@@ -9,7 +9,7 @@ the entry point differs.
 | Claude Code / Codex | copy the folder to `tools/scriptorium/`, then append `AGENTS.md` to the repo-root `AGENTS.md` |
 | OpenCode | same folder placement, then `opencode-rule.md` → `.opencode/rules/localization.md` |
 | Cursor / Windsurf | same, with `AGENTS.md` content as a project rule |
-| No agent at all | `make translate` or the CI job in `examples/ci.yml` |
+| No agent at all | `make run SRC=docs/guide.md LANG=zh-TW`, or `python -m scriptorium run` directly |
 
 Keeping the CLI as the product rather than the prompt is what makes this portable:
 adapters are ten-line pointers, so a fix to a validator lands everywhere at once and

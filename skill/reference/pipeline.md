@@ -71,9 +71,9 @@ is no need to replay the conversation, and no need to keep the whole document in
 context at any point. For very large documents, loop:
 
 ```bash
-while python3 bin/lx.py todo doc.md --lang zh-TW --limit 30 | grep -q '"id"'; do
+while python3 -m scriptorium todo doc.md --lang zh-TW --limit 30 | grep -q '"id"'; do
   : translate the emitted batch, write batch.json, then
-  python3 bin/lx.py apply doc.md --lang zh-TW --file batch.json
+  python3 -m scriptorium apply doc.md --lang zh-TW --file batch.json
 done
 ```
 
@@ -90,7 +90,7 @@ without it.
 
 ## Extending checks
 
-Rules live in `check_segment()` in `bin/lx.py`, each a small block appending to
+Rules live in `check_segment()` in `src/scriptorium/checks.py`, each a small block appending to
 `issues`. Add project rules there and disable built-ins per project with
 `"checks_disabled": ["length", "spacing"]` in `lx.config.json`. Anything mechanically
 decidable belongs here rather than in a prompt — a rule in code runs on every

@@ -146,7 +146,6 @@ emits work, the agent translates in its own context, `lx apply` ingests it.
 ```
 
 A source edit surfaces as pending work and the check fails the pull request.
-`examples/ci.yml` has a complete job.
 
 ## Development
 
