@@ -9,7 +9,7 @@ cd /tmp/demo && cp -r <skill-dir>/config . && cp config/lx.config.json .
 cp <skill-dir>/examples/sample.md .
 printf 'Celurion\nGo\n' >> config/dnt.txt
 
-LX="python3 <skill-dir>/bin/lx.py"
+LX="python3 -m scriptorium"                 # or `lx` if the package is installed
 $LX extract sample.md --lang zh-TW
 #   segments 14 | reused 0 | pending 14
 ```

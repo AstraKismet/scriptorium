@@ -7,7 +7,7 @@ description: Publishing-grade translation and localization of documents, docs si
 
 A translation pipeline built on one rule: **the model translates sentences, code does everything else.**
 
-Structural work — parsing markup, protecting code spans, re-assembling documents, checking terminology, normalizing punctuation — is deterministic. Doing it in the model's head is where publishing-grade pipelines break: a 500-node document at 99% per-node accuracy fails five times. `bin/lx.py` owns all of it.
+Structural work — parsing markup, protecting code spans, re-assembling documents, checking terminology, normalizing punctuation — is deterministic. Doing it in the model's head is where publishing-grade pipelines break: a 500-node document at 99% per-node accuracy fails five times. The `scriptorium` package owns all of it, and the CLI is the only entry point.
 
 ## The loop
 
@@ -75,7 +75,12 @@ Structure is not on this list because it cannot fail: `render` rebuilds the docu
 
 `lx init` writes `lx.config.json`, `config/glossary.csv`, and `config/dnt.txt`. Before a first real run, fill in the glossary and the do-not-translate list — most quality complaints are terminology complaints, and both files are cheap to populate by skimming the source for repeated domain nouns. Templates and field meanings are in `config/` alongside this skill.
 
-Wire `lx check` into CI so translations cannot regress silently; `examples/ci.yml` has a working job.
+Wire `lx check` into CI so translations cannot regress silently — re-extract first, so a source edit surfaces as pending work rather than passing quietly:
+
+```yaml
+- run: lx extract docs/guide.md --lang zh-TW
+- run: lx check   docs/guide.md --lang zh-TW   # exit 1 on any error
+```
 
 ## Reference files
 
