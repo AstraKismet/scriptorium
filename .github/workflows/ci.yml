@@ -36,11 +36,18 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      # The pipeline has no runtime dependencies. Prove it still imports and
-      # runs on a bare interpreter *before* any dev tooling is installed — this
-      # step is the guard on invariant 1, so it must stay first.
+      # The guard on invariant 1, and it must stay before the install step.
+      #
+      # PYTHONPATH=src rather than an install is the entire point: this proves
+      # the pipeline runs from a plain source tree with nothing installed and no
+      # dependencies present, which is exactly how an agent sandbox or a
+      # vendored tools/scriptorium/ consumes it. Running it after
+      # `pip install -e .` — as this job used to — proved nothing, because by
+      # then the package is on the path either way.
       - name: Bare interpreter smoke test
         run: python -m scriptorium --version
+        env:
+          PYTHONPATH: src
 
       - run: pip install -e ".[dev]"
 
