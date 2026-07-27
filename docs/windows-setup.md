@@ -44,31 +44,55 @@ Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
 
 ## Git identity and remote
 
-Identity is set with `--local`, so this project commits as `AstraKismet-Isida`
-without touching the identity every other repository on the machine uses.
+**This is already done.** The repository was initialized on `main`, the identity
+was set with `--local` so nothing else on the machine is affected, and the first
+commit records the delivered state unmodified. Confirm rather than repeat:
 
 ```powershell
-.\scripts\setup-git.ps1
+git log -1 --format='%an <%ae>'    # AstraKismet-Isida <305370422+astrakismet-isida@users.noreply.github.com>
+git config --local core.autocrlf   # input
 ```
 
-It prompts for a commit email — use the GitHub noreply address from
-<https://github.com/settings/emails> if you would rather not publish a real one.
-Add `-Ssh` if you push over SSH rather than HTTPS.
-
-Then create the empty repository at
-<https://github.com/organizations/AstraKismet/repositories/new> (name it
-`scriptorium`, no README or license — the project already has both) and push:
+If you ever need to reproduce the setup on another machine, it is four commands —
+there is deliberately no script, because a script that stops halfway is worse
+than a list you can read:
 
 ```powershell
-git add -A
-git commit -m "Initial commit: deterministic localization pipeline"
-git push -u origin main
+git init -b main
+git config --local user.name  "AstraKismet-Isida"
+git config --local user.email "305370422+astrakismet-isida@users.noreply.github.com"
+git config --local core.autocrlf input
 ```
 
-Verify the identity landed on the commit rather than a global default:
+### The SSH identity trap on this machine
+
+The remote **must** use the `github-astrakismet` alias, not `github.com`:
 
 ```powershell
-git log -1 --format='%an <%ae>'
+git remote add origin github-astrakismet:AstraKismet/scriptorium.git
+```
+
+`~/.ssh/config` maps that alias to `~/.ssh/id_ed25519_astrakismet`. The *default*
+key resolves to a different GitHub account that is not a member of the
+`AstraKismet` organization, so a `git@github.com:AstraKismet/…` remote
+authenticates as the wrong user and the push is rejected. Verify before pushing:
+
+```powershell
+ssh -T github-astrakismet    # Hi astrakismet-isida!
+ssh -T git@github.com        # a different account — this is why the alias exists
+```
+
+The same alias form is used by `AstraKismet/worldthread-core`, so the two
+repositories behave identically.
+
+### Pushing workflow files
+
+The `gh` token on this machine holds `repo` but **not** `workflow` scope. Over
+SSH that does not matter. If you switch the remote to HTTPS, `.github/workflows/`
+changes will be refused until you run:
+
+```powershell
+gh auth refresh -h github.com -s workflow
 ```
 
 ## What is and is not committed
@@ -84,7 +108,9 @@ modified after a fresh clone.
 ## Line endings
 
 Git for Windows defaults to `core.autocrlf=true`, which fights `.gitattributes`
-on some setups. If files appear modified immediately after cloning:
+on some setups. **This repository already sets `core.autocrlf=input` locally**, so
+the problem should not appear here. On a fresh clone elsewhere, if files show as
+modified immediately:
 
 ```powershell
 git config --local core.autocrlf input
