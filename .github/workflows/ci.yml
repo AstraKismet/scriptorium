@@ -1,52 +1,105 @@
-name: ci
+name: CI
 
 on:
+  pull_request:
   push:
     branches: [main]
-  pull_request:
+
+# Read-only by default; nothing here needs more.
+permissions:
+  contents: read
+
+# A newer push to the same ref supersedes the run in flight.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
+    name: test (${{ matrix.os }}, py${{ matrix.python }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
+        # Windows stays in the matrix deliberately. The round-trip defects this
+        # suite is growing to catch are CRLF-specific, and Windows is the
+        # primary development platform.
         os: [ubuntu-latest, windows-latest]
         python: ["3.9", "3.12"]
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - run: pip install -e ".[dev]"
-      # The pipeline itself has no dependencies; this proves it still imports
-      # and runs on a bare interpreter before dev tools are considered.
-      - run: python -m scriptorium --version
-      - run: python -m pytest -q
-      - run: python -m ruff check src tests
-        if: matrix.python == '3.12'
+          cache: pip
+          cache-dependency-path: pyproject.toml
 
-  translations:
+      # The pipeline has no runtime dependencies. Prove it still imports and
+      # runs on a bare interpreter *before* any dev tooling is installed — this
+      # step is the guard on invariant 1, so it must stay first.
+      - name: Bare interpreter smoke test
+        run: python -m scriptorium --version
+
+      - run: pip install -e ".[dev]"
+
+      - run: python -m pytest -q
+
+      - name: Lint
+        if: matrix.python == '3.12'
+        run: python -m ruff check src tests
+
+  cli:
+    name: CLI end-to-end (no model)
     runs-on: ubuntu-latest
-    # Re-extract so source edits surface as pending work, then fail the PR if any
-    # tracked document has untranslated or invalid segments. No model is called.
+    timeout-minutes: 10
+    # The unit tests exercise functions; this exercises the CLI from an empty
+    # directory, which is what a new user actually does. No model is called.
+    #
+    # It replaces a `translations` job that could never have failed: it read a
+    # root lx.config.json that does not exist in this repository, and the
+    # resulting FileNotFoundError occurred inside a command substitution where
+    # `set -e` does not fire — so the loop iterated zero times and the job
+    # exited 0 having verified nothing.
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
       - run: pip install -e .
-      - name: Verify tracked translations
+
+      - name: Scaffold, extract, emit work
         run: |
-          shopt -s nullglob globstar
-          status=0
-          for src in docs/**/*.md; do
-            for lang in $(python -c "import json;print(' '.join(json.load(open('lx.config.json'))['targets']))"); do
-              [ -f ".lx/docs/$(echo "$src" | tr '/' '_').$lang.json" ] || continue
-              lx extract "$src" --lang "$lang"
-              lx check   "$src" --lang "$lang" || status=1
-            done
-          done
-          exit $status
-      - if: always()
-        run: lx stats >> "$GITHUB_STEP_SUMMARY" || true
+          set -euo pipefail
+          work="$(mktemp -d)"
+          cp examples/sample.md "$work/"
+          cd "$work"
+          lx init
+          lx extract sample.md --lang zh-TW
+          lx todo sample.md --lang zh-TW > todo.json
+          python - <<'PY'
+          import json
+          segments = json.load(open("todo.json", encoding="utf-8")).get("segments", [])
+          assert segments, "todo emitted no segments"
+          print(f"{len(segments)} pending segments")
+          PY
+          lx stats
+
+      - name: check must fail while nothing is translated
+        run: |
+          set -uo pipefail
+          work="$(mktemp -d)"
+          cp examples/sample.md "$work/"
+          cd "$work"
+          lx init > /dev/null
+          lx extract sample.md --lang zh-TW > /dev/null
+          if lx check sample.md --lang zh-TW; then
+            echo "::error::check exited 0 on a wholly untranslated document" >&2
+            exit 1
+          fi
+          echo "check correctly exited non-zero"
