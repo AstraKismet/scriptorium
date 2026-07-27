@@ -42,6 +42,10 @@ decision-board*.html
 # machine-specific notes that should never reach anyone else's checkout
 *.local.md
 
+# per-machine agent tooling config (memoryRoot is an absolute local path)
+.claude/dev-rituals.config.json
+.claude/settings.local.json
+
 # never commit credentials; providers read keys from the environment only
 .env
 .env.*
