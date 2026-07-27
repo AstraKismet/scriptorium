@@ -1,182 +1,220 @@
-# 跨 session 交棒工作流——handoff 工作包規範（Scriptorium 版）
+# Handoff work packages — the cross-session convention
 
-> **定位**：本檔＝Scriptorium「handoff 工作包」交棒制的**完整規範**（tracked，位 `docs/conventions/`）
-> ——涵蓋規範、設計理念、生命週期與常見陷阱。
+> **What this is.** The complete convention for Scriptorium's handoff system:
+> the rules, the reasoning behind them, the lifecycle, and the failure modes.
 >
-> **與 `AGENTS.md` 的分工**：repo `AGENTS.md`〈Handoff 工作包〉節＝每 session auto-load 的
-> **操作快速參考＋紅線權威**；本檔＝完整規範＋設計理念。兩者皆 tracked、須保持一致——
-> 出現漂移即視為待修的維護 bug（**紅線／取包規則以 `AGENTS.md` 節為準**，
-> **理念／生命週期／陷阱以本檔為準**）。
+> **Division of labour with `AGENTS.md`.** The `AGENTS.md` section titled
+> *Handoff work packages* is the quick reference that loads into every session,
+> and it is authoritative for the red lines and the pickup rule. This file is
+> authoritative for the reasoning, the lifecycle, and the pitfalls. Both are
+> tracked and must agree; a divergence between them is a maintenance bug, not a
+> matter of taste.
 >
-> **語言**：本檔與 `AGENTS.md` 用繁體中文撰寫——它們是維護者與其 agent 的工作約定，
-> 不是使用者文件。面向使用者的 `README.md` / `README.zh-TW.md` 才是雙語對照的那一組。
->
-> **來源**：移植自 `project-celurion` 的 `docs/conventions/handoff-workflow.md`
-> （該檔第 8 節即為移植 checklist，設計上就是要整份複製後調整）。
-> 本版依 Scriptorium 的規模與紀律做了三處調整，逐項標記為〔本專案調整〕。
+> **Origin.** Ported from `project-celurion`, whose own section 8 is a porting
+> checklist — that document is written to be copied wholesale and adapted. Three
+> adaptations were made for this project, each marked *[adapted]* below.
 
 ---
 
-## 1. 核心概念與設計理念
+## 1. The idea, and why it is shaped this way
 
-**一個 handoff 檔＝一個已排定的工作包。** 新 session（人或 AI agent）指定參照檔執行；
-完成即刪除該檔。
+**One handoff file is one scheduled work package.** A new session — human or
+agent — is pointed at a file, executes it, and deletes it on completion.
 
-設計理念（移植時值得保留的不變量）：
+The invariants worth keeping if this is ever ported again:
 
-| 設計 | 理念 |
+| Design | Reasoning |
 |---|---|
-| 檔案即佇列（file-per-package） | 不依賴外部工具；`ls` 即看板；git 不追蹤（`handoff/` 進 `.gitignore`），避免佇列狀態污染版本史——gitignore 的是**佇列狀態**、不是規範；規範持久紀錄＝`AGENTS.md` 該節＋本檔（皆 tracked） |
-| 完成＝刪檔 | 佇列永遠只剩「未做的事」；刪檔同時自動清除他包對它的依賴（blocked-by 引用消失＝解鎖），零記賬成本 |
-| 工作包必須自足（self-contained） | 執行 session 無前一個 session 的記憶——定案／契約／紅線必須 **distill 進包內**，不能只給文件指標（遠期包例外，見 §4） |
-| id 全域唯一、永不重用 | 供 blocked-by 引用與未來遷移 issue 系統時的對映錨點 |
-| 資料夾＝里程碑＝執行順序 | 數字前綴字典序即優先序；搬資料夾＝插隊，id 不變 |
-| 定案不存在 handoff 裡 | handoff 只是**交棒載體**；決策的正式落點是 `docs/`（`docs/decisions.md`、架構文件）；長期記憶只留一行指標 |
+| One file per package | No external tool. `ls` is the board. Git does not track it (`handoff/` is in `.gitignore`), so queue churn never pollutes history. What is ignored is the *queue state*, never the *convention* — the convention lives in `AGENTS.md` and in this file, both tracked. |
+| Done means deleted | The queue only ever contains work not yet done. Deleting a file simultaneously clears every `blocked-by` that referenced it, so unblocking costs no bookkeeping. |
+| A package must be self-contained | The executing session has no memory of the one that wrote the package. Decisions, contracts and red lines must be **distilled into the package**, not merely pointed at. The one exception is section 4's rule for far-future packages. |
+| Ids are globally unique and never reused | They are the anchor for `blocked-by` references, and the mapping if this ever migrates to an issue tracker. |
+| Folder equals milestone equals order | The numeric prefix sorts lexicographically, which is the priority order. Moving a file between folders is how you reprioritize, and the id does not change. |
+| Decisions do not live in handoff files | A handoff is a **carrier**. The formal home for a decision is `docs/` — `docs/decisions.md` for architecture. Long-term memory keeps a one-line pointer and nothing else. |
 
 ---
 
-## 2. 目錄結構與 id 段
+## 2. Directory structure and id ranges
 
-〔本專案調整〕celurion 原版是四層、綁版本里程碑（`10-v0.1.x` / `20-v0.2` / `30-vnext`）。
-Scriptorium 目前是單人單線、尚未切版，四層對應不到現實里程碑，故採該規範 §2 明文允許的
-三層簡化版：
+*[adapted]* The source convention uses four folders bound to release milestones.
+Scriptorium is single-developer, single-track and has not cut a release, so four
+levels would map to nothing real. Section 2 of the source explicitly permits the
+simplification:
 
 ```
 handoff/
-  00-inbox/    新排程尚未定序者先落此（整理時移入對應資料夾）
-  10-now/      當前里程碑（id 範圍 001–099）
-  90-later/    遠期確定項（id 範圍 201–299）
+  00-inbox/    newly scheduled, not yet ordered (moved out when triaged)
+  10-now/      the current milestone            (ids 001–099)
+  90-later/    committed but not imminent       (ids 201–299)
 ```
 
-- **`handoff/` 只放工作包**——指南／規範／台帳一律不進此目錄（會被 `HANDOFF-*` glob
-  誤配為工作包、成為取包噪音；且 `handoff/` 已 gitignore，放這裡等於不入版控）。
-  本規範文件即因此放在 tracked 的 `docs/conventions/`。
-- 資料夾數字前綴＝執行順序（字典序）。
-- **檔案搬資料夾時 id 不變**（id 屬於包，不屬於里程碑）。
-- 新增里程碑＝新資料夾＋新 id 段（如切版後新增 `20-v0.5/` 用 101–199）。
-- 檔名格式：`HANDOFF-{id}-{kebab-case-slug}.md`（slug 供人眼快速辨識）。
+- **`handoff/` holds work packages and nothing else.** Guides, conventions and
+  ledgers do not belong there: a `HANDOFF-*` glob would mistake them for
+  packages, and the directory is gitignored, so anything placed there is outside
+  version control. This document lives in tracked `docs/conventions/` for exactly
+  that reason.
+- **An id does not change when a file moves between folders.** The id belongs to
+  the package, not to the milestone.
+- A new milestone means a new folder and a new id range — after a release, for
+  instance, `20-v0.5/` taking 101–199.
+- Filename format: `HANDOFF-{id}-{kebab-case-slug}.md`. The slug is for human
+  recognition only.
 
-## 3. 取包規則（每次開工的定位演算法）
+## 3. The pickup rule
 
-最小資料夾（字典序）→ 最小 priority（1＝最高；同 priority 依 id）→
-**跳過任何 blocked-by 未全數清除者**。
+Lowest folder in lexicographic order → lowest `priority` (1 is highest; ties
+break by id) → **skip anything whose `blocked-by` is not fully cleared**.
 
-啟動語（給 AI session 的固定指令句式）：
-- 「依 `handoff/<資料夾>/HANDOFF-xxx` 執行」——指定包。
-- 「取下一個可執行 handoff」——按上述演算法自動定位。
+The two phrasings that start a session:
 
-## 4. 工作包模板（全欄位）
+- "Execute `handoff/<folder>/HANDOFF-xxx`" — a named package.
+- "Take the next executable handoff" — apply the algorithm above.
+
+## 4. The package template
 
 ```markdown
 ---
-id: HANDOFF-xxx          # 全域唯一；未來遷移 issue 時＝issue 標題前綴
-title: <一句話標題>
-status: pending          # pending | in-progress（認領時改，附日期）
+id: HANDOFF-xxx          # globally unique; becomes the issue title prefix on migration
+title: <one sentence>
+status: pending          # pending | in-progress (set on claim, with the date)
 created: <YYYY-MM-DD>
-milestone: <與所在資料夾一致>
-priority: <資料夾內排序，1=最高；同 priority 依 id>
-labels: [<見 §4.1>]
+milestone: <matches the containing folder>
+priority: <order within the folder, 1 = highest; ties break by id>
+labels: [<see 4.1>]
 blocked-by:
-  - "<kind>: <說明>"     # 空陣列 = 可立即執行；kind 見 §5
-blocked-cleared: []      # 已清除的阻塞（附清除日期），供稽核
+  - "<kind>: <detail>"   # empty array means immediately executable; kinds in section 5
+blocked-cleared: []      # cleared blockers with their clearing date, for audit
 ---
-## 目標（一段話）
-## 背景與定案引用（distilled——執行時不必重查原始文件即可動工）
-## 範圍（IN / OUT）
-## 實作指引（檔案清單、接縫所有權、紅線）
-## 驗收標準（可執行的檢核，含測試指令與期望離開碼）
-## 完成後動作（固定：驗收→刪本檔→寫入下一包；另列特殊事項）
+## Goal (one paragraph)
+## Background and decisions, distilled (enough to start without re-reading sources)
+## Scope (IN / OUT)
+## Implementation notes (file list, seam ownership, red lines)
+## Acceptance criteria (commands and their expected exit codes — see 4.2)
+## On completion (always: verify, delete this file, write the next package)
 ```
 
-**自足性分級**：近期包（`00-inbox/`、`10-now/`）必須完整 distill；
-**`90-later/` 遠期包允許簡化**為「背景＝文件指標＋關鍵約束摘要」，
-但**升級搬入近期資料夾時必須補完 distill**（這是搬移動作的一部分，不是可選項）。
+**Self-containment is graded.** Packages in `00-inbox/` and `10-now/` must be
+fully distilled. Packages in `90-later/` may state background as a pointer plus a
+summary of the binding constraints — but **completing the distillation is part of
+the act of promoting a package** into a nearer folder, not an optional follow-up.
 
-### 4.1 labels 池
+### 4.1 Label pool
 
-〔本專案調整〕改為 Scriptorium 的語彙：
+*[adapted]* Rewritten in this project's vocabulary:
 
-| label | 涵蓋 |
+| Label | Covers |
 |---|---|
-| `core` | 管線引擎、遮罩、正規化、演算法本體 |
-| `formats` | 解析／還原器（Markdown、EPUB、DOCX、PO、JSON/YAML…） |
-| `quality` | 驗證器、術語一致性、模糊比對、品質規則 |
-| `store` | 狀態層、翻譯記憶、專案模型、更新傳播 |
-| `provider` | 模型後端、傳輸、重試、路由 |
-| `cli` | 指令介面與其契約 |
-| `web` | 審校工作台 |
-| `infra` | 版控、CI/CD、發行、打包 |
-| `docs` | 文件、README、規範 |
-| `review-backlog` | 事後翻案清單（自決可翻案項） |
+| `core` | Pipeline engine, masking, normalization, the algorithms themselves |
+| `formats` | Parsers and renderers (Markdown, plain text, EPUB, …) |
+| `quality` | Validators, terminology consistency, fuzzy matching, quality rules |
+| `store` | State layer, translation memory, project model, update propagation |
+| `provider` | Model backends, transport, retry, routing |
+| `cli` | The command interface and its contract |
+| `web` | The review workbench |
+| `infra` | Version control, CI/CD, release, packaging |
+| `docs` | Documentation, README, conventions |
+| `review-backlog` | Decisions taken unilaterally during execution, queued for review |
 
-### 4.2 驗收標準的硬性要求
+### 4.2 Acceptance criteria are executable or they do not count
 
-〔本專案調整〕本專案的〈驗收標準〉節**一律要列出可執行的指令與期望離開碼**，
-不接受「看起來對了」這種描述。這是 `AGENTS.md` 該條紅線的延伸——
-**沒有綠燈就不算通過，離開碼即證據**。
+*[adapted]* The *Acceptance criteria* section must state commands and their
+expected exit codes. Prose is not accepted. This extends the project's standing
+rule that a translation is not done without a green `lx check`, where the exit
+code is the evidence — the same standard applies to the work itself.
 
-例如：
+For example:
 
 ```
-- `python -m pytest -q` → 期望 `38 passed`（或本包新增測試後的新基準，須寫明數字）
-- `python -m ruff check src tests` → 期望離開碼 0
-- `lx check examples/sample.md --lang zh-TW` → 期望離開碼 0
+- `python -m pytest -q` → expect `38 passed` (state the new number if this
+  package adds tests)
+- `python -m ruff check src tests` → expect exit 0
+- `lx check examples/sample.md --lang zh-TW` → expect exit 0
 ```
 
-## 5. blocked-by 結構化（每項一條，`kind: 說明` 格式）
+## 5. Structured `blocked-by`
 
-| kind | 語意 | 清除方式 |
+One entry per blocker, in `kind: detail` form.
+
+| Kind | Meaning | How it clears |
 |---|---|---|
-| `user:` | 需要 user 的輸入／定案（如決策看板某題） | user 表態後，把該條移入 `blocked-cleared:` 並附日期 |
-| `package: HANDOFF-xxx` | 依賴另一個包 | 該包**被刪除（＝完成）即自動清除**——無需回頭改檔 |
-| `data:` | 缺資料（如 config 需含某表數值、需要一份真實測試語料） | 資料落地即清除 |
-| `design:` | 需先跑的設計 ceremony／架構定案 | 定案入 `docs/` 即清除 |
-| `external:` | 外部服務／基建（如需先建 GitHub repo、需 PyPI 帳號） | 外部條件滿足即清除 |
+| `user:` | Needs the maintainer's input or decision | Move the entry into `blocked-cleared:` with the date once they have decided |
+| `package: HANDOFF-xxx` | Depends on another package | **Clears automatically when that package is deleted**, which is what completing it means. Nothing to edit. |
+| `data:` | Missing data — a config table, a real test corpus | Clears when the data lands |
+| `design:` | Needs a design ceremony or an architecture decision first | Clears when the decision reaches `docs/` |
+| `external:` | External service or infrastructure — a repository, an account | Clears when the external condition is met |
 
-## 6. 生命週期（五個時刻）
+## 6. Lifecycle — five moments
 
-1. **階段完成→寫下一包**：若已有「待啟動」包且內容因本階段而過時→**替換其內容**（沿用 id）；
-   否則建新 id 檔。
-2. **未啟動期間出現新排程**→**新增**檔案（未定序先進 `00-inbox/`；不得覆蓋既有待啟動包）；
-   插隊＝搬資料夾或改 priority；id 永不重用。
-3. **session 認領**→檔內 `status: in-progress（<日期>）` 再動工——防兩個 session 搶同一包。
-4. **完成**→驗收標準全數通過→**刪除該檔**（引用它的 blocked-by 隨之視為清除）→
-   依規則 1 寫下一包（若有）。
-5. **中斷未完**→在檔尾加／更新「## 進度」節後保留：已完成什麼、續作方式
-   （下個 session 讀什麼、照什麼順序做）、執行期間收到的 user 臨時指示（對本包持續有效者）。
+1. **A stage completes → write the next package.** If a pending package already
+   exists but this stage made its contents stale, **replace its contents** and
+   keep the id. Otherwise create a new file with a new id.
+2. **New work appears while nothing is running → add a file.** Undecided ordering
+   goes to `00-inbox/`. Never overwrite an existing pending package. Reprioritize
+   by moving folders or changing `priority`. Ids are never reused.
+3. **A session claims a package → set `status: in-progress (<date>)` before
+   starting.** This is what stops two sessions from taking the same package.
+4. **Completion → every acceptance criterion passes → delete the file.** Every
+   `blocked-by` referencing it is thereby cleared. Then write the next package if
+   there is one.
+5. **Interrupted → keep the file and add or update a `## Progress` section**
+   recording what is finished, how to resume (what the next session should read,
+   in what order), and any instruction received during execution that still
+   applies to this package.
 
-### 運行經驗補充
+### Operational notes
 
-- **進度節是模型切換／額度中斷的保險**：長任務先建骨架＋把「續作指引」寫進包與產出文件，
-  任何 session（甚至換模型）讀包即可無縫接手。
-- **執行中收到的 user 定向**：立即落到包的進度節＋產出文件本身（雙落點），不要只留在對話裡。
-- **執行中新出現的設計議題**：先自決＋實作，記錄為「自決可翻案」清單事後統一給 user 翻案
-  （看板／評審），不逐題中斷；**user 專屬品味（術語譯法、風格取捨、命名）例外，仍先問**。
+- **The progress section is the insurance against a model switch or a quota
+  interruption.** On long work, build the skeleton first and write the resumption
+  guidance into both the package and the output document — any session, even on a
+  different model, can then pick it up from the file alone.
+- **Direction received mid-execution lands in two places:** the package's progress
+  section and the output document itself. Never leave it only in the conversation.
+- **Design questions that surface mid-execution:** decide, implement, and record
+  the decision in a `review-backlog` list for the maintainer to overturn in one
+  batch afterwards, rather than interrupting per question. The exception is
+  anything that is the maintainer's own taste — terminology renderings, style
+  calls, naming — which is asked first.
 
-## 7. 與其他機制的關係
+## 7. Relationship to everything else
 
-- **正式文件（`docs/`）**：定案的唯一落點。本專案既有的 `docs/decisions.md`
-  （「記下輸掉的方案，不只記贏的那個」）是架構決策的落點；包內只放 distill 副本＋指標，
-  兩者衝突時以 `docs/` 為準並回修包。**本交棒制規範本身亦屬 `docs/`，tracked。**
-- **長期記憶**：只留一行指標（「排程看 `handoff/`，規範見 `AGENTS.md` 該節與本檔」），
-  永不放包內容。
-- **git**：`handoff/` 全目錄 gitignore、只裝佇列狀態；工作產出照專案常規 commit；
-  包的刪除不留 git 痕跡——這是特性不是缺陷（佇列狀態不值得版控，規範與定案才值得）。
-  **分界：gitignored 的是佇列、不是規範。**
-- **決策看板**：`decision-board*.html` 同樣 gitignore——它是定案的**臨時載體**，
-  定案的正式落點仍是 `docs/`。回報收下、定案入檔後即刪除看板。
-- **未來遷移 issue 系統**：frontmatter 即 issue 欄位對映（title／labels／milestone／
-  blocked-by→依賴）；屆時「建包」→開 issue＋本地包引 issue 編號、「刪包」→關 issue；
-  模板與生命週期不變。
+- **`docs/` is where decisions live.** `docs/decisions.md` is the architecture
+  record, and its convention is to write down the alternative that lost. A
+  package carries a distilled copy and a pointer; where they disagree, `docs/`
+  wins and the package is corrected. **This convention document is itself part of
+  `docs/` and is tracked.**
+- **Long-term memory keeps one line:** scheduling lives in `handoff/`, the rules
+  live in the `AGENTS.md` section and in this file. Never package contents.
+- **Git:** `handoff/` is ignored in full and holds only queue state. Work output
+  is committed normally. A package's deletion leaves no trace in git, and that is
+  the design, not a defect — queue state is not worth versioning, conventions and
+  decisions are.
+- **Decision boards:** `decision-board*.html` is likewise ignored. A board is a
+  transient carrier; the decision's home is `docs/`. Once the report is taken and
+  the decisions are recorded, the board is deleted.
+- **A future issue tracker:** the frontmatter is already an issue-field mapping —
+  title, labels, milestone, and `blocked-by` as dependencies. At that point
+  "create a package" becomes "open an issue and reference its number locally",
+  and "delete a package" becomes "close the issue". The template and the lifecycle
+  do not change.
 
-## 8. 常見陷阱
+## 8. Failure modes
 
-- **包不自足**：執行 session 花半天重查上下文＝distill 失職。驗收：新 session 只讀包能否直接動工。
-- **忘記認領**：兩個 session 撞包。動工前必改 `status`。
-- **完成不刪檔**：佇列腐化、依賴不解鎖。驗收過就刪，猶豫的部分寫進下一包。
-- **把定案只寫在包裡**：包會被刪——定案必須先落 `docs/` 再刪包。
-- **覆蓋待啟動包**：只有「內容因剛完成的階段而過時」才允許替換內容（沿 id）；新需求一律新檔。
-- **id 重用**：永不。哪怕包被取消（取消＝刪檔＋在 `docs/decisions.md` 記一行取消緣由）。
-- **指南／規範／台帳混進 `handoff/`**：會被 `HANDOFF-*` glob 誤配為工作包、成為取包噪音，
-  且放 gitignored 目錄等於不入版控。規範一律放 tracked 的 `docs/`，`handoff/` 只放工作包。
-- **驗收標準寫成散文**〔本專案調整〕：沒有指令與期望離開碼的驗收標準等於沒有驗收標準。
+- **A package that is not self-contained.** If the executing session spends half a
+  day reconstructing context, the distillation failed. The test: can a session
+  that reads only the package start work?
+- **Forgetting to claim.** Two sessions collide. Set `status` before starting.
+- **Completing without deleting.** The queue rots and dependants never unblock.
+  Once it passes, delete it; anything you are still unsure about goes into the
+  next package.
+- **Writing a decision only into the package.** Packages get deleted. The decision
+  must reach `docs/` first.
+- **Overwriting a pending package.** Only permitted when the just-completed stage
+  made its contents stale, and then the id is kept. New requirements always mean a
+  new file.
+- **Reusing an id.** Never — not even for a cancelled package. Cancelling means
+  deleting the file and recording one line in `docs/decisions.md` explaining why.
+- **Putting a guide, a convention or a ledger in `handoff/`.** The `HANDOFF-*`
+  glob will mistake it for a package, and the directory is outside version
+  control. Conventions go in tracked `docs/`; `handoff/` holds work packages only.
+- *[adapted]* **Acceptance criteria written as prose.** Criteria without a command
+  and an expected exit code are not acceptance criteria.
