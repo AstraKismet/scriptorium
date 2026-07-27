@@ -1,0 +1,26 @@
+name: localization
+on: [pull_request]
+
+jobs:
+  check-translations:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+
+      # Re-extract so that source edits show up as pending work, then fail the PR
+      # if any tracked document has untranslated or invalid segments.
+      - name: Verify translations
+        run: |
+          set -e
+          for src in $(git ls-files 'docs/**/*.md'); do
+            for lang in zh-TW ja; do
+              python3 tools/scriptorium/bin/lx.py extract "$src" --lang "$lang"
+              python3 tools/scriptorium/bin/lx.py check   "$src" --lang "$lang"
+            done
+          done
+
+      - name: Coverage summary
+        if: always()
+        run: python3 tools/scriptorium/bin/lx.py stats >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,8 @@
+# Do-not-translate terms, masked verbatim before the model sees the text.
+# Longest match wins. ASCII terms are matched at word boundaries, so "Go" will
+# not match inside "Google". One term per line.
+API
+SDK
+CI/CD
+OAuth
+GitHub Actions

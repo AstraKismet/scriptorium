@@ -1,0 +1,12 @@
+source,target,forbidden,severity
+# Terms whose rendering must stay consistent across the whole project.
+#   source     the term as it appears in the source language (word-boundary matched)
+#   target     the rendering that must appear in the translated segment
+#   forbidden  semicolon-separated renderings that must NOT appear
+#   severity   error (fails check) or warn
+# Populate this by skimming the source for repeated domain nouns. Ten good rows
+# eliminate most terminology complaints; a hundred mediocre rows create noise.
+repository,儲存庫,倉庫;repo,error
+server,伺服器,服務器,error
+cache,快取,緩存,error
+deploy,部署,,warn
