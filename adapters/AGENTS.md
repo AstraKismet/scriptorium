@@ -1,5 +1,11 @@
 # Localization
 
+<!--
+This is a fragment for a CONSUMING repository to paste into its own AGENTS.md,
+not the working agreement for the Scriptorium repository itself. That one is the
+AGENTS.md at this repository's root.
+-->
+
 Any translation, localization, or i18n task in this repository goes through the
 Scriptorium pipeline in `tools/scriptorium/`. Do not translate documents by reading
 them and writing a translated copy — structure and terminology regress silently that
