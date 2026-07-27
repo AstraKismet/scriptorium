@@ -18,11 +18,31 @@ dist/
 .ruff_cache/
 .coverage
 
+.mypy_cache/
+coverage.xml
+htmlcov/
+
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
+desktop.ini
+
+# handoff work packages: a queue is working state, not history. The norm itself
+# is tracked — docs/conventions/handoff-workflow.md — precisely because this
+# directory is not. Never put the norm in here.
+handoff/
+
+# knowledge graph output — regenerate with `graphify`
+graphify-out/
+
+# decision boards are a transient carrier; the decision's home is docs/
+decision-board*.html
+
+# machine-specific notes that should never reach anyone else's checkout
+*.local.md
 
 # never commit credentials; providers read keys from the environment only
 .env
+.env.*
 *.local.json
