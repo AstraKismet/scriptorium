@@ -1,0 +1,52 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e ".[dev]"
+      # The pipeline itself has no dependencies; this proves it still imports
+      # and runs on a bare interpreter before dev tools are considered.
+      - run: python -m scriptorium --version
+      - run: python -m pytest -q
+      - run: python -m ruff check src tests
+        if: matrix.python == '3.12'
+
+  translations:
+    runs-on: ubuntu-latest
+    # Re-extract so source edits surface as pending work, then fail the PR if any
+    # tracked document has untranslated or invalid segments. No model is called.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e .
+      - name: Verify tracked translations
+        run: |
+          shopt -s nullglob globstar
+          status=0
+          for src in docs/**/*.md; do
+            for lang in $(python -c "import json;print(' '.join(json.load(open('lx.config.json'))['targets']))"); do
+              [ -f ".lx/docs/$(echo "$src" | tr '/' '_').$lang.json" ] || continue
+              lx extract "$src" --lang "$lang"
+              lx check   "$src" --lang "$lang" || status=1
+            done
+          done
+          exit $status
+      - if: always()
+        run: lx stats >> "$GITHUB_STEP_SUMMARY" || true

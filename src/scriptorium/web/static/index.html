@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scriptorium</title>
+<style>
+:root{
+  --ink:#15131C; --panel:#1D1A26; --panel-2:#242030; --rule:#2E2939;
+  --vellum:#E6DECB; --muted:#948C7E; --faint:#635C6E;
+  --rubric:#C9453C;      /* corrections, in the pigment correctors actually used */
+  --lapis:#6E8FE8;       /* placeholders: the costly pigment, for what must not break */
+  --gold:#C09A48;        /* banked in the translation memory */
+  --amber:#C98A3C;
+  --display:"Iowan Old Style","Palatino Linotype",Palatino,"Book Antiqua",Georgia,serif;
+  --ui:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --text:ui-monospace,"Cascadia Code",Menlo,Consolas,monospace,"Noto Sans TC","PingFang TC","Microsoft JhengHei";
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--ink);color:var(--vellum);font:14px/1.55 var(--ui);
+  display:grid;grid-template-columns:264px 1fr;grid-template-rows:100%}
+button,select,input,textarea{font:inherit;color:inherit}
+button{background:var(--panel-2);border:1px solid var(--rule);border-radius:3px;
+  padding:5px 11px;cursor:pointer}
+button:hover:not(:disabled){border-color:var(--faint);background:#2B2637}
+button:disabled{opacity:.4;cursor:default}
+button.key{border-color:var(--gold);color:var(--gold)}
+button.key:hover:not(:disabled){background:rgba(192,154,72,.1)}
+select{background:var(--panel-2);border:1px solid var(--rule);border-radius:3px;padding:5px 8px}
+:focus-visible{outline:2px solid var(--lapis);outline-offset:1px}
+
+/* ── left rail ─────────────────────────────────────────────── */
+aside{background:var(--panel);border-right:1px solid var(--rule);
+  display:flex;flex-direction:column;overflow:hidden}
+.brand{padding:20px 18px 14px;border-bottom:1px solid var(--rule)}
+.brand h1{font:400 25px/1 var(--display);margin:0;letter-spacing:.01em}
+.brand p{margin:6px 0 0;color:var(--faint);font-size:11px;letter-spacing:.09em;
+  text-transform:uppercase}
+.rail{overflow:auto;padding:10px 0;flex:1}
+.rail h2{font:400 11px/1 var(--ui);letter-spacing:.11em;text-transform:uppercase;
+  color:var(--faint);margin:14px 18px 7px}
+.doc{display:block;width:100%;text-align:left;background:none;border:0;border-radius:0;
+  padding:8px 18px;border-left:2px solid transparent}
+.doc:hover{background:var(--panel-2)}
+.doc[aria-current="true"]{background:var(--panel-2);border-left-color:var(--gold)}
+.doc b{font-weight:500;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.doc small{color:var(--muted);font-size:11px}
+.meter{height:2px;background:var(--rule);margin-top:5px}
+.meter i{display:block;height:100%;background:var(--gold)}
+.rail footer{padding:12px 18px;border-top:1px solid var(--rule);color:var(--faint);
+  font-size:11px;word-break:break-all}
+
+/* ── main ──────────────────────────────────────────────────── */
+main{display:flex;flex-direction:column;overflow:hidden}
+.bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;
+  padding:11px 20px;border-bottom:1px solid var(--rule);background:var(--panel)}
+.bar .spacer{flex:1}
+.tally{font-size:12px;color:var(--muted);display:flex;gap:14px;align-items:center}
+.tally b{font-weight:500;color:var(--vellum)}
+.tally .err{color:var(--rubric)}
+.tally .warn{color:var(--amber)}
+
+/* ── ledger ────────────────────────────────────────────────── */
+.ledger{flex:1;overflow:auto;padding:0 0 30vh}
+.row{display:grid;grid-template-columns:74px 1fr 1fr;gap:0;
+  border-bottom:1px solid var(--rule)}
+.row:hover .gutter{color:var(--muted)}
+.gutter{padding:12px 10px 12px 20px;color:var(--faint);font:11px/1.5 var(--text);
+  border-right:1px solid var(--rule);text-align:right}
+.gutter .kind{display:block;font-family:var(--ui);letter-spacing:.06em;
+  text-transform:uppercase;font-size:9px;margin-top:3px;opacity:.7}
+.mark{display:block;margin-top:6px;font:400 15px/1 var(--display)}
+.mark.ok{color:var(--gold)}
+.mark.bad{color:var(--rubric)}
+.src,.tgt{padding:12px 16px;font:13px/1.65 var(--text);white-space:pre-wrap;
+  word-break:break-word}
+.src{color:var(--muted);border-right:1px solid var(--rule)}
+.tgt{position:relative}
+.tgt textarea{width:100%;min-height:1.65em;background:transparent;border:0;padding:0;
+  resize:none;font:13px/1.65 var(--text);color:var(--vellum);overflow:hidden}
+.tgt textarea::placeholder{color:var(--faint);font-style:italic}
+.row.failing{background:rgba(201,69,60,.055)}
+.row.failing .gutter{border-right-color:var(--rubric)}
+.row.dirty .tgt::after{content:"";position:absolute;top:12px;right:8px;width:5px;height:5px;
+  border-radius:50%;background:var(--lapis)}
+ph{color:var(--lapis);background:rgba(110,143,232,.11);border-radius:2px;padding:0 2px}
+
+/* marginalia — corrections hang in the margin, as a corrector would write them */
+.notes{grid-column:2 / -1;padding:0 16px 11px;display:flex;flex-direction:column;gap:2px}
+.note{font:12px/1.5 var(--display);color:var(--rubric);font-style:italic}
+.note.warn{color:var(--amber)}
+.note b{font-style:normal;font-family:var(--ui);font-size:10px;font-weight:500;
+  letter-spacing:.07em;text-transform:uppercase;margin-right:7px;opacity:.85}
+
+/* ── log drawer ────────────────────────────────────────────── */
+.log{border-top:1px solid var(--rule);background:var(--panel);max-height:172px;
+  overflow:auto;padding:9px 20px;font:11.5px/1.7 var(--text);color:var(--muted)}
+.log:empty{display:none}
+.log .bad{color:var(--rubric)}
+.log .good{color:var(--gold)}
+
+.empty{padding:70px 30px;text-align:center;color:var(--muted);max-width:520px;margin:0 auto}
+.empty h3{font:400 21px/1.3 var(--display);color:var(--vellum);margin:0 0 10px}
+.empty code{color:var(--lapis);font:12px var(--text)}
+
+dialog{background:var(--panel);color:var(--vellum);border:1px solid var(--rule);
+  border-radius:4px;max-width:min(860px,92vw);width:100%;padding:0}
+dialog::backdrop{background:rgba(10,9,14,.72)}
+dialog header{display:flex;align-items:center;gap:12px;padding:13px 18px;
+  border-bottom:1px solid var(--rule)}
+dialog header h3{margin:0;font:400 17px var(--display)}
+dialog pre{margin:0;padding:18px;max-height:62vh;overflow:auto;
+  font:12px/1.7 var(--text);white-space:pre-wrap}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+@media (max-width:900px){body{grid-template-columns:1fr}aside{display:none}
+  .row{grid-template-columns:54px 1fr}.src{display:none}}
+</style>
+</head>
+<body>
+<aside>
+  <div class="brand">
+    <h1>Scriptorium</h1>
+    <p id="ver">workbench</p>
+  </div>
+  <div class="rail">
+    <h2>Tracked</h2>
+    <div id="docs"></div>
+    <h2>Not yet extracted</h2>
+    <div id="cands"></div>
+  </div>
+  <footer id="cwd"></footer>
+</aside>
+
+<main>
+  <div class="bar">
+    <select id="provider" title="Backend for this run"></select>
+    <button id="bDraft">Translate pending</button>
+    <button id="bPolish">Polish prose</button>
+    <button id="bRepair">Repair failing</button>
+    <span style="width:1px;height:20px;background:var(--rule)"></span>
+    <button id="bCheck">Check</button>
+    <button id="bPreview">Preview</button>
+    <button id="bWrite">Write file</button>
+    <button id="bCommit" class="key">Commit to memory</button>
+    <span class="spacer"></span>
+    <select id="filter">
+      <option value="all">All segments</option>
+      <option value="pending">Untranslated</option>
+      <option value="failing">Failing</option>
+    </select>
+    <span class="tally" id="tally"></span>
+  </div>
+  <div class="ledger" id="ledger">
+    <div class="empty"><h3>Pick a document</h3>
+      <p>Nothing is loaded yet. Choose one on the left, or extract a source file to start tracking it.</p></div>
+  </div>
+  <div class="log" id="log"></div>
+</main>
+
+<dialog id="dlg"><header><h3 id="dlgTitle"></h3><span class="spacer" style="flex:1"></span>
+  <button onclick="dlg.close()">Close</button></header><pre id="dlgBody"></pre></dialog>
+
+<script>
+const $ = s => document.querySelector(s);
+const api = async (path, body) => {
+  const r = await fetch(path, body ? {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(body)} : undefined);
+  const d = await r.json();
+  if (d.error) throw new Error(d.error);
+  return d;
+};
+const esc = s => s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const marks = s => esc(s).replace(/⟦(\d+)⟧/g, '<ph>⟦$1⟧</ph>');
+const phs = s => (s.match(/⟦\d+⟧/g) || []).sort().join(',');
+
+let doc = null, cur = null, dirty = new Map();
+
+function say(msg, cls) {
+  const el = document.createElement('div');
+  if (cls) el.className = cls;
+  el.textContent = msg;
+  $('#log').append(el);
+  $('#log').scrollTop = 1e6;
+}
+
+// ── left rail ──────────────────────────────────────────────
+async function loadState() {
+  const s = await api('/api/state');
+  $('#ver').textContent = 'v' + s.version;
+  $('#cwd').textContent = s.cwd;
+  $('#provider').innerHTML = s.providers.map(p => {
+    const bad = p.needs_key && !p.key_present;
+    return `<option value="${p.name}"${bad?' disabled':''}>${p.name} · ${p.model}${bad?' (no key)':''}</option>`;
+  }).join('');
+  const routed = s.routing.draft;
+  if (routed) $('#provider').value = routed;
+
+  $('#docs').innerHTML = s.docs.map(d => {
+    const pct = Math.round(100 * d.done / Math.max(d.total,1));
+    return `<button class="doc" data-src="${d.source}" data-lang="${d.lang}">
+      <b>${esc(d.source)}</b><small>${d.lang} · ${d.done}/${d.total}</small>
+      <span class="meter"><i style="width:${pct}%"></i></span></button>`;
+  }).join('') || '<p style="color:var(--faint);padding:0 18px;font-size:12px">None yet.</p>';
+
+  $('#cands').innerHTML = s.candidates.map(c =>
+    `<button class="doc cand" data-src="${c.source}" data-lang="${c.lang}">
+      <b>${esc(c.source)}</b><small>${c.lang} · extract</small></button>`).join('')
+    || '<p style="color:var(--faint);padding:0 18px;font-size:12px">Nothing new matches <code>sources</code>.</p>';
+
+  document.querySelectorAll('.doc').forEach(b => b.onclick = async () => {
+    if (b.classList.contains('cand')) {
+      say(`extracting ${b.dataset.src} [${b.dataset.lang}]`);
+      const r = await api('/api/extract', {src:b.dataset.src, lang:b.dataset.lang});
+      say(`  ${r.segments} segments, ${r.reused} reused`, 'good');
+      await loadState();
+    }
+    open(b.dataset.src, b.dataset.lang);
+  });
+  if (cur) document.querySelectorAll('.doc').forEach(b =>
+    b.setAttribute('aria-current', b.dataset.src === cur.src && b.dataset.lang === cur.lang));
+}
+
+// ── ledger ─────────────────────────────────────────────────
+async function open(src, lang) {
+  cur = {src, lang};
+  doc = await api(`/api/doc?src=${encodeURIComponent(src)}&lang=${encodeURIComponent(lang)}`);
+  dirty.clear();
+  document.querySelectorAll('.doc').forEach(b =>
+    b.setAttribute('aria-current', b.dataset.src === src && b.dataset.lang === lang));
+  paint();
+}
+
+function paint() {
+  if (!doc) return;
+  const r = doc.report;
+  $('#tally').innerHTML =
+    `<span><b>${r.translated}</b>/${r.segments} translated</span>` +
+    (r.errors ? `<span class="err"><b>${r.errors}</b> error${r.errors>1?'s':''}</span>` : '') +
+    (r.warnings ? `<span class="warn"><b>${r.warnings}</b> warning${r.warnings>1?'s':''}</span>` : '') +
+    (!r.errors && !r.warnings && r.translated === r.segments ? '<span style="color:var(--gold)">clean</span>' : '');
+
+  const f = $('#filter').value;
+  const rows = doc.segments.filter(s =>
+    f === 'all' || (f === 'pending' && !s.target) || (f === 'failing' && s.issues.some(i => i.severity === 'error')));
+
+  $('#ledger').innerHTML = rows.map(s => {
+    const bad = s.issues.some(i => i.severity === 'error');
+    const mark = s.target ? (bad ? '<span class="mark bad">✗</span>'
+                                 : '<span class="mark ok">✓</span>') : '';
+    const notes = s.issues.map(i =>
+      `<div class="note ${i.severity==='warn'?'warn':''}"><b>${i.rule}</b>${esc(i.message)}</div>`).join('');
+    return `<div class="row ${bad?'failing':''}" data-id="${s.id}">
+      <div class="gutter">${s.id}<span class="kind">${s.kind}</span>${mark}</div>
+      <div class="src">${marks(s.source)}</div>
+      <div class="tgt"><textarea rows="1" spellcheck="false"
+        placeholder="untranslated">${esc(s.target)}</textarea></div>
+      ${notes ? `<div class="notes">${notes}</div>` : ''}
+    </div>`;
+  }).join('') || '<div class="empty"><h3>Nothing here</h3><p>No segments match this filter.</p></div>';
+
+  $('#ledger').querySelectorAll('textarea').forEach(ta => {
+    grow(ta);
+    ta.oninput = () => { grow(ta); mark(ta); };
+    ta.onblur = save;
+    ta.onkeydown = e => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); save(); next(ta); }
+    };
+  });
+}
+
+const grow = ta => { ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px'; };
+function mark(ta) {
+  const row = ta.closest('.row'), id = row.dataset.id;
+  const seg = doc.segments.find(s => s.id === id);
+  dirty.set(id, ta.value);
+  row.classList.add('dirty');
+  row.classList.toggle('failing', phs(ta.value) !== phs(seg.source));
+}
+function next(ta) {
+  const all = [...$('#ledger').querySelectorAll('textarea')];
+  const i = all.indexOf(ta);
+  if (all[i+1]) { all[i+1].focus(); all[i+1].scrollIntoView({block:'center'}); }
+}
+
+async function save() {
+  if (!dirty.size) return;
+  const targets = Object.fromEntries(dirty);
+  dirty.clear();
+  await api('/api/save', {...cur, targets});
+  await refresh();
+}
+
+async function refresh() {
+  const keep = $('#ledger').scrollTop;
+  doc = await api(`/api/doc?src=${encodeURIComponent(cur.src)}&lang=${encodeURIComponent(cur.lang)}`);
+  paint();
+  $('#ledger').scrollTop = keep;
+}
+
+// ── actions ────────────────────────────────────────────────
+function busy(on) { document.querySelectorAll('.bar button').forEach(b => b.disabled = on); }
+
+async function job(mode) {
+  if (!cur) return;
+  await save();
+  busy(true);
+  say(`— ${mode} —`);
+  try {
+    const j = await api('/api/translate', {...cur, mode, provider: $('#provider').value});
+    if (!j.total) { say('nothing to do'); return; }
+    let seen = 0;
+    for (;;) {
+      await new Promise(r => setTimeout(r, 700));
+      const s = await api('/api/job', {id: j.id});
+      s.log.slice(seen).forEach(l => say('  ' + l));
+      seen = s.log.length;
+      if (s.done) {
+        s.failures.forEach(([id, why]) => say(`  unresolved ${id}: ${why}`, 'bad'));
+        if (s.error) say('  ' + s.error, 'bad');
+        break;
+      }
+    }
+    await refresh();
+  } catch (e) { say('  ' + e.message, 'bad'); }
+  finally { busy(false); }
+}
+
+$('#bDraft').onclick = () => job('draft');
+$('#bPolish').onclick = () => job('polish');
+$('#bRepair').onclick = () => job('repair');
+$('#filter').onchange = paint;
+
+$('#bCheck').onclick = async () => {
+  if (!cur) return;
+  await save();
+  const r = await api('/api/check', cur);
+  say(`check: ${r.errors} error(s), ${r.warnings} warning(s)`, r.errors ? 'bad' : 'good');
+  await refresh();
+};
+
+$('#bPreview').onclick = async () => {
+  if (!cur) return;
+  await save();
+  const p = await api(`/api/preview?src=${encodeURIComponent(cur.src)}&lang=${encodeURIComponent(cur.lang)}`);
+  $('#dlgTitle').textContent = `${cur.src} → ${p.default_out}`;
+  $('#dlgBody').textContent = p.text;
+  $('#dlg').showModal();
+};
+
+$('#bWrite').onclick = async () => {
+  if (!cur) return;
+  await save();
+  const r = await api('/api/render', {...cur, fallback:false});
+  say(`wrote ${r.wrote}` + (r.missing ? ` (${r.missing} untranslated)` : ''), 'good');
+};
+
+$('#bCommit').onclick = async () => {
+  if (!cur) return;
+  await save();
+  const r = await api('/api/commit', cur);
+  say(`translation memory += ${r.committed}`, 'good');
+};
+
+window.addEventListener('beforeunload', e => { if (dirty.size) e.preventDefault(); });
+loadState().catch(e => say(e.message, 'bad'));
+</script>
+</body>
+</html>

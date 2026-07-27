@@ -1,0 +1,13 @@
+{
+  "source_lang": "en",
+  "targets": ["zh-TW"],
+  "tone": "technical",
+  "glossary": "config/glossary.csv",
+  "dnt": "config/dnt.txt",
+  "sources": ["docs/**/*.md"],
+  "output_pattern": "i18n/{lang}/{path}",
+  "length_ratio": { "zh-TW": [0.25, 1.20] },
+  "normalize": { "zh-TW": ["punct", "pangu", "collapse_space"] },
+  "lexicon_extra": { "元數據": ["中繼資料", "error"] },
+  "checks_disabled": []
+}

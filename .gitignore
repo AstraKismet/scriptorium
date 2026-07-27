@@ -1,0 +1,28 @@
+# pipeline state — regenerable from sources, except the translation memory
+.lx/docs/
+.lx/reports/
+# keep .lx/tm.*.jsonl: the memory is the asset, and it belongs in history
+!.lx/tm.*.jsonl
+
+# rendered output — regenerate with `lx render`; track it only if you publish from the repo
+# i18n/
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# never commit credentials; providers read keys from the environment only
+.env
+*.local.json
