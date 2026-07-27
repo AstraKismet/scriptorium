@@ -1,5 +1,11 @@
 # Scriptorium
 
+[![CI](https://github.com/AstraKismet/scriptorium/actions/workflows/ci.yml/badge.svg)](https://github.com/AstraKismet/scriptorium/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
+
+**English** · [繁體中文](README.zh-TW.md)
+
 Publishing-grade document localization. The model translates sentences; code does
 everything else.
 
@@ -9,8 +15,21 @@ Python. Asking a language model to do it in its head is where translation
 pipelines break: at 99.5% per node, a 500-node document survives 8% of the time,
 and the failures are the invisible kind.
 
-No runtime dependencies. Works with any OpenAI-compatible endpoint, including
+No compiled dependencies. Works with any OpenAI-compatible endpoint, including
 fully local models.
+
+## Status
+
+Working today, for Markdown: extract, translate, validate, repair, render, and a
+translation memory that survives revisions.
+
+Under construction, in this order: an adversarial round-trip corpus, containment
+validators, typed placeholders, a SQLite state layer, a rebuilt review workbench,
+then EPUB and plain text.
+
+Deliberately out of scope: DOCX, the i18n file formats, and anything that needs a
+system web view. `docs/decisions.md` records why, along with the alternative that
+lost in each case.
 
 ## Install
 
@@ -97,12 +116,18 @@ locale's own technical documentation uses, and flags the difference. It carries
 no judgement about the other form, which is correct in the conventions it comes
 from — the rule is only that one document should not mix them.
 
-Structural fidelity is absent from that list because it cannot fail. `render`
-rebuilds from the original skeleton and substitutes only translated spans, so
-front matter, fenced code, table alignment, and math survive by construction.
-
 Punctuation width and CJK/Latin spacing are corrected on ingest rather than
 reported — the cheapest defect is the one that cannot be introduced.
+
+**On structural fidelity, honestly.** `render` rebuilds from the original
+skeleton and substitutes only translated spans, so front matter, fenced code,
+table alignment and math around a segment survive by construction. What the
+skeleton does *not* yet guarantee is the structure of the document after
+substitution: a translation containing a line-initial `1. `, or a `|` inside a
+table cell, changes the block structure and currently passes validation. Three
+containment validators are the next correctness work, and the reasoning is in
+`docs/decisions.md`. Until they land, treat a green `lx check` as necessary and
+not sufficient.
 
 ## Incremental translation
 
@@ -131,12 +156,14 @@ because it can spend money through configured providers.
 
 ## Using it from an agent
 
-`skill/` packages this as a Claude Skill. `adapters/` has an `AGENTS.md` for
-Claude Code and Codex, and a rule file for OpenCode. All three are thin pointers
-at the same CLI, so a fix to a validator lands everywhere at once.
+`skill/` packages this as a Claude Skill. `adapters/` has an `AGENTS.md` fragment
+for Claude Code and Codex, and a rule file for OpenCode. All three are thin
+pointers at the same CLI, so a fix to a validator lands everywhere at once.
 
 Agents can drive the pipeline without any model configured at all: `lx todo`
-emits work, the agent translates in its own context, `lx apply` ingests it.
+emits work, the agent translates in its own context, `lx apply` ingests it. This
+is a first-class path, not a fallback — translation, review and audit can each be
+delegated to a different agent.
 
 ## CI
 
@@ -145,7 +172,8 @@ emits work, the agent translates in its own context, `lx apply` ingests it.
 - run: lx check   docs/guide.md --lang zh-TW
 ```
 
-A source edit surfaces as pending work and the check fails the pull request.
+Re-extracting first is what makes a source edit surface as pending work rather
+than pass quietly; the check then fails the pull request.
 
 ## Development
 
@@ -154,9 +182,11 @@ python -m pytest -q          # 38 tests, no network
 python -m ruff check src tests
 ```
 
-`CLAUDE.md` holds the architectural invariants. Read it before changing anything
-structural.
+`AGENTS.md` holds the architectural invariants and is the authoritative working
+agreement — `CLAUDE.md` is a one-line pointer at it. Read it before changing
+anything structural. `docs/decisions.md` records why each invariant is worded the
+way it is.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
