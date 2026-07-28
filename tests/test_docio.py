@@ -93,7 +93,7 @@ def _explain(name, expected, actual):
 
 
 def test_write_helper_does_not_translate_line_endings(tmp_path):
-    # Direct, so a regression is reported here rather than as 27 corpus failures.
+    # Direct, so a regression is reported here rather than as 28 corpus failures.
     dest = tmp_path / "nested" / "doc.md"
     write_document(str(dest), "a\nb\r\nc\rd")
     assert dest.read_bytes() == b"a\nb\r\nc\rd"

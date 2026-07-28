@@ -129,7 +129,7 @@ Current:
 ```
 src/scriptorium/
   docio.py       document read/write as bytes; text mode never touches a user document
-  mask.py        markup protection: ⟦n⟧ placeholders, DNT terms, repair of mangled brackets
+  mask.py        markup protection: ⟦n⟧ slot records, tag pairing, DNT terms, bracket repair
   mdparse.py     markdown -> (skeleton nodes, segments); render() puts it back
   normalize.py   deterministic repair: punctuation width, CJK/Latin spacing
   checks.py      validators; error severity fails the build
@@ -152,7 +152,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 163 passed; no network
+python -m pytest -q                 # 180 passed; no network
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
 
@@ -271,9 +271,12 @@ silently. That file also holds the downgrade ledger.
   `skill/reference/`.
 - New format support: implement parse/render producing the same
   `(nodes, segments)` shape and register it. Do not fork the pipeline.
-- Paired formats must not enter a segment before placeholders carry
-  `role` / `pair_id` / `can_reorder`. Doing it in the other order multiplies the
-  "green but broken" rate with every format added.
+- A slot is a record — `original` / `role` / `pair_id` / `can_reorder` — and the
+  document state file carries `state_version`, which `store.py` refuses to read
+  when it is older than the build. A format whose markup pairs must emit those
+  records from its own masking step; entering a segment without them is what
+  multiplies the "green but broken" rate with every format added. The model still
+  sees a bare `⟦n⟧`: the type lives beside the slot map, never inside the token.
 - Fuzzy matches are advisory. **They are never applied automatically** — a fuzzy
   hit differs in its placeholder set by definition.
 - Tests use no network. Providers are exercised against a mock HTTP server in
