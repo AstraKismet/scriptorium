@@ -23,8 +23,9 @@ SRC = str(ROOT / "src")
 SAMPLE = ROOT / "examples" / "sample.md"
 
 # A link to mask and CJK to encode: the two things `check` echoes that a narrow
-# code page cannot represent.
-CJK_DOC = "# 標題\n\nSee [the guide](https://example.com/x) for 中文 details.\n"
+# code page cannot represent. Held as bytes and written as bytes — `write_text`
+# only learned the `newline` keyword in 3.10, and 3.9 is the declared floor.
+CJK_DOC = "# 標題\n\nSee [the guide](https://example.com/x) for 中文 details.\n".encode()
 
 
 def _lx(args, cwd, env):
@@ -78,7 +79,7 @@ def test_check_survives_a_stdout_that_cannot_encode_it(tmp_path):
     cannot distinguish "reported errors" from "died encoding them" — the
     assertion is on what reached stdout.
     """
-    (tmp_path / "zh.md").write_text(CJK_DOC, encoding="utf-8", newline="\n")
+    (tmp_path / "zh.md").write_bytes(CJK_DOC)
     env = _ascii_stdout_env()
     assert _lx(["init"], tmp_path, env).returncode == 0
     assert _lx(["extract", "zh.md", "--lang", "zh-TW"], tmp_path, env).returncode == 0
@@ -86,3 +87,41 @@ def test_check_survives_a_stdout_that_cannot_encode_it(tmp_path):
     r = _lx(["check", "zh.md", "--lang", "zh-TW"], tmp_path, env)
     assert b"UnicodeEncodeError" not in r.stderr
     assert "中文" in r.stdout.decode("utf-8")
+
+
+# --- what `lx init` scaffolds, and what the pipeline writes back -------------
+
+
+def test_scaffolding_carries_no_carriage_return(tmp_path):
+    """`lx init` writes into someone else's repository.
+
+    No invariant claims these bytes — 2a excludes the files this project writes
+    for itself — so this is asserting a choice rather than a guarantee: one
+    command must not produce two different trees depending on the machine that
+    ran it. Asserted on bytes, because a text-mode read normalizes and would
+    report success either way.
+    """
+    env = {**os.environ, "PYTHONPATH": SRC}
+    assert _lx(["init"], tmp_path, env).returncode == 0
+    for name in ("lx.config.json", "config/glossary.csv", "config/dnt.txt"):
+        blob = (tmp_path / name).read_bytes()
+        assert blob, f"{name} was not created"
+        assert b"\r" not in blob, f"{name} carries a CR"
+
+
+def test_state_and_rendered_output_keep_the_source_terminator(tmp_path):
+    # The end of criterion (5): a source with no CRLF must not gain one on the
+    # way out. The round-trip itself is covered in test_docio.py at the function
+    # level; this runs it through the real commands and a real filesystem.
+    (tmp_path / "zh.md").write_bytes(CJK_DOC)
+    env = {**os.environ, "PYTHONPATH": SRC}
+    assert _lx(["init"], tmp_path, env).returncode == 0
+    assert _lx(["extract", "zh.md", "--lang", "zh-TW"], tmp_path, env).returncode == 0
+
+    state = next((tmp_path / ".lx" / "docs").iterdir())
+    assert b"\r" not in state.read_bytes(), f"{state.name} carries a CR"
+
+    r = _lx(["render", "zh.md", "--lang", "zh-TW", "--fallback", "-o", "out.md"],
+            tmp_path, env)
+    assert r.returncode == 0, r.stderr.decode("utf-8", "replace")
+    assert (tmp_path / "out.md").read_bytes() == CJK_DOC
