@@ -17,7 +17,7 @@ import posixpath
 import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from .. import __version__
 from ..cli import default_output, do_apply, do_check, do_extract, do_render, pending_segments
@@ -72,12 +72,43 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": str(e)})
 
     def _static(self, path):
-        rel = posixpath.normpath(path.lstrip("/")) or "index.html"
-        if rel.startswith(".."):
+        """Serve a file from the static root, and nothing outside it.
+
+        The guard this replaces decided on a string before the filesystem had a
+        say: it normalized with `posixpath` and rejected a leading "..". Three
+        things get past that, so there are now three answers.
+
+        Percent-decoding happens first, because "%2e%2e%2f" walks up while
+        looking inert. It also un-breaks any asset whose name holds a space or a
+        non-ASCII character, which used to 404 for the same reason.
+
+        A backslash is then a separator on every platform. `posixpath` does not
+        treat it as one and Windows' `open` does, so
+        `x\\..\\..\\..\\..\\..\\pyproject.toml` passed the old guard untouched
+        and then resolved five levels above the static root, into the repository.
+        Rewriting it here rather than only where it is exploitable keeps the rule
+        — and the test that pins it — identical on both platforms.
+
+        The containment check is on the *resolved* path, which is the one that
+        actually decides: comparing the join as a string cannot see a symlink,
+        and `..` inside the join is only inert after resolution.
+
+        Loopback binding bounds the exposure and does not remove it: every local
+        process could read anything this user could, no remote one could.
+        """
+        rel = posixpath.normpath(unquote(path).replace("\\", "/").lstrip("/"))
+        if rel in ("", "."):
+            rel = "index.html"
+        root = os.path.realpath(STATIC)
+        full = os.path.realpath(os.path.join(root, rel))
+        if full != root and not full.startswith(root + os.sep):
             return self._send(403, b"forbidden", "text/plain")
-        full = os.path.join(STATIC, rel)
         if not os.path.isfile(full):
-            full = os.path.join(STATIC, "index.html")
+            # 404, not index.html with a 200. There is one page and no
+            # client-side router, so an unknown path is a mistake — answering it
+            # with a success made every typo render as a blank application, and
+            # made the traversal above look like it had been served.
+            return self._send(404, b"not found", "text/plain")
         ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
         with open(full, "rb") as f:
             self._send(200, f.read(), f"{ctype}; charset=utf-8")
