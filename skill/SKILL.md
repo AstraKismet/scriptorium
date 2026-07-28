@@ -64,7 +64,7 @@ If `check` reports `tags` errors repeatedly on the same segment, the placeholder
 | `escaping` | error | a character the host syntax cannot hold, left unescaped |
 | `eol` | error | a carriage return the source did not have |
 | `glossary` | configurable | agreed term rendered inconsistently, or a forbidden variant used |
-| `numbers` | error | figures dropped or hallucinated |
+| `numbers` | error | a figure in the source missing from the target |
 | `missing` | error | segment never translated |
 | `lexicon` | error/warn | a term the target locale writes differently |
 | `dnt` | warn | protected brand or product name altered |
