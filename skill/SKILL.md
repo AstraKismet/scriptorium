@@ -60,6 +60,9 @@ If `check` reports `tags` errors repeatedly on the same segment, the placeholder
 | Rule | Severity | Catches |
 |---|---|---|
 | `tags` | error | placeholder lost, duplicated, or invented; a pair inverted or crossed |
+| `containment` | error | the translation opens a block the source did not, or adds a table column |
+| `escaping` | error | a character the host syntax cannot hold, left unescaped |
+| `eol` | error | a carriage return the source did not have |
 | `glossary` | configurable | agreed term rendered inconsistently, or a forbidden variant used |
 | `numbers` | error | figures dropped or hallucinated |
 | `missing` | error | segment never translated |
@@ -69,7 +72,9 @@ If `check` reports `tags` errors repeatedly on the same segment, the placeholder
 | `punct` / `spacing` | warn | width and CJK/Latin boundary problems `apply` could not auto-fix |
 | `length` | warn | truncated or padded segment |
 
-Structure is not on this list because it cannot fail: `render` rebuilds the document from the original skeleton and substitutes only the translated spans. Headings, list nesting, table columns, front matter, and fenced code are preserved by construction.
+Structure splits in two, and only the second half can fail. The document *around* a segment is preserved by construction — `render` rebuilds from the original skeleton and substitutes only the translated spans, so headings, list nesting, table columns, front matter and fenced code cannot regress. What the translation itself does once substituted between them is the `containment` rule's business, and it can.
+
+In practice that means: do not begin a translation with `1. `, `- `, `#`, or `> ` unless the source line began that way; do not put a line break in a heading, a table cell or a blockquote; do not add a blank line; and do not add a `|` inside a table cell. If the target genuinely needs a list, the source is a list and the segmentation already reflects it.
 
 ## Setting up a project
 

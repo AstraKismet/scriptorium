@@ -126,9 +126,12 @@ def test_placeholder_repair(mangled):
     assert repair_placeholders(f"x{mangled}y") == "x\u27e63\u27e7y"
 
 
-def _seg(masked, target, slots=None):
-    return {"id": "s1", "kind": "para", "masked": masked, "target": target,
-            "slots": slots or {}}
+def _seg(masked, target, slots=None, kind="para", host=None):
+    seg = {"id": "s1", "kind": kind, "masked": masked, "target": target,
+           "slots": slots or {}}
+    if host:
+        seg["host"] = host          # absent by default: the Markdown path is the default
+    return seg
 
 
 def _rules(masked, target, lang="zh-TW", glossary=(), dnt=(), slots=None):
@@ -178,6 +181,194 @@ def test_nesting_that_survives_is_not_flagged():
     # nested, moved as a unit. A validator that fails this one is worse than none.
     masked, slots = mask("<b><i>x</i></b>")
     assert "tags" not in _rules(masked, "\u8b6f\u6587\u27e61\u27e7\u27e62\u27e7\u5b57\u27e63\u27e7\u27e64\u27e7", slots=slots)
+
+
+# --- containment: what a target does to the block it lands in ----------------
+#
+# Invariant 2a guarantees the bytes around a segment and says nothing about what
+# a target does once substituted between them. The five cases below were measured
+# 2026-07-27 and every one reported zero errors and zero warnings; they are the
+# specification of the rule, so they are written as the source and the target
+# that produced the damage rather than as hand-built segments.
+#
+# Every rule here gets both halves. A validator that cries wolf is ignored, and
+# the zh-TW lexicon above is in this file precisely because it had been failing
+# correct Traditional Chinese \u2014 trading one failure direction for the other is
+# not a repair.
+
+_STRUCTURAL = {"containment", "escaping", "eol"}
+
+
+def _structural(kind, source, target, host=None, cfg=CFG):
+    """Invariant 2b issues as (rule, severity).
+
+    Severity is half of what B2 decided \u2014 these stop a build \u2014 so this does not
+    collapse to rule names the way `_rules` does.
+    """
+    issues = check_segment(_seg(source, target, kind=kind, host=host), "zh-TW", cfg, [], [])
+    return [(i["rule"], i["severity"]) for i in issues if i["rule"] in _STRUCTURAL]
+
+
+#: The five measured cases, and beside each an ordinary translation of the same
+#: source. One list, so a fixture cannot be added to one half and forgotten in
+#: the other.
+MEASURED = [
+    ("cell", "one", "\u542b|\u7ba1\u7dda", "\u4e00"),
+    ("para", "Some sentence here.", "1. \u9019\u662f\u8b6f\u6587", "\u9019\u88e1\u6709\u4e00\u53e5\u8a71\u3002"),
+    ("para", "Some sentence here.", "\u8b6f\u6587\n# \u6191\u7a7a\u9577\u51fa\u7684\u6a19\u984c",
+     "\u9019\u662f\u4e00\u53e5\u666e\u901a\u7684\u8b6f\u6587\u3002"),
+    ("heading", "Title", "\u4e0a\u534a\n\n\u4e0b\u534a", "\u6a19\u984c"),
+    ("quote", "quoted line", "\u7b2c\u4e00\u884c\n\u9038\u51fa\u5f15\u8a00\u7684\u7b2c\u4e8c\u884c", "\u5f15\u7528\u7684\u4e00\u884c"),
+]
+
+
+@pytest.mark.parametrize("kind, source, damaging, _clean",
+                         MEASURED, ids=["cell-pipe", "para-becomes-list",
+                                        "para-invents-heading", "heading-splits",
+                                        "quote-leaks"])
+def test_the_five_measured_structural_cases_fail_the_build(kind, source, damaging, _clean):
+    assert _structural(kind, source, damaging) == [("containment", "error")]
+
+
+@pytest.mark.parametrize("kind, source, _damaging, clean",
+                         MEASURED, ids=["cell", "para-1", "para-2", "heading", "quote"])
+def test_an_ordinary_translation_of_each_source_is_clean(kind, source, _damaging, clean):
+    # Every rule, not only the structural ones: a translation this plain must
+    # produce no issue at all, or the fixture is measuring something else.
+    assert check_segment(_seg(source, clean, kind=kind), "zh-TW", CFG, [], []) == []
+
+
+@pytest.mark.parametrize("kind, source, target", [
+    # A nested list item and a nested blockquote are ordinary input, and their
+    # segments legitimately begin with a marker. This is why the rule compares
+    # against the source instead of stating an absolute.
+    ("list", "- inner item", "- \u5167\u5c64\u9805\u76ee"),
+    ("list", "- inner item", "1. \u5167\u5c64\u9805\u76ee"),
+    ("quote", "> inner", "> \u5167\u5c64"),
+    # A wrapped paragraph and a wrapped list item keep their line breaks, and a
+    # translation is free to rewrap: line count is never compared.
+    ("para", "A long sentence\nwrapped over two lines.", "\u4e00\u53e5\u5f88\u9577\u7684\u53e5\u5b50\n\u8de8\u5169\u884c\u5beb\u6210\u3002"),
+    ("para", "A long sentence\nwrapped over two lines.", "\u5beb\u6210\u4e00\u884c\u7684\u8b6f\u6587\u3002"),
+    # `mdparse` stops a list continuation at a list, a heading and a fence, but
+    # not at a quote \u2014 so a source continuation *can* carry a block start, and
+    # the target may keep it.
+    ("list", "item\n  > quoted", "\u9805\u76ee\n  > \u5f15\u8a00"),
+    # A marker that is not line-initial is text.
+    ("para", "Use the # sign.", "\u4f7f\u7528 # \u7b26\u865f\u3002"),
+    ("para", "A well-known name.", "\u4e00\u500b - \u77e5\u540d\u7684\u540d\u5b57\u3002"),
+    # The pipe rule belongs to cells. A pipe in prose is prose.
+    ("para", "Choose A or B.", "\u9078\u7532 | \u4e59\u3002"),
+    # A heading's and a cell's content is an inline context: a marker there is
+    # literal text, and flagging it would fail correct work.
+    ("heading", "The # sign", "# \u865f\u7b26\u865f"),
+    ("cell", "dash", "- \u7834\u6298\u865f"),
+])
+def test_structure_the_source_already_had_is_not_flagged(kind, source, target):
+    assert _structural(kind, source, target) == []
+
+
+def test_a_cell_may_carry_a_pipe_that_arrived_inside_a_placeholder():
+    # The rule counts pipes in the *restored* text, so a code span containing one
+    # must not be charged to the translation that kept it where it was.
+    masked, slots = mask("`a|b`")
+    seg = _seg(masked, masked, slots=slots, kind="cell")
+    assert [i for i in check_segment(seg, "zh-TW", CFG, [], [])
+            if i["rule"] in _STRUCTURAL] == []
+
+
+@pytest.mark.parametrize("kind, source, target", [
+    ("list", "item", "\u9805\u76ee\n- \u7b2c\u4e8c\u9805"),          # a sibling item
+    ("list", "- inner", "\u8b6f\u6587\n- \u5167\u5c64"),             # one nested item becomes two siblings
+    ("para", "One sentence.", "\u4e0a\u534a\n\n\u4e0b\u534a"),        # a blank line ends the block
+    ("para", "One sentence.", "\u4e00\u53e5\u8a71\u3002\n"),          # so does a trailing one
+    ("para", "One sentence.", "\u8b6f\u6587\n```"),                   # a fence swallows the rest of the file
+    ("para", "One sentence.", "\u8b6f\u6587\n---"),                   # a thematic break
+    ("para", "One sentence.", "> \u5f15\u8a00"),                      # a blockquote
+    ("cell", "one", "\u4e00\n\u4e8c"),                                # a cell is one line
+    # The worst of the family: this one renders to nothing at all.
+    ("para", "One sentence.", '[foo]: http://example.com "title"'),
+])
+def test_a_block_the_translation_invents_is_an_error(kind, source, target):
+    assert _structural(kind, source, target) == [("containment", "error")]
+
+
+def test_a_target_that_becomes_a_link_definition_does_not_merely_move_the_text():
+    """Why the link-definition row is in the table, stated as the damage it does.
+
+    The other block starts put the translated text in the wrong block, where a
+    reviewer can see it. This one deletes it: the rendered document contains a
+    link reference definition and no prose, and re-parsing finds no segment at
+    all, so the text is gone and unrecoverable by re-extracting. Found by an
+    adversarial pass after the first six rows were already in, which is why it
+    gets its own test rather than a line in the table above.
+    """
+    nodes, segs = parse("Some sentence here about a topic.\n")
+    segs[0]["target"] = '[foo]: http://example.com "link title"'
+    assert _structural("para", segs[0]["masked"], segs[0]["target"]) \
+        == [("containment", "error")]
+
+    out, _missing = render({"nodes": nodes, "segments": segs, "lang": "zh-TW"}, CFG)
+    _nodes2, segs2 = parse(out)
+    assert segs2 == [], "the fixture must actually demonstrate the segment vanishing"
+
+
+def test_a_source_link_definition_never_reaches_a_segment_in_the_first_place():
+    # The must-not-fire half, and the reason the row costs nothing: `mdparse`
+    # folds a link definition into a raw node, so no source segment line can be
+    # one. Only a model-invented definition can match the rule.
+    _nodes, segs = parse('[foo]: http://example.com "title"\n\nOrdinary prose.\n')
+    assert [s["source"] for s in segs] == ["Ordinary prose."]
+
+
+def test_containment_is_disableable_like_every_other_rule():
+    # Default on at error severity; a project that genuinely needs it off records
+    # that choice in its own config.
+    cfg = {**CFG, "checks_disabled": ["containment"]}
+    assert _structural("para", "Some sentence here.", "1. \u9019\u662f\u8b6f\u6587", cfg=cfg) == []
+
+
+# --- host escaping, and the carriage return a segment may not invent ---------
+#
+# Markdown declares no escaping requirement, so the table has no live row until
+# EPUB lands: `render()` performs no escaping of slot values at all, and on XHTML
+# that produces a file which does not parse. The rule is written against a host
+# rather than against a kind so the format that emits XHTML segments only has to
+# set `host` on them. These fixtures are what a segment from such a format looks
+# like \u2014 which is also the only way to test a rule with no live caller yet.
+
+
+@pytest.mark.parametrize("target, expected", [
+    ("a < b", [("escaping", "error")]),
+    ("AT&T", [("escaping", "error")]),
+    ("x ]]> y", [("escaping", "error")]),
+    ("&amp; &#8212; &#x2014; &lt;", []),      # already written as references
+    ("a > b", []),                            # legal character data on its own
+])
+def test_an_xml_host_rejects_what_it_cannot_hold(target, expected):
+    assert _structural("para", "source text", target, host="xhtml") == expected
+
+
+@pytest.mark.parametrize("target", ["a < b", "AT&T", "x ]]> y"])
+def test_markdown_declares_no_escaping_requirement(target):
+    # The same three targets, and the same default a document carries today.
+    assert _structural("para", "source text", target) == []
+
+
+def test_a_target_that_invents_a_carriage_return_is_an_error():
+    # A document whose terminators arrived mixed keeps its CRs in the segment
+    # source, so the model is asked to reproduce one. Measured 2026-07-28: five
+    # different replies to one such segment \u2014 CRLF kept, LF only, lines joined, a
+    # break added, a bare CR \u2014 all produced zero errors, so the repair loop could
+    # not see a wrong one.
+    assert _structural("para", "line one", "\u7b2c\u4e00\u884c\r\n\u7b2c\u4e8c\u884c") == [("eol", "error")]
+
+
+def test_a_carriage_return_the_source_already_had_is_not_flagged():
+    # One-directional, and not to be widened: a target that *drops* a CR cannot
+    # be flagged, because a translation may rewrap and comparing break counts
+    # fails the legitimate case.
+    assert _structural("para", "a\r\nb", "\u7532\r\n\u4e59") == []
+    assert _structural("para", "a\r\nb", "\u7532\u4e59") == []
 
 
 def test_missing_number_is_an_error():
@@ -418,6 +609,31 @@ def test_unbalanced_markup_renders():
     out, missing = render({"nodes": nodes, "segments": segs, "lang": "zh-TW"}, CFG)
     assert missing == 0
     assert out == text
+
+
+@pytest.mark.parametrize("path", [pytest.param(p, id=p.name) for p in _corpus_files()])
+def test_every_corpus_segment_translated_to_itself_is_structurally_clean(path):
+    """The must-not-fire half of invariant 2b, on real documents rather than toys.
+
+    A segment translated to itself changes no structure by definition, so any
+    containment, escaping or `eol` issue here is the validator failing correct
+    work — the direction the zh-TW lexicon had to be audited for, and the reason
+    the per-rule fixtures above come in pairs. This is the sweep those pairs
+    cannot be: nested lists, lazy continuations, alignment-padded tables, CRLF
+    and CR-only terminators and a 112k-character manual, without anyone having
+    to think of each case.
+
+    Only the structural rules are read: translating a source to itself trips
+    `untranslated` by design, and CJK rules have nothing to say about English.
+    """
+    text = path.read_bytes().decode("utf-8")
+    _nodes, segs = parse(text)
+    for seg in segs:
+        seg["target"] = seg["masked"]
+        issues = [f"{i['rule']}: {i['message']}"
+                  for i in check_segment(seg, "zh-TW", CFG, [], [])
+                  if i["rule"] in _STRUCTURAL]
+        assert not issues, f"{seg['id']} ({seg['kind']}) {seg['masked']!r}: {issues}"
 
 
 def test_corpus_is_present_and_known_breakage_names_real_fixtures():

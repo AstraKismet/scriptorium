@@ -115,12 +115,13 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
 10. **Never claim a translation passed without a green `lx check`.** The exit
     code is the evidence.
 
-    *Honest caveat until the containment validators land:* `check` was measured
-    to pass five structural-damage cases and to fail five correct Traditional
-    Chinese sentences. The lexicon half is repaired — the zh-TW table was audited
-    against invariant 4 on 2026-07-28 and the five sentences are fixtures now —
-    but the structural half stands, so a green exit code is still necessary and
-    not sufficient. Say so rather than overclaiming.
+    It was measured, on 2026-07-27, to be unreliable in both directions: it
+    passed five structural-damage cases and failed five correct Traditional
+    Chinese sentences. Both halves were repaired on 2026-07-28 — the zh-TW table
+    audited against invariant 4, and the containment validators added at error
+    severity — and all ten are fixtures now. Be exact about what the exit code
+    claims even so: that the structure survived and the mechanical rules passed,
+    never that the translation is good.
 
 ## Layout
 
@@ -132,7 +133,8 @@ src/scriptorium/
   mask.py        markup protection: ⟦n⟧ slot records, tag pairing, DNT terms, bracket repair
   mdparse.py     markdown -> (skeleton nodes, segments); render() puts it back
   normalize.py   deterministic repair: punctuation width, CJK/Latin spacing
-  checks.py      validators; error severity fails the build
+  checks.py      validators; error severity fails the build. Invariant 2b lives
+                 here: block-start containment, host escaping, placeholder pairs
   store.py       .lx/ state, content-addressed segments, translation memory
   config.py      layered config, glossary, do-not-translate list
   translate.py   batching, concurrency, JSON tolerance, per-segment retry
@@ -152,7 +154,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 180 passed; no network
+python -m pytest -q                 # 250 passed; no network
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
 

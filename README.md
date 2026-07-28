@@ -51,12 +51,14 @@ document is gated in CI by an adversarial corpus of 28 inputs, on Linux and
 Windows — end to end, from the bytes on disk to the bytes written back, so a file
 keeps the line endings it arrived with whatever platform it is processed on.
 
-Placeholders are typed records, so paired markup is representable and a
-translation that inverts or crosses a pair fails the build instead of rendering
-`</b>粗體<b>`.
+Structure is guaranteed *around* a segment and checked *inside* one. Placeholders
+are typed records, so paired markup is representable: a translation that inverts
+or crosses a pair fails the build instead of rendering `</b>粗體<b>`. So does one
+that opens a block the source did not, or that grows a table cell an extra
+column.
 
-Under construction, in this order: the remaining containment validators, a
-SQLite state layer, a rebuilt review workbench, then EPUB and plain text.
+Under construction, in this order: a SQLite state layer, a rebuilt review
+workbench, then EPUB and plain text.
 
 Deliberately out of scope: DOCX, the i18n file formats, and anything that needs a
 system web view. `docs/decisions.md` records why, along with the alternative that
@@ -138,10 +140,11 @@ for the polish and repair passes, which operate on small batches by construction
 ## What gets checked
 
 `tags` (placeholder integrity, including pairs that invert or cross),
-`glossary` (agreed terms and forbidden variants),
-`numbers` (figures dropped or invented), `lexicon` (a term the target locale
-writes differently), `dnt`, `untranslated`, `punct`, `spacing`, `length`,
-`missing`.
+`containment` (a block the translation opened and the source did not),
+`escaping` (a character the host syntax cannot hold), `eol` (an invented carriage
+return), `glossary` (agreed terms and forbidden variants), `numbers` (figures
+dropped or invented), `lexicon` (a term the target locale writes differently),
+`dnt`, `untranslated`, `punct`, `spacing`, `length`, `missing`.
 
 `lexicon` is a per-locale preference table: it pairs a term with the form that
 locale's own technical documentation uses, and flags the difference. It carries
@@ -155,15 +158,19 @@ word boundary — `電視頻道` contains `視頻` — report at warn and never 
 Punctuation width and CJK/Latin spacing are corrected on ingest rather than
 reported — the cheapest defect is the one that cannot be introduced.
 
-**On structural fidelity, honestly.** `render` rebuilds from the original
-skeleton and substitutes only translated spans, so front matter, fenced code,
-table alignment and math around a segment survive by construction. What the
-skeleton does *not* yet guarantee is the structure of the document after
-substitution: a translation containing a line-initial `1. `, or a `|` inside a
-table cell, changes the block structure and currently passes validation. Three
-containment validators are the next correctness work, and the reasoning is in
-`docs/decisions.md`. Until they land, treat a green `lx check` as necessary and
-not sufficient.
+**On structural fidelity, honestly.** A guarantee and a check are different
+things, and it is worth saying which is which. `render` rebuilds from the
+original skeleton and substitutes only translated spans, so front matter, fenced
+code, table alignment and math *around* a segment survive by construction —
+there is nothing there to validate. What a translation does once substituted
+*between* them is not under our control, so that half is checked instead. Four
+ways to fail it, all at error severity: opening a block the source did not
+(a line-initial `1. `, a `#`, a blank line inside a heading); adding a `|` inside
+a table cell; leaving a character the host syntax cannot hold unescaped; and
+inventing a carriage return.
+
+A green `lx check` therefore claims exactly this much: the structure survived and
+the mechanical rules passed. It has never claimed the translation is good.
 
 ## Incremental translation
 
