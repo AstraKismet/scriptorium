@@ -1,6 +1,7 @@
 """Round-trip and validator tests. No network, no model."""
 
 import os
+import pathlib
 import sys
 
 import pytest
@@ -139,18 +140,98 @@ def test_config_layering_keeps_new_defaults():
     assert merged["batch"]["concurrency"] == DEFAULT_CONFIG["batch"]["concurrency"]
 
 
-@pytest.mark.parametrize("text", [
-    SAMPLE,
-    "no trailing newline",
-    "# Only a heading\n",
-    "\n\n\n",
-    "- a\n- b\n",
-    "| a | b |\n| --- | --- |\n| 1 | 2 |\n",
-    "Para one.\n\nPara two.",
-])
-def test_skeleton_reproduces_source_exactly(text):
-    nodes, segs = parse(text, [])
-    for s in segs:
-        s["target"] = s["masked"]
-    out, _ = render({"nodes": nodes, "segments": segs, "lang": "en"}, CFG)
-    assert out == text
+# --- the skeleton guarantee (invariant 2a) ---------------------------------
+#
+# `tests/corpus/` holds one input file per property, and nothing else — no
+# README, no manifest. The same reasoning as `handoff/`: anything else in the
+# directory would be collected as a fixture, so the explanation lives here.
+#
+# The properties covered, one file each: a UTF-8 BOM, CRLF terminators, nested
+# lists, wrapped list-item continuations, indented code, HTML blocks, tables with
+# alignment padding and tables without a leading pipe, hard line breaks, front
+# matter, reference link definitions, setext headings and thematic breaks,
+# fenced and unclosed code, nested blockquotes, inline markup, CJK with
+# full-width punctuation, a file with no trailing newline, whitespace-only,
+# blank-lines-only, an empty file, and one 112k-character manual long enough for
+# a per-block defect to hide in.
+#
+# `line-separator-control-chars.md` is load-bearing rather than decorative: it
+# contains every character `str.splitlines()` breaks on that `str.split("\n")`
+# does not. HANDOFF-002 is tempted toward `splitlines`, and this fixture is what
+# proves that swap is not behaviour-neutral.
+#
+# Red line: a fixture is never edited to make a test pass. If one fails, either
+# the parser is wrong or the fixture is not valid input — decide which, and say
+# so in the commit.
+
+CORPUS = pathlib.Path(__file__).parent / "corpus"
+
+# Measured 2026-07-27, scheduled as HANDOFF-002. One entry per defect, not per
+# failing input: six corpus-shaped inputs fail, but they collapse to these two
+# root causes, and the package's acceptance criteria allow exactly two xfails.
+# strict=True so that fixing a defect turns the suite red until the entry is
+# removed — a silently-passing xfail is how a fix gets forgotten.
+KNOWN_BROKEN = {
+    "crlf-line-endings.md":
+        "mdparse.py:40 rstrips the CR off every segment source",
+    "list-continuation-indent.md":
+        "mdparse.py:139 strips the indent off list-item continuation lines",
+}
+
+
+def identity_roundtrip(text, dnt=()):
+    """Substitute each segment's source back into the skeleton.
+
+    Deliberately not routed through ``render()``: render also unmasks and
+    normalizes, so a failure there could be a masking defect rather than a
+    skeleton defect, and this property is only about the skeleton.
+    """
+    nodes, segs = parse(text, dnt)
+    by_id = {s["id"]: s for s in segs}
+    return "".join(
+        n["v"] if n["t"] == "raw" else by_id[n["id"]]["source"] for n in nodes
+    )
+
+
+def _corpus_files():
+    return sorted(p for p in CORPUS.iterdir() if p.is_file())
+
+
+def _case(path):
+    marks = ([pytest.mark.xfail(strict=True, reason=KNOWN_BROKEN[path.name])]
+             if path.name in KNOWN_BROKEN else [])
+    return pytest.param(path, id=path.name, marks=marks)
+
+
+def _explain(name, expected, actual):
+    # repr() of both sides, windowed on the first difference: a CR or a trailing
+    # space is invisible otherwise, and the long fixture is 112k characters.
+    i = next((k for k, (a, b) in enumerate(zip(expected, actual)) if a != b),
+             min(len(expected), len(actual)))
+    lo, hi = max(0, i - 60), i + 60
+    return (
+        f"{name} did not round-trip; first difference at index {i}\n"
+        f"  expected: {expected[lo:hi]!r}\n"
+        f"  actual  : {actual[lo:hi]!r}\n"
+        f"  lengths : expected {len(expected)}, actual {len(actual)}"
+    )
+
+
+@pytest.mark.parametrize("path", [_case(p) for p in _corpus_files()])
+def test_corpus_roundtrips_byte_for_byte(path):
+    # Bytes, then an explicit decode. utf-8-sig would eat the BOM fixture and
+    # text mode would rewrite the CRLF fixture — in both cases silently hiding
+    # the defect the fixture exists to expose.
+    text = path.read_bytes().decode("utf-8")
+    got = identity_roundtrip(text)
+    assert got == text, _explain(path.name, text, got)
+
+
+def test_corpus_is_present_and_known_breakage_names_real_fixtures():
+    # A typo in KNOWN_BROKEN makes the real fixture run unmarked, which fails
+    # loudly. A renamed or deleted fixture is the quiet case: its coverage
+    # vanishes and nothing complains. This is the guard for that.
+    names = {p.name for p in _corpus_files()}
+    assert names, "tests/corpus/ is empty"
+    missing = sorted(KNOWN_BROKEN.keys() - names)
+    assert not missing, f"KNOWN_BROKEN names fixtures that do not exist: {missing}"
