@@ -6,92 +6,184 @@
 
 **English** · [繁體中文](README.zh-TW.md)
 
-Publishing-grade document localization. The model translates sentences; code does
-everything else.
+Translate documents without letting the model near the markup.
 
-## What it does
+Scriptorium is a command-line localization pipeline for Markdown. It splits a
+document into sentences, masks code, links, tags and protected terms behind
+`⟦n⟧` placeholders, and substitutes the translations back into the original file
+byte for byte. Block syntax is never sent at all. The model translates prose,
+which is the part of the job it is actually good at.
 
-Point it at a document and it runs four steps.
+Pure Python, **zero runtime dependencies**, no compiled extensions. It runs on a
+bare interpreter, in CI, inside an agent sandbox, and on a locked-down machine.
 
-1. **Split and mask.** The document is parsed into translatable segments, and
-   every piece of markup — code spans, URLs, link targets, table pipes — is
-   replaced with a `⟦n⟧` placeholder. The model is handed prose and nothing else,
-   so there is no markup for it to reflow, translate or drop.
-2. **Translate what is new.** Segments already in the translation memory are
-   reused; the rest go to a configured model, to an agent through
-   `lx todo` / `lx apply`, or to a person in the review workbench. All three are
-   equal sources, and every segment records which one produced it.
-3. **Check mechanically.** Dropped or duplicated placeholders, figures that
-   changed, forbidden terminology, segments left untranslated. `lx check` exits
-   non-zero when any of these fail, so "is this finished" has an exit code
-   instead of an opinion.
-4. **Render by substitution.** Translations are put back into the original
-   document's skeleton. The target file is never rebuilt from the model's
-   output — only refilled — so every byte the pipeline did not deliberately
-   change is reproduced as it was.
+## What it looks like
 
-Segments are keyed by their content rather than their position, so editing the
-source retranslates only what actually changed and everything already approved
-comes back from the memory. Nothing you have reviewed is spent twice.
+Given this source:
 
-Structural work — parsing markup, protecting code spans, reassembling documents,
-enforcing terminology, normalizing punctuation — is deterministic and lives in
-Python. Asking a language model to do it in its head is where translation
-pipelines break: at 99.5% per node, a 500-node document survives 8% of the time,
-and the failures are the invisible kind.
+```markdown
+# Deployment Guide
 
-No compiled dependencies. Works with any OpenAI-compatible endpoint, including
-fully local models.
+The **Celurion** server requires Go 1.22 and a running instance of `postgres`.
 
-## Status
+| Option | Default | Description |
+| --- | --- | --- |
+| `port` | 8080 | Listening port for the HTTP server |
 
-Working today, for Markdown: extract, translate, validate, repair, render, and a
-translation memory that survives revisions. Byte-exact reassembly of the source
-document is gated in CI by an adversarial corpus of 28 inputs, on Linux and
-Windows — end to end, from the bytes on disk to the bytes written back, so a file
-keeps the line endings it arrived with whatever platform it is processed on.
+> Warning: never commit secrets to the repository.
+```
 
-Structure is guaranteed *around* a segment and checked *inside* one. Placeholders
-are typed records, so paired markup is representable: a translation that inverts
-or crosses a pair fails the build instead of rendering `</b>粗體<b>`. So does one
-that opens a block the source did not, or that grows a table cell an extra
-column.
+`lx run guide.md --lang zh-TW` writes:
 
-Under construction, in this order: a SQLite state layer, a rebuilt review
-workbench, then EPUB and plain text.
+```markdown
+# 部署指南
 
-Deliberately out of scope: DOCX, the i18n file formats, and anything that needs a
-system web view. `docs/decisions.md` records why, along with the alternative that
-lost in each case.
+**Celurion** 伺服器需要 Go 1.22，以及一個執行中的 `postgres` 實例。
 
-## Install
+| 選項 | 預設值 | 說明 |
+| --- | --- | --- |
+| `port` | 8080 | HTTP 伺服器的監聽連接埠 |
+
+> 警告：絕對不要把機密資訊提交到儲存庫。
+```
+
+With `Celurion` and `Go` listed in `config/dnt.txt`, this is everything the model
+received for that paragraph:
+
+```
+The **⟦2⟧** server requires ⟦3⟧ 1.22 and a running instance of ⟦1⟧.
+```
+
+The placeholders are opaque: the model can move them, but it cannot translate,
+drop or duplicate one, and code fills the originals back in afterwards. The
+heading's `#`, the table's alignment row, the `>`, and the cells holding `port`
+and `8080` were never in a segment at all — they stay in the skeleton and are
+copied back byte for byte.
+
+## Quick start
+
+Not published to PyPI; install from source.
 
 ```bash
 git clone https://github.com/AstraKismet/scriptorium.git
 cd scriptorium
-pip install -e .          # optional; provides the `lx` command
+pip install -e .            # optional, provides the `lx` command
 ```
 
 Without installing, use `python -m scriptorium` in place of `lx`.
 
-## Quick start
-
 ```bash
-lx init                                   # config templates + state dirs
-lx run docs/guide.md --lang zh-TW         # the whole pipeline
-lx web                                    # review what came out
+lx init                             # config templates and state directories
+lx run docs/guide.md --lang zh-TW   # the whole pipeline
+lx web                              # review what came out
 ```
 
-`lx run` extracts segments, reuses anything already in the translation memory,
-translates the rest, validates, repairs what failed, and writes the target file —
-refusing to render while errors remain.
+`lx run` needs a model backend, and the shipped default expects Ollama on
+`localhost:11434` — see [Model backends](#model-backends). To try it with no
+backend at all, use the agent path: `lx extract`, then `lx todo` for the pending
+segments as JSON, translate them yourself, and `lx apply` to put them back.
 
-## Backends
+`examples/walkthrough.md` runs through a full document end to end.
 
-Providers are declared in `lx.config.json`. The request sent to an
-OpenAI-compatible endpoint is deliberately plain — no `response_format`, tools,
-or streaming unless you opt in — because self-hosted runtimes reject unknown
-fields rather than ignoring them.
+## How it works
+
+**1. Split and mask.** The document becomes a list of translatable segments;
+everything else stays in a skeleton. Code spans, math, URLs, link and reference
+targets, footnotes, HTML tags, entities, template variables and any term in
+`config/dnt.txt` are replaced with `⟦n⟧` placeholders. Block syntax — headings,
+list bullets, blockquote markers, table pipes — is not masked but never leaves
+the skeleton, so the model does not see it either. Supporting new inline syntax
+means a new pattern in `mask.py`, not a new sentence in a prompt.
+
+**2. Translate what is new.** Segments already in the translation memory are
+reused as-is. The rest go to a configured model, to an agent via
+`lx todo` / `lx apply`, or to a person in the review workbench. All three are
+equal sources and every segment records which one produced it. Because segment
+identity is a content hash rather than a position, editing one paragraph of a
+400-segment document reports `reused 399 | pending 1`.
+
+**3. Check mechanically.** Placeholders that went missing, figures dropped,
+terminology that drifted, structure the translation broke. `lx check` exits 1 on
+any error, so a build can gate on it.
+
+**4. Render by substitution.** Translations are refilled into the original
+skeleton, never re-serialized from a parse tree. This is why front matter, fenced
+code, table alignment, indentation and line endings survive byte for byte — a CI
+corpus of 28 deliberately awkward inputs asserts it on Linux and Windows, from
+the bytes on disk to the bytes written back.
+
+Per-segment errors compound, which is why steps 1 and 4 are code rather than
+instructions. Even at a hypothetical 99.5% per segment, a 500-segment document
+comes through intact 8% of the time, and a dropped table pipe or a mangled link
+is exactly the damage that survives review.
+
+A green `lx check` means the structure survived and the mechanical rules passed.
+It does not mean the translation is good; that is what review is for.
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `lx init` | scaffold config and state |
+| `lx extract SRC --lang L` | parse to segments, mask markup, reuse translation memory |
+| `lx todo SRC --lang L` | pending segments as JSON, for an agent to translate |
+| `lx apply SRC --lang L --file F` | ingest translations, auto-normalize |
+| `lx translate SRC --lang L` | translate with a configured model (`--mode draft\|polish\|repair`) |
+| `lx check SRC --lang L` | validate; exit 1 on error (`--json` for the full report) |
+| `lx repair SRC --lang L` | re-translate only failing segments |
+| `lx run SRC --lang L` | the whole loop, with `--polish` for a fluency pass |
+| `lx render SRC --lang L -o OUT` | rebuild the target document |
+| `lx commit SRC --lang L` | bank approved wording in the translation memory |
+| `lx web` | local review workbench |
+| `lx providers` / `lx stats` | backends / coverage |
+
+`--dry-run` on `translate`, `repair` and `run` reports the work without calling a
+model.
+
+## Validation rules
+
+| Rule | Severity | Catches |
+|---|---|---|
+| `tags` | error | a placeholder lost, duplicated or invented; a pair inverted or crossed |
+| `containment` | error | a block the translation opened and the source did not; an added table column |
+| `eol` | error | a carriage return the source did not have |
+| `numbers` | error | a figure in the source missing from the target |
+| `missing` | error | a segment never translated |
+| `escaping` | error | a raw `<`, `&` or `]]>` in an XML host — inert today, activates with EPUB |
+| `glossary` | per row, `forbidden` always error | an agreed term rendered inconsistently, or a banned variant used |
+| `lexicon` | error / warn | a term the target locale writes differently |
+| `dnt` | warn | a protected brand or product name altered |
+| `untranslated` | warn | the source copied through verbatim |
+| `punct` / `spacing` | warn | width and CJK/Latin boundary problems that could not be auto-fixed |
+| `length` | warn | a segment much shorter or longer than expected |
+
+Turn any of them off per project with `"checks_disabled": ["length"]`.
+
+Every rule here is decidable by a program; anything needing human judgement lives
+in the language brief or in review. `docs/decisions.md` records the entry test
+and the eighteen terms it removed from the lexicon.
+
+Punctuation width and CJK/Latin spacing are repaired by `normalize.py` on the way
+in rather than reported.
+
+## Target languages
+
+| Locale | Language brief | Normalization | Lexicon |
+|---|---|---|---|
+| `zh-TW` | yes | punctuation width, CJK/Latin spacing | yes |
+| `ja` | yes | — | — |
+
+Any other `--lang` value works and gets the structural checks, but no
+locale-specific guidance or terminology rules. Adding one means a brief in
+`translate.py`, a normalization profile in `config.py`, and a reference file
+under `skill/reference/`.
+
+## Model backends
+
+Providers are declared in `lx.config.json`. `lx init` routes every stage to
+`local`; a typical split once you have a paid key sends bulk drafting to a cheap
+or local model and reserves a strong one for polish and repair, which work on
+small batches by construction.
 
 ```json
 "providers": {
@@ -103,6 +195,8 @@ fields rather than ignoring them.
 "routing": { "draft": "local", "polish": "claude", "repair": "claude" }
 ```
 
+Any OpenAI-compatible endpoint works, including fully local ones:
+
 | Runtime | `base_url` |
 |---|---|
 | Ollama | `http://localhost:11434/v1` |
@@ -111,124 +205,106 @@ fields rather than ignoring them.
 | vLLM | `http://localhost:8000/v1` |
 | LiteLLM proxy | `http://localhost:4000/v1` |
 
-`lx providers` lists what is configured and whether each key is present.
+The request itself is deliberately plain: no `response_format`, no tools, no
+streaming unless you opt in, because self-hosted runtimes tend to reject unknown
+fields rather than ignore them.
 
-API keys are read from the environment named in `api_key_env` and are never
-written to config, state, or logs. Local servers usually want no key at all —
-leave `api_key_env` empty and no `Authorization` header is sent.
+API keys are read from the environment variable named in `api_key_env` and are
+never written to config, state or logs. Local servers usually need no key — leave
+`api_key_env` empty and no `Authorization` header is sent. `lx providers` shows
+what is configured and whether each key is present.
 
-Routing sends bulk drafting to a cheap or local model and reserves a strong one
-for the polish and repair passes, which operate on small batches by construction.
+## Translation memory
 
-## Commands
+`.lx/tm.<lang>.jsonl` only ever grows, and it is the file worth committing to
+version control.
 
-| | |
-|---|---|
-| `lx init` | scaffold config and state |
-| `lx extract SRC --lang L` | parse to segments, mask markup, reuse translation memory |
-| `lx todo SRC --lang L` | pending segments as JSON, for an agent to translate |
-| `lx apply SRC --lang L --file F` | ingest translations, auto-normalize |
-| `lx translate SRC --lang L` | translate with a configured model (`--mode draft\|polish\|repair`) |
-| `lx check SRC --lang L` | validate; exit 1 on error |
-| `lx repair SRC --lang L` | re-translate only failing segments |
-| `lx run SRC --lang L` | the whole loop, with `--polish` for a fluency pass |
-| `lx render SRC --lang L -o OUT` | rebuild the target document |
-| `lx commit SRC --lang L` | bank approved wording in the translation memory |
-| `lx web` | local review workbench |
-| `lx providers` / `lx stats` | backends / coverage |
+`.lx/docs/` is working state. It is regenerable only for wording you have already
+banked with `lx commit`, so commit before you clean it. `.lx/reports/` is always
+regenerable.
 
-## What gets checked
-
-`tags` (placeholder integrity, including pairs that invert or cross),
-`containment` (a block the translation opened and the source did not),
-`escaping` (a character the host syntax cannot hold), `eol` (an invented carriage
-return), `glossary` (agreed terms and forbidden variants), `numbers` (figures
-dropped or invented), `lexicon` (a term the target locale writes differently),
-`dnt`, `untranslated`, `punct`, `spacing`, `length`, `missing`.
-
-`lexicon` is a per-locale preference table: it pairs a term with the form that
-locale's own technical documentation uses, and flags the difference. It carries
-no judgement about the other form, which is correct in the conventions it comes
-from — the rule is only that one document should not mix them. A term earns a
-place there only if a substring match can decide it. Words carrying a correct
-Taiwanese sense of their own — `質量` is mass as well as quality — are guidance in
-the language brief instead, and words that fall out of an ordinary phrase across a
-word boundary — `電視頻道` contains `視頻` — report at warn and never fail a build.
-
-Punctuation width and CJK/Latin spacing are corrected on ingest rather than
-reported — the cheapest defect is the one that cannot be introduced.
-
-**On structural fidelity, honestly.** A guarantee and a check are different
-things, and it is worth saying which is which. `render` rebuilds from the
-original skeleton and substitutes only translated spans, so front matter, fenced
-code, table alignment and math *around* a segment survive by construction —
-there is nothing there to validate. What a translation does once substituted
-*between* them is not under our control, so that half is checked instead. Four
-ways to fail it, all at error severity: opening a block the source did not
-(a line-initial `1. `, a `#`, a blank line inside a heading); adding a `|` inside
-a table cell; leaving a character the host syntax cannot hold unescaped; and
-inventing a carriage return.
-
-A green `lx check` therefore claims exactly this much: the structure survived and
-the mechanical rules passed. It has never claimed the translation is good.
-
-## Incremental translation
-
-Segment identity is a content hash, not a position. Edit one paragraph of a
-400-segment document and `extract` reports `reused 399 | pending 1`. Approved
-wording does not drift between revisions, and moving a section costs nothing.
-
-`.lx/tm.<lang>.jsonl` is the asset worth committing to version control. The rest
-of `.lx/` is regenerable.
-
-## The workbench
+## Review workbench
 
 ```bash
-lx web        # http://localhost:8787
+lx web        # http://127.0.0.1:8787
 ```
 
-Source and target side by side, placeholders highlighted, failures shown as
-marginalia against the segment that caused them. Translate, polish, repair,
-check, preview, and commit from the toolbar; edits save on blur and are
-normalized on the way in, including repairing placeholder brackets a model
-mangled.
+Source and target side by side, placeholders highlighted, validation failures
+shown as marginalia beside the segment that caused them. Translate, polish,
+repair, check, preview and commit from the toolbar. A field saves when it loses
+focus, and the text is normalized on the way in, including repairing placeholder
+brackets a model mangled.
 
-It binds to loopback and is a shell over the same functions the CLI calls — there
-is no second implementation. Exposing it on another interface prints a warning,
-because it can spend money through configured providers.
+It binds to loopback, and it is a shell over the same functions the CLI calls, so
+there is no second implementation to drift. Binding it to another network
+interface prints a warning, because it can spend money through configured
+providers.
 
-## Using it from an agent
+## Driving it from an agent
 
 `skill/` packages this as a Claude Skill. `adapters/` has an `AGENTS.md` fragment
 for Claude Code and Codex, and a rule file for OpenCode. All three are thin
-pointers at the same CLI, so a fix to a validator lands everywhere at once.
+shells over the same CLI, so fixing a validator fixes it everywhere.
 
-Agents can drive the pipeline without any model configured at all: `lx todo`
-emits work, the agent translates in its own context, `lx apply` ingests it. This
-is a first-class path, not a fallback — translation, review and audit can each be
-delegated to a different agent.
+An agent can drive the whole pipeline with no model configured at all: `lx todo`
+emits the pending work, the agent translates in its own context, `lx apply`
+ingests it. This is the normal path rather than a fallback, and translation,
+review and audit can each go to a different agent.
 
-## CI
+## In CI
 
 ```yaml
+- run: pip install -e ./tools/scriptorium    # or wherever you vendored it
 - run: lx extract docs/guide.md --lang zh-TW
 - run: lx check   docs/guide.md --lang zh-TW
 ```
 
-Re-extracting first is what makes a source edit surface as pending work rather
-than pass quietly; the check then fails the pull request.
+Re-extracting first is what makes an edited source surface as pending work
+instead of passing quietly. The check then fails the pull request.
+
+## Limitations
+
+Worth knowing before you adopt it, and all of them measured rather than guessed:
+
+- **Markdown only.** Plain text and EPUB are next; DOCX and the i18n formats
+  (JSON, YAML, PO) are deliberately out of scope for good.
+- **Emphasis markers still reach the model.** `**bold**`, `_italics_`, `~~strike~~`
+  and link-text brackets are not masked yet. The direction is to finish the
+  masking, not to relax the rule.
+- **A wrapped block's interior line breaks are inside the segment**, along with
+  the indentation that follows them — 79 of 2394 segments across this project's
+  own documentation. They cannot be masked without splitting one sentence into
+  several segments.
+- **No fuzzy matching.** Only exact content-hash reuse. When it lands it will be
+  advisory and never applied automatically, since a fuzzy hit differs in its
+  placeholder set by definition.
+- **`escaping` is inert** until a format with an XML host arrives.
+
+## Project status
+
+Markdown works end to end today: extract, translate, validate, repair, render,
+and a translation memory that survives revisions.
+
+Next, in order: a SQLite state layer, a rebuilt review workbench, then EPUB and
+plain text — the two formats that let a whole book through the pipeline.
+
+`docs/decisions.md` records what was decided and, for each entry, the alternative
+that lost.
 
 ## Development
 
 ```bash
-python -m pytest -q          # 59 passed; no network
+python -m pytest -q                # 253 passed, no network
 python -m ruff check src tests
 ```
 
-`AGENTS.md` holds the architectural invariants and is the authoritative working
-agreement — `CLAUDE.md` is a one-line pointer at it. Read it before changing
-anything structural. `docs/decisions.md` records why each invariant is worded the
-way it is.
+CI runs Python 3.9 and 3.12 on both Ubuntu and Windows; the cross-platform half
+matters here, because line-ending fidelity is something this project promises.
+
+Contributions go through a feature branch and a pull request, squash-merged to
+keep `main` linear, with Conventional Commit messages in English. `AGENTS.md` is
+the working agreement and holds the architectural invariants — read it before
+changing anything structural. `CLAUDE.md` is a one-line pointer at it.
 
 ## License
 

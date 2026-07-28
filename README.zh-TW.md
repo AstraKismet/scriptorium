@@ -6,77 +6,170 @@
 
 [English](README.md) · **繁體中文**
 
-出版級的文件在地化工具。模型只翻句子，其餘全部由程式決定性處理。
+翻譯文件，全程不讓模型碰到任何標記語法。
 
-## 它做什麼
+Scriptorium 是一套 Markdown 在地化的命令列工具。它把文件切成句子，把程式碼、連結、
+標籤和受保護的術語都遮成 `⟦n⟧` placeholder，翻完再逐位元組填回原本的檔案。
+區塊語法根本不會送出去。模型只負責翻文句本身，那才是它真正擅長的事。
 
-指定一份文件，它會跑四個步驟。
+純 Python，**沒有任何執行期相依套件**，也沒有編譯型擴充。裸的直譯器、CI、
+agent sandbox、受限制的機器，都跑得起來。
 
-1. **切分與遮罩。** 文件被解析成可翻譯的 segment，所有標記——程式碼片段、
-   URL、連結目標、表格豎線——都替換成 `⟦n⟧` placeholder。交給模型的只有散文，
-   沒有任何標記可供它重排、翻譯或弄丟。
-2. **只翻新的部分。** 翻譯記憶裡已有的 segment 直接重用；其餘交給設定好的模型、
-   透過 `lx todo` / `lx apply` 交給 agent，或在審校工作台交給人。三種來源地位相同，
-   每個 segment 都會記錄自己是由哪一種產生的。
-3. **機械化檢查。** placeholder 遺失或重複、數字變動、術語違規、尚未翻譯的段落。
-   只要有任何一項不過，`lx check` 就以非零狀態結束——「這份完成了嗎」有 exit code
-   可回答，不必靠主觀判斷。
-4. **以代入方式輸出。** 譯文被放回原文件的骨架。目標檔案永遠不是從模型輸出重建的，
-   只是把空格填回去——因此管線沒有刻意更動的每一個位元組，都原樣重現。
+## 實際長什麼樣
 
-Segment 以內容而非位置為索引鍵，所以修改原文時只會重譯真正變動的部分，
-已核可的內容全部從記憶回來。你審過的東西不會付第二次代價。
+拿這份原文來看：
 
-結構性的工作——解析標記、保護程式碼片段、重組文件、強制術語一致、正規化標點——
-都是決定性的，全部寫在 Python 裡。把這些交給語言模型在腦中處理，正是翻譯管線出事的地方：
-每個節點 99.5% 的正確率，一份 500 節點的文件只有 8% 的機率毫髮無傷，
-而且失敗的方式都是看不見的那一種。
+```markdown
+# Deployment Guide
 
-無編譯型依賴。可搭配任何 OpenAI 相容端點，包含完全在本機執行的模型。
+The **Celurion** server requires Go 1.22 and a running instance of `postgres`.
 
-## 現況
+| Option | Default | Description |
+| --- | --- | --- |
+| `port` | 8080 | Listening port for the HTTP server |
 
-**目前可用**（Markdown）：抽取、翻譯、驗證、修復、還原，以及一份能跨版本存活的翻譯記憶。
-原文文件的逐位元組重組由一組 28 份輸入的對抗性語料庫在 CI 上把關，Linux 與 Windows 都跑——
-而且是端到端的，從磁碟上的位元組到寫回去的位元組，所以檔案不管在哪個平台處理，
-都保有它進來時的換行符號。
+> Warning: never commit secrets to the repository.
+```
 
-結構在 segment **周圍**由建構保住，在 segment **內部**則靠檢查守住。
-placeholder 是有型別的紀錄，成對的標記因此表達得出來：譯文若把一對前後顛倒或交叉，
-會讓建置失敗，而不是還原成 `</b>粗體<b>`；譯文若開了一個原文沒有的區塊，
-或讓表格儲存格多出一欄，也一樣。
+執行 `lx run guide.md --lang zh-TW`，會得到：
 
-**建置中**（依序）：SQLite 狀態層、重建的審校工作台，然後是 EPUB 與純文字。
+```markdown
+# 部署指南
 
-**刻意排除**：DOCX、i18n 檔案格式，以及任何需要系統 web view 的東西。
-`docs/decisions.md` 記錄了每一項的理由，以及輸掉的替代方案。
+**Celurion** 伺服器需要 Go 1.22，以及一個執行中的 `postgres` 實例。
 
-## 安裝
+| 選項 | 預設值 | 說明 |
+| --- | --- | --- |
+| `port` | 8080 | HTTP 伺服器的監聽連接埠 |
+
+> 警告：絕對不要把機密資訊提交到儲存庫。
+```
+
+只要 `config/dnt.txt` 裡列了 `Celurion` 和 `Go`，那一段真正送進模型的就只有這一行：
+
+```
+The **⟦2⟧** server requires ⟦3⟧ 1.22 and a running instance of ⟦1⟧.
+```
+
+placeholder 對模型來說是看不懂內容的符號：它搬得動，卻翻不了、丟不掉，也複製不出
+第二個，事後由程式把原值填回去。標題的 `#`、表格的對齊列、引用區塊的 `>`，
+還有放著 `port` 和 `8080` 的那兩格，從頭到尾都沒有進過任何 segment；
+它們留在骨架裡，由程式逐位元組原樣抄回。
+
+## 快速開始
+
+尚未發布到 PyPI，請從原始碼安裝。
 
 ```bash
 git clone https://github.com/AstraKismet/scriptorium.git
 cd scriptorium
-pip install -e .          # 選用；安裝後可使用 `lx` 指令
+pip install -e .            # 選用，裝了就有 `lx` 指令
 ```
 
-不安裝也能用，把 `lx` 換成 `python -m scriptorium` 即可。
-
-## 快速開始
+不安裝也可以用，把 `lx` 換成 `python -m scriptorium` 即可。
 
 ```bash
-lx init                                   # 建立設定範本與狀態目錄
-lx run docs/guide.md --lang zh-TW         # 跑完整條管線
-lx web                                    # 檢視結果
+lx init                             # 建立設定範本與狀態目錄
+lx run docs/guide.md --lang zh-TW   # 跑完整條流程
+lx web                              # 檢視結果
 ```
 
-`lx run` 會抽取 segment、重用翻譯記憶裡已有的內容、翻譯其餘部分、驗證、
-修復失敗的段落，最後寫出目標檔案——**只要還有 error 就拒絕輸出**。
+`lx run` 需要一個模型後端，而預設值指向 `localhost:11434` 上的 Ollama，
+詳見[模型後端](#模型後端)。如果手邊完全沒有後端，可以走 agent 路線：先 `lx extract`，
+再用 `lx todo` 把待譯的 segment 以 JSON 吐出來，自己翻完之後用 `lx apply` 收回去。
 
-## 後端
+`examples/walkthrough.md` 有一份完整走過一遍的範例。
 
-模型後端宣告在 `lx.config.json`。送往 OpenAI 相容端點的請求刻意保持樸素——
-沒有 `response_format`、沒有 tools、沒有 streaming，除非你主動開啟——
-因為自架的推論執行環境是**拒絕**未知欄位，而不是忽略它們。
+## 運作方式
+
+**一、切分與遮罩。** 文件會拆成一份可翻譯的 segment 清單，其餘的一切都留在骨架裡。
+程式碼片段、數學式、URL、連結與參照目標、註腳、HTML 標籤、HTML 實體、模板變數，
+還有 `config/dnt.txt` 裡的每一個術語，都換成 `⟦n⟧` placeholder。區塊語法——標題、
+清單符號、引用區塊的標記、表格的 `|`——雖然不遮罩，但從來沒有離開過骨架，
+所以模型一樣看不到。要支援新的行內語法，做法是在 `mask.py` 裡加一條 pattern，
+而不是在 prompt 裡多寫一句話。
+
+**二、只翻新的。** 翻譯記憶裡已經有的 segment 直接沿用，不必再翻一次。其餘的交給
+設定好的模型、透過 `lx todo` / `lx apply` 交給 agent，或在審校工作台交給人。
+三種來源地位相同，每個 segment 都記著自己是由哪一種產生的。因為 segment 的識別依據
+是內容雜湊而不是位置，改動一份有 400 個 segment 的文件裡的一段，
+工具回報的是 `reused 399 | pending 1`。
+
+**三、機械化檢查。** 會抓出這些狀況：placeholder 不見了、數字被吞掉、術語走鐘、
+譯文把結構弄壞。只要有 error，`lx check` 就以 1 結束，讓建置流程可以拿它當關卡。
+
+**四、以填回的方式輸出。** 譯文填回原本的骨架，絕不從語法樹重新序列化。正因為如此，
+front matter、圍欄式程式碼區塊、表格對齊、縮排、換行字元才能逐位元組活下來。
+CI 上有一組語料庫在把關，裡面收了 28 份刻意刁難的輸入，Linux 與 Windows 都跑，
+從磁碟上的位元組一路驗到寫回去的位元組。
+
+每個 segment 的誤差會一路累積，所以第一步和第四步寫成程式，而不是寫成給模型的指示。
+就算每個 segment 的正確率有 99.5%，一份 500 個 segment 的文件也只有 8% 的機率
+毫髮無傷；而少一根表格分隔線、壞掉一個連結，正好就是撐得過審校的那種損傷。
+
+`lx check` 通過只代表兩件事：結構沒被破壞，機械規則也都過了。它不保證譯文品質好，
+那是審校的工作。
+
+## 指令
+
+| 指令 | 用途 |
+|---|---|
+| `lx init` | 建立設定與狀態骨架 |
+| `lx extract SRC --lang L` | 解析成 segment、遮罩標記、重用翻譯記憶 |
+| `lx todo SRC --lang L` | 以 JSON 吐出待譯 segment，供 agent 翻譯 |
+| `lx apply SRC --lang L --file F` | 收回譯文，自動正規化 |
+| `lx translate SRC --lang L` | 用設定好的模型翻譯（`--mode draft\|polish\|repair`） |
+| `lx check SRC --lang L` | 驗證；有 error 時以 1 結束（`--json` 可拿到完整報告） |
+| `lx repair SRC --lang L` | 只重譯失敗的 segment |
+| `lx run SRC --lang L` | 跑完整條流程；加 `--polish` 會多跑一次流暢度潤稿 |
+| `lx render SRC --lang L -o OUT` | 重建目標文件 |
+| `lx commit SRC --lang L` | 把核可的譯法存進翻譯記憶 |
+| `lx web` | 本機審校工作台 |
+| `lx providers` / `lx stats` | 後端 / 覆蓋率 |
+
+`translate`、`repair`、`run` 都吃 `--dry-run`，只回報會做哪些工作，不會真的呼叫模型。
+
+## 驗證規則
+
+| 規則 | 嚴重度 | 抓什麼 |
+|---|---|---|
+| `tags` | error | placeholder 遺失、重複或憑空出現；成對的 placeholder 顛倒或交叉 |
+| `containment` | error | 譯文開了一個原文沒有的區塊；表格被多加一欄 |
+| `eol` | error | 原文沒有、譯文卻多出來的歸位字元 |
+| `numbers` | error | 原文裡的數字在譯文中不見了 |
+| `missing` | error | segment 從未翻譯 |
+| `escaping` | error | XML 類語法裡未跳脫的 `<`、`&` 或 `]]>`——目前空轉，等 EPUB 進來才生效 |
+| `glossary` | 逐列設定，`forbidden` 一律 error | 約定術語譯法不一致，或用了禁用的譯法 |
+| `lexicon` | error / warn | 用詞與目標語言的慣用形式不符 |
+| `dnt` | warn | 受保護的品牌或產品名稱被改動 |
+| `untranslated` | warn | 原文整段照抄 |
+| `punct` / `spacing` | warn | 無法自動修好的標點寬度與中英文交界問題 |
+| `length` | warn | 長度比預期短得多或長得多 |
+
+每個專案都可以自行關掉任何一條，寫成 `"checks_disabled": ["length"]` 即可。
+
+這裡的每一條規則，程式都能自己決定，不需要人的判斷；凡是要靠人判斷的，
+都寫在語言 brief 或交給審校。`docs/decisions.md` 記著這張表的入場條件，
+以及當初被剔除的十八個詞。
+
+標點寬度與中英文間距在收回譯文時就由 `normalize.py` 直接修好，不另外回報。
+
+## 目標語言
+
+| 語言 | 語言 brief | 正規化 | 用詞表 |
+|---|---|---|---|
+| `zh-TW` | 有 | 標點寬度、中英文間距 | 有 |
+| `ja` | 有 | — | — |
+
+其他 `--lang` 值一樣可以跑，結構檢查照常生效，只是沒有該語言專屬的指引和術語規則。
+要新增一個語言，需要在 `translate.py` 加一份 brief、在 `config.py` 加一組正規化設定，
+再到 `skill/reference/` 放一份參考檔。
+
+## 模型後端
+
+模型後端在 `lx.config.json` 裡宣告。`lx init` 會把每個階段都指向 `local`；
+等你手上有付費金鑰之後，常見的分法是讓大量初譯走便宜或本機的模型，
+把強模型留給 polish 和 repair——這兩個階段本來就只處理小批次。
 
 ```json
 "providers": {
@@ -88,6 +181,8 @@ lx web                                    # 檢視結果
 "routing": { "draft": "local", "polish": "claude", "repair": "claude" }
 ```
 
+任何 OpenAI 相容端點都可以，包含完全跑在本機的：
+
 | 執行環境 | `base_url` |
 |---|---|
 | Ollama | `http://localhost:11434/v1` |
@@ -96,111 +191,93 @@ lx web                                    # 檢視結果
 | vLLM | `http://localhost:8000/v1` |
 | LiteLLM proxy | `http://localhost:4000/v1` |
 
-`lx providers` 會列出已設定的後端，以及每個金鑰是否存在。
+請求本身刻意保持單純：沒有 `response_format`、沒有 tools，也沒有 streaming——
+除非你主動開啟。原因是自架的推論環境傾向於**拒絕**未知欄位，而不是忽略它們。
 
-API 金鑰只從 `api_key_env` 指名的環境變數讀取，**絕不寫入設定檔、狀態或日誌**。
-本機伺服器通常根本不需要金鑰——把 `api_key_env` 留空，就不會送出 `Authorization` 標頭。
+API 金鑰只從 `api_key_env` 指定的環境變數讀取，絕不寫進設定檔、狀態或記錄檔。
+本機伺服器通常不需要金鑰，把 `api_key_env` 留空就不會送出 `Authorization` 標頭。
+`lx providers` 會列出設定了哪些後端，以及每個金鑰在不在。
 
-routing 讓大量的初譯走便宜或本機的模型，把強模型留給 polish 與 repair 這兩個
-就設計而言只處理小批次的階段。
+## 翻譯記憶
 
-## 指令
+`.lx/tm.<lang>.jsonl` 只增不改，也是唯一值得納入版本控制的檔案。
 
-| | |
-|---|---|
-| `lx init` | 建立設定與狀態骨架 |
-| `lx extract SRC --lang L` | 解析成 segment、遮罩標記、重用翻譯記憶 |
-| `lx todo SRC --lang L` | 以 JSON 吐出待譯 segment，供 agent 翻譯 |
-| `lx apply SRC --lang L --file F` | 收回譯文，自動正規化 |
-| `lx translate SRC --lang L` | 用設定好的模型翻譯（`--mode draft\|polish\|repair`） |
-| `lx check SRC --lang L` | 驗證；有 error 時離開碼為 1 |
-| `lx repair SRC --lang L` | 只重譯失敗的 segment |
-| `lx run SRC --lang L` | 整個迴圈；加 `--polish` 多跑一次流暢度潤稿 |
-| `lx render SRC --lang L -o OUT` | 重建目標文件 |
-| `lx commit SRC --lang L` | 把核可的譯法存進翻譯記憶 |
-| `lx web` | 本機審校工作台 |
-| `lx providers` / `lx stats` | 後端 / 覆蓋率 |
+`.lx/docs/` 是工作狀態。只有已經用 `lx commit` 存進記憶的譯法才重新產生得出來，
+所以清掉它之前記得先 commit。`.lx/reports/` 則隨時都可以再生。
 
-## 檢查哪些東西
-
-`tags`（placeholder 完整性，包含成對 placeholder 顛倒或交叉）、
-`containment`（譯文開了一個原文沒有的區塊）、
-`escaping`（所在語法容納不了的字元）、`eol`（憑空多出來的歸位字元）、
-`glossary`（約定術語與禁用譯法）、
-`numbers`（數字被吞掉或憑空出現）、`lexicon`（用詞與目標語言的慣用形式不符）、
-`dnt`、`untranslated`、`punct`、`spacing`、`length`、`missing`。
-
-`lexicon` 是一份逐語言的用詞偏好表：它把一個詞與該語言自身技術文件慣用的形式配成對，
-再標出差異。它對另一種形式不作評價——在它自己的行文慣例裡那是正確的——
-規則只有一條：同一份文件不應該混用兩種。一個詞要進得了這張表，前提是**光靠子字串比對就能判定**。
-本身在臺灣就有正確語義的詞（`質量`既是品質也是物體的質量）改放到語言 brief 裡當提示；
-會從一般詞組的詞界之間掉出來的（`電視頻道`裡含有`視頻`）則只回報 warn，永遠不會讓建置失敗。
-
-標點寬度與中英文間距是**在收回譯文時直接修正**，而不是回報——
-最便宜的缺陷是那個根本不可能被引入的缺陷。
-
-**關於結構保真，說實話。**「保證」和「檢查」是兩回事，值得說清楚哪個是哪個。
-`render` 從原始骨架重建，只代入譯文片段，所以 segment **周圍**的 front matter、
-圍籬程式碼區塊、表格對齊與數學式，都是建構本身保住的——那裡沒有什麼好驗證的。
-譯文代進去之後會發生什麼事，則不在我們控制範圍內，所以這一半改用檢查。
-有四種方式會踩到它，全都是 error 等級：開了一個原文沒有的區塊
-（行首的 `1. `、`#`、標題裡的空行）；在表格儲存格裡多放一個 `|`；
-留下一個所在語法容納不了、又沒有跳脫的字元；以及憑空生出一個歸位字元。
-
-所以綠燈的 `lx check` 主張的就是這麼多：結構活下來了，機械規則也過了。
-它從來沒有主張譯文品質好。
-
-## 增量翻譯
-
-segment 的身分是內容雜湊，不是位置。改動一份 400 個 segment 的文件裡的一段，
-`extract` 會回報 `reused 399 | pending 1`。核可過的譯法不會在改版之間漂移，
-搬動章節也不花任何成本。
-
-`.lx/tm.<lang>.jsonl` 是值得進版控的資產，`.lx/` 其餘部分都可再生。
-
-## 工作台
+## 審校工作台
 
 ```bash
-lx web        # http://localhost:8787
+lx web        # http://127.0.0.1:8787
 ```
 
-原文與譯文並排，placeholder 高亮，失敗以旁註形式顯示在造成它的 segment 旁。
-翻譯、潤稿、修復、檢查、預覽、提交都在工具列上；編輯在失焦時儲存，
-並在收回途中正規化，包含修復被模型弄壞的 placeholder 括號。
+原文與譯文並排，placeholder 高亮，驗證失敗會以旁註標在對應的 segment 邊上。
+翻譯、潤稿、修復、檢查、預覽、提交都在工具列上。編輯欄位失去焦點就自動存檔，
+內容在收回時會先正規化，包含把模型弄壞的 placeholder 括號修回來。
 
-它只綁定 loopback，而且是 CLI 所呼叫的同一批函式的外殼——**沒有第二套實作**。
-把它開在其他介面上會印出警告，因為它可以透過設定好的後端花錢。
+它只綁在 loopback 上，而且只是一層外殼，底下呼叫的和 CLI 是同一批函式，
+不存在第二套會走鐘的實作。綁到其他網路介面時會印出警告，
+因為它會透過設定好的後端花掉你的錢。
 
 ## 從 agent 驅動
 
-`skill/` 把這個專案打包成 Claude Skill。`adapters/` 有給 Claude Code 與 Codex 的
-`AGENTS.md` 片段，以及給 OpenCode 的規則檔。三者都是指向同一個 CLI 的薄指標，
-所以修好一個驗證器，所有地方同時生效。
+`skill/` 把這個專案打包成 Claude Skill。`adapters/` 裡有給 Claude Code 與 Codex 的
+`AGENTS.md` 片段，以及給 OpenCode 的規則檔。三者都只是薄薄一層外殼，
+底下指向同一套 CLI，所以修好一個驗證器就等於到處都修好了。
 
-agent 可以在**完全沒有設定任何模型**的情況下驅動整條管線：`lx todo` 吐出工作、
-agent 在自己的 context 裡翻譯、`lx apply` 收回。這是一等路徑而非退路——
-翻譯、校閱、審計可以各自交給不同的 agent。
+agent 可以在完全沒有設定任何模型的情況下驅動整條管線：`lx todo` 吐出待譯的工作、
+agent 在自己的 context 裡翻譯、`lx apply` 收回來。這是正規做法，不是備案；
+翻譯、審校、審計也可以各自交給不同的 agent。
 
-## CI
+## 在 CI 裡
 
 ```yaml
+- run: pip install -e ./tools/scriptorium    # 或你 vendor 進去的位置
 - run: lx extract docs/guide.md --lang zh-TW
 - run: lx check   docs/guide.md --lang zh-TW
 ```
 
-先重新 extract 才能讓「原文被改過」浮現成待譯工作，而不是靜靜地通過；
+先重新 extract，改過的原文才會變成待譯工作，而不是悄悄通過檢查；
 接著 check 會讓 pull request 失敗。
+
+## 已知限制
+
+採用之前值得先知道，而且以下每一項都是實際量測出來的，不是猜的：
+
+- **只支援 Markdown。** 純文字與 EPUB 排在後面；DOCX 與 i18n 檔案格式
+  （JSON、YAML、PO）則是刻意永久排除。
+- **強調語法還是會送到模型面前。** `**粗體**`、`_斜體_`、`~~刪除線~~`
+  和連結文字的方括號目前都還沒遮罩。方向是把遮罩補完，不是放寬規則。
+- **折行後的接續行還留在 segment 裡**，連同它後面的縮排。這個專案自己的文件裡，
+  2394 個 segment 中有 79 個是這種情況；要遮掉它們，就得把一個句子拆成好幾個 segment。
+- **沒有模糊比對。** 只有內容雜湊完全相同才會重用。將來做出來也只會是參考性質，
+  永遠不自動套用，因為模糊命中的 placeholder 集合本來就一定不同。
+- **`escaping` 目前是空轉的**，要等到有 XML 這類語法的格式進來才會生效。
+
+## 專案現況
+
+Markdown 目前已經可以端到端跑完：抽取、翻譯、驗證、修復、輸出，
+翻譯記憶也能跟著原文改版一路沿用。
+
+接下來依序是 SQLite 狀態層、重建的審校工作台，然後是 EPUB 與純文字——
+有了這兩種格式，一整本書才進得了管線。
+
+`docs/decisions.md` 記著每一項決策，以及當初輸掉的替代方案。
 
 ## 開發
 
 ```bash
-python -m pytest -q          # 59 passed；不碰網路
+python -m pytest -q                # 253 passed，不碰網路
 python -m ruff check src tests
 ```
 
-`AGENTS.md` 記載架構不變量，是權威的工作約定——`CLAUDE.md` 只是指向它的一行。
-動任何結構性的東西之前先讀它。`docs/decisions.md` 記錄了每條不變量為何是現在這個寫法。
+CI 會在 Ubuntu 和 Windows 上各跑一次 Python 3.9 與 3.12。跨平台這件事在這裡不是形式，
+因為換行字元的保真度正是這個專案對外的承諾之一。
+
+貢獻請開 feature branch 再送 pull request，以 squash 方式合併，讓 `main` 保持線性；
+commit 訊息用英文，並遵循 Conventional Commits。`AGENTS.md` 是這個專案的工作約定，
+架構不變量都寫在裡面，動任何結構性的東西之前先讀它。`CLAUDE.md` 只是指向它的一行。
 
 ## 授權
 
-MIT——見 [LICENSE](LICENSE)。
+MIT，見 [LICENSE](LICENSE)。
