@@ -2,7 +2,9 @@
 
 Rules for the case where work on this repository is split across more than one
 worker — a second person, a second session, or several assistant processes
-running concurrently. They exist because the failure modes of delegation are not
+running concurrently. `docs/conventions/handoff-workflow.md` governs the other
+axis: which work is picked up when, and by whom, over time. This file governs one
+moment, across workers. They exist because the failure modes of delegation are not
 the failure modes of working alone: what breaks is not the code a worker writes
 but the context it was never given.
 
@@ -120,6 +122,10 @@ a gap in it looks complete from the inside, and no later review recovers the
 option that was never written.
 
 ## 6. Failure modes measured on projects of this shape
+
+Of delegation. For the ways the *queue* fails — a package that is not
+self-contained, a completed package that was never deleted, a reused id — see
+`docs/conventions/handoff-workflow.md` §8. Two lists, two subjects.
 
 Watch for these specifically when reviewing delegated output. Each has been
 observed; none is theoretical.
