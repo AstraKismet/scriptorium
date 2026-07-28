@@ -200,6 +200,18 @@ that package is deleted), `data:`, `design:`, `external:`.
 Labels: `core`, `formats`, `quality`, `store`, `provider`, `cli`, `web`, `infra`,
 `docs`, `review-backlog`.
 
+## Delegated work
+
+When work is split across more than one worker — a second person, a second
+session, or several assistant processes at once — `docs/conventions/delegated-work.md`
+governs. Three rules from it are red lines and are repeated here so they are not
+missed: **shared seams** (`mask.py`, `checks.py`, `mdparse.py`, `store.py`) are
+edited by one worker in one place, never concurrently; **a brief carries its own
+context**, because a delegated worker substitutes a plausible guess for every
+decision that was not distilled into it; and **work produced below the capability
+tier its category requires is marked at the output and logged**, never absorbed
+silently. That file also holds the downgrade ledger.
+
 ## Git and commits
 
 - Remote is `github-astrakismet:AstraKismet/scriptorium.git`. **The alias is not
