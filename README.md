@@ -9,6 +9,31 @@
 Publishing-grade document localization. The model translates sentences; code does
 everything else.
 
+## What it does
+
+Point it at a document and it runs four steps.
+
+1. **Split and mask.** The document is parsed into translatable segments, and
+   every piece of markup — code spans, URLs, link targets, table pipes — is
+   replaced with a `⟦n⟧` placeholder. The model is handed prose and nothing else,
+   so there is no markup for it to reflow, translate or drop.
+2. **Translate what is new.** Segments already in the translation memory are
+   reused; the rest go to a configured model, to an agent through
+   `lx todo` / `lx apply`, or to a person in the review workbench. All three are
+   equal sources, and every segment records which one produced it.
+3. **Check mechanically.** Dropped or duplicated placeholders, figures that
+   changed, forbidden terminology, segments left untranslated. `lx check` exits
+   non-zero when any of these fail, so "is this finished" has an exit code
+   instead of an opinion.
+4. **Render by substitution.** Translations are put back into the original
+   document's skeleton. The target file is never rebuilt from the model's
+   output — only refilled — so every byte the pipeline did not deliberately
+   change is reproduced as it was.
+
+Segments are keyed by their content rather than their position, so editing the
+source retranslates only what actually changed and everything already approved
+comes back from the memory. Nothing you have reviewed is spent twice.
+
 Structural work — parsing markup, protecting code spans, reassembling documents,
 enforcing terminology, normalizing punctuation — is deterministic and lives in
 Python. Asking a language model to do it in its head is where translation
@@ -178,7 +203,7 @@ than pass quietly; the check then fails the pull request.
 ## Development
 
 ```bash
-python -m pytest -q          # 38 tests, no network
+python -m pytest -q          # 53 passed, 2 xfailed; no network
 python -m ruff check src tests
 ```
 
