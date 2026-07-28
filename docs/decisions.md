@@ -317,6 +317,74 @@ application of fuzzy matches; and desktop shells such as Tauri, Wails or Electro
 — each of which requires a system web view and so destroys the download-and-run
 property that would be their only reason for existing.
 
+## 2026-07-28 · Per-stage backend selection is written by the CLI; its settings surface belongs to the rebuilt workbench
+
+The data model already routes each pipeline stage to its own backend —
+`routing` maps `draft` / `polish` / `repair` to a provider name — but nothing can
+write it. `lx providers` lists, `--provider` overrides one run, and the workbench
+dropdown selects a backend for one run; changing the project's own configuration
+means hand-editing `lx.config.json`. Three decisions follow.
+
+**Writing configuration is a CLI capability, and it comes first.** Invariant 8
+is not satisfied by a form that writes JSON from the browser. `lx config` and
+`lx routing` land before any interface renders them, which also means the
+capability is usable from a terminal, from CI and from an agent — the three
+callers that will never have a browser.
+
+**`routing` values gain an optional model override.** Today `model` belongs to
+the provider, so "same endpoint, different model per stage" requires a duplicate
+provider entry whose only differing field is `model` — the entry then also
+duplicates `base_url`, `api_key_env` and the timeout, and the copies drift. A
+routing value becomes either a provider name or `{provider, model}`. The bare
+string stays valid, because every existing configuration uses it.
+
+**The visual settings surface waits for the rebuilt workbench (A6).** The
+current one is a 369-line shell that A6 already schedules for replacement;
+building a settings panel into it spends the work twice. It waits for the second
+reason too: a browser-writable configuration endpoint hands any page in the
+user's browser the ability to repoint `base_url` at a host it chooses, and the
+document being translated is what would then be sent there. That endpoint is not
+written until the origin and path hardening exists.
+
+*Lost:* shipping the panel in the current shell to get the visual selection
+sooner. The throwaway cost was small, but it puts a configuration-writing HTTP
+endpoint in place before the hardening that makes it safe, and that ordering is
+the part that does not come back.
+
+Scheduled as HANDOFF-206.
+
+## 2026-07-28 · Delegation rules split into a tracked mechanism and a per-machine binding
+
+An orchestration convention developed on another project was offered for adoption
+here. It is good material and most of it generalizes, but it is written almost
+entirely in tool vocabulary — worker types, model tier names, script pitfalls —
+which the process-tool-names decision below forbids in a tracked file, while the
+mirror rule forbids a convention from living only in a gitignored one. Adopting
+it verbatim in either place breaks one rule or the other.
+
+Split instead. `docs/conventions/delegated-work.md` is tracked and states each
+rule by the *work* it governs: what may not be delegated, what a brief must
+carry, which categories of work require the highest capability tier, and that a
+shortfall is marked and logged rather than absorbed. `.claude/orchestration.md`
+is per-machine and binds those categories to the tooling installed here. The
+tracked file wins on disagreement, and nothing may live only in the binding.
+
+Adapted rather than copied: the source project's hazard list is its own — asset
+manifests, comment language, its rendering architecture. The hazards here are
+this repository's: a corpus fixture edited to make a test pass, a slot value
+written without host escaping, a judgement rule pushed into `checks.py`, a
+dependency added. Its lane-parallel policy was dropped outright, because the
+queue here is mostly sequential by `blocked-by` and its packages converge on the
+same four modules.
+
+Kept without change, because it is right and general: retrieval has a capability
+*ceiling* as well as a floor; the security tier is reserved for security work
+alone; the review gate for anything feeding a decision is before the decision,
+since a missing option is invisible from inside the option set; and re-review of
+a downgraded artifact means re-deriving it, not reading it over and agreeing.
+Recording which model produced what is consistent with C3, which keeps
+`Co-Authored-By` trailers for the same reason.
+
 ## 2026-07-28 · Process-tool names stay out of the tracked process docs
 
 An audit asked whether any available agent skill was missing from the working
