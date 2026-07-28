@@ -89,6 +89,29 @@ def test_check_survives_a_stdout_that_cannot_encode_it(tmp_path):
     assert "中文" in r.stdout.decode("utf-8")
 
 
+def test_check_exits_zero_on_correct_traditional_chinese(tmp_path):
+    """The exit code is the evidence invariant 10 rests on, so it is asserted end
+    to end rather than at `check_segment`.
+
+    分析這批數據 is ordinary Taiwanese usage — 數據 for measured readings — and
+    until the 2026-07-28 lexicon audit it failed the build at error severity.
+    """
+    (tmp_path / "d.md").write_bytes(b"Analyse this batch of readings.\n")
+    env = {**os.environ, "PYTHONPATH": SRC}
+    assert _lx(["init"], tmp_path, env).returncode == 0
+    assert _lx(["extract", "d.md", "--lang", "zh-TW"], tmp_path, env).returncode == 0
+
+    todo = _lx(["todo", "d.md", "--lang", "zh-TW"], tmp_path, env)
+    seg_id = json.loads(todo.stdout.decode("utf-8"))["segments"][0]["id"]
+    (tmp_path / "t.json").write_bytes(
+        json.dumps({seg_id: "分析這批數據"}, ensure_ascii=False).encode("utf-8"))
+    apply = _lx(["apply", "d.md", "--lang", "zh-TW", "--file", "t.json"], tmp_path, env)
+    assert apply.returncode == 0, apply.stderr.decode("utf-8", "replace")
+
+    r = _lx(["check", "d.md", "--lang", "zh-TW"], tmp_path, env)
+    assert r.returncode == 0, r.stdout.decode("utf-8", "replace")
+
+
 # --- what `lx init` scaffolds, and what the pipeline writes back -------------
 
 

@@ -141,7 +141,11 @@ writes differently), `dnt`, `untranslated`, `punct`, `spacing`, `length`,
 `lexicon` is a per-locale preference table: it pairs a term with the form that
 locale's own technical documentation uses, and flags the difference. It carries
 no judgement about the other form, which is correct in the conventions it comes
-from — the rule is only that one document should not mix them.
+from — the rule is only that one document should not mix them. A term earns a
+place there only if a substring match can decide it. Words carrying a correct
+Taiwanese sense of their own — `質量` is mass as well as quality — are guidance in
+the language brief instead, and words that fall out of an ordinary phrase across a
+word boundary — `電視頻道` contains `視頻` — report at warn and never fail a build.
 
 Punctuation width and CJK/Latin spacing are corrected on ingest rather than
 reported — the cheapest defect is the one that cannot be introduced.

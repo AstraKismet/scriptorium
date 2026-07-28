@@ -99,8 +99,84 @@ def test_missing_number_is_an_error():
     assert "numbers" in _rules("Requires Go 1.22 exactly.", "\u9700\u8981 Go 1.21\u3002")
 
 
-def test_nonpreferred_term_is_flagged():
+def test_lexicon_flags_a_nonpreferred_term():
     assert "lexicon" in _rules("The server caches data.", "\u670d\u52d9\u5668\u6703\u7de9\u5b58\u6578\u64da\u3002")
+
+
+# --- the zh-TW lexicon, in both directions -----------------------------------
+#
+# Until 2026-07-28 the table failed correct Traditional Chinese, one case at
+# error severity, because a plain substring match cannot tell \u7269\u9ad4\u7684\u8cea\u91cf (mass)
+# from \u54c1\u8cea. Fixtures below are written raw rather than escaped: for a lexicon
+# rule the fixture *is* the specification, and \u6578\u64da is not reviewable.
+
+def _lexicon(target, cfg=CFG):
+    """Lexicon issues for a target as (severity, message).
+
+    Severity is half the assertion here \u2014 error stops a build, warn costs a
+    reviewer three seconds \u2014 so this deliberately does not collapse to rule names
+    the way `_rules` does.
+    """
+    issues = check_segment(_seg("A source sentence.", target), "zh-TW", cfg, [], [])
+    return [(i["severity"], i["message"]) for i in issues if i["rule"] == "lexicon"]
+
+
+@pytest.mark.parametrize("target", [
+    "\u4f9d\u7167\u6cd5\u5f8b\u7a0b\u5e8f\u8fa6\u7406",       # \u7a0b\u5e8f \u2014 a legal procedure, not \u7a0b\u5f0f
+    "\u7269\u9ad4\u7684\u8cea\u91cf\u662f\u5169\u516c\u65a4",     # \u8cea\u91cf \u2014 mass, not \u54c1\u8cea
+    "\u4ed6\u652f\u6301\u9019\u9805\u63d0\u6848",         # \u652f\u6301 \u2014 endorsement, not \u652f\u63f4
+    "\u95b1\u8b80\u539f\u59cb\u6587\u672c",           # \u6587\u672c \u2014 the text itself, not \u6587\u5b57
+    "\u5206\u6790\u9019\u6279\u6578\u64da",           # \u6578\u64da \u2014 measured readings; this one failed the build
+])
+def test_lexicon_passes_correct_traditional_chinese(target):
+    assert _lexicon(target) == []
+
+
+@pytest.mark.parametrize("target", [
+    "\u6709\u7dda\u96fb\u8996\u983b\u9053\u5f88\u591a",       # \u96fb\u8996 + \u983b\u9053, not \u8996\u983b
+    "\u8001\u9f20\u6a19\u672c\u5df2\u7d93\u7de8\u865f",       # \u8001\u9f20 + \u6a19\u672c, not \u9f20\u6a19
+    "\u517c\u5bb9\u4e26\u84c4\u7684\u614b\u5ea6",         # the idiom, not \u517c\u5bb9
+])
+def test_lexicon_guard_exempts_a_longer_word(target):
+    assert _lexicon(target) == []
+
+
+@pytest.mark.parametrize("target", [
+    "\u9ad4\u5167\u5b58\u5728\u6297\u9ad4",           # \u9ad4\u5167 + \u5b58\u5728, not \u5167\u5b58
+    "\u53c3\u6578\u7d44\u5408\u592a\u591a",           # \u53c3\u6578 + \u7d44\u5408, not \u6578\u7d44
+    "\u76ae\u5e36\u5bec\u5ea6\u4e0d\u8db3",           # \u76ae\u5e36 + \u5bec\u5ea6, not \u5e36\u5bec
+    "\u523a\u6fc0\u6d3b\u5316\u7d30\u80de",           # \u523a\u6fc0 + \u6d3b\u5316, not \u6fc0\u6d3b
+    "\u6536\u96c6\u6210\u679c\u4e26\u6b78\u6a94",         # \u6536\u96c6 + \u6210\u679c, not \u96c6\u6210
+    "\u5f37\u8abf\u8a66\u7528\u671f\u7684\u898f\u5247",       # \u5f37\u8abf + \u8a66\u7528, not \u8abf\u8a66
+    "\u6eab\u5ea6\u7684\u6539\u8b8a\u91cf\u5f88\u5c0f",       # \u6539\u8b8a + \u91cf, not \u8b8a\u91cf
+    "\u6062\u5fa9\u7528\u96fb\u4e4b\u5f8c\u518d\u8a66",       # \u6062\u5fa9 + \u7528\u96fb, not \u5fa9\u7528
+])
+def test_lexicon_collision_never_fails_the_build(target):
+    issues = _lexicon(target)
+    assert issues, "row removed rather than demoted \u2014 retire this fixture with it"
+    assert all(sev == "warn" for sev, _ in issues)
+
+
+@pytest.mark.parametrize("target", [
+    "\u8acb\u5148\u5b89\u88dd\u9019\u500b\u8edf\u4ef6",       # \u8edf\u9ad4
+    "\u8abf\u6574\u87a2\u5e55\u7684\u8996\u983b\u8a2d\u5b9a",     # \u5f71\u7247 \u2014 guarded, but \u8a2d is not a \u983bX continuation
+    "\u9ede\u64ca\u9f20\u6a19\u53f3\u9375",           # \u6ed1\u9f20 \u2014 guarded, but \u53f3 is not \u672c
+    "\u9019\u500b\u7248\u672c\u4e0d\u517c\u5bb9",         # \u76f8\u5bb9 \u2014 guarded, but \u4e26 does not follow
+])
+def test_lexicon_still_fails_the_build_on_an_unambiguous_form(target):
+    assert [sev for sev, _ in _lexicon(target)] == ["error"]
+
+
+def test_lexicon_leaves_a_clean_translation_alone():
+    assert _lexicon("\u9019\u53f0\u4f3a\u670d\u5668\u7684\u8edf\u9ad4\u5f88\u5feb") == []
+
+
+def test_lexicon_extra_still_adds_a_project_term_at_error():
+    # A list gives the severity; a bare string means error. The second form is how
+    # a project restores a row the audit removed, in a domain where it is decidable.
+    cfg = {**CFG, "lexicon_extra": {"\u5143\u6578\u64da": ["\u4e2d\u7e7c\u8cc7\u6599", "error"], "\u767b\u9304": "\u767b\u5165"}}
+    assert [sev for sev, _ in _lexicon("\u5beb\u5165\u5143\u6578\u64da", cfg)] == ["error"]
+    assert [sev for sev, _ in _lexicon("\u5b8c\u6210\u767b\u9304\u7a0b\u5e8f", cfg)] == ["error"]
 
 
 def test_glossary_forbidden_variant():
