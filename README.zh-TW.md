@@ -274,9 +274,10 @@ python -m ruff check src tests
 CI 會在 Ubuntu 和 Windows 上各跑一次 Python 3.9 與 3.12。跨平台這件事在這裡不是形式，
 因為換行字元的保真度正是這個專案對外的承諾之一。
 
-貢獻請開 feature branch 再送 pull request，以 squash 方式合併，讓 `main` 保持線性；
-commit 訊息用英文，並遵循 Conventional Commits。`AGENTS.md` 是這個專案的工作約定，
-架構不變量都寫在裡面，動任何結構性的東西之前先讀它。`CLAUDE.md` 只是指向它的一行。
+[CONTRIBUTING.md](CONTRIBUTING.md) 寫了環境設定、五件會讓修改被退回的事，
+以及文件保真度的問題該怎麼回報（該附原始檔而不是貼內容）。`AGENTS.md` 是這個專案的
+工作約定，架構不變量都寫在裡面；`docs/decisions.md` 記著每條不變量為何是現在這個寫法，
+以及當初輸掉的替代方案。
 
 ## 授權
 
