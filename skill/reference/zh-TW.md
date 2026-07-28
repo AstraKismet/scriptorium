@@ -19,29 +19,71 @@ left column is simply not the form this target locale uses.
 
 | Avoid | Prefer | | Avoid | Prefer |
 |---|---|---|---|---|
-| 軟件 | 軟體 | | 數組 | 陣列 |
-| 硬件 | 硬體 | | 對象 | 物件 |
-| 插件 | 外掛 / 擴充套件 | | 函數 | 函式 |
-| 視頻 | 影片 | | 變量 | 變數 |
-| 音頻 | 音訊 | | 指針 | 指標 |
-| 屏幕 | 螢幕 | | 線程 | 執行緒 |
-| 網絡 | 網路 | | 進程 | 行程 |
-| 服務器 | 伺服器 | | 緩存 | 快取 |
-| 內存 | 記憶體 | | 隊列 | 佇列 |
-| 硬盤 | 硬碟 | | 帶寬 | 頻寬 |
-| 數據 | 資料 | | 端口 | 連接埠 |
-| 信息 | 資訊 | | 調試 | 除錯 |
-| 默認 / 缺省 | 預設 | | 兼容 | 相容 |
-| 鼠標 | 滑鼠 | | 集成 | 整合 |
-| 菜單 | 選單 | | 交互 | 互動 |
-| 打印 | 列印 | | 激活 | 啟用 |
-| 登錄 | 登入 | | 標簽 | 標籤 |
-| 賬號 | 帳號 | | 短信 | 簡訊 |
+| 軟件 | 軟體 | | 缺省 | 預設 |
+| 硬件 | 硬體 | | 賬號 | 帳號 |
+| 插件 | 外掛 / 擴充套件 | | 線程 | 執行緒 |
+| 屏幕 | 螢幕 | | 緩存 | 快取 |
+| 網絡 | 網路 | | 標簽 | 標籤 |
+| 服務器 | 伺服器 | | 端口 | 連接埠 |
+| 硬盤 | 硬碟 | | 短信 | 簡訊 |
+| 打印 | 列印 | | 信息 | 資訊 |
+| 視頻 | 影片 | | 鼠標 | 滑鼠 |
+| 兼容 | 相容 | | | |
 
-Contextual, not automatic: `質量` is correct in physics but should be `品質` for
-quality; `程序` is fine for a legal or operational procedure but should be `程式`
-for software; `支持` works for endorsement but `支援` for technical support;
-`用戶` is understood but `使用者` reads better in product copy.
+These fail the build. `lx check` exempts the three cases where the string is
+inside a longer, correct word — 電視頻道, 老鼠標本, 兼容並蓄 — and nothing else.
+
+## Right form, but the checker can only warn
+
+Chinese is unspaced and the check is a substring match, so these fall out of
+ordinary phrases across a word boundary. They are reported at `warn`, which never
+stops a build. Read the phrase before acting on one.
+
+| Avoid | Prefer | Also matches |
+|---|---|---|
+| 內存 | 記憶體 | 體內存在、國內存款 |
+| 激活 | 啟用 | 刺激活化、感激活動主辦單位 |
+| 集成 | 整合 | 收集成果、募集成功 |
+| 調試 | 除錯 | 強調試用期、協調試驗 |
+| 數組 | 陣列 | 參數組合、多數組織 |
+| 變量 | 變數 | 改變量、不變量 |
+| 帶寬 | 頻寬 | 皮帶寬度、地帶寬廣 |
+| 復用 | 重複使用 | 恢復用電、修復用具 |
+
+## Contextual, not automatic
+
+Each of these is *correct* Taiwanese usage in the sense on the left, so no
+validator can decide them — choosing takes the sentence, which is judgement, and
+[invariant 4](../../AGENTS.md) keeps judgement out of `checks.py`. They were
+removed from the lexicon table on 2026-07-28 because the table was failing
+correct Traditional Chinese. This section and the model's language brief are
+where they live now, so read it rather than trusting a green `lx check` on them.
+
+| Term | Correct in Taiwan when it means | Otherwise write |
+|---|---|---|
+| 程序 | 法律程序、議事程序 | 程式 (software) |
+| 數據 | 統計數據、實驗數據 (readings) | 資料 (data) |
+| 質量 | 物體的質量 (mass) | 品質 (quality) |
+| 支持 | 支持這項提案 (endorsement) | 支援 (technical support) |
+| 文本 | 文本分析 (a text under analysis) | 文字 (plain text) |
+| 對象 | 研究對象、交往對象 | 物件 (an OOP object) |
+| 函數 | 三角函數 (mathematics) | 函式 (a function in code) |
+| 指針 | 時鐘的指針、羅盤指針 | 指標 (a pointer) |
+| 進程 | 歷史進程、和平進程 | 行程 (an OS process) |
+| 登錄 | 戶籍登錄、登錄有案 | 登入 (to log in) |
+| 交互 | 交互作用、交互驗證 | 互動 (interaction) |
+| 隊列 | 隊列訓練 (formation) | 佇列 (a queue) |
+| 菜單 | 餐廳的菜單 | 選單 (a UI menu) |
+| 默認 | 默認、默許 (to acquiesce) | 預設 (a default) |
+| 音頻 | 音頻放大器 (audio frequency) | 音訊 (audio) |
+| 智能 | 智能障礙、智能不足 | 智慧 / 智慧型 (intelligent) |
+| 視圖 | 正視圖、俯視圖、透視圖 | 檢視 (a view) |
+| 用戶 | 用戶端、電信用戶 | 使用者 (a person) |
+
+A project whose documents never use the left-hand sense can put any of these back
+mechanically, at whatever severity it wants, under `lexicon_extra` in
+`lx.config.json` — `{"數據": ["資料", "error"]}`. That is the right place for it:
+the judgement is the project's, not the pipeline's.
 
 ## Punctuation
 

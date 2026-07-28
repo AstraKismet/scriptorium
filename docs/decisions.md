@@ -3,6 +3,55 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-07-28 · The zh-TW lexicon audit: what invariant 4 excludes from a substring table
+
+Executing B4 below. The table held **45 rows, not the 42 recorded there** — a
+miscount, corrected here rather than silently. Every row was read against
+invariant 4 and sorted three ways: 19 stay at error, 8 drop to warn, 18 leave.
+
+**Two questions decide a row, and they are the reusable part.** *Does the string
+carry a standard zh-TW sense of its own?* If it does, the row is judgement —
+物體的質量 is mass, 法律程序 is a legal procedure, 三角函數 is mathematics — and
+it goes to the language brief and `skill/reference/zh-TW.md` instead. *Can it
+fall out of an ordinary zh-TW phrase across a word boundary?* Chinese is unspaced
+and the match is a plain substring, so 電視頻道 contains 視頻 and 參數組合
+contains 數組. That row may report but must not fail a build, so it is warn.
+
+The second question is the one the earlier reading missed. It is not about
+meaning at all — 內存 and 數組 are never Taiwanese forms — which is why they were
+sitting at error while 體內存在抗體 and 參數組合太多 would have stopped a build.
+
+**The eighteen that left** are 程序, 數據, 質量, 支持, 文本 (the five measured
+false positives) plus 對象, 函數, 指針, 進程, 登錄, 交互, 隊列, 菜單, 默認, 音頻,
+智能, 視圖, 用戶. **The seven demoted** are 內存, 激活, 集成, 調試, 數組, 變量,
+帶寬, joining 復用, which was already warn.
+
+**One tightening mechanism, deliberately tiny.** A row may name a closed set of
+continuations it does not fire before: `視頻` skips 頻道/頻率/頻寬/頻譜/頻段, and
+`鼠標`, `兼容` skip 標本 and 兼容並蓄. Three rows use it. The discipline is one
+condition per row over a closed set — B4 said 視頻 and 鼠標 stay at error and this
+is how they do so without failing on 有線電視頻道.
+
+*Lost:* demoting the whole table to warn. The entry test is per row; 軟件 has no
+Taiwanese sense and no collision, and a rule that cannot stop a build is a rule
+the pipeline could have left to the prompt. *Lost:* letting a row carry a list of
+longer words that are exempt. The collisions are productive patterns, not fixed
+words — 電視頻道, 公視頻道, 有線電視頻道 are all different strings while 頻X is a
+closed set of about six words, so the guard belongs on the continuation, and a
+list would have to grow forever, which is the heuristic ladder that makes a
+validator untrustworthy in the other direction. *Lost:* deleting the eighteen
+outright. The signal is real, it just needs a reader; a project that knows its own
+domain restores any of them through `lexicon_extra`, where the judgement is its
+own to make.
+
+*Not reopened:* word segmentation, which would decide every one of these
+properly and needs a compiled extension (invariant 1); and the OpenCC table B4
+already refused.
+
+Half of the invariant 10 caveat is now discharged. The other half is the
+containment validators, and until those land a green exit code is still necessary
+and not sufficient.
+
 ## 2026-07-28 · Three edge decisions: static-path confinement, retry timing, and the bytes we write for ourselves
 
 Taken while fixing five measured defects. The fixes themselves need no record —
