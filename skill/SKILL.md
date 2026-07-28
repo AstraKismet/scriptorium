@@ -59,7 +59,7 @@ If `check` reports `tags` errors repeatedly on the same segment, the placeholder
 
 | Rule | Severity | Catches |
 |---|---|---|
-| `tags` | error | placeholder lost, duplicated, or invented |
+| `tags` | error | placeholder lost, duplicated, or invented; a pair inverted or crossed |
 | `glossary` | configurable | agreed term rendered inconsistently, or a forbidden variant used |
 | `numbers` | error | figures dropped or hallucinated |
 | `missing` | error | segment never translated |

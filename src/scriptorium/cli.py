@@ -21,7 +21,17 @@ from .docio import (
 from .mask import repair_placeholders
 from .mdparse import parse, render
 from .normalize import normalize, polish_rendered
-from .store import append_tm, load_doc, load_tm, report_path, save_doc, store_path, tracked
+from .store import (
+    StateVersionError,
+    append_tm,
+    load_doc,
+    load_tm,
+    prior_targets,
+    report_path,
+    save_doc,
+    store_path,
+    tracked,
+)
 
 
 def _out(msg):
@@ -64,11 +74,13 @@ def do_extract(src, lang, cfg, tone=None, reset=False):
     text, eol = split_terminator(read_document(src))
     nodes, segments = parse(text, load_dnt(cfg))
 
-    prior = {}
-    if not reset and os.path.exists(store_path(src, lang)):
-        for seg in load_doc(src, lang)["segments"]:
-            if seg.get("target"):
-                prior[seg["hash"]] = (seg["target"], seg.get("origin") or "carryover")
+    # `prior_targets` rather than `load_doc`: extract is what migrates a state
+    # file the current build refuses to read, so it must be able to read the
+    # translations out of one first. It still refuses a file from a *newer*
+    # build, because the next line overwrites it. `--reset` skips that read and
+    # so overwrites it anyway — deliberately, and named in the message the newer
+    # file raises, because "start over" is exactly what the flag means.
+    prior = {} if reset else prior_targets(src, lang)
 
     tm = load_tm(lang)
     reused = 0
@@ -477,7 +489,7 @@ def main(argv=None):
     cfg = load_config(args.config)
     try:
         args.fn(args, cfg)
-    except FileNotFoundError as e:
+    except (FileNotFoundError, StateVersionError) as e:
         print(f"lx: {e}", file=sys.stderr)
         sys.exit(2)
     except BrokenPipeError:

@@ -47,11 +47,15 @@ fully local models.
 
 Working today, for Markdown: extract, translate, validate, repair, render, and a
 translation memory that survives revisions. Byte-exact reassembly of the source
-document is gated in CI by an adversarial corpus of 27 inputs, on Linux and
+document is gated in CI by an adversarial corpus of 28 inputs, on Linux and
 Windows — end to end, from the bytes on disk to the bytes written back, so a file
 keeps the line endings it arrived with whatever platform it is processed on.
 
-Under construction, in this order: containment validators, typed placeholders, a
+Placeholders are typed records, so paired markup is representable and a
+translation that inverts or crosses a pair fails the build instead of rendering
+`</b>粗體<b>`.
+
+Under construction, in this order: the remaining containment validators, a
 SQLite state layer, a rebuilt review workbench, then EPUB and plain text.
 
 Deliberately out of scope: DOCX, the i18n file formats, and anything that needs a
@@ -133,7 +137,8 @@ for the polish and repair passes, which operate on small batches by construction
 
 ## What gets checked
 
-`tags` (placeholder integrity), `glossary` (agreed terms and forbidden variants),
+`tags` (placeholder integrity, including pairs that invert or cross),
+`glossary` (agreed terms and forbidden variants),
 `numbers` (figures dropped or invented), `lexicon` (a term the target locale
 writes differently), `dnt`, `untranslated`, `punct`, `spacing`, `length`,
 `missing`.

@@ -73,17 +73,66 @@ def test_dnt_respects_word_boundaries():
     assert masked.count("\u27e6") == 2
 
 
+def test_slots_are_records_and_html_tags_pair():
+    text = "A <b>bold</b> word and `code`."
+    masked, slots = mask(text)
+    by_text = {s["original"]: s for s in slots.values()}
+    assert by_text["<b>"]["role"] == "open"
+    assert by_text["</b>"]["role"] == "close"
+    assert by_text["<b>"]["pair_id"] == by_text["</b>"]["pair_id"] is not None
+    assert by_text["<b>"]["can_reorder"] is False
+    assert by_text["`code`"] == {"original": "`code`", "role": "standalone",
+                                 "pair_id": None, "can_reorder": True}
+    assert unmask(masked, slots) == text
+
+
+def test_nested_tags_pair_with_the_right_partner():
+    text = "<b><i>x</i></b>"
+    masked, slots = mask(text)
+    assert unmask(masked, slots) == text
+    pairs = {s["original"]: s["pair_id"] for s in slots.values()}
+    assert pairs["<b>"] == pairs["</b>"]
+    assert pairs["<i>"] == pairs["</i>"]
+    assert pairs["<b>"] != pairs["<i>"]
+
+
+def test_an_open_shadowed_by_a_void_element_still_pairs():
+    # `<b><br>x</b>` is why the stack is searched downwards rather than read at
+    # its top: a top-of-stack rule lets the <br> shadow the <b> and records no
+    # pair at all. No void-element table is involved, deliberately.
+    _masked, slots = mask("<b><br>x</b>")
+    roles = {s["original"]: s["role"] for s in slots.values()}
+    assert roles == {"<b>": "open", "<br>": "standalone", "</b>": "close"}
+
+
+@pytest.mark.parametrize("text", [
+    "Compare <b>a</i> and b.",                  # a close whose name does not match
+    "A stray < in prose and an <b>unclosed tag.",
+    "A void <br> element and <img src='x.png'/> beside it.",
+    "An orphan </i> whose partner is in another block.",
+])
+def test_unbalanced_markup_stays_standalone_and_never_raises(text):
+    # Unbalanced input is ordinary, not exceptional. Nothing may crash, and
+    # nothing may pair with the wrong partner \u2014 a wrong pair is worse than none,
+    # because the validator would then enforce it.
+    masked, slots = mask(text)
+    assert unmask(masked, slots) == text
+    assert all(s["role"] == "standalone" and s["pair_id"] is None
+               for s in slots.values())
+
+
 @pytest.mark.parametrize("mangled", ["\u30103\u3011", "[[3]]", "\u27e6 \uff13 \u27e7", "\u30143\u3015"])
 def test_placeholder_repair(mangled):
     assert repair_placeholders(f"x{mangled}y") == "x\u27e63\u27e7y"
 
 
-def _seg(masked, target):
-    return {"id": "s1", "kind": "para", "masked": masked, "target": target, "slots": {}}
+def _seg(masked, target, slots=None):
+    return {"id": "s1", "kind": "para", "masked": masked, "target": target,
+            "slots": slots or {}}
 
 
-def _rules(masked, target, lang="zh-TW", glossary=(), dnt=()):
-    issues = check_segment(_seg(masked, target), lang, CFG, list(glossary), list(dnt))
+def _rules(masked, target, lang="zh-TW", glossary=(), dnt=(), slots=None):
+    issues = check_segment(_seg(masked, target, slots), lang, CFG, list(glossary), list(dnt))
     return {i["rule"] for i in issues}
 
 
@@ -91,8 +140,44 @@ def test_dropped_placeholder_is_an_error():
     assert "tags" in _rules("Set \u27e61\u27e7 now.", "\u8acb\u8a2d\u5b9a\u3002")
 
 
-def test_reordered_placeholder_is_fine():
-    assert "tags" not in _rules("\u27e61\u27e7 and \u27e62\u27e7", "\u27e62\u27e7 \u8207 \u27e61\u27e7")
+# --- typed slot records: what may move and what may not ----------------------
+#
+# Reordering used to be legal for every placeholder, asserted as a property. It
+# is legal for a *standalone* one \u2014 moving a URL or a code span is ordinary \u2014 and
+# it is not for a pair: `\u27e62\u27e7\u7c97\u9ad4\u27e61\u27e7` against `\u27e61\u27e7\u7c97\u9ad4\u27e62\u27e7` reported zero issues
+# until 2026-07-28 and rendered `</b>\u7c97\u9ad4<b>`. Sources are written as markup here
+# rather than as hand-built records, because the record shape is `mask`'s to
+# define and a fixture that hard-codes it stops testing the thing that broke.
+
+
+def test_standalone_placeholders_may_still_reorder():
+    masked, slots = mask("Run `go build` after https://x.dev/a")
+    assert "tags" not in _rules(masked, "\u5148\u770b \u27e62\u27e7 \u518d\u57f7\u884c \u27e61\u27e7", slots=slots)
+
+
+def test_an_inverted_pair_is_an_error():
+    masked, slots = mask("<b>bold</b>")
+    assert masked == "\u27e61\u27e7bold\u27e62\u27e7"
+    assert "tags" in _rules(masked, "\u27e62\u27e7\u7c97\u9ad4\u27e61\u27e7", slots=slots)
+
+
+def test_a_pair_kept_in_order_passes_wherever_it_moves():
+    masked, slots = mask("The <b>fast</b> server.")
+    assert "tags" not in _rules(masked, "\u9019\u53f0\u4f3a\u670d\u5668\u27e61\u27e7\u5f88\u5feb\u27e62\u27e7", slots=slots)
+
+
+def test_crossed_pairs_are_an_error():
+    masked, slots = mask("<b><i>x</i></b>")
+    assert masked == "\u27e61\u27e7\u27e62\u27e7x\u27e63\u27e7\u27e64\u27e7"
+    crossed = "\u27e61\u27e7\u27e62\u27e7\u5b57\u27e64\u27e7\u27e63\u27e7"
+    assert "tags" in _rules(masked, crossed, slots=slots)
+
+
+def test_nesting_that_survives_is_not_flagged():
+    # The must-not-fire half of the rule above: same four placeholders, still
+    # nested, moved as a unit. A validator that fails this one is worse than none.
+    masked, slots = mask("<b><i>x</i></b>")
+    assert "tags" not in _rules(masked, "\u8b6f\u6587\u27e61\u27e7\u27e62\u27e7\u5b57\u27e63\u27e7\u27e64\u27e7", slots=slots)
 
 
 def test_missing_number_is_an_error():
@@ -227,12 +312,12 @@ def test_config_layering_keeps_new_defaults():
 # list-item continuations at four spaces and at two, indented code, HTML blocks,
 # tables with alignment padding and tables without a leading pipe, hard line
 # breaks, front matter, reference link definitions, setext headings and thematic
-# breaks, fenced and unclosed code, nested blockquotes, inline markup, CJK with
-# full-width punctuation, a file with no trailing newline, whitespace-only,
-# blank-lines-only, an empty file, and one 112k-character manual long enough for
-# a per-block defect to hide in.
+# breaks, fenced and unclosed code, nested blockquotes, inline markup, unbalanced
+# inline HTML, CJK with full-width punctuation, a file with no trailing newline,
+# whitespace-only, blank-lines-only, an empty file, and one 112k-character manual
+# long enough for a per-block defect to hide in.
 #
-# Two of them are load-bearing rather than decorative.
+# Three of them are load-bearing rather than decorative.
 #
 # `cr-only-terminators.md` is what separates a real terminator fix from one that
 # special-cases "\r\n": the latter passes every other fixture here and still
@@ -246,6 +331,12 @@ def test_config_layering_keeps_new_defaults():
 # breaks on that `str.split("\n")` does not. `parse` splits on "\n" alone and
 # `splitlines` looks like a tidier way to handle terminators; this fixture is
 # the standing proof that the swap is not behaviour-neutral.
+#
+# `html-unbalanced-inline.md` is the input the pairing stack must not crash on
+# or guess about — a stray "<", an unclosed tag, an orphan close, a mismatched
+# name, a void element between a real pair. `test_unbalanced_markup_renders`
+# below is the half that also exercises restoration; this parametrization only
+# proves the skeleton survives parsing it.
 #
 # Red line: a fixture is never edited to make a test pass. If one fails, either
 # the parser is wrong or the fixture is not valid input — decide which, and say
@@ -309,6 +400,24 @@ def test_corpus_roundtrips_byte_for_byte(path):
     text = path.read_bytes().decode("utf-8")
     got = identity_roundtrip(text)
     assert got == text, _explain(path.name, text, got)
+
+
+def test_unbalanced_markup_renders():
+    """Restore the unbalanced fixture through the branch a translation takes.
+
+    `identity_roundtrip` above substitutes each segment's *source* back and never
+    calls `unmask`. `test_docio.py` does call it, on `render`'s fallback branch —
+    untranslated segments. Neither covers the branch that matters here: a segment
+    with a target, whose slot records are read after the model has moved the
+    placeholders around.
+    """
+    text = (CORPUS / "html-unbalanced-inline.md").read_bytes().decode("utf-8")
+    nodes, segs = parse(text)
+    for s in segs:
+        s["target"] = s["masked"]
+    out, missing = render({"nodes": nodes, "segments": segs, "lang": "zh-TW"}, CFG)
+    assert missing == 0
+    assert out == text
 
 
 def test_corpus_is_present_and_known_breakage_names_real_fixtures():

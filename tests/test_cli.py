@@ -112,6 +112,92 @@ def test_check_exits_zero_on_correct_traditional_chinese(tmp_path):
     assert r.returncode == 0, r.stdout.decode("utf-8", "replace")
 
 
+# --- the state file's own shape ----------------------------------------------
+
+
+def test_state_from_before_typed_slots_is_refused_with_the_command_that_fixes_it(tmp_path):
+    """A `.lx/` written by an older build must not be read as if it were current.
+
+    Reading both slot shapes was the alternative and it loses: the document would
+    load, and every pair in it would silently read as standalone — the defect the
+    records exist to remove, in a file that looks current. So the door refuses it,
+    and the message has to carry the way out, because a traceback is not an
+    actionable message. The second half of the test is the message's own claim:
+    re-extracting keeps the translations, so it must be shown keeping one.
+    """
+    (tmp_path / "d.md").write_bytes(b"The <b>bold</b> server is fast.\n")
+    env = {**os.environ, "PYTHONPATH": SRC}
+    assert _lx(["init"], tmp_path, env).returncode == 0
+    assert _lx(["extract", "d.md", "--lang", "zh-TW"], tmp_path, env).returncode == 0
+
+    todo = _lx(["todo", "d.md", "--lang", "zh-TW"], tmp_path, env)
+    seg_id = json.loads(todo.stdout.decode("utf-8"))["segments"][0]["id"]
+    target = "這台 ⟦1⟧粗體⟦2⟧ 伺服器很快。"
+    (tmp_path / "t.json").write_bytes(
+        json.dumps({seg_id: target}, ensure_ascii=False).encode("utf-8"))
+    assert _lx(["apply", "d.md", "--lang", "zh-TW", "--file", "t.json"],
+               tmp_path, env).returncode == 0
+
+    # Downgrade the state file to the shape this build replaced: no version key,
+    # slots as plain strings.
+    state = next((tmp_path / ".lx" / "docs").iterdir())
+    doc = json.loads(state.read_text(encoding="utf-8"))
+    doc.pop("state_version", None)
+    for seg in doc["segments"]:
+        seg["slots"] = {k: v["original"] for k, v in seg["slots"].items()}
+    state.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+
+    r = _lx(["check", "d.md", "--lang", "zh-TW"], tmp_path, env)
+    assert r.returncode == 2, r.stdout.decode("utf-8", "replace")
+    message = r.stderr.decode("utf-8")
+    assert "Traceback" not in message
+    assert "lx extract d.md --lang zh-TW" in message
+
+    assert _lx(["extract", "d.md", "--lang", "zh-TW"], tmp_path, env).returncode == 0
+    doc = json.loads(state.read_text(encoding="utf-8"))
+    assert doc["state_version"] == 2
+    assert doc["segments"][0]["target"] == target
+    assert doc["segments"][0]["slots"]["1"]["role"] == "open"
+    assert _lx(["check", "d.md", "--lang", "zh-TW"], tmp_path, env).returncode == 0
+
+
+def test_state_from_a_newer_build_is_not_silently_overwritten(tmp_path):
+    """The other direction, which is not the mirror image of the first.
+
+    An older file is rebuilt by extract, so only readers that would misread it
+    refuse. A newer one holds fields this build cannot represent, and extract
+    *writes* — so the read that lets extract migrate an old file was also, at
+    first, what let it downgrade a new one and exit 0, while `lx check` on the
+    same file refused to touch it. Two scriptorium versions on one machine is
+    all it takes: an installed `lx` beside a source checkout.
+    """
+    (tmp_path / "d.md").write_bytes(b"A sentence to extract.\n")
+    env = {**os.environ, "PYTHONPATH": SRC}
+    assert _lx(["init"], tmp_path, env).returncode == 0
+    assert _lx(["extract", "d.md", "--lang", "zh-TW"], tmp_path, env).returncode == 0
+
+    state = next((tmp_path / ".lx" / "docs").iterdir())
+    doc = json.loads(state.read_text(encoding="utf-8"))
+    doc["state_version"] = 99
+    doc["segments"][0]["field_from_the_future"] = "must not be lost"
+    state.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+
+    for cmd in (["check"], ["extract"], ["render", "--fallback", "-o", "out.md"]):
+        r = _lx([cmd[0], "d.md", "--lang", "zh-TW", *cmd[1:]], tmp_path, env)
+        assert r.returncode == 2, f"{cmd[0]} did not refuse: {r.stdout.decode('utf-8', 'replace')}"
+        assert "--reset" in r.stderr.decode("utf-8")
+
+    after = json.loads(state.read_text(encoding="utf-8"))
+    assert after["state_version"] == 99
+    assert "field_from_the_future" in after["segments"][0]
+
+    # --reset is the escape hatch the message names, and it must actually work.
+    assert _lx(["extract", "d.md", "--lang", "zh-TW", "--reset"], tmp_path, env).returncode == 0
+    after = json.loads(state.read_text(encoding="utf-8"))
+    assert after["state_version"] == 2
+    assert "field_from_the_future" not in after["segments"][0]
+
+
 # --- what `lx init` scaffolds, and what the pipeline writes back -------------
 
 
