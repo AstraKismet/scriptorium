@@ -93,6 +93,12 @@ blocked-cleared: []      # cleared blockers with their clearing date, for audit
 ## On completion (always: verify, delete this file, write the next package)
 ```
 
+**Seam ownership** names which worker owns each file the package touches, and it
+is defined in `docs/conventions/delegated-work.md` §1: a file several packages
+converge on is edited in one place by one worker, never concurrently. A package
+that will be worked by more than one worker states that split here, or it does
+not have one.
+
 **Self-containment is graded.** Packages in `00-inbox/` and `10-now/` must be
 fully distilled. Packages in `90-later/` may state background as a pointer plus a
 summary of the binding constraints — but **completing the distillation is part of
@@ -191,6 +197,13 @@ One entry per blocker, in `kind: detail` form.
 - **Decision boards:** `decision-board*.html` is likewise ignored. A board is a
   transient carrier; the decision's home is `docs/`. Once the report is taken and
   the decisions are recorded, the board is deleted.
+- **Delegated work is the other axis.** This convention governs the timeline —
+  when a piece of work is picked up, in what order, and when it is deleted.
+  `docs/conventions/delegated-work.md` governs the cross-section: what happens
+  when one piece of work is split across several workers at the same moment. They
+  share no rule, and neither restates the other. A package is the unit of
+  scheduling; a brief is the unit of dispatch, and §3 there says what a brief must
+  carry beyond what the package already holds.
 - **A future issue tracker:** the frontmatter is already an issue-field mapping —
   title, labels, milestone, and `blocked-by` as dependencies. At that point
   "create a package" becomes "open an issue and reference its number locally",
@@ -198,6 +211,11 @@ One entry per blocker, in `kind: detail` form.
   do not change.
 
 ## 8. Failure modes
+
+Of the queue and its lifecycle. For the ways *delegating* a package to several
+workers fails — a fixture bent to make a test pass, a contract key invented, a
+seam overwritten — see `docs/conventions/delegated-work.md` §6. Two lists, two
+subjects; neither supersedes the other.
 
 - **A package that is not self-contained.** If the executing session spends half a
   day reconstructing context, the distillation failed. The test: can a session
