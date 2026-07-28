@@ -115,11 +115,12 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
 10. **Never claim a translation passed without a green `lx check`.** The exit
     code is the evidence.
 
-    *Honest caveat until the foundation work lands:* `check` was measured to pass
-    five structural-damage cases and to fail five correct Traditional Chinese
-    sentences. Until the containment validators and the lexicon repair are done,
-    a green exit code is necessary but not sufficient — say so rather than
-    overclaiming.
+    *Honest caveat until the containment validators land:* `check` was measured
+    to pass five structural-damage cases and to fail five correct Traditional
+    Chinese sentences. The lexicon half is repaired — the zh-TW table was audited
+    against invariant 4 on 2026-07-28 and the five sentences are fixtures now —
+    but the structural half stands, so a green exit code is still necessary and
+    not sufficient. Say so rather than overclaiming.
 
 ## Layout
 
@@ -151,7 +152,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 140 passed; no network
+python -m pytest -q                 # 163 passed; no network
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
 

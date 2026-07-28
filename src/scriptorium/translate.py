@@ -39,11 +39,27 @@ nothing else — no code fences, no commentary:
 {{"s0001": "...", "s0002": "..."}}"""
 
 _LANG_BRIEFS = {
+    # The second paragraph carries the terms the 2026-07-28 audit removed from
+    # `checks.py::ZH_TW_LEXICON`: each is correct Taiwanese usage in one sense, so
+    # choosing between them needs the sentence, which invariant 4 keeps out of a
+    # validator and puts here instead. Do not compress it back into "X not Y" —
+    # that phrasing is what taught the model the wrong half.
     "zh-TW": """\
 Target is Traditional Chinese as used in Taiwanese technical documentation.
 Converting characters is not enough — use the vocabulary that documentation
-uses: 軟體 not 軟件, 資料 not 數據, 網路 not 網絡,
-程式 not 程序, 執行緒 not 線程, 快取 not 緩存, 預設 not 默認, 影片 not 視頻.
+uses: 軟體 not 軟件, 網路 not 網絡, 執行緒 not 線程, 快取 not 緩存,
+螢幕 not 屏幕, 資訊 not 信息, 列印 not 打印, 影片 not 視頻.
+Some words are correct in Taiwan in one sense and wrong in another, so choose by
+meaning rather than by reflex: 程式 for software but 程序 for a legal or
+operational procedure; 資料 for data but 數據 for measured readings; 品質 for
+quality but 質量 for physical mass; 支援 for technical support but 支持 for
+endorsement; 物件 for an OOP object but 對象 for a person or a subject of study;
+函式 for code but 函數 for mathematics; 預設 for a default but 默認 for
+acquiescence; 選單 for a UI but 菜單 for food. The same split applies to 指標 vs
+指針 (a clock's hand), 行程 vs 進程 (a historical process), 登入 vs 登錄 (to
+place on a register), 互動 vs 交互 (交互作用), 佇列 vs 隊列 (a military
+formation), 音訊 vs 音頻 (audio frequency), 智慧 vs 智能 (智能障礙), 檢視 vs
+視圖 (正視圖), 文字 vs 文本 (a text under analysis), 使用者 vs 用戶端.
 Use full-width ，。！？；： and 「」 inside Chinese text. Write technical
 documentation register: neutral-formal, subject usually dropped, 請 for
 instructions, active voice rather than 被. Nominalize headings.""",
