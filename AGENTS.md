@@ -203,8 +203,11 @@ executable handoff".
   of promoting a package, not a follow-up.
 - **Acceptance criteria state a command and its expected exit code.** Prose is
   not an acceptance criterion.
-- **Done means deleted.** Delete on passing; anything still uncertain goes into
-  the next package.
+- **Done means deleted, and deleting is the deadline.** Delete on passing;
+  anything still uncertain goes into the next package. Everything the package
+  deferred to another one must already be written *into* that package, and any
+  neighbouring package this work made stale must already be corrected — a
+  deferral that exists only in the deleted file's OUT list did not happen.
 - **Decisions reach `docs/` before the package is deleted.** Packages are
   deleted; `docs/decisions.md` is not.
 - **Ids are never reused**, not even for a cancelled package.
