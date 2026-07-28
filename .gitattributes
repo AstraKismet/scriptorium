@@ -2,3 +2,10 @@
 *.ps1 text eol=crlf
 *.bat text eol=crlf
 *.jsonl text eol=lf
+
+# Round-trip fixtures are byte-exact inputs, so Git must not touch them. Last
+# rule wins, which is why this sits at the end: the `* text=auto eol=lf` above
+# would otherwise normalize the CRLF fixture on checkout — and on Windows CI,
+# where the runner sets core.autocrlf=true, it is the only thing standing
+# between the corpus and a rewritten line ending.
+tests/corpus/** -text
