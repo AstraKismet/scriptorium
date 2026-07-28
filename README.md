@@ -301,10 +301,10 @@ python -m ruff check src tests
 CI runs Python 3.9 and 3.12 on both Ubuntu and Windows; the cross-platform half
 matters here, because line-ending fidelity is something this project promises.
 
-Contributions go through a feature branch and a pull request, squash-merged to
-keep `main` linear, with Conventional Commit messages in English. `AGENTS.md` is
-the working agreement and holds the architectural invariants — read it before
-changing anything structural. `CLAUDE.md` is a one-line pointer at it.
+[CONTRIBUTING.md](CONTRIBUTING.md) covers setup, the five things that will get a
+change rejected, and how to report a document-fidelity bug. `AGENTS.md` is the
+working agreement and holds the architectural invariants; `docs/decisions.md`
+records why each is worded the way it is, and the alternative that lost.
 
 ## License
 

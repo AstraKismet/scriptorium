@@ -39,6 +39,13 @@ graphify-out/
 # decision boards are a transient carrier; the decision's home is docs/
 decision-board*.html
 
+# background reading gathered to answer one question — landscape surveys, tool
+# comparisons, vendor documentation. Same rule as a decision board: the survey is
+# a carrier, and whatever it settles belongs in docs/ or in the README. Untracked
+# because it goes stale the moment someone else ships a release, and a stale
+# comparison in history reads as a claim.
+research/
+
 # machine-specific notes that should never reach anyone else's checkout
 *.local.md
 
