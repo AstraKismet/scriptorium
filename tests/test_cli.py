@@ -112,6 +112,67 @@ def test_check_exits_zero_on_correct_traditional_chinese(tmp_path):
     assert r.returncode == 0, r.stdout.decode("utf-8", "replace")
 
 
+# One document carrying all five shapes the 2026-07-27 measurement damaged: a
+# heading, two paragraphs, a table cell and a blockquote.
+FIVE_SHAPES = (
+    b"# Title\n\nSome sentence here.\n\nAnother sentence here.\n\n"
+    b"| one | two |\n| --- | --- |\n\n> quoted line\n"
+)
+
+# Keyed by masked source text rather than by segment id, so the fixture does not
+# encode the numbering `mdparse` happens to produce.
+DAMAGING = {
+    "one": "含|管線",                                   # a third column
+    "Some sentence here.": "1. 這是譯文",                  # the paragraph becomes a list
+    "Another sentence here.": "譯文\n# 憑空長出的標題",      # a heading from nowhere
+    "Title": "上半\n\n下半",                             # the heading splits in two
+    "quoted line": "第一行\n逸出引言的第二行",              # the second half leaves the quote
+    "two": "二",
+}
+CLEAN = {
+    "one": "一", "two": "二", "Title": "標題",
+    "Some sentence here.": "這裡有一句話。",
+    "Another sentence here.": "這裡還有一句話。",
+    "quoted line": "引用的一行",
+}
+
+
+def _apply_by_source_text(tmp_path, env, name, mapping):
+    todo = _lx(["todo", name, "--lang", "zh-TW", "--all"], tmp_path, env)
+    ids = {s["text"]: s["id"] for s in json.loads(todo.stdout.decode("utf-8"))["segments"]}
+    assert set(ids) == set(mapping), f"document parsed into {sorted(ids)}"
+    payload = {ids[text]: target for text, target in mapping.items()}
+    (tmp_path / "t.json").write_bytes(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+    r = _lx(["apply", name, "--lang", "zh-TW", "--file", "t.json"], tmp_path, env)
+    assert r.returncode == 0, r.stderr.decode("utf-8", "replace")
+
+
+def test_check_exit_code_answers_for_structural_damage(tmp_path):
+    """Invariant 10's evidence, on the half of it that used to be missing.
+
+    Before the containment validators, all five of these rendered broken
+    Markdown under a green exit code — which is what made `lx check` necessary
+    and not sufficient, and what the caveat under invariant 10 said out loud.
+    The same document with ordinary translations must still exit 0, because a
+    validator that cannot be passed is not evidence either.
+    """
+    (tmp_path / "d.md").write_bytes(FIVE_SHAPES)
+    env = {**os.environ, "PYTHONPATH": SRC}
+    assert _lx(["init"], tmp_path, env).returncode == 0
+    assert _lx(["extract", "d.md", "--lang", "zh-TW"], tmp_path, env).returncode == 0
+
+    _apply_by_source_text(tmp_path, env, "d.md", DAMAGING)
+    r = _lx(["check", "d.md", "--lang", "zh-TW", "--json"], tmp_path, env)
+    assert r.returncode == 1
+    report = json.loads(r.stdout.decode("utf-8"))
+    assert report["by_rule"] == {"containment": 5}, report["by_rule"]
+    assert report["errors"] == 5
+
+    _apply_by_source_text(tmp_path, env, "d.md", CLEAN)
+    r = _lx(["check", "d.md", "--lang", "zh-TW"], tmp_path, env)
+    assert r.returncode == 0, r.stdout.decode("utf-8", "replace")
+
+
 # --- the state file's own shape ----------------------------------------------
 
 

@@ -3,6 +3,109 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-07-28 · The containment validators, and what a rule may compare against
+
+Executing B2 below, and closing the half of invariant 2b that was measured but
+not checked. Three rules join `checks.py`, all at error severity and all
+`checks_disabled`-able: `containment`, `escaping`, `eol`. The five structural
+cases measured 2026-07-27 went from zero errors to one error each, and
+`lx check` now exits 1 on a document carrying them and 0 on the same document
+with ordinary translations.
+
+**Block starts are read with `mdparse`'s own patterns, imported rather than
+copied.** Whether a line opens a block is the parser's question, and a validator
+that answers it independently is a second answer that drifts on the first flavour
+change — with the copy being the one nobody re-reads. This does put a
+`checks -> mdparse` import in the tree; there is no cycle, and the alternative
+was worse. *Lost:* a private table of block-start patterns in `checks.py`, which
+reads as more host-generic and is not: it would encode one Markdown flavour in
+two places instead of one.
+
+**The two new structural rules read opposite sides of the mask, and that is the
+decision, not an oversight.** `containment` reads the *unmasked* text on both
+sides, because what reaches the file is what `render` writes and `render` unmasks
+first — a rule reading ⟦n⟧ answers a slightly different question. `escaping`
+reads the *masked* target, because everything the host's own markup contributed
+is a ⟦n⟧ there and restores verbatim, so what is left is exactly what the model
+wrote itself, which is the only thing that can be unescaped. Reading restored
+text would flag every legitimate tag.
+
+**Comparison against the source is positional for the first line and set-based
+afterwards.** A nested list item and a nested blockquote are ordinary input whose
+segments legitimately *begin* with a marker, so an absolute rule fails correct
+work. But `- 譯文\n- 內層` turns one item carrying a nested list into two
+siblings, which a set-based rule cannot see. A translation is free to rewrap, so
+position must stop mattering after the first line. *Lost:* both pure forms.
+*Also lost:* comparing line counts, which fails every legitimate rewrap.
+
+**A heading and a table cell are inline contexts and are exempt from the
+block-start rule.** `## # x` is a heading whose text begins with a hash, and
+`| - x |` is a cell containing a dash; neither opens anything. Applying the rule
+there would fail correct work, which is the direction the zh-TW lexicon had to be
+audited for on this same date. Blockquotes are *not* exempt — a blockquote's
+content is a block context — so they get the rule and the one-line rule both.
+
+**A blank line is a blank line, including a leading or trailing one.** In a
+paragraph an extra blank line is cosmetic; in a list item it ends the list. *Lost:*
+a carve-out per kind. Deciding which blank lines are harmless is judgement, and
+invariant 4 excludes judgement from this file — one rule that is occasionally
+strict beats a ladder of exceptions that becomes untrustworthy, which is the same
+reasoning that keeps `_LEXICON_UNLESS_FOLLOWED_BY` to one condition per row.
+
+**`escaping` is absolute rather than compared against the source, alone among the
+rules here.** In an XML host `<`, a bare `&` and `]]>` are never legal character
+data, so there is nothing a correct source could have had; if one ever fires on a
+character the source itself carried, the parser that produced the segment is the
+bug and this is how it surfaces rather than how it is excused. `>` on its own is
+legal and is not reported.
+
+**The host is read from `seg["host"]` and nothing writes it yet.** Markdown
+declares no escaping requirement, so the table has no live row until EPUB lands.
+Reading a key no writer emits looks like dead code and is the cheap half of the
+prerequisite: a format that emits XHTML segments sets `host` on them and the rule
+starts working with no change in `checks.py`. *Lost:* putting the host in
+config, which is project-level while an EPUB has several hosts in one book.
+*Also lost:* adding the key to Markdown segments now, which is a schema change
+with no reader and would cost a `state_version` bump for nothing.
+
+**The `eol` rule is one-directional and is not to be widened.** A target that
+invents a carriage return its source did not have is decidable and is an error. A
+target that *drops* one cannot be flagged, because a translation may rewrap and
+comparing break counts fails the legitimate case.
+
+Be exact about what that buys, because the first draft of this entry was not.
+The rule fires when the *segment source* carries no CR, which is every segment of
+every uniform document — LF sources never had one, and on a uniform CRLF document
+`split_terminator` and `emit_seg` keep it out. So a model inventing a control
+character in an ordinary document is now caught, and that is the win. It does
+**not** touch the mixed-terminator residual recorded above under "Where a line
+terminator lives": there the CR is already in the source, so `"\r" not in src` is
+false and the rule is inert — measured on `tests/corpus/crlf-mixed-terminators.md`,
+where CRLF kept, LF only and a bare CR added all still report zero structural
+issues. Catching that needs comparing CR *position*, which a translation is free
+to change by rewrapping, so it is not decidable and invariant 4 excludes it. The
+residual stands whole; only the population it applies to was ever small.
+
+**Deliberately not covered**, so it is not mistaken for an oversight: a target
+that *builds* a table, which needs a two-line lookahead for a separator row and
+is a different shape of rule; and automatic repair, because a structural
+violation in a translation is a meaning question and silently rewriting a
+translator's line break is worse than failing (invariant 5 yields here, as B2
+already recorded).
+
+**The false-positive guard is a sweep, not a list.** Every segment of every
+`tests/corpus/` fixture, translated to itself, must produce zero structural
+issues — nested lists, lazy continuations, alignment-padded tables, CRLF and
+CR-only terminators and the 112k-character manual, without anyone having to think
+of each case. Per-rule fixtures come in must-fire and must-not-fire pairs on top
+of that.
+
+**Invariant 10's caveat comes off.** Both halves are now discharged: the lexicon
+audit earlier today, and the structural half here. A green `lx check` is evidence
+again — necessary *and* sufficient for what the exit code claims. What it does
+not claim is unchanged: it says the structure survived and the mechanical rules
+passed, never that the translation is good.
+
 ## 2026-07-28 · Placeholder slots become typed records, and the state file gains a version
 
 Executing B3 below. A slot was `{"1": "<b>"}`; it is now
@@ -91,7 +194,8 @@ was rewritten rather than deleted — standalone may reorder, pairs may not inve
 or cross — because the half that is still true is worth keeping asserted.
 
 This discharges one of the four validators HANDOFF-006 carries. The invariant 10
-caveat stands until the other three land.
+caveat stands until the other three land — which they did later the same day; see
+the containment-validators entry at the top of this file.
 
 ## 2026-07-28 · The zh-TW lexicon audit: what invariant 4 excludes from a substring table
 
@@ -140,7 +244,8 @@ already refused.
 
 Half of the invariant 10 caveat is now discharged. The other half is the
 containment validators, and until those land a green exit code is still necessary
-and not sufficient.
+and not sufficient — they landed later the same day, and the caveat came off with
+them; see the entry at the top of this file.
 
 ## 2026-07-28 · Three edge decisions: static-path confinement, retry timing, and the bytes we write for ourselves
 
@@ -304,7 +409,12 @@ keeps the CR in `source`, so it keeps the memory split.
 a CR. One fixture of 27, roughly one tracked file in 76. Handling it needs a
 per-segment mechanism, which is the wrong price for that frequency; the
 containment validators own it. `test_mixed_terminators_keep_todays_behaviour`
-asserts the residual so it cannot quietly change.
+asserts the residual so it cannot quietly change. The containment validators
+later the same day did **not** close it, contrary to what this line first said:
+their `eol` rule fires only when the segment source carries no CR, and here it
+does, so the rule is inert on exactly this document. What it does close is the
+neighbouring case — a model inventing a CR in an ordinary document — which is the
+larger population but not this one.
 
 Two smaller consequences worth knowing. `normalize`'s trailing-whitespace rule
 is `re.sub(r"[ \t]+$", "", out, flags=re.M)`, and in multiline mode `$` anchors

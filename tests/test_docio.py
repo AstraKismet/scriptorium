@@ -156,14 +156,25 @@ def test_crlf_and_lf_twins_share_translation_memory():
 
 
 def test_mixed_terminators_keep_todays_behaviour_and_still_round_trip():
-    """The recorded residual, asserted rather than assumed.
+    """The recorded residual, asserted rather than assumed — and now half closed.
 
     A mixed document has no single terminator to re-impose, so it is passed
     through verbatim and its CRs stay in the segment source. Bytes still survive;
     what does not survive is the guarantee that the model is never shown a CR.
-    Scheduled onto the containment validators (HANDOFF-006). If this test ever
-    starts failing because no segment carries a CR, the residual has been closed
-    and this test should be replaced, not deleted.
+
+    The containment validators landed 2026-07-28 and did **not** close it, which
+    is worth saying because the package that scheduled them expected otherwise.
+    Their `eol` rule makes an *invented* carriage return an error, and "invented"
+    means the segment source has none — true of every uniform document, false of
+    this one, where the CR is in the source and the rule is therefore inert.
+    Measured on this fixture: CRLF kept, LF only and a bare CR added all still
+    report zero structural issues. Catching that would mean comparing CR
+    *position*, which a translation is free to change by rewrapping, so invariant
+    4 excludes it; closing it properly needs the per-segment terminator mechanism
+    `docs/decisions.md` (2026-07-28, "Where a line terminator lives") prices
+    against one fixture in 27. If this test ever starts failing because no
+    segment carries a CR, the residual has been closed and this test should be
+    replaced, not deleted.
     """
     raw = read_document(CORPUS / "crlf-mixed-terminators.md")
     fed, eol = split_terminator(raw)
