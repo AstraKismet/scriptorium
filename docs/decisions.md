@@ -3,6 +3,96 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-07-28 · Placeholder slots become typed records, and the state file gains a version
+
+Executing B3 below. A slot was `{"1": "<b>"}`; it is now
+
+```json
+{"1": {"original": "<b>", "role": "open", "pair_id": "p1", "can_reorder": false}}
+```
+
+with `role` in `open` / `close` / `standalone` and `pair_id` null unless the slot
+is half of a pair. The token the model sees is unchanged — still a bare integer —
+so this extends the 2026-07 entry on ⟦n⟧ rather than reversing it.
+
+**Pairing is a stack, and unbalanced markup is ordinary input.** An unclosed
+`<br>`, a stray `<` in prose, a `</i>` whose partner is in the next block: these
+are what real documents contain, so nothing raises and nothing guesses. Anything
+unmatched stays standalone, which is also its state at creation, so there is no
+cleanup path to get wrong. The stack is searched *downwards* for a matching name
+rather than read at its top, because `<b><br>x</b>` is otherwise shadowed by the
+`<br>` and records no pair at all. *Lost:* a void-element table (`br`, `img`, …)
+to keep those off the stack. It would be a second place to be wrong about HTML,
+and the general rule already covers the case that motivated it.
+
+`pair_id` is named for the opening slot — `p1` for a pair opened by slot 1 — so
+pairs read in document order and the id is stable. *Lost:* XLIFF's spelling,
+where `ec/@startRef` is the start code's own id. Borrowing the semantics is the
+point of B8, but an id that is sometimes a slot id and sometimes not invites
+`slots[pair_id]`, which returns the opening record and looks correct in every
+test that has one pair in it.
+
+`can_reorder` is derivable from `role` today and stored anyway. It records that a
+standalone slot may be repositioned freely against every other placeholder and a
+pair member may not — the pair as a unit still moves — and a format with a
+standalone code that must not move (XLIFF spells it `canReorder="no"`) is the
+case it exists for.
+
+*Lost:* a `kind` field carrying the pattern name that produced the slot. It is
+free at mask time and the escaping validator will want something like it, but the
+2026-07 entry refused to encode type for the same reason — nothing downstream
+needs it yet — and the argument that bought `variant` early in B5 does not
+transfer: that one avoids a second **memory** migration, which invalidates
+everything, while document state is regenerable and re-extracting is cheap by
+construction.
+
+**The old shape is refused, not upgraded in place.** `.lx/docs/*.json` carries
+`state_version: 2`; a file without it fails with a message naming
+`lx extract <src> --lang <lang>`, which rebuilds it and carries the translations
+over by content hash. *Lost:* reading both shapes. It is a few lines and it costs
+nothing at the door, which is the problem — an upgraded-in-place document would
+load cleanly with every pair silently reading as standalone, so `⟦2⟧粗體⟦1⟧`
+would keep passing in a file that looks current. That is the defect the records
+exist to remove. `store.tracked` deliberately stays version-independent: it only
+counts segments for `stats` and the workbench list, so a file waiting to be
+re-extracted should appear rather than take the listing down.
+
+**The two directions are not symmetrical, and treating them as one place to
+check is how the first version of this was wrong.** An *older* file only misleads
+a reader, so `load_doc` refuses it while `prior_targets` — the read that lets
+extract migrate it — does not. A *newer* file holds fields this build cannot
+represent, and every write is a whole-file rewrite, so anything that could save
+over it must stop first. Measured on the first shape of this change: `lx check`
+refused a state file marked version 3 while `lx extract` and `lx run` rewrote it
+as version 2 and exited 0, dropping the unknown fields. Both readers now refuse
+that direction, and the message names `lx extract --reset` — which skips the read
+and so overwrites it deliberately, which is what the flag means.
+
+**Validation.** Pair order and non-crossing join placeholder integrity under the
+existing `tags` rule at error severity, so `checks_disabled` treats them as one
+thing. Standalone slots keep multiset semantics — moving a URL is ordinary.
+Deliberately not checked: a pair that stops *containing* another without crossing
+it, because reassociating emphasis is a translator's decision and a rule against
+it would fail correct work. Validator messages name slot ids and never slot
+contents: `translate._user_message` feeds `issues` back to the model as
+`problems`, so a message quoting `<b>` would show it markup, against invariant 3.
+
+**The prompt is unchanged, deliberately.** `_BASE_RULES` tells the model to move
+a placeholder wherever the target grammar needs it, which stays true — a pair
+moves as a unit. It says nothing about the two halves' order, and the package
+that added the records requires the model-facing payload to stay as it was, so
+this is recorded rather than fixed: if the `tags` failure rate on documents with
+paired markup turns out to be dominated by inverted pairs, one clause about
+opening and closing placeholders is the cheap repair, and it needs no field from
+the slot record to say it.
+
+`test_reordered_placeholder_is_fine` asserted free reordering as a property. It
+was rewritten rather than deleted — standalone may reorder, pairs may not invert
+or cross — because the half that is still true is worth keeping asserted.
+
+This discharges one of the four validators HANDOFF-006 carries. The invariant 10
+caveat stands until the other three land.
+
 ## 2026-07-28 · The zh-TW lexicon audit: what invariant 4 excludes from a substring table
 
 Executing B4 below. The table held **45 rows, not the 42 recorded there** — a

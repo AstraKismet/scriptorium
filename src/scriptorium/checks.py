@@ -1,7 +1,13 @@
 """Validators. Every rule here is mechanically decidable — that is the entry test.
 
-Rules append to ``issues`` with a severity; ``error`` fails the build. Structural
-fidelity is deliberately absent: it is guaranteed by :mod:`.mdparse`, not checked.
+Rules append to ``issues`` with a severity; ``error`` fails the build.
+
+Structural fidelity splits in two, and only one half is checked here. The
+skeleton (invariant 2a) is *guaranteed* by :mod:`.mdparse` — every byte the
+pipeline did not change is reproduced, so there is nothing to validate. What a
+target value does once substituted into that skeleton (invariant 2b) is not under
+our control, and is checked: placeholder pairs, today, with block-start
+containment and host escaping to follow.
 """
 
 import re
@@ -82,6 +88,53 @@ _LEXICON_UNLESS_FOLLOWED_BY = {
 #   視圖   正視圖、俯視圖、透視圖    用戶   用戶端、電信用戶
 
 
+def pair_problems(target, slots):
+    """Messages for paired placeholders the target broke; empty when it did not.
+
+    Two rules, both decidable: an open comes before its close, and two pairs
+    either nest or stay apart. Standalone slots keep multiset semantics, because
+    moving a URL or a code span is an ordinary thing for a translation to do — a
+    pair is not. Until 2026-07-28 a target of ``⟦2⟧粗體⟦1⟧`` against a source of
+    ``⟦1⟧粗體⟦2⟧`` reported zero issues and rendered ``</b>粗體<b>``: a layout
+    defect in Markdown, and in XHTML a file that does not open.
+
+    Deliberately *not* checked: a pair that stops containing another without
+    crossing it. Reassociating emphasis is a meaning decision a translator is
+    allowed to make, and a rule against it would fail correct work — the
+    false-positive trap the zh-TW lexicon was audited for on the same date.
+
+    Messages name slot ids and never slot contents. Validator messages are fed
+    back to the model as ``problems`` by ``translate._user_message``, so putting
+    the original ``<b>`` in one would show it markup, against invariant 3.
+    """
+    pos = {}
+    for m in PH_RE.finditer(target):
+        pos.setdefault(m.group(1), m.start())
+
+    halves = {}
+    for sid, rec in slots.items():
+        if rec.get("pair_id"):
+            halves.setdefault(rec["pair_id"], {})[rec.get("role")] = sid
+
+    out, spans = [], []
+    for pid in sorted(halves):
+        o, c = halves[pid].get("open"), halves[pid].get("close")
+        if o is None or c is None or o not in pos or c not in pos:
+            continue          # a half that never arrived is already a mismatch
+        if pos[o] > pos[c]:
+            out.append(f"placeholder pair inverted: ⟦{o}⟧ opens and must come "
+                       f"before ⟦{c}⟧")
+        else:
+            spans.append((pos[o], pos[c], o, c))
+
+    for i, (a_open, a_close, a1, a2) in enumerate(spans):
+        for b_open, b_close, b1, b2 in spans[i + 1:]:
+            if a_open < b_open < a_close < b_close or b_open < a_open < b_close < a_close:
+                out.append(f"placeholder pairs cross: ⟦{a1}⟧…⟦{a2}⟧ and "
+                           f"⟦{b1}⟧…⟦{b2}⟧ must nest or stay apart")
+    return out
+
+
 def check_segment(seg, lang, cfg, glossary, dnt):
     issues = []
     src, tgt = seg["masked"], seg.get("target") or ""
@@ -95,12 +148,14 @@ def check_segment(seg, lang, cfg, glossary, dnt):
         add("missing", "error", "no translation")
         return issues
 
-    # 1. placeholder integrity
+    # 1. placeholder integrity — presence as a multiset, then pair order
     a, b = Counter(PH_RE.findall(src)), Counter(PH_RE.findall(tgt))
     if a != b:
         lost = sorted((a - b).elements())
         extra = sorted((b - a).elements())
         add("tags", "error", f"placeholder mismatch lost={lost} extra={extra}")
+    for msg in pair_problems(tgt, seg.get("slots") or {}):
+        add("tags", "error", msg)
 
     # 2. untranslated passthrough
     if tgt.strip() == src.strip() and len(strip_placeholders(src).split()) >= 3:
