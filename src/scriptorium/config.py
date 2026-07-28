@@ -66,11 +66,22 @@ def load_json(path, default=None):
 
 
 def dump_json(path, obj):
+    """Write JSON atomically, with LF whatever platform ran the command.
+
+    The terminator is a *choice* here, not an invariant: `docio` exists because
+    invariant 2a claims the bytes of user documents, and it explicitly excludes
+    the files this project writes for itself. What argues for it anyway is that
+    two of these land in someone's repository — `lx.config.json` from `lx init`,
+    and the `.lx/` state for anyone who tracks it — so leaving the default meant
+    one command producing a different tree depending on the machine that ran it,
+    and the whole diff showing up the first time two of them shared a project.
+    One keyword per site is a cheap price for that, and it costs nothing to read.
+    """
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
     tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
         f.write("\n")
     os.replace(tmp, path)
@@ -129,7 +140,12 @@ def load_dnt(cfg):
 
 
 def write_templates():
-    """Idempotent scaffolding for a fresh project."""
+    """Idempotent scaffolding for a fresh project.
+
+    `newline="\\n"` for the same reason as `dump_json`: these two files are
+    edited and committed by the user, so a scaffolder that emits CRLF on one
+    machine and LF on another hands them a diff they did not make.
+    """
     created = []
     if not os.path.exists("lx.config.json"):
         dump_json("lx.config.json", DEFAULT_CONFIG)
@@ -137,12 +153,12 @@ def write_templates():
     for d in (os.path.join(STATE, "docs"), os.path.join(STATE, "reports"), "config"):
         os.makedirs(d, exist_ok=True)
     if not os.path.exists("config/glossary.csv"):
-        with open("config/glossary.csv", "w", encoding="utf-8") as f:
+        with open("config/glossary.csv", "w", encoding="utf-8", newline="\n") as f:
             f.write("source,target,forbidden,severity\n"
                     "# forbidden is ;-separated; severity is error or warn\n")
         created.append("config/glossary.csv")
     if not os.path.exists("config/dnt.txt"):
-        with open("config/dnt.txt", "w", encoding="utf-8") as f:
+        with open("config/dnt.txt", "w", encoding="utf-8", newline="\n") as f:
             f.write("# verbatim terms, one per line; longest match wins\n")
         created.append("config/dnt.txt")
     return created

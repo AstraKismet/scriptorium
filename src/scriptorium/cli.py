@@ -28,6 +28,36 @@ def _out(msg):
     print(msg, flush=True)
 
 
+def force_utf8(stream):
+    """Make a diagnostic stream carry UTF-8 whatever the platform picked for it.
+
+    On Windows an interactive console gets UTF-16 through `WriteConsoleW` and is
+    fine; redirect it or pipe it and the stream falls back to the locale code
+    page. Three commands emit non-ASCII — `todo` prints a literal ⟦n⟧ in its
+    rules line, `check` prints validator messages containing CJK, and `render
+    --out -` writes a whole translated document — so
+    `lx todo doc.md --lang zh-TW > todo.json` died with UnicodeEncodeError. CI
+    never saw it because the only redirect in the workflow runs on Ubuntu.
+
+    This is for *diagnostics*. `render --out -` is a document, not a message, and
+    goes out through `sys.stdout.buffer` in `docio`, which no text layer touches
+    — deliberately two repairs, because that one is also a newline problem and
+    this one is not.
+
+    Guarded rather than assumed: `sys.stdout` is replaced by a stand-in under
+    test and in embedded callers, and not every stand-in is a `TextIOWrapper`.
+    Doing nothing is the right answer there — a stand-in has already decided how
+    it encodes.
+    """
+    reconfigure = getattr(stream, "reconfigure", None)
+    if reconfigure is None:
+        return
+    try:
+        reconfigure(encoding="utf-8", errors="replace")
+    except (OSError, ValueError):  # detached, closed, or already written through
+        pass
+
+
 # ── extract ────────────────────────────────────────────────────────────────
 
 def do_extract(src, lang, cfg, tone=None, reset=False):
@@ -440,6 +470,9 @@ def build_parser():
 
 
 def main(argv=None):
+    # Before parse_args, because argparse writes usage and errors to these two.
+    force_utf8(sys.stdout)
+    force_utf8(sys.stderr)
     args = build_parser().parse_args(argv)
     cfg = load_config(args.config)
     try:

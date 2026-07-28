@@ -42,10 +42,48 @@ def test_state_lists_providers(base, tmp_path, monkeypatch):
     assert {"local", "openai", "claude"} <= {p["name"] for p in state["providers"]}
 
 
-def test_path_traversal_is_refused(base):
+@pytest.mark.parametrize("path", [
+    # The only spelling the previous guard caught, kept so the fix is not a
+    # trade: posixpath.normpath does collapse these.
+    "/../../../etc/passwd",
+    # It does not treat a backslash as a separator; Windows' open does, so this
+    # one passed the guard unchanged and then resolved into the repository root.
+    "/x\\..\\..\\..\\..\\..\\pyproject.toml",
+    # Decoded before the check, or the check reads inert text.
+    "/%2e%2e%2f%2e%2e%2f%2e%2e%2fpyproject.toml",
+    "/x%5C..%5C..%5C..%5C..%5C..%5Cpyproject.toml",
+])
+def test_traversal_is_refused_in_every_spelling(base, path):
     with pytest.raises(urllib.error.HTTPError) as e:
-        _get(base, "/../../../etc/passwd")
+        _get(base, path)
     assert e.value.code == 403
+
+
+def test_a_drive_absolute_path_cannot_escape(base):
+    # A fourth escape shape, and the one where the two platforms genuinely
+    # differ: os.path.join discards its first half when the second names a
+    # drive, so this leaves the root on Windows and is an ordinary missing
+    # relative name on Linux. The status differs, 403 against 404; the property
+    # asserted is the one that does not — it is never 200.
+    with pytest.raises(urllib.error.HTTPError) as e:
+        _get(base, "/C:/Windows/win.ini")
+    assert e.value.code in (403, 404)
+
+
+def test_unknown_path_is_404_rather_than_a_silent_index(base):
+    # Serving index.html with a 200 made every typo look like a blank app — and
+    # would have made a traversal that got through look like it had been served.
+    with pytest.raises(urllib.error.HTTPError) as e:
+        _get(base, "/does-not-exist.js")
+    assert e.value.code == 404
+
+
+def test_percent_encoded_names_still_resolve(base):
+    # The other half of unquoting: without it any asset whose name has a space
+    # or a non-ASCII character 404s. "/index.html" spelled the hard way.
+    code, html = _get(base, "/%69ndex.html")
+    assert code == 200
+    assert b"Scriptorium" in html
 
 
 def test_unknown_endpoint_reports_cleanly(base):
