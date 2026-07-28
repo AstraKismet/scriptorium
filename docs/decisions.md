@@ -3,6 +3,66 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-07-28 · Where a line terminator lives, and where a continuation indent lives
+
+Both round-trip defects the review measured (see the entry below) are fixed. Two
+questions had to be answered to fix them, and neither answer is obvious enough to
+leave in the code alone.
+
+**A continuation's indent belongs to the segment source, not to the skeleton.**
+`- item\n    continued\n` is one segment whose source is now
+`item\n    continued` — the four spaces included, and therefore visible to the
+model. That reads wrong at first: the marker prefix `- ` is already a raw
+skeleton node, so the indent looks like skeleton too. It cannot be. The indent
+sits *after* a newline that is inside the segment, and a raw node can only be
+placed before or after a whole segment, never in the middle of one. The only
+shape that would make it skeleton is one segment per physical line, which is the
+alternative that lost: it cuts a wrapped sentence into fragments and asks the
+model to translate each one blind, to buy a representation detail no one needs.
+
+**A lone CR is text, not a line terminator.** `parse` splits on `"\n"` and
+nothing else, so `one\rtwo\r` is one segment containing a CR. CommonMark would
+call that two lines. Reinterpreting it would move a segment boundary and
+invalidate every memory entry keyed on the old source, in exchange for nothing at
+the byte level — the file round-trips exactly either way. Byte preservation and
+segmentation are separate decisions; this package owed only the first. Classic
+Mac OS line endings are the only real source of such files, and they can be
+reopened as their own entry if one ever turns up.
+
+Consequences worth knowing, measured by running both parsers over the committed
+contents of all 40 tracked Markdown files — 2394 segments. Round-trip failures go
+from 8 files to 0. **No segment boundary moves, in any file**, and no segment
+changes kind.
+
+67 of the 2394 segment hashes change, every one of them a wrapped list item, and
+every one of them a segment that was losing bytes before. The CR repair changes
+**none** — moving the terminator into the skeleton leaves the source string
+exactly as the old `rstrip` left it, so `tests/corpus/crlf-line-endings.md`
+reports 0 of 7 hashes changed and no translation memory is invalidated by that
+half at all. Files affected by the indent half: `AGENTS.md` (27 of 68),
+`docs/conventions/handoff-workflow.md` (24 of 99), `README.md` and
+`README.zh-TW.md` (4 of 68 each), `skill/reference/zh-TW.md` (3 of 100),
+`adapters/opencode-rule.md` (2 of 15), and one fixture (3 of 3). That the
+project's own documentation was the largest victim is the argument for the
+corpus.
+
+**The parser now holds the line terminator; the CLI still throws it away.**
+Measured while verifying this package: `cli.py` opens source files in text mode,
+so universal newlines deletes every CR before `parse` is called, and writes the
+rendered file in text mode, so every `\n` becomes `os.linesep`. A CRLF document
+therefore round-trips on Windows by coincidence and loses every CR on Linux, and
+no mixed-terminator document survives anywhere. The parser fix is a strict
+prerequisite for the I/O fix — normalizing at the boundary hides the parser
+defect rather than removing it — so it landed first, and the I/O layer is
+scheduled as its own package. Recorded here because a green corpus could
+otherwise be read as an end-to-end guarantee that does not yet exist.
+
+**`str.splitlines()` was not used**, though it makes the terminator handling
+shorter. It also splits on `\x0b`, `\x0c`, `\x1c`–`\x1e`, `\x85`, U+2028 and
+U+2029, which `str.split("\n")` does not, so the swap silently changes block
+boundaries in any document containing one of them.
+`tests/corpus/line-separator-control-chars.md` exists to hold that line.
+
 ## 2026-07-28 · Stack, scope and infrastructure review
 
 Twenty-three decisions, taken from an interactive decision board after a
