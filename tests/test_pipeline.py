@@ -146,19 +146,30 @@ def test_config_layering_keeps_new_defaults():
 # README, no manifest. The same reasoning as `handoff/`: anything else in the
 # directory would be collected as a fixture, so the explanation lives here.
 #
-# The properties covered, one file each: a UTF-8 BOM, CRLF terminators, nested
-# lists, wrapped list-item continuations, indented code, HTML blocks, tables with
-# alignment padding and tables without a leading pipe, hard line breaks, front
-# matter, reference link definitions, setext headings and thematic breaks,
-# fenced and unclosed code, nested blockquotes, inline markup, CJK with
+# The properties covered, one file each: a UTF-8 BOM, CRLF terminators, CRLF
+# mixed with bare LF, CR-only terminators, CRLF list items, nested lists, wrapped
+# list-item continuations at four spaces and at two, indented code, HTML blocks,
+# tables with alignment padding and tables without a leading pipe, hard line
+# breaks, front matter, reference link definitions, setext headings and thematic
+# breaks, fenced and unclosed code, nested blockquotes, inline markup, CJK with
 # full-width punctuation, a file with no trailing newline, whitespace-only,
 # blank-lines-only, an empty file, and one 112k-character manual long enough for
 # a per-block defect to hide in.
 #
-# `line-separator-control-chars.md` is load-bearing rather than decorative: it
-# contains every character `str.splitlines()` breaks on that `str.split("\n")`
-# does not. HANDOFF-002 is tempted toward `splitlines`, and this fixture is what
-# proves that swap is not behaviour-neutral.
+# Two of them are load-bearing rather than decorative.
+#
+# `cr-only-terminators.md` is what separates a real terminator fix from one that
+# special-cases "\r\n": the latter passes every other fixture here and still
+# loses this file's bytes. Note what it does *not* assert — the parser treats a
+# lone CR as ordinary text, not as a line ending, so this file is one segment.
+# CommonMark would call it two lines. Reinterpreting it would move a segment
+# boundary, which is a decision separate from preserving the bytes, and
+# `docs/decisions.md` records why it was not taken.
+#
+# `line-separator-control-chars.md` contains every character `str.splitlines()`
+# breaks on that `str.split("\n")` does not. `parse` splits on "\n" alone and
+# `splitlines` looks like a tidier way to handle terminators; this fixture is
+# the standing proof that the swap is not behaviour-neutral.
 #
 # Red line: a fixture is never edited to make a test pass. If one fails, either
 # the parser is wrong or the fixture is not valid input — decide which, and say
@@ -166,17 +177,14 @@ def test_config_layering_keeps_new_defaults():
 
 CORPUS = pathlib.Path(__file__).parent / "corpus"
 
-# Measured 2026-07-27, scheduled as HANDOFF-002. One entry per defect, not per
-# failing input: six corpus-shaped inputs fail, but they collapse to these two
-# root causes, and the package's acceptance criteria allow exactly two xfails.
-# strict=True so that fixing a defect turns the suite red until the entry is
-# removed — a silently-passing xfail is how a fix gets forgotten.
-KNOWN_BROKEN = {
-    "crlf-line-endings.md":
-        "mdparse.py:40 rstrips the CR off every segment source",
-    "list-continuation-indent.md":
-        "mdparse.py:139 strips the indent off list-item continuation lines",
-}
+# Empty, and that is the state to keep it in. It held the two round-trip defects
+# measured 2026-07-27, both fixed 2026-07-28 — see `docs/decisions.md`. The
+# entries came out in the same commit as the fix, because strict=True turns a
+# fixed-but-still-listed defect into a build failure. The machinery stays for the
+# next measured defect:
+# an xfail here is a scheduled repair, never a permanent exemption, and a file
+# that is simply not in the corpus is the alternative that hides it instead.
+KNOWN_BROKEN = {}
 
 
 def identity_roundtrip(text, dnt=()):
