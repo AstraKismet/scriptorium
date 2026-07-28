@@ -224,6 +224,21 @@ subjects; neither supersedes the other.
 - **Completing without deleting.** The queue rots and dependants never unblock.
   Once it passes, delete it; anything you are still unsure about goes into the
   next package.
+- **A deleted package's OUT list lapses.** Writing "out of scope — that belongs
+  with package X" defers the work in the *reader's* mind and nowhere else. The
+  package is then deleted and the deferral goes with it, because nothing ever
+  wrote it into X. Observed: HANDOFF-003 deferred two `web/server.py` job-layer
+  defects to HANDOFF-204, which did not mention them. Before deleting, open every
+  package the OUT list names and confirm the item is actually in it — deferring
+  is an edit to two files, not a sentence in one.
+- **A neighbour that landed first leaves a package stale.** A pending package
+  describes code as it was when it was written. When another package changes that
+  code, the pending one keeps instructing a future session to fix what is already
+  fixed, and its acceptance criteria keep citing numbers that have moved.
+  Observed: HANDOFF-003 closed defect (d) of HANDOFF-008 and moved the test count
+  the same day. Correcting the neighbour is part of completing the package, and
+  the correction says *closed by which package, on what date*, so the record of
+  what was measured survives without reading as work still owed.
 - **Writing a decision only into the package.** Packages get deleted. The decision
   must reach `docs/` first.
 - **Overwriting a pending package.** Only permitted when the just-completed stage
