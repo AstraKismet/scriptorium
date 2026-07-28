@@ -8,6 +8,7 @@ so adding a backend never means reimplementing the pipeline.
 
 import json
 import os
+import socket
 import time
 import urllib.error
 import urllib.request
@@ -71,7 +72,14 @@ class Provider:
                     "For a local server, check that it is running and that base_url "
                     "ends in /v1.")
                 time.sleep(min(2 ** attempt, 20))
-            except TimeoutError:
+            # `socket.timeout` only became an alias of the builtin in 3.10, and
+            # 3.9 is the declared floor and a CI matrix entry. There a stalled
+            # read — headers received, body never arriving — raises the socket
+            # class, which is not a `TimeoutError` and not a `URLError` either,
+            # so it escaped both handlers and reached the user as a bare OSError
+            # instead of the message below. On 3.10+ the two names are one class
+            # and the tuple is a duplicate, which costs nothing.
+            except (TimeoutError, socket.timeout):
                 last = ProviderError(
                     f"{self.name}: timed out after {self.timeout}s. Local models on "
                     "CPU are slow — raise `timeout` or lower `batch.size`.")
