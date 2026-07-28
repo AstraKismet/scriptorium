@@ -52,14 +52,12 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    containing invalid UTF-8 — routine for older Big5, GBK and Shift-JIS text —
    cannot be written to a JSON state file at all.
 
-   *Known gap, measured 2026-07-28:* the parser holds this property — 27 corpus
-   fixtures gate it in CI — but `cli.py` reads and writes through Python's text
-   mode, which normalizes every line ending on the way in and rewrites it as
-   `os.linesep` on the way out. So `lx render` emits CRLF for an LF source on
-   Windows and LF for a CRLF source on Linux, and mixed terminators do not
-   survive anywhere. The parser fix landed first because the I/O fix is worthless
-   without it; the I/O fix is scheduled. Until it lands, the guarantee holds for
-   `parse` → skeleton → substitution, not for the file the CLI writes.
+   The file boundary is part of this. Documents are read and written as bytes
+   through `docio.py`, never through Python's text mode, because universal
+   newlines deletes every CR on the way in and `os.linesep` is manufactured on
+   the way out — neither of which the pipeline decided. Machine-written files
+   (`config.py`, the `.lx/` JSON state) are excluded on purpose: no invariant
+   claims their bytes.
 
    **(2b) Substitution.** Every slot carries its host syntax's escaping function
    and containment rules. A translated segment may not introduce a block-start
@@ -129,6 +127,7 @@ Current:
 
 ```
 src/scriptorium/
+  docio.py       document read/write as bytes; text mode never touches a user document
   mask.py        markup protection: ⟦n⟧ placeholders, DNT terms, repair of mangled brackets
   mdparse.py     markdown -> (skeleton nodes, segments); render() puts it back
   normalize.py   deterministic repair: punctuation width, CJK/Latin spacing
@@ -152,7 +151,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 59 passed; no network
+python -m pytest -q                 # 115 passed; no network
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
 
@@ -250,6 +249,12 @@ silently. That file also holds the downgrade ledger.
 
 - Public functions in `cli.py` prefixed `do_` are the API other surfaces call;
   `cmd_` functions are argparse handlers and should stay thin.
+- A document's line terminator is a document-level fact, held in `doc["eol"]` and
+  re-imposed once at render — never carried inside a segment, where the model and
+  the reviewer would both have to reproduce a control character neither can be
+  checked on. A state file without the key means `"\n"`. Documents whose
+  terminators are already mixed are the recorded exception and pass through
+  verbatim; see `docs/decisions.md`, 2026-07-28.
 - Segment ids are per-document and sequential. The translation memory key is
   `(content_hash, context, segmentation_version)` plus a nullable `variant` —
   never position. `variant=null` must hash identically to the field's absence, or

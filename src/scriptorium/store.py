@@ -77,7 +77,12 @@ def append_tm(lang, records):
     if not records:
         return 0
     os.makedirs(STATE, exist_ok=True)
-    with open(tm_path(lang), "a", encoding="utf-8") as f:
+    # newline="\n" so the append log keeps LF on every platform. Without it text
+    # mode writes CRLF on Windows, which contradicts the `*.jsonl text eol=lf`
+    # rule in .gitattributes: git normalizes on commit, so the working file and
+    # the committed file disagree, and the diff churn only becomes visible if
+    # that rule is ever relaxed to -text.
+    with open(tm_path(lang), "a", encoding="utf-8", newline="\n") as f:
         for rec in records:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     return len(records)

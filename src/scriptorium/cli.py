@@ -11,6 +11,13 @@ from collections import Counter
 from . import __version__
 from .checks import check_segment
 from .config import dump_json, load_config, load_dnt, load_glossary, write_templates
+from .docio import (
+    apply_terminator,
+    read_document,
+    split_terminator,
+    write_document,
+    write_document_to_stdout,
+)
 from .mask import repair_placeholders
 from .mdparse import parse, render
 from .normalize import normalize, polish_rendered
@@ -24,8 +31,7 @@ def _out(msg):
 # ── extract ────────────────────────────────────────────────────────────────
 
 def do_extract(src, lang, cfg, tone=None, reset=False):
-    with open(src, encoding="utf-8") as f:
-        text = f.read()
+    text, eol = split_terminator(read_document(src))
     nodes, segments = parse(text, load_dnt(cfg))
 
     prior = {}
@@ -48,6 +54,11 @@ def do_extract(src, lang, cfg, tone=None, reset=False):
     doc = {
         "version": __version__, "source": os.path.relpath(src), "lang": lang,
         "tone": tone or cfg.get("tone", "technical"),
+        # The document's own line terminator, held here rather than in the
+        # skeleton so the model and the reviewer never see it. A state file
+        # written before this existed has no key, and "\n" is the right default
+        # for one: text-mode reads had already deleted every CR.
+        "eol": eol,
         "nodes": nodes, "segments": segments,
     }
     save_doc(src, lang, doc)
@@ -169,7 +180,11 @@ def cmd_check(args, cfg):
 
 def do_render(src, lang, cfg, fallback=False):
     doc = load_doc(src, lang)
-    return render(doc, cfg, polish=lambda t: polish_rendered(t, lang, cfg), fallback=fallback)
+    text, missing = render(doc, cfg, polish=lambda t: polish_rendered(t, lang, cfg),
+                           fallback=fallback)
+    # Here rather than in write_document so every caller gets it: the file path,
+    # `--out -`, and the workbench's render endpoint are all downstream of this.
+    return apply_terminator(text, doc.get("eol", "\n")), missing
 
 
 def default_output(src, lang, cfg):
@@ -181,12 +196,10 @@ def default_output(src, lang, cfg):
 def cmd_render(args, cfg):
     text, missing = do_render(args.src, args.lang, cfg, args.fallback)
     if args.out == "-":
-        sys.stdout.write(text)
+        write_document_to_stdout(text)
         return
     out = args.out or default_output(args.src, args.lang, cfg)
-    os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
-    with open(out, "w", encoding="utf-8") as f:
-        f.write(text)
+    write_document(out, text)
     _out(f"wrote {out}" + (f" ({missing} untranslated)" if missing else ""))
 
 
@@ -317,9 +330,7 @@ def cmd_run(args, cfg):
         sys.exit(1)
     out = args.out or default_output(args.src, args.lang, cfg)
     text, missing = do_render(args.src, args.lang, cfg, fallback=args.force)
-    os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
-    with open(out, "w", encoding="utf-8") as f:
-        f.write(text)
+    write_document(out, text)
     _out(f"wrote {out}")
     _out("review the rendered file, then `lx commit` to bank the wording in the translation memory")
 
