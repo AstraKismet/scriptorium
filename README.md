@@ -48,9 +48,8 @@ fully local models.
 Working today, for Markdown: extract, translate, validate, repair, render, and a
 translation memory that survives revisions. Byte-exact reassembly of the source
 document is gated in CI by an adversarial corpus of 27 inputs, on Linux and
-Windows — with one measured exception: the CLI still reads and writes through
-Python's text mode, so line endings are normalized at the file boundary. That is
-the next thing being fixed.
+Windows — end to end, from the bytes on disk to the bytes written back, so a file
+keeps the line endings it arrived with whatever platform it is processed on.
 
 Under construction, in this order: containment validators, typed placeholders, a
 SQLite state layer, a rebuilt review workbench, then EPUB and plain text.

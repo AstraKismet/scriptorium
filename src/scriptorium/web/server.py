@@ -22,6 +22,7 @@ from urllib.parse import parse_qs, urlparse
 from .. import __version__
 from ..cli import default_output, do_apply, do_check, do_extract, do_render, pending_segments
 from ..config import load_config
+from ..docio import write_document
 from ..providers import available
 from ..store import append_tm, load_doc, load_tm, tracked
 
@@ -140,9 +141,7 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/render":
             text, missing = do_render(src, lang, cfg, fallback=body.get("fallback", False))
             out = body.get("out") or default_output(src, lang, cfg)
-            os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
-            with open(out, "w", encoding="utf-8") as f:
-                f.write(text)
+            write_document(out, text)
             return {"wrote": out, "missing": missing}
         if path == "/api/commit":
             doc = load_doc(src, lang)
