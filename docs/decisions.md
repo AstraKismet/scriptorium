@@ -3,6 +3,62 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-07-28 · Three edge decisions: static-path confinement, retry timing, and the bytes we write for ourselves
+
+Taken while fixing five measured defects. The fixes themselves need no record —
+they are in the history — but three of the answers were choices with a losing
+alternative, and one measurement contradicts what was written down.
+
+**A static path is decided after resolution, and a backslash is a separator
+everywhere.** The workbench's guard normalized with `posixpath` and rejected a
+leading `..`, which is a decision taken on a string before the filesystem has a
+say. `posixpath` does not treat `\` as a separator and Windows' `open` does, so
+`GET /x\..\..\..\..\..\pyproject.toml` returned this repository's
+`pyproject.toml` with a 200 — measured, 1305 bytes. The guard is now percent-
+decoding, then `\` rewritten to `/` on every platform, then `realpath` of the
+join compared against `realpath` of the root.
+
+*Lost:* rejecting backslashes only on Windows, where they are exploitable. It
+halves the test surface and leaves Linux and Windows running different rules,
+so the platform that is not the development machine is the one nobody checks.
+*Also lost:* keeping the unknown-path fallback that served `index.html` with a
+200, on the theory that a client-side router may want it later. There is one
+page and no router; the cost today is that a typo renders as a blank
+application and a traversal that gets through looks like an ordinary success.
+Unknown static paths are 404. The rule if a router ever arrives: fall back on
+the router's own prefix, not on everything.
+
+Bounding, stated so it is not overstated: the server binds `127.0.0.1`, so the
+reachable set was local processes running as this user, never the network.
+
+**`Retry-After` is honoured as a number; its HTTP-date spelling is not.** A
+hosted API returning 429 knows its own window and an exponential guess is
+strictly worse information. *Lost:* parsing the date form. It needs a date
+parser and a clock-skew policy to save a caller a few seconds, and falling
+through to our own backoff is only slower, never wrong. The backoff also gained
+jitter inside the existing 20-second ceiling, because a batch runs several
+requests concurrently against one server and without jitter they all retry in
+the same instant — the burst that caused the failure, arriving again on schedule.
+
+**Files this project writes for itself get LF, as a choice rather than an
+invariant.** Invariant 2a deliberately excludes them, and `docio` exists because
+2a claims user documents only. The reason to pin them anyway is different:
+`lx init` scaffolds `lx.config.json`, `config/glossary.csv` and `config/dnt.txt`
+into someone else's repository, and `dump_json` writes `.lx/` state a project may
+track — so the platform-default meant one command producing two different trees
+and a whole-file diff the first time two machines shared a project. *Lost:*
+leaving them alone on the grounds that no invariant claims them, which was the
+position taken by omission when the byte-level I/O work shipped. It is correct
+about the invariant and wrong about the consequence.
+
+**A correction to a measured claim.** The queue recorded the ~1s in
+`test_unreachable_server_gives_actionable_message` as the cost of the retry
+loop sleeping after its final attempt. On Windows that second is the *connect*
+timeout: `127.0.0.1:1` is refused instantly on Linux but times out here. The
+spurious sleep was real and is fixed, but a timing test that connects to a dead
+port measures the platform rather than the fix, so the one that guards it now
+uses a mock server answering 503 at once.
+
 ## 2026-07-28 · Where a line terminator lives, and where a continuation indent lives
 
 Both round-trip defects the review measured (see the entry below) are fixed. Two
