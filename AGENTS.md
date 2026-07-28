@@ -135,7 +135,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 38 tests, no network
+python -m pytest -q                 # 53 passed, 2 xfailed; no network
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
 
@@ -144,9 +144,13 @@ lx web                              # review workbench on 127.0.0.1:8787
 ```
 
 Run tests before proposing a change as finished. They are fast and cover the
-round-trip property, which is the thing most likely to break silently — though
-note that the round-trip test currently has seven inputs, six of them single-line
-toy strings, and is being replaced by an adversarial corpus.
+round-trip property, which is the thing most likely to break silently. That
+property is exercised by `tests/corpus/` — one input file per property, read as
+bytes and substituted back into the skeleton without going through `render()`.
+Two fixtures are `xfail(strict=True)`, one per defect scheduled in HANDOFF-002;
+fixing a defect turns the suite red until its entry is removed. **No fixture is
+ever edited to make a test pass** — if one fails, either the parser is wrong or
+the fixture is not valid input.
 
 ## Handoff work packages
 
