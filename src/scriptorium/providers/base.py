@@ -8,9 +8,16 @@ so adding a backend never means reimplementing the pipeline.
 
 import json
 import os
+import random
+import socket
 import time
 import urllib.error
 import urllib.request
+
+# Transient by contract: a timeout, a conflict, "too early", a rate limit, and
+# the 5xx family a gateway emits while a local runtime is still loading weights.
+_RETRYABLE = (408, 409, 425, 429, 500, 502, 503, 504)
+_MAX_BACKOFF = 20.0
 
 
 class ProviderError(RuntimeError):
@@ -48,10 +55,36 @@ class Provider:
         raise NotImplementedError
 
     # -- transport ---------------------------------------------------------
+    def _backoff(self, attempt, retry_after=None):
+        """How long to wait before the next attempt.
+
+        `Retry-After` wins when the server sends a number, because a hosted API
+        returning 429 knows its own window and an exponential guess does not.
+        Its HTTP-date spelling is deliberately not honoured: parsing a date to
+        wait on it is more machinery than this case earns, and falling through
+        to our own backoff is never wrong, only slower.
+
+        Jitter because a batch runs several requests concurrently against one
+        server. Without it every one of them fails together and then retries in
+        the same instant, which is the burst that caused the failure arriving
+        again on schedule.
+        """
+        if retry_after:
+            try:
+                return min(max(float(retry_after), 0.0), _MAX_BACKOFF)
+            except ValueError:
+                pass  # an HTTP-date; use the backoff we control
+        return min(2 ** attempt + random.uniform(0, 1), _MAX_BACKOFF)
+
     def _post(self, url, payload, headers):
         body = json.dumps(payload).encode("utf-8")
         last = None
         for attempt in range(self.retries + 1):
+            # Every sleep below is guarded by this. The loop used to wait after
+            # its final attempt and then leave and raise anyway, so `retries=0`
+            # cost a second of pure latency per failed call — which the suite
+            # paid on every run.
+            final = attempt == self.retries
             req = urllib.request.Request(url, data=body, method="POST")
             for k, v in {**headers, **self.extra_headers}.items():
                 req.add_header(k, v)
@@ -61,19 +94,28 @@ class Provider:
             except urllib.error.HTTPError as e:
                 detail = e.read().decode("utf-8", "replace")[:500]
                 last = ProviderError(f"{self.name}: HTTP {e.code} — {detail}")
-                if e.code in (408, 409, 425, 429, 500, 502, 503, 504):
-                    time.sleep(min(2 ** attempt, 20))
-                    continue
-                raise last from e
+                if e.code not in _RETRYABLE:
+                    raise last from e
+                if not final:
+                    time.sleep(self._backoff(attempt, e.headers.get("Retry-After")))
             except urllib.error.URLError as e:
                 last = ProviderError(
                     f"{self.name}: cannot reach {url} — {e.reason}. "
                     "For a local server, check that it is running and that base_url "
                     "ends in /v1.")
-                time.sleep(min(2 ** attempt, 20))
-            except TimeoutError:
+                if not final:
+                    time.sleep(self._backoff(attempt))
+            # `socket.timeout` only became an alias of the builtin in 3.10, and
+            # 3.9 is the declared floor and a CI matrix entry. There a stalled
+            # read — headers received, body never arriving — raises the socket
+            # class, which is not a `TimeoutError` and not a `URLError` either,
+            # so it escaped both handlers and reached the user as a bare OSError
+            # instead of the message below. On 3.10+ the two names are one class
+            # and the tuple is a duplicate, which costs nothing.
+            except (TimeoutError, socket.timeout):
                 last = ProviderError(
                     f"{self.name}: timed out after {self.timeout}s. Local models on "
                     "CPU are slow — raise `timeout` or lower `batch.size`.")
-                time.sleep(min(2 ** attempt, 20))
+                if not final:
+                    time.sleep(self._backoff(attempt))
         raise last or ProviderError(f"{self.name}: request failed")
