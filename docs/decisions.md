@@ -46,16 +46,80 @@ half at all. Files affected by the indent half: `AGENTS.md` (27 of 68),
 project's own documentation was the largest victim is the argument for the
 corpus.
 
-**The parser now holds the line terminator; the CLI still throws it away.**
-Measured while verifying this package: `cli.py` opens source files in text mode,
-so universal newlines deletes every CR before `parse` is called, and writes the
-rendered file in text mode, so every `\n` becomes `os.linesep`. A CRLF document
-therefore round-trips on Windows by coincidence and loses every CR on Linux, and
-no mixed-terminator document survives anywhere. The parser fix is a strict
-prerequisite for the I/O fix — normalizing at the boundary hides the parser
-defect rather than removing it — so it landed first, and the I/O layer is
-scheduled as its own package. Recorded here because a green corpus could
-otherwise be read as an end-to-end guarantee that does not yet exist.
+**The parser held the line terminator; the CLI threw it away. Now fixed.**
+Measured while verifying this package: `cli.py` opened source files in text mode,
+so universal newlines deleted every CR before `parse` was called, and wrote the
+rendered file in text mode, so every `\n` became `os.linesep`. A CRLF document
+therefore round-tripped on Windows by coincidence and lost every CR on Linux, and
+no mixed-terminator document survived anywhere. The parser fix was a strict
+prerequisite — normalizing at the boundary hides the parser defect rather than
+removing it — so it landed first, and the I/O layer followed as its own package.
+
+**Outcome.** Documents are read and written as bytes through `docio.py`.
+Measured end to end on the real CLI, on Windows: a CRLF source renders CRLF, an
+LF source renders LF, and each is byte-identical to its input. All 27 corpus
+fixtures survive `read → extract → render(fallback) → write`, and the suite goes
+from 59 tests to 124. `store.append_tm` gained `newline="\n"`, so the memory log
+stops contradicting the `*.jsonl text eol=lf` rule in `.gitattributes`.
+`config.py` and the `.lx/` JSON state were deliberately left in text mode: they
+are files this project writes for itself and no invariant claims their bytes.
+
+**A document's terminator lives in the document's state, not in its segments.**
+This is the question the I/O fix forced, because byte-exact reading is what first
+lets a CR reach a segment source: `parse` splits on `"\n"`, so a wrapped
+paragraph in a CRLF file yields `'line one\r\nline two'`. `split_terminator`
+classifies a document as uniform-CRLF, and if it is, hands `parse` LF text and
+records `doc["eol"]`; `do_render` re-imposes it with one blanket substitution.
+
+Three measurements decided it, and each rules out the cheaper alternative of
+simply accepting the CR:
+
+- *No check can tell whether the model got it right.* Five replies for one
+  wrapped segment — CRLF kept, LF only, lines joined, a break added, a bare CR —
+  all produced zero errors from `check_segment` and none was collected by
+  `failing_segments`, so the repair loop is structurally blind to a wrong one.
+  Invariant 4 admits a rule only if a program can decide it, and the only
+  candidate — comparing break counts — rejects the legitimate case where a
+  translation rewraps. A green `lx check` would have covered a document with
+  mixed terminators.
+- *The human path cannot preserve one either.* The workbench edits segments in an
+  HTML `textarea`, whose value has CRLF collapsed to LF by the parser before a
+  reviewer types anything. Two of the three sources `AGENTS.md` treats as equals
+  therefore cannot round-trip a CR even in principle.
+- *Accepting it is what splits the translation memory.* The same sentence hashed
+  `8fcdf9940052` under CRLF and `c788218aac8a` under LF, so a Windows copy and a
+  Unix copy of one document shared nothing. Normalizing produces the LF hash —
+  which is exactly what text-mode reads produced all along, so no existing `.lx/`
+  state or memory entry moves. Doing nothing was the option that would have
+  broken continuity, by minting CR-bearing hashes that never existed before.
+
+The losing alternatives. **Masking the CR as a placeholder** renumbers every
+do-not-translate slot in the segment, because `mask` runs its inline patterns
+before the DNT list; the hash does not move, so `do_extract` carries a prior
+target onto a segment where the same `⟦n⟧` now means something else. **Making
+the segment source LF-canonical and recording the terminators on the node**
+fixes the hash too, but breaks `identity_roundtrip` for 3 of 27 fixtures — the
+skeleton alone would no longer reproduce the file, which is the property that
+test exists to state — and it commits the node schema before HANDOFF-202 has
+written one. **Re-imposing per segment at render** covers the mixed case, but
+keeps the CR in `source`, so it keeps the memory split.
+
+**Recorded residual, not a hidden one:** a document whose terminators are
+*already* inconsistent keeps today's verbatim behaviour and still hands the model
+a CR. One fixture of 27, roughly one tracked file in 76. Handling it needs a
+per-segment mechanism, which is the wrong price for that frequency; the
+containment validators own it. `test_mixed_terminators_keep_todays_behaviour`
+asserts the residual so it cannot quietly change.
+
+Two smaller consequences worth knowing. `normalize`'s trailing-whitespace rule
+is `re.sub(r"[ \t]+$", "", out, flags=re.M)`, and in multiline mode `$` anchors
+immediately before `\n` — an intervening `\r` blocks it, so on a CRLF document
+invariant 5's deterministic fixer was silently going dark. Keeping the CR out of
+the segment fixes that for free. And `lx render --out -` now writes through
+`sys.stdout.buffer`, because a document on stdout should no more be newline- or
+codec-translated than one on disk; the diagnostics printed by `lx todo` and
+`lx check` have the encoding half of that problem and not the newline half, so
+HANDOFF-003 still owns reconfiguring the stream for them.
 
 **`str.splitlines()` was not used**, though it makes the terminator handling
 shorter. It also splits on `\x0b`, `\x0c`, `\x1c`–`\x1e`, `\x85`, U+2028 and
