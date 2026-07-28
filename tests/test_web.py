@@ -59,6 +59,17 @@ def test_traversal_is_refused_in_every_spelling(base, path):
     assert e.value.code == 403
 
 
+def test_a_drive_absolute_path_cannot_escape(base):
+    # A fourth escape shape, and the one where the two platforms genuinely
+    # differ: os.path.join discards its first half when the second names a
+    # drive, so this leaves the root on Windows and is an ordinary missing
+    # relative name on Linux. The status differs, 403 against 404; the property
+    # asserted is the one that does not — it is never 200.
+    with pytest.raises(urllib.error.HTTPError) as e:
+        _get(base, "/C:/Windows/win.ini")
+    assert e.value.code in (403, 404)
+
+
 def test_unknown_path_is_404_rather_than_a_silent_index(base):
     # Serving index.html with a 200 made every typo look like a blank app — and
     # would have made a traversal that got through look like it had been served.
