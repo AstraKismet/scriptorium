@@ -52,6 +52,15 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    containing invalid UTF-8 — routine for older Big5, GBK and Shift-JIS text —
    cannot be written to a JSON state file at all.
 
+   *Known gap, measured 2026-07-28:* the parser holds this property — 27 corpus
+   fixtures gate it in CI — but `cli.py` reads and writes through Python's text
+   mode, which normalizes every line ending on the way in and rewrites it as
+   `os.linesep` on the way out. So `lx render` emits CRLF for an LF source on
+   Windows and LF for a CRLF source on Linux, and mixed terminators do not
+   survive anywhere. The parser fix landed first because the I/O fix is worthless
+   without it; the I/O fix is scheduled. Until it lands, the guarantee holds for
+   `parse` → skeleton → substitution, not for the file the CLI writes.
+
    **(2b) Substitution.** Every slot carries its host syntax's escaping function
    and containment rules. A translated segment may not introduce a block-start
    sequence, must escape `&`, `<` and `]]>` inside an XML host, and must keep
@@ -68,6 +77,14 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    *Known gap, measured:* `**bold**`, `_italics_`, `~~strike~~` and link-text
    brackets currently reach the model unmasked. The direction is to finish the
    masking, not to weaken the rule.
+
+   *Deliberate exception, not a gap:* a wrapped block's interior line breaks and
+   the indentation that follows them are inside the segment, so the model does
+   see them — 79 of 2394 segments across the tracked documentation. They cannot
+   be masked or held in the skeleton without splitting one wrapped sentence into
+   several segments. `docs/decisions.md`, 2026-07-28, "Where a line terminator
+   lives", records why that alternative lost. Do not "fix" this by stripping
+   them; that is the round-trip defect repaired on the same date.
 
 4. **Checks are mechanically decidable.** A rule belongs in `checks.py` only if a
    program can decide it without judgement. Anything requiring taste goes in the
@@ -135,7 +152,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 53 passed, 2 xfailed; no network
+python -m pytest -q                 # 59 passed; no network
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
 
@@ -147,10 +164,12 @@ Run tests before proposing a change as finished. They are fast and cover the
 round-trip property, which is the thing most likely to break silently. That
 property is exercised by `tests/corpus/` — one input file per property, read as
 bytes and substituted back into the skeleton without going through `render()`.
-Two fixtures are `xfail(strict=True)`, one per defect scheduled in HANDOFF-002;
-fixing a defect turns the suite red until its entry is removed. **No fixture is
-ever edited to make a test pass** — if one fails, either the parser is wrong or
-the fixture is not valid input.
+Every fixture passes; `KNOWN_BROKEN` in `tests/test_pipeline.py` is empty and
+should stay that way. An entry there marks a measured defect with a repair
+scheduled, is `xfail(strict=True)`, and turns the suite red once the defect is
+fixed — which is how the entry gets removed in the same commit as the fix.
+**No fixture is ever edited to make a test pass** — if one fails, either the
+parser is wrong or the fixture is not valid input.
 
 ## Handoff work packages
 

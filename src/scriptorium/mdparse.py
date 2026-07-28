@@ -37,15 +37,31 @@ def parse(text, dnt=()):
             nodes.append({"t": "raw", "v": s})
 
     def emit_seg(source, kind):
-        source = source.rstrip("\r")
+        # A file written on Windows leaves the CR of its terminator at the end of
+        # the block, because parse() splits on "\n" alone. That CR is part of the
+        # line ending, not part of the sentence: the model must never see it, and
+        # it still has to reach the rendered document. So it moves into the
+        # skeleton here. The old code called `source.rstrip("\r")` and kept
+        # nothing, so every block of every CRLF file lost a byte.
+        #
+        # The whole trailing run moves, not just one CR. Taking exactly one is
+        # defensible — a second CR is arguably literal text — but `text\r\r\n`
+        # is what a twice-applied LF-to-CRLF conversion produces, and leaving the
+        # extra CR in the source would hand the model a control character to
+        # reproduce for no gain. Moving the run also keeps every segment source
+        # byte-identical to what the old code produced, so the repair invalidates
+        # no translation memory at all.
+        stripped = source.rstrip("\r")
+        cr = source[len(stripped):]
+        source = stripped
         if not source.strip() or not re.search(r"[A-Za-z\u00c0-\u024f" + CJK + r"]", source):
-            emit_raw(source)
+            emit_raw(source + cr)
             return
         counter[0] += 1
         sid = f"s{counter[0]:04d}"
         masked, slots = mask(source, dnt)
         if not strip_placeholders(masked).strip():
-            emit_raw(source)  # nothing left to translate
+            emit_raw(source + cr)  # nothing left to translate
             counter[0] -= 1
             return
         segs.append({
@@ -54,6 +70,8 @@ def parse(text, dnt=()):
             "target": None, "status": "pending", "origin": None,
         })
         nodes.append({"t": "seg", "id": sid})
+        if cr:
+            emit_raw(cr)  # lands ahead of the caller's "\n", restoring the CRLF
 
     # front matter
     if n and lines[0].strip() == "---":
@@ -136,7 +154,16 @@ def parse(text, dnt=()):
             while j < n and lines[j].strip() and not LIST_RE.match(lines[j]) \
                     and not HEADING_RE.match(lines[j]) and not FENCE_RE.match(lines[j]) \
                     and len(lines[j]) - len(lines[j].lstrip()) >= indent:
-                body.append(lines[j].strip())
+                # Kept verbatim, indent included. This looked like a case for
+                # .strip() — the marker prefix is already in a raw node, so the
+                # indent reads as skeleton — but the skeleton cannot hold it: a
+                # continuation's indent sits *after* a newline that is inside the
+                # segment source, and a raw node can only go before or after a
+                # whole segment. Splitting the item into one segment per line
+                # would make it representable, and would also cut a wrapped
+                # sentence into fragments the model must translate blind. So the
+                # indent stays in the source, where it round-trips.
+                body.append(lines[j])
                 j += 1
             emit_raw(prefix)
             emit_seg("\n".join(body), "list")

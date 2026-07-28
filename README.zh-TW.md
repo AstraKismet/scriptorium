@@ -37,9 +37,12 @@ Segment 以內容而非位置為索引鍵，所以修改原文時只會重譯真
 ## 現況
 
 **目前可用**（Markdown）：抽取、翻譯、驗證、修復、還原，以及一份能跨版本存活的翻譯記憶。
+原文文件的逐位元組重組由一組 27 份輸入的對抗性語料庫在 CI 上把關，Linux 與 Windows 都跑——
+但有一個量測到的例外：CLI 目前仍以 Python 的文字模式讀寫檔案，換行符號會在檔案邊界被正規化。
+那是下一個要修的東西。
 
-**建置中**（依序）：對抗性往返語料庫、圍堵驗證器、有型別的 placeholder、
-SQLite 狀態層、重建的審校工作台，然後是 EPUB 與純文字。
+**建置中**（依序）：圍堵驗證器、有型別的 placeholder、SQLite 狀態層、
+重建的審校工作台，然後是 EPUB 與純文字。
 
 **刻意排除**：DOCX、i18n 檔案格式，以及任何需要系統 web view 的東西。
 `docs/decisions.md` 記錄了每一項的理由，以及輸掉的替代方案。
@@ -178,7 +181,7 @@ agent 在自己的 context 裡翻譯、`lx apply` 收回。這是一等路徑而
 ## 開發
 
 ```bash
-python -m pytest -q          # 53 passed, 2 xfailed；不碰網路
+python -m pytest -q          # 59 passed；不碰網路
 python -m ruff check src tests
 ```
 

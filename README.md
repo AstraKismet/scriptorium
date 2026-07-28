@@ -46,11 +46,14 @@ fully local models.
 ## Status
 
 Working today, for Markdown: extract, translate, validate, repair, render, and a
-translation memory that survives revisions.
+translation memory that survives revisions. Byte-exact reassembly of the source
+document is gated in CI by an adversarial corpus of 27 inputs, on Linux and
+Windows — with one measured exception: the CLI still reads and writes through
+Python's text mode, so line endings are normalized at the file boundary. That is
+the next thing being fixed.
 
-Under construction, in this order: an adversarial round-trip corpus, containment
-validators, typed placeholders, a SQLite state layer, a rebuilt review workbench,
-then EPUB and plain text.
+Under construction, in this order: containment validators, typed placeholders, a
+SQLite state layer, a rebuilt review workbench, then EPUB and plain text.
 
 Deliberately out of scope: DOCX, the i18n file formats, and anything that needs a
 system web view. `docs/decisions.md` records why, along with the alternative that
@@ -203,7 +206,7 @@ than pass quietly; the check then fails the pull request.
 ## Development
 
 ```bash
-python -m pytest -q          # 53 passed, 2 xfailed; no network
+python -m pytest -q          # 59 passed; no network
 python -m ruff check src tests
 ```
 
