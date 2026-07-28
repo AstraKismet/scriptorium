@@ -317,6 +317,39 @@ application of fuzzy matches; and desktop shells such as Tauri, Wails or Electro
 — each of which requires a system web view and so destroys the download-and-run
 property that would be their only reason for existing.
 
+## 2026-07-28 · Process-tool names stay out of the tracked process docs
+
+An audit asked whether any available agent skill was missing from the working
+agreement. What came back was a proposed `## Process tooling` section in
+`AGENTS.md`, naming the ceremonies, advisors and read-only reviewers installed on
+the development machine. Rejected on three grounds.
+
+**Audience.** `AGENTS.md` exists so that Claude Code, Codex, Cursor and OpenCode
+load the same rules. The tools in question are Claude Code skills. A section
+naming them is inert for three of the four readers.
+
+**Measured rot.** Five skills were disabled on 2026-07-27 as unused. The comment
+in `.claude/dev-rituals.config.json` still named one of them — `design-doc-scribe`
+— the next day. A list no CI can check went stale in under twenty-four hours; a
+tracked one would rot the same way and be harder to notice.
+
+**The gap was not real.** What the audit read as unwired is already recorded, in
+the form that survives a tool being renamed. `.gitignore` governs the artifacts —
+`graphify-out/`, `decision-board*.html` — without naming the tools that emit
+them, and `docs/conventions/handoff-workflow.md` §5 already states the mechanism
+each `blocked-by` kind clears by. Writing `decision-ceremony` next to `design:`
+would create a second tracked copy of one rule, in two files that are required to
+agree.
+
+The rule this settles: **record the artifact and the mechanism, never the tool.**
+A per-machine file may name a tool; a tracked file may not.
+
+`.claude/dev-rituals.config.json` is gitignored — it carries an absolute
+`memoryRoot` — so it is a mirror and never a source. Measured the same day: of
+its eight keys, only `handoffDir`, `memoryRoot` and `docAuthor` are read by any
+installed skill. The remaining five are pointers at tracked originals, and where
+they disagree with `AGENTS.md`, `AGENTS.md` is right.
+
 ## 2026-07 · Placeholders use ⟦n⟧ rather than [[TYPE_NNN]]
 
 The original design used typed, per-type-numbered tags like `[[PROTECTED_CODE_001]]`.
