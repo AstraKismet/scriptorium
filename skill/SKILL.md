@@ -91,7 +91,7 @@ Wire `lx check` into CI so translations cannot regress silently — re-extract f
 
 Read these when the situation calls for them, not upfront:
 
-- `reference/zh-TW.md` — Traditional Chinese style: register, spacing, punctuation, term pairs, and the traps that make output read as character-converted rather than written for the locale. Read before any zh-TW work.
+- `reference/zh-TW.md` — Traditional Chinese style: register, spacing, punctuation, term pairs, and the traps that make output read as character-converted rather than written for the locale. Read before any zh-TW work. Its register section covers technical documentation; prose is a different register, selected with `lx extract --tone literary` and reported in `lx todo`'s `tone` field.
 - `reference/pipeline.md` — full command reference, state layout, batching and model-routing guidance, resuming interrupted jobs.
 - `reference/formats.md` — extending past Markdown: JSON/YAML string catalogs, gettext PO, MDX, HTML. Read before translating anything that is not a `.md` file.
 - `reference/critique.md` — the design rationale, and the failure modes of prompt-only translation rules. Read when someone asks why the pipeline is shaped this way, or wants to modify it.

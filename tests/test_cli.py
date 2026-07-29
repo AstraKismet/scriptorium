@@ -299,3 +299,27 @@ def test_state_and_rendered_output_keep_the_source_terminator(tmp_path):
             tmp_path, env)
     assert r.returncode == 0, r.stderr.decode("utf-8", "replace")
     assert (tmp_path / "out.md").read_bytes() == CJK_DOC
+
+
+def test_extract_names_a_non_default_register_and_stays_quiet_about_the_default(tmp_path):
+    """The register decides the brief and which half of the memory answers, so a
+    document that is in one says so on the line reporting what carried over.
+
+    Only when it is not the default, for the same reason `rejected` is only
+    printed when it happened: a line every document prints is a line nobody
+    reads. The second half also pins the stickiness — the third command names no
+    register and must not silently return the document to the configured one.
+    """
+    (tmp_path / "d.md").write_bytes(b"He left without a word.\n")
+    env = {**os.environ, "PYTHONPATH": SRC}
+    assert _lx(["init"], tmp_path, env).returncode == 0
+
+    r = _lx(["extract", "d.md", "--lang", "zh-TW", "--tone", "literary"], tmp_path, env)
+    assert r.returncode == 0, r.stderr.decode("utf-8", "replace")
+    assert "tone literary" in r.stdout.decode("utf-8")
+
+    r = _lx(["extract", "d.md", "--lang", "zh-TW"], tmp_path, env)
+    assert "tone literary" in r.stdout.decode("utf-8")
+
+    r = _lx(["extract", "d.md", "--lang", "zh-TW", "--tone", "technical"], tmp_path, env)
+    assert "tone" not in r.stdout.decode("utf-8")

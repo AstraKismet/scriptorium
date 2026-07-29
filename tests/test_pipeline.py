@@ -13,7 +13,7 @@ from scriptorium.config import DEFAULT_CONFIG  # noqa: E402
 from scriptorium.mask import mask, repair_placeholders, unmask  # noqa: E402
 from scriptorium.mdparse import parse, render  # noqa: E402
 from scriptorium.normalize import normalize  # noqa: E402
-from scriptorium.translate import accept, parse_reply  # noqa: E402
+from scriptorium.translate import _LANG_TERMS, _system_prompt, accept, parse_reply  # noqa: E402
 
 SAMPLE = """\
 ---
@@ -557,6 +557,75 @@ def test_config_layering_keeps_new_defaults():
     assert merged["tone"] == "literary"
     assert merged["batch"]["size"] == 5
     assert merged["batch"]["concurrency"] == DEFAULT_CONFIG["batch"]["concurrency"]
+
+
+# --- the language brief, and the register that selects it --------------------
+#
+# The defect these pin, measured 2026-07-29 at commit f11fb53: `--tone literary`
+# could be typed, was stored on the document, and reached `Tone: literary.` in the
+# system prompt — and then `_LANG_BRIEFS["zh-TW"]` ended, unconditionally, with
+# "Write technical documentation register". The last thing the model read
+# overrode the knob two paragraphs above it. See `docs/decisions.md`, D4.
+
+
+def test_register_brief_replaces_the_documentation_rules_for_a_novel():
+    tech = _system_prompt("en", "zh-TW", "technical", "draft")
+    lit = _system_prompt("en", "zh-TW", "literary", "draft")
+
+    assert "Write technical documentation register" in tech
+    assert "Nominalize headings" in tech
+    for documentation_rule in ("Write technical documentation register",
+                               "Nominalize headings", "請 for instructions",
+                               "subject usually dropped", "technical documentation"):
+        assert documentation_rule not in lit
+    assert "Write narrative prose" in lit
+
+
+def test_register_brief_covers_japanese_as_well():
+    tech = _system_prompt("en", "ja", "technical", "draft")
+    lit = _system_prompt("en", "ja", "literary", "draft")
+    assert "technical documentation register" in tech
+    assert "technical documentation register" not in lit
+    assert "narrative prose" in lit
+    assert "全角" in tech and "全角" in lit      # the shared block reaches both
+
+
+@pytest.mark.parametrize("typed", ["Literary", " literary ", "LITERARY"])
+def test_register_brief_ignores_case_and_padding(typed):
+    """`--tone Literary` and `--tone literary` naming two registers — and so two
+    sets of banked wording — is a split nobody would ever find."""
+    assert (_system_prompt("en", "zh-TW", typed, "draft").replace(f"Tone: {typed}.", "")
+            == _system_prompt("en", "zh-TW", "literary", "draft").replace("Tone: literary.", ""))
+
+
+def test_brief_terminology_shared_between_the_registers():
+    """One source, not two copies. The zh-TW vocabulary list is the output of the
+    2026-07-28 invariant-4 audit, and two copies of it drifting apart is how that
+    audit gets silently undone."""
+    tech = _system_prompt("en", "zh-TW", "technical", "draft")
+    lit = _system_prompt("en", "zh-TW", "literary", "draft")
+    assert _LANG_TERMS["zh-TW"] in tech
+    assert _LANG_TERMS["zh-TW"] in lit
+    for row in ("軟體 not 軟件", "資料 for data but 數據 for measured readings",
+                "智慧 vs 智能 (智能障礙)", "使用者 vs 用戶端",
+                "Use full-width ，。！？；： and 「」 inside Chinese text."):
+        assert tech.count(row) == 1
+        assert lit.count(row) == 1
+
+
+def test_unknown_tone_falls_back_to_the_default_register():
+    """The knob is free text by design: an unrecognized value still reaches the
+    model on the `Tone:` line, and the brief is the default register's."""
+    odd = _system_prompt("en", "zh-TW", "brisk", "draft")
+    assert "Tone: brisk." in odd
+    assert odd.replace("Tone: brisk.", "Tone: technical.") == \
+        _system_prompt("en", "zh-TW", "technical", "draft")
+
+
+def test_unknown_tone_falls_back_for_a_language_with_no_brief_at_all():
+    p = _system_prompt("en", "fr", "literary", "draft")
+    assert "Tone: literary." in p
+    assert p.endswith('{"s0001": "...", "s0002": "..."}')     # nothing appended
 
 
 # --- the skeleton guarantee (invariant 2a) ---------------------------------

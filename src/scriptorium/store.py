@@ -5,7 +5,7 @@ import json
 import os
 import re
 
-from .config import STATE, dump_json, load_json
+from .config import DEFAULT_TONE, STATE, canonical_tone, dump_json, load_json
 
 #: Shape of a document state file. Bumped when a reader of an older file would be
 #: wrong rather than merely incomplete. `__version__` cannot serve here: it moves
@@ -40,9 +40,33 @@ def seg_hash(text):
 
 # ── the translation-memory key ─────────────────────────────────────────────
 
+def key_tone(tone):
+    """The register as the key sees it, where the default register is the null.
+
+    Absent, null, and the default register are one value. That is what keeps
+    every entry banked before registers existed answering a document in the
+    default register — and for everything a *model* produced it is true as well
+    as convenient, because the build that wrote it ended the brief with "Write
+    technical documentation register" whatever `tone` had been typed. The
+    exception is wording that arrived through `lx apply`, which is a person's or
+    an agent's own words and was never briefed by anything; such an entry sits in
+    this tier because nothing recorded its register, not because it is known to
+    be in this one.
+
+    *Lost:* keying on the register always and adding a second, register-blind
+    lookup for the old tier, the way :func:`tm_lookup` already does for
+    ``segmentation_version``. It costs a lookup, and — decisively — it lets a
+    documentation-era wording be claimed by a novel, which is the one failure
+    this axis was added to prevent. See ``docs/decisions.md``, 2026-07-29.
+    """
+    register = canonical_tone(tone)
+    return None if register == DEFAULT_TONE else register
+
+
 def tm_key(content_hash, context=None, segmentation_version=SEGMENTATION_VERSION,
-           variant=None):
-    """What identifies a translation: its content, its place, its cut, its form.
+           variant=None, tone=None):
+    """What identifies a translation: its content, its place, its cut, its form,
+    and the register it was written in.
 
     A tuple, not a digest over a canonical serialization. The hard requirement is
     that ``variant=None`` be indistinguishable from the field's absence — getting
@@ -52,6 +76,13 @@ def tm_key(content_hash, context=None, segmentation_version=SEGMENTATION_VERSION
     opaque digest, which would also hand a future SQLite schema one indexable
     column. Nothing on disk holds the key — the memory file holds the fields it is
     built from — so the representation is free to stay readable in a traceback.
+
+    ``tone`` is the one field that cannot hold by construction, because its null
+    is a *string* the caller is holding — ``"technical"`` has to compare equal to
+    absent, and no amount of ``dict.get`` makes it. So the collapse runs here,
+    inside the one function no caller can route around, rather than at the four
+    call sites where it would be a rule someone has to keep correct. The other
+    three fields are still passed through raw.
 
     ``context`` is gettext's ``msgctxt``: what lets one source string carry
     different translations in different places. Markdown sets it to the segment
@@ -64,12 +95,20 @@ def tm_key(content_hash, context=None, segmentation_version=SEGMENTATION_VERSION
     Reuse is gated by ``translate.accept`` instead — see ``docs/decisions.md``,
     2026-07-29.
     """
-    return (content_hash, context, segmentation_version, variant)
+    return (content_hash, context, segmentation_version, variant, key_tone(tone))
 
 
-def segment_key(seg):
-    """The key for a segment this build just parsed, so the cut is this build's."""
-    return tm_key(seg["hash"], seg.get("context"), SEGMENTATION_VERSION, seg.get("variant"))
+def segment_key(seg, tone=None):
+    """The key for a segment this build just parsed, so the cut is this build's.
+
+    ``tone`` is threaded in rather than read off the segment: the register is a
+    document-level fact, and a document-level fact does not belong inside a
+    segment — the same rule ``doc["eol"]`` follows, and for the same reason.
+    Copying it onto every segment would also be a state-file schema change, so it
+    would cost a ``STATE_VERSION`` bump and a migration, for a duplicate.
+    """
+    return tm_key(seg["hash"], seg.get("context"), SEGMENTATION_VERSION,
+                  seg.get("variant"), tone)
 
 
 def record_key(rec):
@@ -77,11 +116,14 @@ def record_key(rec):
 
     A field that is null and a field that is absent mean the same thing in both
     directions: this reader collapses them, and :func:`tm_record` never writes a
-    null. That is the one rule the whole memory rests on.
+    null. That is the one rule the whole memory rests on. ``tone`` extends it by
+    one step — the default register collapses too, in :func:`key_tone` — so a
+    line another tool wrote as ``"tone": "technical"`` is the same entry as a
+    line with no ``tone`` at all.
     """
     version = rec.get("segmentation_version")
     return tm_key(rec["hash"], rec.get("context"),
-                  0 if version is None else version, rec.get("variant"))
+                  0 if version is None else version, rec.get("variant"), rec.get("tone"))
 
 
 def doc_id(src):
@@ -136,8 +178,8 @@ def load_doc(src, lang):
     return doc
 
 
-def prior_targets(src, lang):
-    """``{key: (target, origin)}`` from an existing state file.
+def prior_doc(src, lang):
+    """The stored state, read the way extract has to read it. ``{}`` if there is none.
 
     Deliberately not :func:`load_doc` for the *older* direction: this is the one
     reader that must work across a bump, because re-extracting is how a stale
@@ -149,6 +191,21 @@ def prior_targets(src, lang):
     shape of this function, and it silently downgraded such a file — with a green
     exit code, while `lx check` on the same file refused to touch it.
 
+    Split out of :func:`prior_targets` on 2026-07-29 so that extract can read the
+    document's register from the same parse it reads its translations from. The
+    alternative was a second full read of a file that is a whole book.
+    """
+    p = store_path(src, lang)
+    if not os.path.exists(p):
+        return {}
+    doc = load_json(p, {})
+    _refuse_if_newer(doc, src, lang)
+    return doc
+
+
+def prior_targets(doc):
+    """``{key: (target, origin)}`` from a state file :func:`prior_doc` has read.
+
     The keys are :func:`segment_key`, not the content hash alone, because the
     collision the context axis removes is a within-document one first: a sentence
     that appears as a paragraph and as a blockquote used to carry over from one to
@@ -158,13 +215,19 @@ def prior_targets(src, lang):
     changed segmentation has already changed the segment text and the content hash
     discriminates on its own. Keying on the file's version instead would make
     every bump silently discard the translations `lx extract` promises to carry.
+
+    The register does **not** get that treatment, and the difference is the point:
+    a changed segmentation changes the segment text, so the hash discriminates on
+    its own, while a changed register leaves the source byte-identical. So these
+    keys carry the *file's* register, extract looks them up under the new one, and
+    a document re-extracted into another register carries nothing over. That is
+    the intended result — the alternative keeps documentation wording in a
+    document now labelled `literary`, and `lx commit` then banks all of it under
+    the literary key, which poisons the memory permanently rather than costing
+    one re-translation.
     """
-    p = store_path(src, lang)
-    if not os.path.exists(p):
-        return {}
-    doc = load_json(p, {})
-    _refuse_if_newer(doc, src, lang)
     out = {}
+    tone = doc.get("tone")
     for s in doc.get("segments", []):
         if not (s.get("hash") and s.get("target")):
             continue
@@ -174,7 +237,7 @@ def prior_targets(src, lang):
         # presence, not truth: a format whose context is legitimately null must
         # not silently acquire the kind instead.
         ctx = s["context"] if "context" in s else s.get("kind")
-        key = tm_key(s["hash"], ctx, SEGMENTATION_VERSION, s.get("variant"))
+        key = tm_key(s["hash"], ctx, SEGMENTATION_VERSION, s.get("variant"), tone)
         out[key] = (s["target"], s.get("origin") or "carryover")
     return out
 
@@ -187,7 +250,7 @@ def save_doc(src, lang, doc):
 
 
 def tracked(lang=None):
-    # Version-independent, like `prior_targets` and for the same reason: `stats`
+    # Version-independent, like `prior_doc` and for the same reason: `stats`
     # and the workbench's document list read counts and a source path, so a state
     # file waiting to be re-extracted should still appear rather than take the
     # whole listing down.
@@ -230,7 +293,7 @@ def load_tm(lang):
     return tm
 
 
-def tm_lookup(tm, seg):
+def tm_lookup(tm, seg, tone=None):
     """``(target, origin)`` for a segment, or ``(None, None)``.
 
     The exact key first. A record carrying neither a context nor a segmentation
@@ -249,23 +312,32 @@ def tm_lookup(tm, seg):
     A segment carrying a variant is not offered the fallback. A record written
     before variants existed cannot be known to be the right form, and guessing
     there is how a plural becomes a singular in a place nobody looks.
+
+    A segment in a non-default register is not offered it either, for the same
+    reason one step along: nothing in that tier records a register, and what a
+    model put there was briefed as documentation whatever `tone` said, so handing
+    it to a novel is a guess with the odds against it rather than one that might
+    be right. A document in the default register still gets the tier in full,
+    which is what keeps the upgrade free.
     """
-    exact = tm.get(segment_key(seg))
+    exact = tm.get(segment_key(seg, tone))
     if exact is not None:
         return exact, "tm"
-    if seg.get("variant") is None:
-        legacy = tm.get(tm_key(seg["hash"], None, 0, None))
+    if seg.get("variant") is None and key_tone(tone) is None:
+        legacy = tm.get(tm_key(seg["hash"], None, 0, None, None))
         if legacy is not None:
             return legacy, "tm:legacy"
     return None, None
 
 
-def tm_record(seg):
+def tm_record(seg, tone=None):
     """The memory line for a translated segment. A null field is not written.
 
     Omitting a null is the same rule :func:`record_key` reads by — absent and null
     mean one thing — and it keeps the file legible, which is why the memory is
-    JSONL and in version control at all.
+    JSONL and in version control at all. The default register is a null here by
+    :func:`key_tone`, so a documentation project's memory file is byte-for-byte
+    the file it was before registers existed.
     """
     rec = {"hash": seg["hash"]}
     if seg.get("context") is not None:
@@ -273,6 +345,8 @@ def tm_record(seg):
     rec["segmentation_version"] = SEGMENTATION_VERSION
     if seg.get("variant") is not None:
         rec["variant"] = seg["variant"]
+    if key_tone(tone) is not None:
+        rec["tone"] = key_tone(tone)
     rec["source"] = seg["source"]
     rec["target"] = seg["target"]
     return rec
@@ -288,14 +362,20 @@ def tm_records(doc, tm):
     key: the comparison is against the exact key, which such a segment misses.
     That is the upgrade path, not a duplicate — the second commit finds the
     versioned record and skips it.
+
+    The register is read off the document here rather than passed in, because
+    both callers already hold the document and neither should have to know that
+    the key grew a field. It is the only place a key is built from stored state
+    whose register is the one that produced the wording.
     """
     out = []
+    tone = doc.get("tone")
     for seg in doc["segments"]:
         if not seg.get("target"):
             continue
-        if tm.get(segment_key(seg)) == seg["target"]:
+        if tm.get(segment_key(seg, tone)) == seg["target"]:
             continue
-        out.append(tm_record(seg))
+        out.append(tm_record(seg, tone))
     return out
 
 

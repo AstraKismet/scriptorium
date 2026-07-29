@@ -5,10 +5,17 @@ import os
 
 STATE = ".lx"
 
+#: The register a document is in when nobody said otherwise — and the value the
+#: translation-memory key treats as its null, so that everything banked before
+#: registers existed keeps answering (see :func:`store.key_tone`). Named once
+#: rather than written as a literal in both places: the two have to be the same
+#: string, and a drift between them silently invalidates the whole memory.
+DEFAULT_TONE = "technical"
+
 DEFAULT_CONFIG = {
     "source_lang": "en",
     "targets": ["zh-TW"],
-    "tone": "technical",
+    "tone": DEFAULT_TONE,
     "glossary": "config/glossary.csv",
     "dnt": "config/dnt.txt",
     "sources": ["docs/**/*.md"],
@@ -54,6 +61,21 @@ DEFAULT_CONFIG = {
     "routing": {"draft": "local", "polish": "local", "repair": "local"},
     "batch": {"size": 25, "concurrency": 2, "max_repair_rounds": 3},
 }
+
+
+def canonical_tone(value):
+    """What counts as the same register: the tone, stripped and lowercased.
+
+    One normalizer for the two readers that must agree — `translate` picks the
+    language brief with it, `store` builds the memory key from it — because
+    ``--tone Literary`` and ``--tone literary`` naming two registers, and
+    therefore two sets of banked wording, is a split nobody would ever find.
+
+    It decides sameness only. The user's own string still reaches the model on
+    the ``Tone:`` line, and an unrecognized one still selects the default
+    register's brief, so this narrows nothing the field could say before.
+    """
+    return str(value or "").strip().lower() or DEFAULT_TONE
 
 
 def load_json(path, default=None):
