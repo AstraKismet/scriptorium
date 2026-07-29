@@ -3,6 +3,64 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-07-29 · A hard line break survives normalization, and a long one is canonicalized to two spaces
+
+Closing HANDOFF-010. `normalize()` collapsed every run of two or more blanks, so
+a Markdown hard break the translation had correctly preserved was deleted on the
+way in: measured `'第一行  \n第二行'` → `'第一行\n第二行'`, two lines joined into one
+on render. Invariant 5 says fix rather than report; it does not say delete
+something meaningful.
+
+**The package named one culprit and there were two.** It cited `collapse_space`,
+which is where the defect was found. But the ops run in the order `config.py`
+lists — `punct`, `pangu`, `collapse_space` — and `punct`'s "no space after
+fullwidth punctuation" rule, `(?<=[FULLWIDTH])[ \t]+`, reaches the run first. A
+zh-TW line ends in `。` far more often than not, so in practice *that* op deleted
+most hard breaks, and a fix confined to `collapse_space` would have passed the
+package's own acceptance test — which uses a line with no terminal punctuation —
+while leaving the common case broken. The package scoped `punct` OUT; that
+scoping was written believing it was uninvolved. Both are guarded now, with the
+same rule and no other change to `punct`.
+
+**Three or more spaces before a line break are canonicalized to exactly two.**
+*Lost:* preserving the run verbatim. Both mean the same `<br>` in Markdown, so
+neither deletes meaning, and the case is decided by what the op is for: stray
+runs from an editor are exactly what `collapse_space` exists to remove, and a
+five-space break is one. Preserving it verbatim keeps invisible byte-level
+variation between two renderings of the same wording — one from a model, one from
+`lx apply` — for no gain any reader can see. This binds the *target* only; the
+source side is untouched by invariant 2a, and `tests/corpus/hard-line-breaks.md`
+keeps its three-space line byte-for-byte.
+
+**A tab run is not converted, it is removed.** CommonMark's hard break is two or
+more *spaces* before the line ending, so `'a\t\t\n'` marks nothing. Turning it
+into two spaces would invent a break nobody wrote — the mirror image of the
+defect being fixed.
+
+**What is still removed, because it means nothing:** a single space before a line
+break, a line consisting only of blanks, and a run at the very end of a segment
+(a `<br>` before a block end renders nothing). `accept()` strips segment ends
+before normalize anyway; `lx apply` does not, which is why the last one stays.
+
+**The rule is applied blind to the host format.** `normalize(text, lang, cfg)`
+cannot see whether the segment lands in Markdown or plain text, and a trailing
+two spaces mean nothing outside Markdown. *Lost:* threading the format through
+three call sites and `translate.accept` to make the op host-aware — the wrong
+price for suppressing two invisible characters, when the failure it would prevent
+is cosmetic and the failure it would introduce is a deleted `<br>`.
+
+**`pangu` was checked and needed nothing.** Both of its rules are zero-width
+assertions between a CJK character and a Latin one, and neither can match across
+a blank, so it cannot insert or remove a space at a line end from either
+direction. Recorded because the question is not obvious from reading it and the
+answer is cheap to lose.
+
+**Verified by mutation, not by review.** Thirteen mutants of the two guards, the
+line-end pass and its two predicates; twelve fail the suite. The survivor is the
+`[ \t]*` inside `collapse_space`'s lookahead, which is redundant given the pass
+that runs before it and is commented as such — it is there so the line is correct
+read on its own.
+
 ## 2026-07-29 · The workbench confines every path it is given, and answers only its own page
 
 Closing HANDOFF-008's three measured defects: `/api/render` wrote to any path the

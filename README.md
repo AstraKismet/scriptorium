@@ -326,7 +326,7 @@ that lost.
 ## Development
 
 ```bash
-python -m pytest -q                # 303 passed, no network
+python -m pytest -q                # 326 passed, no network
 python -m ruff check src tests
 ```
 
