@@ -65,7 +65,20 @@ def parse(text, dnt=()):
             counter[0] -= 1
             return
         segs.append({
+            # `context` is this format's answer to gettext's msgctxt, and for
+            # Markdown the answer is the block kind: it is what stops a paragraph
+            # translation from being reused inside a blockquote, where a line
+            # break the paragraph was free to have lands outside the block. It
+            # duplicates `kind` today and is stored separately anyway — a format
+            # whose context is a key path or a spine position has no `kind` to
+            # borrow, and the memory key must not have to know which format it is
+            # looking at.
+            #
+            # `variant` is the i18n hedge: null until something emits plural or
+            # gender forms, present now because adding it later means a second
+            # migration and a second migration invalidates the whole memory.
             "id": sid, "kind": kind, "hash": seg_hash(source),
+            "context": kind, "variant": None,
             "source": source, "masked": masked, "slots": slots,
             "target": None, "status": "pending", "origin": None,
         })

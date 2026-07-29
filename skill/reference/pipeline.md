@@ -39,13 +39,30 @@ the batch.
 
 ## Incremental re-translation
 
-Segment identity is a hash of the source text, not its position. Edit one paragraph
-in a 400-segment document and `extract` reports `reused 399 | pending 1`. This is
-the property that makes the pipeline usable on a document that goes through many
+A segment is identified by its content and the kind of block it sits in, never by
+its position: the memory key is `(content_hash, context, segmentation_version)`
+plus a nullable `variant`, where `context` is the block kind for Markdown. Edit
+one paragraph in a 400-segment document and `extract` reports
+`reused 399 | pending 1`; move a whole section and nothing goes pending at all.
+This is what makes the pipeline usable on a document that goes through many
 revisions — nothing is retranslated unless its source actually changed, and
 approved wording never silently drifts between versions.
 
-Because reuse is content-addressed, moving a section produces zero pending work.
+The block kind is in the key because a paragraph translation may wrap across
+lines and a blockquote's may not: reusing one as the other puts the second line
+outside the quote.
+
+A memory hit is a proposal, not a result. It is taken only if its placeholders
+still match the segment it matched — the same gate model output passes — so
+editing `config/dnt.txt` cannot resurrect wording that was masked differently
+when it was banked. `extract` reports what it refused:
+
+```
+segments 120 | reused 118 | pending 2 | 2 stale memory hit(s) refused
+```
+
+Those segments are pending, not damaged, and the memory entry is untouched. Put
+the do-not-translate list back and the same entry answers again.
 
 ## Batching and routing
 

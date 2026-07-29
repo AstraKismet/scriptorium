@@ -3,6 +3,100 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-07-29 · The memory key gains three axes, and reuse stops being a write
+
+Executing B5 below, with the derived i18n hedge folded into the same migration
+because a second one invalidates everything the first one banked. The key is now
+`(content_hash, context, segmentation_version)` plus a nullable `variant`, and a
+translation-memory hit is a *proposal* that goes through `translate.accept`
+rather than a target written straight into the segment.
+
+**`accept()`, not a mask fingerprint.** The IN list offered both. A fingerprint —
+the do-not-translate list plus a mask-pattern version, folded into the hash —
+loses on three counts. It invalidates wholesale where the gate rejects
+individually: adding one DNT term would orphan every entry in the language,
+including the overwhelming majority whose placeholder set that term never
+touched. It models only the drift it knows about, so a new entry in
+`INLINE_PATTERNS` needs a version bump that someone has to remember, while the
+gate compares the actual placeholder sets and cannot be forgotten. And it puts a
+config-derived value inside the key, so the same wording banked on two machines
+with different DNT lists would never be one entry — which defeats the point of a
+memory that travels. The gate also catches drift no fingerprint models at all: a
+hand-edited memory, a target emptied by a bad merge, a `⟦2⟧` a person deleted.
+*Kept from the fingerprint idea:* nothing. The key is deliberately blind to the
+mask configuration, and that blindness is what the gate exists to make safe.
+
+**Measured, both directions, and only one of them was ever visible.** Bank a
+segment under `dnt=['Celurion','Acme']`, drop `Acme`, re-extract: the banked
+target keeps a `⟦2⟧` the new slot map has nothing to restore, so a bare `⟦2⟧`
+reached the rendered file. Add a term instead and the failure is quieter — the
+target is short a placeholder, so the reused wording renders as ordinary prose
+with the new term unprotected, wrong in a way no reader of the output can see.
+HANDOFF-007's acceptance criterion names the second direction and the first is
+the one that renders damage; both are fixtures now.
+
+**The key is a tuple, not a digest.** `variant=None` must be indistinguishable
+from the field's absence or the entire memory invalidates the moment this lands,
+and a tuple of read fields makes that true by construction — `dict.get` yields
+`None` for both — instead of a canonicalization rule someone must keep correct.
+*Lost:* an opaque digest, which would hand a future SQLite schema one indexable
+column and would read as a single value everywhere. Nothing on disk holds the
+key; the memory file holds the fields it is built from, which is also what keeps
+it diffable. The representation is therefore free to stay readable in a
+traceback, and the requirement stops being something a test has to defend.
+
+**For Markdown the context is the block kind, stored separately from `kind`
+anyway.** It duplicates the field today and buys the format boundary: a key path
+or an EPUB spine position has no `kind` to borrow, and `store` must not have to
+know which format it is looking at. Measured 2026-07-28: `A shared sentence.`
+hashes `649729361f3c` as a paragraph and as a blockquote, and a paragraph
+translation wrapped across two lines, carried onto the blockquote, put its second
+line outside the quote — reported by `containment` at the reused segment, which
+is a fault location pointing at work nobody wrote.
+
+**Unversioned records are accepted, and marked.** Every entry banked before today
+has a content hash and nothing else. Refusing them would empty a user's memory on
+upgrade in exchange for nothing, because the reuse they grant now goes through
+the same gate as everything else; so absent means version 0, version 0 matches on
+content alone, and the hit is recorded as `tm:legacy` rather than `tm` so a
+reviewer can see which reuses still rest on a context-blind match. `lx commit`
+rewrites the entry under the full key the first time that wording is banked
+again, so the tier drains instead of lingering. A segment carrying a `variant` is
+not offered the fallback — a record from before variants existed cannot be known
+to be the right form. *Lost:* ignoring them, which is defensible only because
+this repository's own memory is empty, and that is not true of anyone else's.
+
+**Prior state and the memory are both proposals, and the memory is tried second
+rather than skipped.** The old code took the document's own target whenever it
+had one. Now a refused carryover falls through to the memory, so good banked
+wording is not lost behind a stale copy sitting in front of it. `prior_targets`
+keys on `segment_key` for the same reason the memory does — the paragraph and
+blockquote collision is a within-document one first — but deliberately uses *this
+build's* segmentation version on both sides rather than the file's: that field
+guards the memory across time, while here the source has just been re-parsed, so
+a changed segmentation has already changed the segment text and the content hash
+discriminates alone. Keying on the file's version would make every bump silently
+discard the translations `lx extract` promises to carry, which is the one thing
+that reader exists to do.
+
+**`lx apply` deliberately stays outside the gate.** It carries a person's or an
+agent's own words, and refusing those at the door with no override is worse than
+reporting them at `lx check`, where a reviewer is already looking. That is also
+why `accept` stayed in `translate.py` instead of moving to a module of its own:
+two of the three target sources pass through it and the third is excluded on
+purpose, so a module named for a universal gate would misdescribe the design.
+When `apply` is brought under it — a separate decision, about whether a human's
+paste is refused or reported — the split can happen then.
+
+**State files are version 3, and `.lx/tm.*.jsonl` is not rewritten.** Segments
+gained `context` and `variant`, so a version-2 file would key wrongly while
+looking current, and `load_doc` refuses it with the `lx extract` message.
+`prior_targets` reads one anyway — that is how extract migrates it — and reads
+`kind` where `context` is absent, which is not a guess: every build that could
+have written such a file produced Markdown. The memory itself is append-only,
+always; anything that rewrote it in place would destroy the git diffability that
+is the whole reason it is version-controlled.
+
 ## 2026-07-28 · The containment validators, and what a rule may compare against
 
 Executing B2 below, and closing the half of invariant 2b that was measured but

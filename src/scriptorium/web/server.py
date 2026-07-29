@@ -24,7 +24,7 @@ from ..cli import default_output, do_apply, do_check, do_extract, do_render, pen
 from ..config import load_config
 from ..docio import write_document
 from ..providers import available
-from ..store import append_tm, load_doc, load_tm, tracked
+from ..store import append_tm, load_doc, load_tm, tm_records, tracked
 
 STATIC = os.path.join(os.path.dirname(__file__), "static")
 
@@ -157,8 +157,9 @@ class _Handler(BaseHTTPRequestHandler):
         cfg = load_config()
         src, lang = body.get("src"), body.get("lang")
         if path == "/api/extract":
-            doc, reused = do_extract(src, lang, cfg, body.get("tone"), body.get("reset", False))
-            return {"segments": len(doc["segments"]), "reused": reused}
+            doc, reused, rejected = do_extract(src, lang, cfg, body.get("tone"),
+                                               body.get("reset", False))
+            return {"segments": len(doc["segments"]), "reused": reused, "rejected": rejected}
         if path == "/api/save":
             applied, unknown = do_apply(src, lang, cfg, body["targets"], origin="human")
             return {"applied": applied, "unknown": unknown}
@@ -176,11 +177,7 @@ class _Handler(BaseHTTPRequestHandler):
             return {"wrote": out, "missing": missing}
         if path == "/api/commit":
             doc = load_doc(src, lang)
-            tm = load_tm(lang)
-            recs = [{"hash": s["hash"], "source": s["source"], "target": s["target"]}
-                    for s in doc["segments"]
-                    if s.get("target") and tm.get(s["hash"]) != s["target"]]
-            return {"committed": append_tm(lang, recs)}
+            return {"committed": append_tm(lang, tm_records(doc, load_tm(lang)))}
         raise ValueError(f"unknown endpoint {path}")
 
 

@@ -135,7 +135,7 @@ src/scriptorium/
   normalize.py   deterministic repair: punctuation width, CJK/Latin spacing
   checks.py      validators; error severity fails the build. Invariant 2b lives
                  here: block-start containment, host escaping, placeholder pairs
-  store.py       .lx/ state, content-addressed segments, translation memory
+  store.py       .lx/ state, the translation-memory key, the memory itself
   config.py      layered config, glossary, do-not-translate list
   translate.py   batching, concurrency, JSON tolerance, per-segment retry
   providers/     openai_compat (primary), anthropic; base holds transport + retry
@@ -154,7 +154,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 253 passed; no network
+python -m pytest -q                 # 269 passed; no network
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
 
@@ -264,10 +264,20 @@ silently. That file also holds the downgrade ledger.
 - Segment ids are per-document and sequential. The translation memory key is
   `(content_hash, context, segmentation_version)` plus a nullable `variant` —
   never position. `variant=null` must hash identically to the field's absence, or
-  the entire memory invalidates.
+  the entire memory invalidates; it is a tuple of read fields for exactly that
+  reason, so the property holds by construction rather than by a canonicalizer.
+  `context` is gettext's `msgctxt`; for Markdown it is the block kind, and it is
+  stored beside `kind` rather than derived from it, because a key path or a spine
+  position has no `kind` to borrow. A record with no `segmentation_version`
+  predates the field, matches on content alone, and is marked `tm:legacy`.
 - Translation memory hits go through the same acceptance path as model output.
   Writing a target directly is how a stale mask configuration renders a bare
-  `⟦2⟧`.
+  `⟦2⟧`. The key is deliberately blind to the mask configuration — that is what
+  keeps one wording one entry across machines — so `translate.accept` is what
+  makes the blindness safe. Carryover from a document's own prior state is a
+  proposal on the same terms, and the memory is tried when it is refused.
+  `lx apply` is the deliberate exception: a person's words are reported at
+  `lx check`, not refused at the door.
 - New language support: add a brief to `_LANG_BRIEFS` in `translate.py`, a
   normalization profile in `config.py`, and a reference file under
   `skill/reference/`.

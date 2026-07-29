@@ -86,7 +86,7 @@ src/scriptorium/
   mdparse.py   markdown -> (skeleton, segments); render() puts it back
   normalize.py deterministic repair: punctuation width, CJK/Latin spacing
   checks.py    validators; error severity fails the build
-  store.py     .lx/ state, content-addressed segments, translation memory
+  store.py     .lx/ state, the translation-memory key, the memory itself
   config.py    layered config, glossary, do-not-translate list
   translate.py batching, concurrency, JSON tolerance, per-segment retry
   providers/   openai_compat (primary), anthropic
