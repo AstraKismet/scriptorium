@@ -254,6 +254,24 @@ agent 在自己的 context 裡翻譯、`lx apply` 收回來。這是正規做法
   永遠不自動套用，因為模糊命中的 placeholder 集合本來就一定不同。
 - **`escaping` 目前是空轉的**，要等到有 XML 這類語法的格式進來才會生效。
 
+## 和其他工具的差別
+
+我查過的開源 Markdown 在地化工具，沒有例外，都是從語法樹把目標文件重新算出來。
+[po4a](https://www.po4a.org/) 預設會替段落重新斷行；
+[mdpo](https://github.com/mondeja/mdpo) 和 [Weblate](https://weblate.org/) 都從 AST
+重新算——Weblate 走的是 [translate-toolkit](https://github.com/translate/translate)，
+而它自己的文件就寫著「不會檢查譯文是否保持原文的格式」；
+[Okapi Framework](https://okapiframework.org/) 的 Markdown filter 更有一個 2018 年開到
+現在的 bug：縮排式程式碼區塊會掉開頭的空白。
+
+這對它們來說是划算的交換，因為換到的是廣度。po4a 支援二十種格式，翻了 Debian 的
+文件二十年。Weblate 給你譯者社群、審校流程和上百種格式。
+[OmegaT](https://omegat.org/) 是真正的 CAT 工作環境，有模糊比對、索引檢索和術語窗格。
+
+Scriptorium 只支援一種格式，換來的是把譯文代回原本的位元組。
+你如果需要很多格式或很多譯者，就用那些工具。你如果需要檔案原封不動回來、
+只有你翻譯的地方變了，那正是這個工具存在的唯一理由。
+
 ## 專案現況
 
 Markdown 目前已經可以端到端跑完：抽取、翻譯、驗證、修復、輸出，
