@@ -499,11 +499,38 @@ silently shift the existing offset, mask and hash arithmetic on CJK extension
 blocks and emoji.
 
 **A2 · Scope: TXT, Markdown and EPUB only.** The four text types are four
-product lines, not four features — Okapi's OpenXML filter has been under
-development for fifteen years and still has open content-loss bugs. Doing all
-four is 79–145 days, which at a solo pace guarantees four lines each 60 percent
-finished. DOCX and the three i18n formats are deferred indefinitely: not "later",
-but "not unless someone pays for it".
+product lines, not four features — Okapi's OpenXML filter has a defect history
+going back at least a decade and still accrues structural ones. Doing all four is
+79–145 days, which at a solo pace guarantees four lines each 60 percent finished.
+DOCX and the three i18n formats are deferred indefinitely: not "later", but "not
+unless someone pays for it".
+
+*Citation corrected 2026-07-29, the decision unchanged.* The original wording was
+"under development for fifteen years and still has open content-loss bugs", and
+the issue it rested on — #458, *OpenXML: Text runs containing multiple text
+fragments + tabs lose content on merge*, opened 2015-05-09 — is **closed**. That
+is the kind of claim the first reader who checks it discovers, so it is replaced
+with issues verified open from the GitLab API on 2026-07-29:
+
+- **#1341**, *OpenXML Filter: DOCX: document corruption on processing texbox with
+  a hyperlink*, opened 2024-01-31, still open, labelled `bug`.
+- **#1200**, *OpenXml filter adds tags around nnbsp by default*, opened
+  2023-03-06, still open, labelled `bug` — the reporter states it leaves roughly
+  30% of segments untranslated in existing projects.
+
+The project moved off Bitbucket and SourceForge; the live tracker is
+<https://gitlab.com/okapiframework/Okapi>, and the old
+`github.com/okapiframework/okapi` path 404s.
+
+**The stronger citation for invariant 2a is a different issue entirely**, and it
+is worth knowing because it is in *our* format rather than DOCX: **#704**,
+*Markdown filter drop spaces in code block*, opened 2018-04-03, still open, last
+touched 2024-10-05, labelled `bug`. Fenced blocks lose the leading spaces of
+continuation lines, and indented code blocks lose content-critical leading
+whitespace. Eight years unfixed, in the most widely deployed open-source filter
+framework in the industry, on the one format this project supports — which
+removes the "well, DOCX is famously horrible" escape hatch from any argument
+about re-serialization.
 
 **A3 · One repository, two internal packages.** The requirement behind "let
 another repo vendor this into `tools/`" is a small stable *artifact*, not a
