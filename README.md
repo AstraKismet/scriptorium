@@ -173,8 +173,12 @@ in rather than reported.
 
 | Locale | Language brief | Normalization | Lexicon |
 |---|---|---|---|
-| `zh-TW` | yes | punctuation width, CJK/Latin spacing | yes |
+| `zh-TW` | yes | punctuation width, CJK/Latin spacing, whitespace | yes |
 | `ja` | yes | — | — |
+
+Whitespace normalization collapses runs left by an editor, and deliberately keeps
+a Markdown hard line break — two or more spaces before a line end — because
+deleting one joins two lines the translation meant to keep apart.
 
 Any other `--lang` value works and gets the structural checks, but no
 locale-specific guidance or terminology rules. Adding one means a brief in
@@ -288,6 +292,12 @@ Worth knowing before you adopt it, and all of them measured rather than guessed:
   segmentation. When it lands it will be advisory and never applied
   automatically, since a fuzzy hit differs in its placeholder set by definition.
 - **`escaping` is inert** until a format with an XML host arrives.
+- **Built for documentation, not for prose.** The language briefs say so in as
+  many words — the `zh-TW` brief asks for "technical documentation register" and
+  nominalized headings — and a segment reaches the model with its own text and
+  block kind, without its neighbours. Structure and scale are what the roadmap
+  addresses; a literary register, continuity across segments, and a place to
+  record how a character speaks are none of them built.
 
 ## How this differs from the alternatives
 
@@ -317,8 +327,14 @@ is the whole point of this one.
 Markdown works end to end today: extract, translate, validate, repair, render,
 and a translation memory that survives revisions.
 
-Next, in order: a SQLite state layer, a rebuilt review workbench, then EPUB and
-plain text — the two formats that let a whole book through the pipeline.
+In progress: a SQLite state layer, so a 100k-word document resumes one segment at
+a time instead of rewriting its whole state file.
+
+Queued, roughly in that order: a written and versioned HTTP contract for the
+workbench; EPUB and plain text, the two formats that let a whole book through the
+pipeline; a writable configuration that can point two pipeline stages at
+different models; and a rebuilt review workbench, which is the largest item by
+far and cannot start until the contract is frozen.
 
 `docs/decisions.md` records what was decided and, for each entry, the alternative
 that lost.
