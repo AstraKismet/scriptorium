@@ -158,4 +158,5 @@ gets a second line recording the re-derivation.
 
 | Date | Artifact | Required tier | Tier used | Reason | Cleared |
 |---|---|---|---|---|---|
-| — | — | — | — | — | — |
+| 2026-07-29 | `language_tag` — the `lang` whitelist and its enforcement points (HANDOFF-008) | Security | Coordinating worker, general top tier | The security-tier design pass did not find the `lang` vector at all. The coordinating worker measured it and specified the rule while freezing the contract, rather than sending a second design round. | 2026-07-29 |
+| 2026-07-29 | ↑ cleared by re-derivation | Security | Security | Three independent security-tier reviews attacked `language_tag` directly — every separator, `..`, empty, over-length, NUL, and every non-string JSON value — and found a real defect the original rule missed: `dict.get` cannot distinguish an absent key from a JSON `null`, so `{"lang": null}` skipped the whitelist entirely. Fixed at the security tier and pinned by a test. Re-derived, not re-read. | — |
