@@ -96,11 +96,14 @@ the skeleton, so the model does not see it either. Supporting new inline syntax
 means a new pattern in `mask.py`, not a new sentence in a prompt.
 
 **2. Translate what is new.** Segments already in the translation memory are
-reused as-is. The rest go to a configured model, to an agent via
-`lx todo` / `lx apply`, or to a person in the review workbench. All three are
-equal sources and every segment records which one produced it. Because segment
-identity is a content hash rather than a position, editing one paragraph of a
-400-segment document reports `reused 399 | pending 1`.
+offered back, and taken only if their placeholders still match the segment they
+matched — a memory hit passes the same gate model output does. The rest go to a
+configured model, to an agent via `lx todo` / `lx apply`, or to a person in the
+review workbench. All three are equal sources and every segment records which one
+produced it. Because a segment is identified by its content and the kind of block
+it sits in rather than by its position, editing one paragraph of a 400-segment
+document reports `reused 399 | pending 1`, and moving a whole section reports
+nothing pending at all.
 
 **3. Check mechanically.** Placeholders that went missing, figures dropped,
 terminology that drifted, structure the translation broke. `lx check` exits 1 on
@@ -275,9 +278,9 @@ Worth knowing before you adopt it, and all of them measured rather than guessed:
   the indentation that follows them — 79 of 2394 segments across this project's
   own documentation. They cannot be masked without splitting one sentence into
   several segments.
-- **No fuzzy matching.** Only exact content-hash reuse. When it lands it will be
-  advisory and never applied automatically, since a fuzzy hit differs in its
-  placeholder set by definition.
+- **No fuzzy matching.** Reuse is exact: same text, same kind of block, same
+  segmentation. When it lands it will be advisory and never applied
+  automatically, since a fuzzy hit differs in its placeholder set by definition.
 - **`escaping` is inert** until a format with an XML host arrives.
 
 ## How this differs from the alternatives

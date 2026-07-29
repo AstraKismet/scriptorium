@@ -13,7 +13,21 @@ from .config import STATE, dump_json, load_json
 #:
 #: 2 — slots became records (``original`` / ``role`` / ``pair_id`` /
 #:     ``can_reorder``) instead of plain strings.
-STATE_VERSION = 2
+#: 3 — segments carry ``context`` and ``variant``, the two axes the translation
+#:     memory key gained beside the content hash.
+STATE_VERSION = 3
+
+#: How the parsers cut a document into segments. Bumped when a change to that
+#: decision changes segment text — rewrapping a list continuation, merging two
+#: paragraphs, splitting on a different boundary.
+#:
+#: It prevents nothing. Every such change invalidates every entry in the memory
+#: by changing the text that was hashed, and no field can stop that; what this one
+#: buys is that the invalidation is **detectable** rather than silent, because a
+#: record written under an older segmentation stops answering lookups instead of
+#: answering them with wording cut for a different sentence. A record with no such
+#: field predates the field and is version 0 — see :func:`tm_lookup`.
+SEGMENTATION_VERSION = 1
 
 
 class StateVersionError(RuntimeError):
@@ -22,6 +36,52 @@ class StateVersionError(RuntimeError):
 
 def seg_hash(text):
     return hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
+
+
+# ── the translation-memory key ─────────────────────────────────────────────
+
+def tm_key(content_hash, context=None, segmentation_version=SEGMENTATION_VERSION,
+           variant=None):
+    """What identifies a translation: its content, its place, its cut, its form.
+
+    A tuple, not a digest over a canonical serialization. The hard requirement is
+    that ``variant=None`` be indistinguishable from the field's absence — getting
+    that wrong invalidates the entire memory the moment it lands — and a tuple
+    makes it true by construction, since ``dict.get`` yields ``None`` for both,
+    rather than a canonicalization rule someone has to keep correct. *Lost:* an
+    opaque digest, which would also hand a future SQLite schema one indexable
+    column. Nothing on disk holds the key — the memory file holds the fields it is
+    built from — so the representation is free to stay readable in a traceback.
+
+    ``context`` is gettext's ``msgctxt``: what lets one source string carry
+    different translations in different places. Markdown sets it to the segment
+    kind, so a sentence appearing as a paragraph and as a blockquote is two
+    entries rather than one. Measured 2026-07-28: both hashed ``649729361f3c``,
+    and a paragraph translation wrapped across two lines, carried onto the
+    blockquote by a memory hit, put its second line outside the quote.
+
+    Deliberately *not* in the key: anything derived from the mask configuration.
+    Reuse is gated by ``translate.accept`` instead — see ``docs/decisions.md``,
+    2026-07-29.
+    """
+    return (content_hash, context, segmentation_version, variant)
+
+
+def segment_key(seg):
+    """The key for a segment this build just parsed, so the cut is this build's."""
+    return tm_key(seg["hash"], seg.get("context"), SEGMENTATION_VERSION, seg.get("variant"))
+
+
+def record_key(rec):
+    """The key for a line of the memory, which may have been written long ago.
+
+    A field that is null and a field that is absent mean the same thing in both
+    directions: this reader collapses them, and :func:`tm_record` never writes a
+    null. That is the one rule the whole memory rests on.
+    """
+    version = rec.get("segmentation_version")
+    return tm_key(rec["hash"], rec.get("context"),
+                  0 if version is None else version, rec.get("variant"))
 
 
 def doc_id(src):
@@ -77,7 +137,7 @@ def load_doc(src, lang):
 
 
 def prior_targets(src, lang):
-    """``{content hash: (target, origin)}`` from an existing state file.
+    """``{key: (target, origin)}`` from an existing state file.
 
     Deliberately not :func:`load_doc` for the *older* direction: this is the one
     reader that must work across a bump, because re-extracting is how a stale
@@ -88,14 +148,35 @@ def prior_targets(src, lang):
     replace it. Reading it here and letting the write proceed was the first
     shape of this function, and it silently downgraded such a file — with a green
     exit code, while `lx check` on the same file refused to touch it.
+
+    The keys are :func:`segment_key`, not the content hash alone, because the
+    collision the context axis removes is a within-document one first: a sentence
+    that appears as a paragraph and as a blockquote used to carry over from one to
+    the other. The segmentation version is this build's on both sides rather than
+    the file's, and that is not an oversight — this field guards the memory across
+    time, while here the source has just been re-parsed by this build, so a
+    changed segmentation has already changed the segment text and the content hash
+    discriminates on its own. Keying on the file's version instead would make
+    every bump silently discard the translations `lx extract` promises to carry.
     """
     p = store_path(src, lang)
     if not os.path.exists(p):
         return {}
     doc = load_json(p, {})
     _refuse_if_newer(doc, src, lang)
-    return {s["hash"]: (s["target"], s.get("origin") or "carryover")
-            for s in doc.get("segments", []) if s.get("hash") and s.get("target")}
+    out = {}
+    for s in doc.get("segments", []):
+        if not (s.get("hash") and s.get("target")):
+            continue
+        # A file older than version 3 has no `context`. Every build that could
+        # have written one produced Markdown, where the context *is* the kind, so
+        # reading `kind` is the migration rule rather than a guess. Tested for
+        # presence, not truth: a format whose context is legitimately null must
+        # not silently acquire the kind instead.
+        ctx = s["context"] if "context" in s else s.get("kind")
+        key = tm_key(s["hash"], ctx, SEGMENTATION_VERSION, s.get("variant"))
+        out[key] = (s["target"], s.get("origin") or "carryover")
+    return out
 
 
 def save_doc(src, lang, doc):
@@ -125,7 +206,13 @@ def tracked(lang=None):
 
 
 def load_tm(lang):
-    """Last write wins, so a corrected segment supersedes its earlier form."""
+    """``{key: target}``. Last write wins, so a correction supersedes its original.
+
+    A line that is not an object with a hash and a target is skipped rather than
+    raised on. The file is append-only and hand-editable by design, and one bad
+    line taking down every command that reads the memory is a poor trade for a
+    diagnostic nobody asked for.
+    """
     tm = {}
     p = tm_path(lang)
     if os.path.exists(p):
@@ -137,8 +224,79 @@ def load_tm(lang):
                         rec = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    tm[rec["hash"]] = rec["target"]
+                    if not isinstance(rec, dict) or not rec.get("hash") or not rec.get("target"):
+                        continue
+                    tm[record_key(rec)] = rec["target"]
     return tm
+
+
+def tm_lookup(tm, seg):
+    """``(target, origin)`` for a segment, or ``(None, None)``.
+
+    The exact key first. A record carrying neither a context nor a segmentation
+    version predates both, and is then tried on content alone — that is every
+    entry in every memory written before this key existed, and refusing them would
+    empty a user's memory on upgrade for nothing. Accepting them is safe in a way
+    it would not have been a week ago: the hit goes through ``translate.accept``
+    like any other, and `lx commit` rewrites the entry under the full key the
+    first time that wording is banked again, so the legacy tier drains rather than
+    lingers.
+
+    It is marked ``tm:legacy`` and not ``tm``, because a match on content alone is
+    exactly the context-blind reuse this key was changed to stop, and a reviewer
+    should be able to see which reuses still rest on it.
+
+    A segment carrying a variant is not offered the fallback. A record written
+    before variants existed cannot be known to be the right form, and guessing
+    there is how a plural becomes a singular in a place nobody looks.
+    """
+    exact = tm.get(segment_key(seg))
+    if exact is not None:
+        return exact, "tm"
+    if seg.get("variant") is None:
+        legacy = tm.get(tm_key(seg["hash"], None, 0, None))
+        if legacy is not None:
+            return legacy, "tm:legacy"
+    return None, None
+
+
+def tm_record(seg):
+    """The memory line for a translated segment. A null field is not written.
+
+    Omitting a null is the same rule :func:`record_key` reads by — absent and null
+    mean one thing — and it keeps the file legible, which is why the memory is
+    JSONL and in version control at all.
+    """
+    rec = {"hash": seg["hash"]}
+    if seg.get("context") is not None:
+        rec["context"] = seg["context"]
+    rec["segmentation_version"] = SEGMENTATION_VERSION
+    if seg.get("variant") is not None:
+        rec["variant"] = seg["variant"]
+    rec["source"] = seg["source"]
+    rec["target"] = seg["target"]
+    return rec
+
+
+def tm_records(doc, tm):
+    """Lines for the segments whose wording the memory does not already hold.
+
+    One builder for `lx commit` and for the workbench's commit endpoint, because
+    two of them is how two surfaces come to disagree about what a record is.
+
+    A segment reused from the legacy tier is written again here, under the full
+    key: the comparison is against the exact key, which such a segment misses.
+    That is the upgrade path, not a duplicate — the second commit finds the
+    versioned record and skips it.
+    """
+    out = []
+    for seg in doc["segments"]:
+        if not seg.get("target"):
+            continue
+        if tm.get(segment_key(seg)) == seg["target"]:
+            continue
+        out.append(tm_record(seg))
+    return out
 
 
 def append_tm(lang, records):
