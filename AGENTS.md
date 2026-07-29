@@ -123,6 +123,28 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
     claims even so: that the structure survived and the mechanical rules passed,
     never that the translation is good.
 
+11. **An untrusted path is confined before it is opened.** Any path the user did
+    not type at a terminal — one that arrived in an HTTP request, was read out of
+    a configuration file, or is an entry name inside a container — goes through
+    `cli.confined_path` before anything opens it: both sides resolved with
+    `os.path.realpath`, compared with `os.path.commonpath`, **rejected rather
+    than clamped**, and the caller's own string handed back rather than a
+    canonicalized one. A CLI argument is the named exception, because
+    `lx render doc.md -o /tmp/out.md` is a person typing a command.
+
+    This is a rule about where a path *came from*, not about which module is
+    reading it. Three places it already binds and one of them is not written yet:
+    every endpoint in `web/server.py`; an EPUB entry name, where the same defect
+    is called zip-slip; and `output_pattern`, which is trusted today only because
+    configuration is written by hand — the moment anything writes configuration
+    over HTTP, that trust is gone and the pattern is confined at render time or
+    it is not writable over HTTP.
+
+    *Why it is an invariant rather than a note about the workbench:* the version
+    scoped to the web surface would have expired the day HANDOFF-204 rewrote it,
+    and would have bound neither of the other two. Measured cases and the losing
+    alternatives are in `docs/decisions.md`, 2026-07-29.
+
 ## Layout
 
 Current:
@@ -255,16 +277,17 @@ silently. That file also holds the downgrade ledger.
 
 - Public functions in `cli.py` prefixed `do_` are the API other surfaces call;
   `cmd_` functions are argparse handlers and should stay thin.
-- Every caller-supplied path reaching the web surface goes through
-  `cli.confined_path`, and every `lang` through `cli.language_tag`. Both live in
-  `cli.py` (invariant 8) and are enforced in `web/server.py` only — the CLI is
-  deliberately unconfined, because `lx render doc.md -o /tmp/out.md` is a person
-  typing a command. A new endpoint gets them **by presence of the field, not by
-  endpoint name**, so one added later cannot skip the check by being new. The
-  helper validates and returns the caller's string unchanged; it must never hand
-  back a resolved path, because every document identity here is
-  `os.path.relpath(src)` against `os.getcwd()`. See `docs/decisions.md`,
-  2026-07-29.
+- Invariant 11's mechanics, which the invariant itself does not fix. The helpers
+  live in `cli.py` (invariant 8) and are called from the surface that receives the
+  path, never from the CLI. They apply **by presence of the field, not by endpoint
+  name**, so one added later cannot skip the check by being new. Why the helper
+  returns the caller's string rather than the resolved one: every document
+  identity here is `os.path.relpath(src)` against `os.getcwd()`, so a resolved
+  path silently becomes a second document — measured under a junction and under
+  an 8.3 short-name cwd. `lang` gets `cli.language_tag` instead, because it is not
+  a path but a filename *component* that `store_path`, `report_path` and `tm_path`
+  interpolate; a language tag has a decidable shape, so a whitelist refuses every
+  separator by construction.
 - A document's line terminator is a document-level fact, held in `doc["eol"]` and
   re-imposed once at render — never carried inside a segment, where the model and
   the reviewer would both have to reproduce a control character neither can be

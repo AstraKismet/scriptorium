@@ -125,6 +125,19 @@ forever against a correct implementation. The fix is to nest the project root tw
 levels down inside `tmp_path`, so every escape target is still inside the
 directory pytest owns and rotates.
 
+**Added as invariant 11 on the same day, deliberately not scoped to the
+workbench.** The rule as written binds any path the user did not type at a
+terminal, whatever module receives it. *Lost:* the narrower version, "the
+workbench confines every path it is given", which describes what was built and is
+the obvious thing to write down. It fails on both ends. It expires the day
+HANDOFF-204 rewrites the workbench, because an invariant that names an
+implementation stops meaning anything when the implementation goes; and it binds
+neither of the two places this defect is most likely to reappear — an EPUB entry
+name, where it is called zip-slip, and `output_pattern`, which is trusted today
+only because configuration is written by hand. An invariant earns its place by
+constraining work that has not been written yet, which is also why it is phrased
+as where a path *came from* rather than as which module reads it.
+
 ## 2026-07-29 · The memory key gains three axes, and reuse stops being a write
 
 Executing B5 below, with the derived i18n hedge folded into the same migration
