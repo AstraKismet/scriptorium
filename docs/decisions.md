@@ -3,6 +3,185 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-07-29 · The register is a real axis, and the translation memory can see it
+
+Closing HANDOFF-013, which implements D4 of the entry below. The knob was already
+there and was being contradicted by its own prompt: `_system_prompt` returned
+`f"{base}\n\n{brief}"`, and `_LANG_BRIEFS["zh-TW"]` ended, unconditionally, with
+*"Write technical documentation register: neutral-formal, subject usually
+dropped, 請 for instructions, active voice rather than 被. Nominalize headings."*
+The last thing the model read overrode `Tone: literary.` two paragraphs above it.
+
+**The brief is keyed by `(language, register)`, and the terminology is one string
+between two register-specific halves.** Each entry is a `(head, rules)` pair —
+what the target variety is, and how that register is written — with
+`_LANG_TERMS[language]` placed between them. *Lost:* one brief per register with
+the vocabulary copied into each. The zh-TW list is the output of the 2026-07-28
+invariant-4 audit, and two copies of it drift apart silently; the drift only
+surfaces in a translation months later, which is the same shape of failure the
+audit itself was fixing. *Also lost:* making the terminology the whole shared
+part, with each register contributing only a trailing paragraph. The brief's
+opening sentence names the variety — "as used in Taiwanese technical
+documentation" — and that sentence is precisely what has to change for a novel,
+so the register contributes a head as well as a tail.
+
+Two things inside the shared block did change, and only these: "use the
+vocabulary that documentation uses" is now "use the vocabulary Taiwan uses", and
+the first list was re-wrapped so no `X not Y` pair straddles a line break. The
+first is not cosmetic — telling a novel to use the vocabulary documentation uses
+is this same defect one level down. Every term, every sense-split and every
+parenthetical is unchanged.
+
+**`tone` is threaded as a parameter; it is not copied onto each segment.**
+`segment_key`, `tm_lookup` and `tm_record` take it, and `tm_records` and
+`prior_targets` read it off the document they are already holding. *Lost:* a
+`tone` field on every segment, which needs no threading at all and would leave
+`prior_targets` untouched. It loses on three counts, in order of weight: the
+register is a document-level fact, and a document-level fact does not live inside
+a segment — the rule `doc["eol"]` already follows; it is a state-file schema
+change, so it costs a `STATE_VERSION` bump and a forced re-extract for every
+existing project; and the migration has a trap, because a version-3 file has no
+per-segment `tone`, so every carryover would miss on the upgrade unless
+`prior_targets` fell back to the document's value — which is the threading,
+reached by a longer road. `STATE_VERSION` stays 3, and the criterion is met: the
+state file gains no field, so no state file this build writes would be misread by
+the build before it, and none it reads has changed shape.
+
+The *memory* file is a separate question, and the answer is weaker on purpose. It
+has no version and never had one — it is append-only JSONL that people hand-edit
+— so an older build reads a record carrying `tone` and simply ignores the field,
+which means it would serve a literary wording to a documentation document. That
+is the standing property of every field this file has ever gained, `context` and
+`segmentation_version` included, and it is the price of a memory that stays
+readable and mergeable. Downgrading a build is what is unguarded here, not
+upgrading one.
+
+**The default register is the key's null**, so `technical`, `null` and the
+field's absence are one value. Every entry banked before this landed keeps
+answering **a document in the default register**, in both tiers, by construction
+rather than by a migration — which is the case that would otherwise have been a
+whole-memory invalidation, since that is what every documentation project is.
+Two things it does not claim. A document that already carried `--tone literary`
+before this landed now misses those same entries; that is deliberate, and its own
+state file still carries its translations, because carryover keys on the stored
+register on both sides. And "the old tier is documentation register" is true of
+everything a *model* produced — the brief ended in the documentation-register
+sentence whatever `tone` had been set to — but not of wording that arrived
+through `lx apply`, which was never briefed by anything. Such an entry sits in
+the default tier because nothing recorded its register, not because it is known
+to be in that one.
+
+*Lost:* keying on the register always and adding a second, register-blind lookup
+for the old entries, the way `tm_lookup` already does for `segmentation_version`.
+It costs one extra lookup, which is nothing, and it hands a documentation-era
+wording to a novel, which is the one failure this axis was added to prevent. The
+same reasoning extends the existing `tm:legacy` tier: a document in a non-default
+register is not offered it at all. That is the rule `variant` already had, one
+step stronger — a pre-variant record cannot be *known* to be the right form,
+while a pre-register record is known to be the wrong register.
+
+**The collapse runs inside `tm_key`, not at its call sites.** `tm_key`'s
+docstring argues that the key is a tuple of read fields *because* a
+canonicalization rule is something someone has to keep correct, and `variant=None`
+is then indistinguishable from absence by construction. `tone` cannot have that
+property: its null is a string the caller is holding, so `"technical"` must
+compare equal to absent and no amount of `dict.get` makes it. A collapse is
+therefore unavoidable, and the choice is only where. Inside `tm_key` it is in one
+place that no caller can route around; at the four call sites it is exactly the
+rule someone has to keep correct. The other three fields still pass through raw.
+
+**Carryover is keyed on the register the state file was written in.**
+`prior_targets` uses *this* build's `SEGMENTATION_VERSION` on both sides — that
+was decided on 2026-07-29 and the reason is that a changed segmentation changes
+the segment text, so the content hash discriminates on its own. That argument
+does not transfer to the register, which leaves the source byte-identical, so the
+register is read from the file instead. A document re-extracted into another
+register therefore carries nothing over and every segment returns to pending.
+
+That is the intended result and the alternative is far worse: register-blind
+carryover leaves documentation wording in a document that now says
+`tone: literary`, and `lx commit` then banks all of it under the literary key —
+one re-translation, against permanent memory poisoning. The honest cost is that
+uncommitted drafts in the old register are lost from the state file, which is why
+`lx extract --tone` now says so in its help.
+
+`prior_targets(src, lang)` became `prior_doc(src, lang)` plus
+`prior_targets(doc)` so that extract can read the register out of the same parse
+it reads the translations from; the alternative was a second full read of a file
+that is a whole book. The earlier entries below that describe `prior_targets`
+reading the file are describing `prior_doc` after this date.
+
+**The register is sticky.** `do_extract` takes an explicit `--tone`, else the
+stored `doc["tone"]`, else config, else the default. Before this it re-froze the
+configured default on every extract, which was harmless while the register only
+reached the `Tone:` line and is not harmless now: a forgotten `--tone` would take
+every carryover and every memory hit with it. `--reset` is the exception and
+deliberately so — it does not read the state file at all, because it has to work
+on one this build cannot read. `lx extract` prints `| tone X` when the register
+is not the default, for the same reason it prints refused hits only when there
+were any.
+
+**Case and padding do not split a register.** `config.canonical_tone` strips and
+lowercases for both readers — the brief selection and the key — so `--tone
+Literary` and `--tone literary` are one register and one set of banked wording.
+The user's own string still reaches the model on the `Tone:` line, so the field
+keeps saying everything it could say before.
+
+**Verified by mutation, not by review.** Fourteen mutants, one per guard this
+change added; all fourteen turn the suite red. Removing the default-register
+collapse from `key_tone` is caught by seven tests including
+`test_legacy_tm_survives_tone_for_a_document_in_the_default_register`; dropping
+`tone` from the key tuple by `test_tone_in_memory_key_keeps_two_registers_apart`;
+letting the unversioned tier reach a novel by
+`test_a_literary_document_is_not_offered_the_unversioned_tier`; making carryover
+register-blind and removing the stickiness both by
+`test_the_register_is_frozen_on_the_document_and_a_later_extract_keeps_it`;
+selecting the default brief for every register by
+`test_register_brief_replaces_the_documentation_rules_for_a_novel`; and giving
+the terminology to one register only by
+`test_brief_terminology_shared_between_the_registers`. No survivors, so nothing
+here is redundant or untested.
+
+**What an adversarial review pass then found, and what it did not.** Five
+independent lenses over the diff, three refuters told to default to refuting.
+One finding survived the panel and four more were kept over its verdict, because
+a panel told to default to refuting is a filter, not an authority, and because
+each of the four was decidable by reading or had already been measured:
+
+- The zh-TW literary paragraph said *"Never 請 for an imperative"* while ending
+  *"a character keeps their own diction and level of formality wherever they
+  speak."* In a novel imperatives live almost entirely inside 「」, where 請坐 and
+  請進 are ordinary published Taiwanese, so one sentence deleted what the other
+  preserved. The scope line asked for no 請-*for-instructions*, which is a
+  documentation habit, not a prohibition. Now: 請 belongs to a character who is
+  speaking, never to the narrator and never as an instruction to the reader.
+- **The register was resolved in two places.** `translate_segments` read
+  `doc.get("tone") or cfg.get("tone")` while `store.tm_records` read
+  `doc["tone"]` alone. Measured on a state file with no `tone` beside a config
+  saying `literary`: the model was briefed literary and the wording was banked in
+  the default tier — this entry's own failure, arriving through a divergent
+  fallback rather than through the key. The document is now the sole authority
+  for its own register; the config decides it once, at extract.
+- `_LANG_BRIEFS` keyed the default register by the literal `"technical"` while
+  `_brief` fell back through `DEFAULT_TONE`, which is the drift `DEFAULT_TONE`
+  was introduced to remove.
+- Two sentences in this entry over-claimed and are corrected above.
+
+*Not taken, and each recorded where it will be picked up rather than here:* the
+agent path (`lx todo`) still carries no register brief — real, but a new field on
+a contract HANDOFF-203 and HANDOFF-207 will freeze, and written into HANDOFF-015,
+which owns what voice instructions reach a prompt; and the workbench still cannot
+show or set a register, written into HANDOFF-204. *Rejected outright:* that the
+agent path is made worse by this change — before it, agent-produced literary
+wording was banked with no register at all and was served to every document,
+including documentation ones, so confining it to the literary tier is strictly an
+improvement.
+
+**What HANDOFF-202 inherits.** A segment's identity is five columns, and the
+fifth is absent-when-default: in SQL the register column holds `NULL` for the
+default register and the string otherwise, which is the same question `variant`
+already poses about `NULL != NULL` in a unique index, now posed twice.
+
 ## 2026-07-29 · Novels are the primary use case, and the six things that follow from it
 
 The maintainer stated on 2026-07-29 that translating English novels into

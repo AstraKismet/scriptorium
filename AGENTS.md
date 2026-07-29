@@ -190,7 +190,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 326 passed; no network
+python -m pytest -q                 # 345 passed; no network
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
 
@@ -309,14 +309,23 @@ silently. That file also holds the downgrade ledger.
   terminators are already mixed are the recorded exception and pass through
   verbatim; see `docs/decisions.md`, 2026-07-28.
 - Segment ids are per-document and sequential. The translation memory key is
-  `(content_hash, context, segmentation_version)` plus a nullable `variant` —
-  never position. `variant=null` must hash identically to the field's absence, or
-  the entire memory invalidates; it is a tuple of read fields for exactly that
-  reason, so the property holds by construction rather than by a canonicalizer.
-  `context` is gettext's `msgctxt`; for Markdown it is the block kind, and it is
-  stored beside `kind` rather than derived from it, because a key path or a spine
-  position has no `kind` to borrow. A record with no `segmentation_version`
-  predates the field, matches on content alone, and is marked `tm:legacy`.
+  `(content_hash, context, segmentation_version)` plus a nullable `variant` and
+  the register — never position. `variant=null` must hash identically to the
+  field's absence, or the entire memory invalidates; it is a tuple of read fields
+  for exactly that reason, so the property holds by construction rather than by a
+  canonicalizer. `context` is gettext's `msgctxt`; for Markdown it is the block
+  kind, and it is stored beside `kind` rather than derived from it, because a key
+  path or a spine position has no `kind` to borrow. A record with no
+  `segmentation_version` predates the field, matches on content alone, and is
+  marked `tm:legacy`.
+- The register is `doc["tone"]`, threaded into the key as a parameter and never
+  stored on a segment — the rule `doc["eol"]` follows, and for the same reason.
+  It is the one key field whose null is a *string*: the default register,
+  `null`, and the field's absence are one value, which is what keeps every entry
+  banked before the axis existed answering. That collapse cannot hold by
+  construction the way `variant`'s does, so it lives inside `tm_key` where no
+  caller can skip it. A document in a non-default register is not offered the
+  `tm:legacy` tier at all. See `docs/decisions.md`, 2026-07-29.
 - Translation memory hits go through the same acceptance path as model output.
   Writing a target directly is how a stale mask configuration renders a bare
   `⟦2⟧`. The key is deliberately blind to the mask configuration — that is what
@@ -325,8 +334,10 @@ silently. That file also holds the downgrade ledger.
   proposal on the same terms, and the memory is tried when it is refused.
   `lx apply` is the deliberate exception: a person's words are reported at
   `lx check`, not refused at the door.
-- New language support: add a brief to `_LANG_BRIEFS` in `translate.py`, a
-  normalization profile in `config.py`, and a reference file under
+- New language support: add a `(language, register)` entry to `_LANG_BRIEFS` in
+  `translate.py` for each register, with the register-independent terminology in
+  `_LANG_TERMS` — one string shared, never a copy per register — plus a
+  normalization profile in `config.py` and a reference file under
   `skill/reference/`.
 - New format support: implement parse/render producing the same
   `(nodes, segments)` shape and register it. Do not fork the pipeline.

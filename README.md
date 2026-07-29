@@ -128,7 +128,7 @@ It does not mean the translation is good; that is what review is for.
 | Command | What it does |
 |---|---|
 | `lx init` | scaffold config and state |
-| `lx extract SRC --lang L` | parse to segments, mask markup, reuse translation memory |
+| `lx extract SRC --lang L` | parse to segments, mask markup, reuse translation memory (`--tone literary` for prose) |
 | `lx todo SRC --lang L` | pending segments as JSON, for an agent to translate |
 | `lx apply SRC --lang L --file F` | ingest translations, auto-normalize |
 | `lx translate SRC --lang L` | translate with a configured model (`--mode draft\|polish\|repair`) |
@@ -292,12 +292,12 @@ Worth knowing before you adopt it, and all of them measured rather than guessed:
   segmentation. When it lands it will be advisory and never applied
   automatically, since a fuzzy hit differs in its placeholder set by definition.
 - **`escaping` is inert** until a format with an XML host arrives.
-- **Built for documentation, not for prose.** The language briefs say so in as
-  many words — the `zh-TW` brief asks for "technical documentation register" and
-  nominalized headings — and a segment reaches the model with its own text and
-  block kind, without its neighbours. Structure and scale are what the roadmap
-  addresses; a literary register, continuity across segments, and a place to
-  record how a character speaks are none of them built.
+- **Prose support is one register deep.** `--tone literary` selects a narrative
+  brief instead of the documentation one, and the register is part of the memory
+  key, so wording banked under one cannot be served to the other. What is missing
+  is everything *around* a segment: it still reaches the model with its own text
+  and block kind and no neighbours, and there is still nowhere to record how a
+  particular character speaks.
 
 ## How this differs from the alternatives
 

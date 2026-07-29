@@ -104,7 +104,11 @@ Put a space between Chinese characters and adjacent Latin letters or digits:
 punctuation. `lx` applies this at both `apply` and `render` time, including across
 restored placeholders.
 
-## Register
+## Register: technical documentation
+
+This section is one register, not the language. A document extracted with
+`--tone literary` is briefed for narrative prose instead, and several rules below
+reverse there — see `lx todo`'s `tone` field for which register a document is in.
 
 Technical documentation in Taiwan reads as neutral-formal. Concretely:
 
