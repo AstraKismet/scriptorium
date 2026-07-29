@@ -280,6 +280,29 @@ Worth knowing before you adopt it, and all of them measured rather than guessed:
   placeholder set by definition.
 - **`escaping` is inert** until a format with an XML host arrives.
 
+## How this differs from the alternatives
+
+Every open-source Markdown localization tool I surveyed re-renders the target
+from a parse tree. [po4a](https://www.po4a.org/) rewraps paragraphs by default;
+[mdpo](https://github.com/mondeja/mdpo) and
+[Weblate](https://weblate.org/) render from an AST — Weblate through
+[translate-toolkit](https://github.com/translate/translate), whose own
+documentation says it "does not perform any checks that the translated text has
+the same formatting as the source"; and the
+[Okapi Framework](https://okapiframework.org/)'s Markdown filter has had an open
+bug since 2018 where indented code blocks lose their leading whitespace.
+
+That is a reasonable trade for the breadth those tools offer. po4a handles twenty
+formats and two decades of Debian's documentation. Weblate gives you a translator
+community, a review workflow and a hundred formats. [OmegaT](https://omegat.org/)
+is a real CAT environment, with fuzzy matching, concordance search and glossary
+panes.
+
+Scriptorium handles one format and substitutes translations back into the
+original bytes instead. If you need many formats or many translators, use those.
+If you need the file to come back unchanged except where you translated it, that
+is the whole point of this one.
+
 ## Project status
 
 Markdown works end to end today: extract, translate, validate, repair, render,
