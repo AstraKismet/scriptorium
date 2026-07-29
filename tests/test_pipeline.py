@@ -13,7 +13,7 @@ from scriptorium.config import DEFAULT_CONFIG  # noqa: E402
 from scriptorium.mask import mask, repair_placeholders, unmask  # noqa: E402
 from scriptorium.mdparse import parse, render  # noqa: E402
 from scriptorium.normalize import normalize  # noqa: E402
-from scriptorium.translate import parse_reply  # noqa: E402
+from scriptorium.translate import accept, parse_reply  # noqa: E402
 
 SAMPLE = """\
 ---
@@ -467,6 +467,74 @@ def test_clean_segment_passes():
 def test_normalize_fixes_width_and_spacing():
     got = normalize("\u8b66\u544a:\u8acb\u5148\u57f7\u884cmake build\u6307\u4ee4", "zh-TW", CFG)
     assert got == "\u8b66\u544a\uff1a\u8acb\u5148\u57f7\u884c make build \u6307\u4ee4"
+
+
+# Two spaces before a line break are a Markdown hard break. Deleting one is a
+# content change landing on a translation that did the right thing, so these
+# assert on the target side of what `tests/corpus/hard-line-breaks.md` gates for
+# the source side.
+_L1, _L2 = "\u7b2c\u4e00\u884c", "\u7b2c\u4e8c\u884c"
+
+
+@pytest.mark.parametrize("text", [
+    f"{_L1}  \n{_L2}",                    # the plain case
+    f"{_L1}\u3002  \n{_L2}\u3002",        # after fullwidth punctuation, where a
+                                          # zh-TW line ends far more often than
+                                          # not — `punct` ate this one before
+                                          # `collapse_space` could protect it
+    f"{_L1}  \r\n{_L2}",                  # a mixed-terminator document keeps its
+                                          # CRLF inside the segment
+    f"{_L1}\u3002  \r\n{_L2}\u3002",      # both at once
+    "Hello  \nWorld",                     # no CJK anywhere in the segment
+])
+def test_normalize_keeps_a_markdown_hard_break(text):
+    assert normalize(text, "zh-TW", CFG) == text
+
+
+@pytest.mark.parametrize("run", ["   ", "    ", " \t  "])
+@pytest.mark.parametrize("eol", ["\n", "\r\n"])
+def test_normalize_canonicalizes_a_long_hard_break_run_to_two_spaces(run, eol):
+    # Three or more mean the same <br>; the surplus is the editor noise this op
+    # exists to remove. `docs/decisions.md`, 2026-07-29.
+    assert normalize(f"{_L1}{run}{eol}{_L2}", "zh-TW", CFG) == f"{_L1}  {eol}{_L2}"
+
+
+@pytest.mark.parametrize("text,want", [
+    ("a  b", "a b"),                              # the run the op exists for
+    ("a    b", "a b"),
+    (f"{_L1} \n{_L2}", f"{_L1}\n{_L2}"),          # one space is not a hard break
+    (f"{_L1} \r\n{_L2}", f"{_L1}\r\n{_L2}"),      # and is not one before a CRLF
+                                                  # either: the removal side of a
+                                                  # line end is as easy to get
+                                                  # wrong as the keeping side
+    (f"{_L1}\t\t\r\n{_L2}", f"{_L1}\r\n{_L2}"),   # likewise for a tab run
+    (f"{_L1}\r\n   \r\n{_L2}", f"{_L1}\r\n\r\n{_L2}"),   # and a blank-only line
+    (f"{_L1}\t\t\n{_L2}", f"{_L1}\n{_L2}"),       # nor is a tab run — turning it
+                                                  # into two spaces would invent
+                                                  # a break nobody wrote
+    (f"{_L1}\n   \n{_L2}", f"{_L1}\n\n{_L2}"),    # a blank-only line has no
+                                                  # break to protect
+    (f"{_L1}  ", _L1),                            # nothing follows, so the run
+    ("abc  ", "abc"),                             # marks nothing. Not ending in
+                                                  # fullwidth punctuation, which
+                                                  # `punct` strips on its own \u2014
+                                                  # these reach `collapse_space`
+    ("\u7d50\u5c3e\u3002  ", "\u7d50\u5c3e\u3002"),   # and this one does not
+])
+def test_normalize_still_removes_whitespace_that_means_nothing(text, want):
+    assert normalize(text, "zh-TW", CFG) == want
+
+
+def test_accept_keeps_a_hard_break_the_model_got_right():
+    # The property that matters: all three reuse paths — model output, `lx apply`
+    # and a translation-memory hit — reach normalize, and two of them through
+    # here. A unit test on normalize alone would miss `accept`'s own strip().
+    text = (CORPUS / "hard-line-breaks.md").read_bytes().decode("utf-8")
+    seg = next(s for s in parse(text)[1] if "\n" in s["masked"])
+    target = ("\u4e00\u884c\u4ee5\u5169\u500b\u7a7a\u683c\u7d50\u5c3e\u3002  \n"
+              "\u5728\u786c\u63db\u884c\u5f8c\u7e7c\u7e8c\u3002  \n"
+              "\u9084\u6709\u7b2c\u4e09\u884c\u3002")
+    assert accept(seg, target, "zh-TW", CFG) == (target, None)
 
 
 @pytest.mark.parametrize("reply", [
