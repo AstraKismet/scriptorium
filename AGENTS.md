@@ -7,6 +7,13 @@ Code, Codex, Cursor and OpenCode all load the same rules.
 
 ## What this project is
 
+**What it is for.** Translating **English novels into Traditional Chinese**. That
+is the original and principal reason this project was built, and as of the
+2026-07-29 review it is the use case every scope argument resolves against.
+Technical documentation is a secondary use case and stays supported — its tests
+stay green and its defects get fixed — but where the two compete, long-form
+literary work wins.
+
 A localization pipeline built on one architectural commitment: **the model
 translates sentences; code does everything else.** Structural work — parsing,
 markup protection, reassembly, terminology enforcement, punctuation
@@ -14,15 +21,22 @@ normalization — is deterministic and lives in Python. The model is called only
 for the part that needs judgement.
 
 Every design question resolves against that sentence. When adding a feature, the
-first question is which side of the line it falls on.
+first question is which side of the line it falls on. Novels do not challenge
+that commitment; they shift the balance under it, making code's half smaller and
+the model's half harder.
 
-**Where it is going.** As of the 2026-07-28 review it is becoming a personal
-translation workstation for long-form work: quality, status tracking, source and
-output update propagation, text management. Scope is **plain text, Markdown and
-EPUB**. Translations come from three sources treated as equals — an API model, an
-agent working in its own context, and a human — so a segment records where its
-target came from, and review and audit are workflow stages distinct from
-translation.
+**Where it is going.** A personal translation workstation for long-form work:
+quality, status tracking, source and output update propagation, text management.
+Scope is **plain text, Markdown and EPUB** — plain text and EPUB are how novels
+actually arrive. Translations come from three sources treated as equals — an API
+model, an agent working in its own context, and a human — so a segment records
+where its target came from, and review and audit are workflow stages distinct
+from translation.
+
+The consequences of the 2026-07-29 re-founding — paragraph segmentation, what the
+translation memory is for, where register lives, neighbour context, and the queue
+order that follows — are in `docs/decisions.md`, "Novels are the primary use
+case, and the six things that follow from it".
 
 Reasoning for all of it is in `docs/decisions.md`. Read that before proposing an
 architectural change; it records the alternatives that lost.
