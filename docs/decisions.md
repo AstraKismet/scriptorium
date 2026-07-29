@@ -3,6 +3,146 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-07-29 · Novels are the primary use case, and the six things that follow from it
+
+The maintainer stated on 2026-07-29 that translating English novels into
+Traditional Chinese was the original and principal reason this project was built.
+Nothing in the tracked repository said so, and — decisively — none of the
+consequences had propagated. The language briefs, the request payload, the
+segmentation, the memory design and the package priorities were all settled for
+technical documentation, which is the only thing the project had ever been
+pointed at. Closing HANDOFF-012, which re-derived them and deliberately wrote no
+code; every consequence below is scheduled as its own package.
+
+**D1 · Literary long-form is primary. Technical documentation is secondary and
+stays supported.** Said in "What this project is", because that section is what
+every future scope argument resolves against. *Lost:* naming both as equal
+first-class use cases. "Equal" is not a decision — `AGENTS.md` already said
+"long-form work", which was compatible with novels and propagated not one
+consequence, and D2 through D6 would each have stayed open under it. Secondary
+means the documentation path keeps its tests green and its defects fixed, not
+that it is left to rot; what it loses is the tie-break when two features compete.
+
+**D2 · Prose stays segmented at the paragraph.** Measured: a four-sentence
+narration paragraph parses to exactly one segment, `kind=para`, `context=para`.
+*Lost:* sentence-level segmentation. It would buy some memory reuse and a finer
+review unit, at the cost of intra-paragraph flow — and flow is the deliverable
+for prose, the one thing no downstream stage can recover. English prose
+sentence-splitting is also a heuristic, and heuristics on dialogue, quotes,
+abbreviations and em-dashes are judgement, which invariant 4 keeps out of the
+deterministic half. *Also lost:* making it configurable per project, which pays
+for two segmentations that can never share a memory — they differ in
+`segmentation_version` by construction — in exchange for an option this entry
+recommends against. The honest cost of the choice is that a long narration
+paragraph is a large editing unit in review. The mitigation is sentence-level
+highlighting *inside* a segment in the rebuilt workbench (HANDOFF-204), which
+leaves the unit of record alone.
+
+**D3 · The translation memory is unchanged, and name consistency was never its
+job.** `store.tm_key` hashes the *whole segment*, and for prose a segment is a
+whole paragraph, so exact reuse on a novel approaches zero. That is a fact about
+the key's shape, not a measurement — do not cite `tests/corpus/long-manual.md`
+for it, whose 75.1% duplicate rate measures its own generator; its first
+paragraph says it is a fixture.
+
+The memory is nevertheless not inert, and that is why it is not being narrowed:
+it still makes documentation revision cheap, still makes any re-run idempotent,
+and still makes an EPUB's three copies of a chapter title — `<h1>`, `nav.xhtml`,
+`toc.ncx` — agree for free.
+
+Name and terminology consistency belongs to the glossary, and the difference is
+enforcement, measured 2026-07-29 against `check_segment`. With the row
+`Ashcombe,灰岸,阿什科姆;艾什康,error`: the term is injected into the request as
+required terminology *before* the model translates, and a target that drifts to
+阿什科姆 forty chapters later produces two issues at error severity — `lx check`
+exits 1. With no row, the same drift produces no issues at all and `lx check`
+exits 0. *Lost:* a sub-segment name index inside the memory. It duplicates what
+the glossary already does; it has no alignment information, so which characters
+of a Chinese target correspond to which English substring can only be guessed;
+and a guess is a fuzzy match, which this project has already decided is advisory
+and never applied automatically. Its ceiling is therefore a suggestion beside a
+green build. It would also be built from nothing — `fuzzy` appears nowhere in
+`src/` — and built on `store.py`, a shared seam.
+
+What the glossary genuinely does not do is *discovery*: it requires knowing the
+two hundred proper nouns of an unread novel in advance. That half becomes a
+terminology-extraction command (HANDOFF-016), not a memory feature, because
+ranking capitalized token runs by frequency is mechanically decidable and
+invariant 4 puts it in code, and because its output feeds the enforcement path
+that already exists.
+
+**D4 · Register selects the language brief through the existing `tone` field, and
+`tone` joins the memory key.** The axis was already there and was being
+contradicted by its own prompt: `config.py` defaults `tone` to `technical`,
+`lx extract --tone` freezes it into `doc["tone"]`, and `_BASE_RULES` interpolates
+`Tone: {tone}.` — but `_system_prompt` returns `f"{base}\n\n{brief}"`, and
+`_LANG_BRIEFS["zh-TW"]` ends with an unconditional *"Write technical
+documentation register: neutral-formal, subject usually dropped, 請 for
+instructions, active voice rather than 被. Nominalize headings."* The last thing
+the model reads overrides the knob. So `_LANG_BRIEFS` becomes keyed by
+`(language, register)` with the terminology paragraph shared and only the
+register paragraph varying, selected by `doc["tone"]`; an unrecognized value
+falls back to today's behaviour, so `tone` stays free text for the `Tone:` line.
+
+`tone` also enters the translation-memory key, because a register that changes
+the target and cannot be seen by the key is a silent overwrite. Absent must
+compare equal to absent by the same rule `record_key` already applies to
+`segmentation_version`. *Lost:* leaving the key alone. The per-project memory
+path (`.lx/tm.{lang}.jsonl`, relative to the working directory) does keep a
+novels project apart from a documentation project — but `tone` is
+*per-document*, so mixing two registers inside one project costs nothing and
+fails silently. *Lost:* a second `register` axis beside `tone`, which is a
+near-synonym that leaves the first one broken. *Lost:* reusing `variant`, which
+contradicts its documented purpose, is per-segment where register is
+per-document, and has a measurable side effect — `store.py` does not offer the
+fallback to a segment carrying a variant, so every segment of a literary document
+would lose it.
+
+**D5 · Each request item carries its neighbours as read-only source, and the
+retry path carries them in full.** Measured: `_user_message` builds
+`{"id", "kind", "text"}` and nothing marks two items adjacent; `retry_one` sends
+a single segment *alone*, and retry is the path a hard sentence actually takes.
+Inside a batch the neighbours are already present as other items, so they are
+referenced by id and only the two batch edges carry full text — about two extra
+segments per batch of 25. On retry there is no batch to borrow from, so the
+neighbours are sent in full; that is the path that needs them most.
+
+Neighbours are source text, so invariant 3 is untouched — the model already sees
+the source. **Neighbour context does not enter the memory key.** This is the same
+reasoning as the mask configuration: the key is deliberately blind to what
+produced a proposal, and `translate.accept` is what makes the blindness safe.
+*Lost:* feeding the model its own preceding *target*. With `batch.concurrency`
+defaulting to 2 over a `ThreadPoolExecutor`, the preceding target is not
+guaranteed to exist yet; making it exist means translating prose serially, which
+costs the whole concurrency. *Lost:* a rolling chapter summary, which is
+generated content — a second model call whose errors propagate silently into
+every segment under it — and unbounded in length.
+
+**D6 · The queue is re-ordered on the shortest path to one real book, translated
+end to end.** `10-now/` becomes: 013 literary register → 016 terminology
+extraction → 017 plain text → 202 resumability → 014 neighbour context → 015
+style sheet → 011 continuation indent → 206 per-stage routing. `90-later/` keeps
+207 (which gates two others) → 204 workbench → 201 core/studio split → 205 EPUB
+→ 203 `lx status --json`.
+
+*Lost:* durability first, putting 202 ahead of everything. Losing a run is the
+worse failure, but the first book will be translated in the wrong register
+whatever the state layer does, and 013 is small. *Lost:* pulling EPUB forward
+with plain text. EPUB is where novels actually arrive, but it is estimated at
+8–15 days against plain text's 2–4, and it would push the first end-to-end
+verification far out. 201 and 203 move back because they serve a consuming
+repository and the separate bookshelf project respectively — neither serves
+translation, which is what D1 now ranks by.
+
+**What does not change.** *The model translates sentences; code does everything
+else* still holds. Novels do not challenge it; they shift the balance, making
+code's half smaller and the model's half harder. Invariant 4 survives untouched —
+register, tone and flow are judgement and stay out of `checks.py`. Invariant 10
+survives and matters more: on a novel the gap between "passes" and "reads well"
+is the whole job, and a green `lx check` still claims only that the structure
+survived and the mechanical rules passed. Invariants 1, 2, 6, 7, 8, 9 and 11 are
+untouched. This was a re-prioritization, not an architecture change.
+
 ## 2026-07-29 · A hard line break survives normalization, and a long one is canonicalized to two spaces
 
 Closing HANDOFF-010. `normalize()` collapsed every run of two or more blanks, so
