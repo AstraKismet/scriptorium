@@ -154,6 +154,33 @@ def _chunks(items, size):
 
 # ── driver ─────────────────────────────────────────────────────────────────
 
+def accept(seg, text, lang, cfg):
+    """Take a proposed target only if its placeholders survived. ``(text, why)``.
+
+    Model output and a translation-memory hit both arrive here, because they fail
+    the same way. A memory entry is keyed on source text, not on the mask
+    configuration that produced its placeholders — deliberately, so that the same
+    wording banked on two machines with different do-not-translate lists is still
+    one entry — and the consequence is that editing `config/dnt.txt` changes how
+    many ``⟦n⟧`` a segment has while leaving its key untouched. Written straight
+    to target, as reuse used to be, that renders a bare ``⟦2⟧``: measured
+    2026-07-27, and caught only by a downstream check, which is safety by
+    inspection where invariant 2 asks for safety by construction.
+
+    `lx apply` deliberately does not come through here. It carries a person's or
+    an agent's own words, and refusing those at the door with no way to override
+    is worse than reporting them at `lx check`, where a reviewer is already
+    looking. See ``docs/decisions.md``, 2026-07-29.
+    """
+    text = repair_placeholders(text).strip()
+    want, got = sorted(placeholder_ids(seg["masked"])), sorted(placeholder_ids(text))
+    if want != got:
+        return None, f"placeholder mismatch (expected {want}, got {got})"
+    if not text:
+        return None, "empty translation"
+    return normalize(text, lang, cfg), None
+
+
 class Progress:
     """Minimal thread-safe reporter; the web UI swaps in its own sink."""
 
@@ -195,16 +222,6 @@ def translate_segments(segments, doc, cfg, provider_name=None, mode="draft",
     batches = list(_chunks(segments, size))
     progress(f"{provider.describe()} · {len(segments)} segment(s) in {len(batches)} batch(es)")
 
-    def accept(seg, text):
-        """Only take a translation whose placeholders survived."""
-        text = repair_placeholders(text).strip()
-        want, got = sorted(placeholder_ids(seg["masked"])), sorted(placeholder_ids(text))
-        if want != got:
-            return None, f"placeholder mismatch (expected {want}, got {got})"
-        if not text:
-            return None, "empty translation"
-        return normalize(text, lang, cfg), None
-
     def retry_one(seg):
         note = ""
         if seg["masked"].count("\u27e6"):
@@ -215,7 +232,7 @@ def translate_segments(segments, doc, cfg, provider_name=None, mode="draft",
             got = parse_reply(reply).get(seg["id"], "")
         except Exception as e:  # noqa: BLE001 - surfaced to the caller
             return None, str(e)
-        return accept(seg, got)
+        return accept(seg, got, lang, cfg)
 
     def run_batch(idx, batch):
         try:
@@ -228,7 +245,8 @@ def translate_segments(segments, doc, cfg, provider_name=None, mode="draft",
         local_ok, local_bad = {}, []
         for seg in batch:
             text = mapping.get(seg["id"])
-            good, why = (None, "no answer for this id") if text is None else accept(seg, text)
+            good, why = ((None, "no answer for this id") if text is None
+                         else accept(seg, text, lang, cfg))
             if good is None:
                 good, why = retry_one(seg)
             if good is None:

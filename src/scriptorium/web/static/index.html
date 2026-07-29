@@ -212,7 +212,8 @@ async function loadState() {
     if (b.classList.contains('cand')) {
       say(`extracting ${b.dataset.src} [${b.dataset.lang}]`);
       const r = await api('/api/extract', {src:b.dataset.src, lang:b.dataset.lang});
-      say(`  ${r.segments} segments, ${r.reused} reused`, 'good');
+      say(`  ${r.segments} segments, ${r.reused} reused`
+          + (r.rejected ? `, ${r.rejected} stale memory hit(s) refused` : ''), 'good');
       await loadState();
     }
     open(b.dataset.src, b.dataset.lang);

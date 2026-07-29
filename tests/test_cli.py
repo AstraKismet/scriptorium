@@ -216,9 +216,13 @@ def test_state_from_before_typed_slots_is_refused_with_the_command_that_fixes_it
 
     assert _lx(["extract", "d.md", "--lang", "zh-TW"], tmp_path, env).returncode == 0
     doc = json.loads(state.read_text(encoding="utf-8"))
-    assert doc["state_version"] == 2
+    assert doc["state_version"] == 3
     assert doc["segments"][0]["target"] == target
     assert doc["segments"][0]["slots"]["1"]["role"] == "open"
+    # The carryover crossed a file with no `context` at all, which is every state
+    # file written before version 3. It works because `prior_targets` reads `kind`
+    # when the key is absent — the migration rule, asserted where it is used.
+    assert doc["segments"][0]["context"] == doc["segments"][0]["kind"]
     assert _lx(["check", "d.md", "--lang", "zh-TW"], tmp_path, env).returncode == 0
 
 
@@ -255,7 +259,7 @@ def test_state_from_a_newer_build_is_not_silently_overwritten(tmp_path):
     # --reset is the escape hatch the message names, and it must actually work.
     assert _lx(["extract", "d.md", "--lang", "zh-TW", "--reset"], tmp_path, env).returncode == 0
     after = json.loads(state.read_text(encoding="utf-8"))
-    assert after["state_version"] == 2
+    assert after["state_version"] == 3
     assert "field_from_the_future" not in after["segments"][0]
 
 

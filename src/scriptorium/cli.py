@@ -29,7 +29,10 @@ from .store import (
     prior_targets,
     report_path,
     save_doc,
+    segment_key,
     store_path,
+    tm_lookup,
+    tm_records,
     tracked,
 )
 
@@ -71,6 +74,10 @@ def force_utf8(stream):
 # ── extract ────────────────────────────────────────────────────────────────
 
 def do_extract(src, lang, cfg, tone=None, reset=False):
+    # Lazy, like every other `.translate` import in this file: extract does not
+    # talk to a model and should not pull the provider stack in to do so.
+    from .translate import accept
+
     text, eol = split_terminator(read_document(src))
     nodes, segments = parse(text, load_dnt(cfg))
 
@@ -83,15 +90,32 @@ def do_extract(src, lang, cfg, tone=None, reset=False):
     prior = {} if reset else prior_targets(src, lang)
 
     tm = load_tm(lang)
-    reused = 0
+    reused, rejected = 0, 0
     for seg in segments:
-        if seg["hash"] in prior:
-            seg["target"], seg["origin"] = prior[seg["hash"]]
-            seg["status"] = "translated"
-            reused += 1
-        elif seg["hash"] in tm:
-            seg["target"], seg["origin"], seg["status"] = tm[seg["hash"]], "tm", "translated"
-            reused += 1
+        # This document's own state first, then the memory. Both are proposals,
+        # not results: reuse goes through `accept` for the same reason model
+        # output does — the placeholder set is the one thing neither the pipeline
+        # nor a reviewer can reconstruct, and a stale entry that keeps its key
+        # while the mask configuration moves under it is the measured case.
+        candidates = []
+        key = segment_key(seg)
+        if key in prior:
+            candidates.append(prior[key])
+        hit, hit_origin = tm_lookup(tm, seg)
+        if hit is not None:
+            candidates.append((hit, hit_origin))
+        for proposal, origin in candidates:
+            # The memory is tried even when this document's own target was
+            # refused: the two can differ, and a good banked wording should not be
+            # lost to a stale one sitting in front of it.
+            target, _why = accept(seg, proposal, lang, cfg)
+            if target is not None:
+                seg["target"], seg["origin"], seg["status"] = target, origin, "translated"
+                reused += 1
+                break
+        else:
+            if candidates:
+                rejected += 1
 
     doc = {
         "version": __version__, "source": os.path.relpath(src), "lang": lang,
@@ -104,14 +128,20 @@ def do_extract(src, lang, cfg, tone=None, reset=False):
         "nodes": nodes, "segments": segments,
     }
     save_doc(src, lang, doc)
-    return doc, reused
+    return doc, reused, rejected
 
 
 def cmd_extract(args, cfg):
-    doc, reused = do_extract(args.src, args.lang, cfg, args.tone, args.reset)
+    doc, reused, rejected = do_extract(args.src, args.lang, cfg, args.tone, args.reset)
     pending = sum(1 for s in doc["segments"] if s["status"] == "pending")
     _out(f"{args.src} -> {store_path(args.src, args.lang)}")
-    _out(f"  segments {len(doc['segments'])} | reused {reused} | pending {pending}")
+    line = f"  segments {len(doc['segments'])} | reused {reused} | pending {pending}"
+    # Only when it happened, and named as the memory's problem rather than the
+    # document's: a rejected reuse means a banked entry no longer fits the
+    # segment it matched, and the segment went back to pending because of it.
+    if rejected:
+        line += f" | {rejected} stale memory hit(s) refused"
+    _out(line)
 
 
 # ── todo ───────────────────────────────────────────────────────────────────
@@ -247,11 +277,7 @@ def cmd_render(args, cfg):
 
 def cmd_commit(args, cfg):
     doc = load_doc(args.src, args.lang)
-    tm = load_tm(args.lang)
-    records = [{"hash": s["hash"], "source": s["source"], "target": s["target"]}
-               for s in doc["segments"]
-               if s.get("target") and tm.get(s["hash"]) != s["target"]]
-    n = append_tm(args.lang, records)
+    n = append_tm(args.lang, tm_records(doc, load_tm(args.lang)))
     _out(f"translation memory += {n} entries")
 
 
@@ -334,10 +360,11 @@ def cmd_repair(args, cfg):
 
 def cmd_run(args, cfg):
     """extract → translate → check → repair* → render, in one command."""
-    doc, reused = do_extract(args.src, args.lang, cfg, args.tone)
+    doc, reused, rejected = do_extract(args.src, args.lang, cfg, args.tone)
     pending = [s for s in doc["segments"] if s["status"] == "pending"]
     _out(f"{args.src} [{args.lang}] · {len(doc['segments'])} segments · "
-         f"{reused} reused · {len(pending)} to translate")
+         f"{reused} reused · {len(pending)} to translate"
+         + (f" · {rejected} stale memory hit(s) refused" if rejected else ""))
 
     if pending:
         _translate(args.src, args.lang, cfg, pending, "draft", args)

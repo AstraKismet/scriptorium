@@ -46,9 +46,10 @@ no way to resume after a failure, and no way to retranslate only what changed. A
 document in its seventh revision gets fully retranslated for the seventh time, and
 previously approved wording drifts on every pass.
 
-Here, state is content-addressed segments on disk plus an append-only translation
-memory. Editing one paragraph of a 400-segment document produces exactly one unit of
-work, and approved wording is stable across revisions by default.
+Here, state is segments on disk keyed by content and block context, plus an
+append-only translation memory. Editing one paragraph of a 400-segment document
+produces exactly one unit of work, and approved wording is stable across revisions
+by default.
 
 ## 5. Terminology enforcement was aspirational
 
