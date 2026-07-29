@@ -3,6 +3,128 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-07-29 · The workbench confines every path it is given, and answers only its own page
+
+Closing HANDOFF-008's three measured defects: `/api/render` wrote to any path the
+caller named, `src` was unconfined on every endpoint that took it, and nothing
+anywhere inspected the request's origin. The fourth defect that package recorded
+— the static handler escaping its root — was closed separately on 2026-07-28 and
+has its own entry below.
+
+**A third path vector the package did not name: `lang`.** It is not a path, so it
+was not on the list; it is interpolated straight into a *filename* by
+`store.store_path`, `store.report_path` and `store.tm_path`, and it arrives from
+the request body on `/api/extract`, `/api/check` and `/api/commit`. Measured:
+`tm_path("../../../../pwn")` resolves one directory *above* the project. Closing
+`src` and `out` while leaving it open would have shipped the same write primitive
+under a different key. It gets a whitelist rather than the confinement helper —
+letters, digits, `-` and `_` — because a language tag has a decidable shape
+(invariant 4), and confining the derived path would still let a tag escape `.lx/`
+into the project and collide with a source document, with the answer depending on
+which of the three paths an endpoint happened to build.
+
+**The helper validates and hands back the caller's string. It never
+canonicalizes.** *Lost:* returning `os.path.realpath(value)` and letting callers
+pass it on, which is the obvious shape and is wrong here. Every identity in this
+project is `os.path.relpath(src)` against `os.getcwd()` — `store.doc_id`,
+`store_path`, `report_path`, `do_extract`'s `doc["source"]`, `default_output` —
+so a different spelling of one file is a different document. Measured twice: with
+the cwd reached through a junction (`mklink /J`, no elevation), and with an 8.3
+short-name cwd, where `os.getcwd()` returns the short form and `realpath`
+expands it. `doc_id("docs/guide.md")` is `docs_guide.md`, and
+`doc_id(realpath("docs/guide.md"))` is `.._real-project_docs_guide.md`. The
+second is not a crash: `/api/extract` writes one state file and `/api/doc` then
+looks for another, and `default_output` formats to
+`i18n/zh-TW/../real-project/docs/guide.md`, which *passes* confinement — so the
+render succeeds and silently writes to the wrong directory. The 8.3 case is not
+exotic: it is the GitHub Actions windows-latest layout, because `TEMP` lives
+under `RUNNER~1` and pytest builds `tmp_path` from it.
+
+**The comparison is `os.path.commonpath([root, full]) == root`, both sides
+resolved, root first.** *Lost:* `str.startswith`, which matches `/proj-evil`
+against `/proj`, is case-sensitive where Windows is not, and rejects every child
+when the root is a drive root. *Also lost:* `pathlib.Path.is_relative_to`, which
+3.9 does have but which is the same string comparison with the same blindness to
+`..`. Root first because `ntpath.commonpath` lowercases before comparing and
+returns the casing of its *first* argument, so the other order turns a case
+difference in the candidate into a false rejection. `_static` moved onto the same
+helper rather than keeping its own `startswith` idiom, and keeps its byte-identical
+`forbidden` response so its existing tests measure the same thing.
+
+**Six mechanical rules run in front of the resolution, because resolution cannot
+see them.** A reserved device name, an alternate data stream, a trailing dot or
+space, and a drive-relative spelling all resolve *inside* the root and still name
+something other than the file the caller wrote down — measured: `{"out": "NUL"}`
+answered 200 with `{"wrote": "NUL"}` while the document was discarded, and
+`docs/g.md:evil` wrote bytes into a stream of a tracked source document leaving
+its size and the directory listing unchanged. They are unconditional rather than
+gated on `os.name`, and that costs something real: on Linux a legal filename
+containing `:`, ending in `.` or a space, or whose stem is `nul`, `con`, `aux`,
+`prn`, `com1`–`com9` or `lpt1`–`lpt9` cannot be reached through the workbench.
+Paid on purpose, and for the reason the static-path entry below already gives —
+one rule means one behaviour and one test on all four runners, and the platform
+that is not the development machine is the one nobody checks. `lx` from a
+terminal still reaches such a file, because the CLI does not call this.
+
+**The CLI is deliberately not confined.** `lx render doc.md -o /tmp/out.md` is a
+person typing a command. The helper lives in `cli.py` because that is where
+shared logic lives (invariant 8); it is enforced at the web edge only.
+
+**The origin control is a rejection, not a token, and absent is not the same as
+wrong.** *Lost:* a CSRF token, which has to be minted, embedded and rotated, and
+which buys nothing against a local process that can read it out of the served
+page. Three rules: `Host` against a loopback allowlist, which is the only one
+that closes DNS rebinding and the only one that works on a GET; `Sec-Fetch-Site`,
+which is a forbidden header name no page can set, and where `same-site` is
+refused alongside `cross-site` because a page on another loopback port is
+same-site and is not us; and `Origin` by membership against all three loopback
+spellings with the port included, because `serve()` opens `http://localhost:PORT`
+after binding `127.0.0.1`, so the default UI's `Origin` is the *name* and never
+the address. `Origin: null` is a present value, not an absent header — a
+sandboxed iframe, a `data:` URL, a cross-origin redirect and an https page
+posting to this http server all send it — so the test is membership and never
+falsiness. A request with no `Origin` at all is accepted, because that is `curl`
+and `lx`, which can read and write these files without asking anyone.
+
+**A non-loopback bind keeps exactly the exposure it already had.** With no
+loopback address to compare against, the control degrades to matching each
+request's own `Host`, which does not resist rebinding because the attacker
+controls both sides of that comparison. `serve()`'s existing warning now says so;
+a warning that named the money and not the weakened check would be true and
+incomplete.
+
+**What this does not close, stated so it is not overstated.** Confinement bounds
+the blast radius; it is not a safety property. `{"out": ".git/hooks/pre-commit"}`
+is inside the project root. So is overwriting a source document. A local process
+running as this user is inside the boundary by construction and a header check
+cannot see the difference between it and `curl`. TOCTOU between the check and the
+open is not closed and not mitigated: winning it needs write access inside the
+project root, which needs exactly such a process, and that process can write
+anything this user can. The absence of any `Access-Control-Allow-*` header is
+load-bearing — it is why a cross-site call in `cors` mode preflights into the
+existing `OPTIONS` 501 — and an absence is invisible to the next reader, so a
+future `do_OPTIONS` that answers a preflight permissively silently reopens all of
+this.
+
+**Two escape hatches are recorded and not built**, per the package's own
+instruction, and carried to HANDOFF-204 which owns this surface: a corpus living
+outside the project root, which the confinement refuses today; and an
+`--allow-origin` flag, which is the better answer for a deliberately exposed bind
+than deriving the allowed origin from the request. Both are new public interface,
+and neither belongs inside a closure.
+
+**A test that asserts a file was *not* written must aim inside `tmp_path`.** The
+first spelling of these tests did not, and it turned the suite red against
+byte-identical correct code for a run of consecutive attempts before the cause
+was found. `monkeypatch.chdir(tmp_path)` makes `tmp_path` the project, so "outside the
+project" is `tmp_path.parent` — and `tmp_path.parent.parent` is pytest's shared
+base directory, which pytest never cleans. One run of the *unfixed* code — a
+bisect, a `git stash`, CI on the parent commit, or the measurement this package
+required — leaves the escape artifact there permanently, and the test then fails
+forever against a correct implementation. The fix is to nest the project root two
+levels down inside `tmp_path`, so every escape target is still inside the
+directory pytest owns and rotates.
+
 ## 2026-07-29 · The memory key gains three axes, and reuse stops being a write
 
 Executing B5 below, with the derived i18n hedge folded into the same migration
