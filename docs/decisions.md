@@ -49,6 +49,12 @@ three call sites and `translate.accept` to make the op host-aware — the wrong
 price for suppressing two invisible characters, when the failure it would prevent
 is cosmetic and the failure it would introduce is a deleted `<br>`.
 
+**`pangu` was checked and needed nothing.** Both of its rules are zero-width
+assertions between a CJK character and a Latin one, and neither can match across
+a blank, so it cannot insert or remove a space at a line end from either
+direction. Recorded because the question is not obvious from reading it and the
+answer is cheap to lose.
+
 **Verified by mutation, not by review.** Thirteen mutants of the two guards, the
 line-end pass and its two predicates; twelve fail the suite. The survivor is the
 `[ \t]*` inside `collapse_space`'s lookahead, which is redundant given the pass
