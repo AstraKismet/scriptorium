@@ -154,7 +154,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 269 passed; no network
+python -m pytest -q                 # 303 passed; no network
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
 
@@ -255,6 +255,16 @@ silently. That file also holds the downgrade ledger.
 
 - Public functions in `cli.py` prefixed `do_` are the API other surfaces call;
   `cmd_` functions are argparse handlers and should stay thin.
+- Every caller-supplied path reaching the web surface goes through
+  `cli.confined_path`, and every `lang` through `cli.language_tag`. Both live in
+  `cli.py` (invariant 8) and are enforced in `web/server.py` only — the CLI is
+  deliberately unconfined, because `lx render doc.md -o /tmp/out.md` is a person
+  typing a command. A new endpoint gets them **by presence of the field, not by
+  endpoint name**, so one added later cannot skip the check by being new. The
+  helper validates and returns the caller's string unchanged; it must never hand
+  back a resolved path, because every document identity here is
+  `os.path.relpath(src)` against `os.getcwd()`. See `docs/decisions.md`,
+  2026-07-29.
 - A document's line terminator is a document-level fact, held in `doc["eol"]` and
   re-imposed once at render — never carried inside a segment, where the model and
   the reviewer would both have to reproduce a control character neither can be
