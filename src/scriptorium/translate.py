@@ -12,7 +12,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from .checks import check_segment
-from .config import load_dnt, load_glossary
+from .config import DEFAULT_TONE, canonical_tone, load_dnt, load_glossary
 from .mask import placeholder_ids, repair_placeholders
 from .normalize import normalize
 from .providers import build as build_provider
@@ -38,16 +38,20 @@ nothing else — no code fences, no commentary:
 
 {{"s0001": "...", "s0002": "..."}}"""
 
-_LANG_BRIEFS = {
-    # The second paragraph carries the terms the 2026-07-28 audit removed from
-    # `checks.py::ZH_TW_LEXICON`: each is correct Taiwanese usage in one sense, so
-    # choosing between them needs the sentence, which invariant 4 keeps out of a
-    # validator and puts here instead. Do not compress it back into "X not Y" —
-    # that phrasing is what taught the model the wrong half.
+#: What a language needs whatever register it is written in: the terms, and the
+#: punctuation width. Register-independent by definition and **shared, not
+#: duplicated** — the zh-TW list is the output of the 2026-07-28 invariant-4
+#: audit, and two copies of it are how that audit gets silently undone.
+#:
+#: The sense-split half carries the terms that audit removed from
+#: `checks.py::ZH_TW_LEXICON`: each is correct Taiwanese usage in one sense, so
+#: choosing between them needs the sentence, which invariant 4 keeps out of a
+#: validator and puts here instead. Do not compress it back into "X not Y" —
+#: that phrasing is what taught the model the wrong half.
+_LANG_TERMS = {
     "zh-TW": """\
-Target is Traditional Chinese as used in Taiwanese technical documentation.
-Converting characters is not enough — use the vocabulary that documentation
-uses: 軟體 not 軟件, 網路 not 網絡, 執行緒 not 線程, 快取 not 緩存,
+Converting characters is not enough — use the vocabulary Taiwan uses:
+軟體 not 軟件, 網路 not 網絡, 執行緒 not 線程, 快取 not 緩存,
 螢幕 not 屏幕, 資訊 not 信息, 列印 not 打印, 影片 not 視頻.
 Some words are correct in Taiwan in one sense and wrong in another, so choose by
 meaning rather than by reflex: 程式 for software but 程序 for a legal or
@@ -60,13 +64,67 @@ acquiescence; 選單 for a UI but 菜單 for food. The same split applies to 指
 place on a register), 互動 vs 交互 (交互作用), 佇列 vs 隊列 (a military
 formation), 音訊 vs 音頻 (audio frequency), 智慧 vs 智能 (智能障礙), 檢視 vs
 視圖 (正視圖), 文字 vs 文本 (a text under analysis), 使用者 vs 用戶端.
-Use full-width ，。！？；： and 「」 inside Chinese text. Write technical
-documentation register: neutral-formal, subject usually dropped, 請 for
-instructions, active voice rather than 被. Nominalize headings.""",
-    "ja": """\
+Use full-width ，。！？；： and 「」 inside Chinese text.""",
+    "ja": "Use 全角 punctuation 、。 and 「」.",
+}
+
+#: ``(language, register)`` -> ``(what the target variety is, how it is written)``.
+#: The shared block above goes between the two halves, so a register cannot
+#: acquire a private copy of the terminology by being edited on its own.
+#:
+#: Selected by ``doc["tone"]``, and an unrecognized value falls back to the
+#: default register — `tone` stays free text for the ``Tone:`` line of
+#: `_BASE_RULES`, which is where an unrecognized one still has its effect.
+#: Before 2026-07-29 there was one brief per language and it ended in the
+#: documentation-register sentence unconditionally, so it overrode the knob two
+#: paragraphs above it: `docs/decisions.md`, D4.
+_LANG_BRIEFS = {
+    ("zh-TW", DEFAULT_TONE): (
+        "Target is Traditional Chinese as used in Taiwanese technical documentation.",
+        """\
+Write technical documentation register: neutral-formal, subject usually dropped,
+請 for instructions, active voice rather than 被. Nominalize headings.""",
+    ),
+    ("zh-TW", "literary"): (
+        "Target is Traditional Chinese as it is written in novels published in Taiwan.",
+        """\
+Write narrative prose. This is a novel, and the target has to read as a book
+written in Chinese rather than an English one showing through it: build each
+sentence in Chinese order instead of following the English clause by clause, and
+let it break where Chinese would break it.
+Speech goes inside 「」 and a quotation inside speech inside 『』; a book, a film
+or a song takes 《》. An em dash is —— and an ellipsis is ……, two characters each.
+Keep a subject where the sentence wants one and drop it where Chinese would —
+neither is the rule here. 請 belongs to a character who is speaking, never to the
+narrator and never as an instruction to the reader; and avoid 被 where 讓, 由, or
+an active sentence is what Chinese uses.
+Avoid the marks of translated English: stacked 的, 一個 standing in for an
+article, 當……的時候, 對於……來說, and 進行/作出 in place of a plain verb.
+Keep an image an image. Where an English metaphor has no Chinese collocation,
+write the image a Chinese writer would use rather than the words the English
+used, and never flatten it into an explanation.
+Narration holds one voice throughout, and a character keeps their own diction
+and level of formality wherever they speak.""",
+    ),
+    ("ja", DEFAULT_TONE): (
+        """\
 Target is Japanese technical documentation register (である/だ体 for reference
-material, ですます体 for guides — follow whichever the surrounding segments use).
-Use 全角 punctuation 、。 and 「」.""",
+material, ですます体 for guides — follow whichever the surrounding segments use).""",
+        None,
+    ),
+    ("ja", "literary"): (
+        """\
+Target is Japanese narrative prose: だ・である体 for narration, held in one
+register throughout, while dialogue in 「」 takes the speaker's own.""",
+        """\
+Build each sentence in Japanese order rather than following the English clause
+by clause. Japanese carries the subject in the context rather than in every
+sentence: drop 彼, 彼女 and 私 wherever the reader can still follow, and name the
+person when the referent has to be marked — a pronoun in every sentence is the
+plainest mark of 翻訳調. A quotation inside speech takes 『』; an em dash is ——
+and an ellipsis ……, two characters each. Do not add explanation the source does
+not have, and do not flatten an image into a statement.""",
+    ),
 }
 
 _POLISH_RULES = """\
@@ -85,12 +143,29 @@ Reply with a single JSON object mapping segment id to the revised text, and
 nothing else."""
 
 
+def _brief(target_lang, tone):
+    """The language brief for a register, or ``None`` for an unbriefed language.
+
+    An unrecognized register takes the default one's brief rather than none: the
+    knob is free text by design, and a language losing its terminology because
+    somebody typed a register nobody has written yet is a far worse trade than
+    a novel briefed as documentation, which is what happened before D4 anyway.
+    """
+    register = canonical_tone(tone)
+    parts = (_LANG_BRIEFS.get((target_lang, register))
+             or _LANG_BRIEFS.get((target_lang, DEFAULT_TONE)))
+    if parts is None:
+        return None
+    head, rules = parts
+    return "\n".join(p for p in (head, _LANG_TERMS.get(target_lang), rules) if p)
+
+
 def _system_prompt(source_lang, target_lang, tone, mode):
     if mode == "polish":
         base = _POLISH_RULES.format(target_lang=target_lang)
     else:
         base = _BASE_RULES.format(source_lang=source_lang, target_lang=target_lang, tone=tone)
-    brief = _LANG_BRIEFS.get(target_lang)
+    brief = _brief(target_lang, tone)
     return f"{base}\n\n{brief}" if brief else base
 
 
@@ -204,7 +279,15 @@ def translate_segments(segments, doc, cfg, provider_name=None, mode="draft",
     progress = progress or Progress()
     lang = doc["lang"]
     source_lang = cfg.get("source_lang", "en")
-    tone = doc.get("tone") or cfg.get("tone", "technical")
+    # The document, and not the config, is the authority for its own register.
+    # `do_extract` froze it there, and reading `cfg["tone"]` again here would
+    # resolve one fact a second time, at a later moment, from a source the
+    # memory key does not consult: `store.tm_records` reads `doc["tone"]` only.
+    # Measured on a state file with no `tone` and a config saying `literary` —
+    # the model was briefed literary and the wording was banked in the default
+    # register's tier, which is the silent cross-register overwrite this axis
+    # exists to prevent, arriving through a divergent fallback.
+    tone = doc.get("tone") or DEFAULT_TONE
 
     routing = cfg.get("routing", {})
     name = provider_name or routing.get(mode) or routing.get("draft") or "local"

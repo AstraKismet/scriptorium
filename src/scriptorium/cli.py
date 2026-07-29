@@ -10,7 +10,15 @@ from collections import Counter
 
 from . import __version__
 from .checks import check_segment
-from .config import dump_json, load_config, load_dnt, load_glossary, write_templates
+from .config import (
+    DEFAULT_TONE,
+    canonical_tone,
+    dump_json,
+    load_config,
+    load_dnt,
+    load_glossary,
+    write_templates,
+)
 from .docio import (
     apply_terminator,
     read_document,
@@ -26,6 +34,7 @@ from .store import (
     append_tm,
     load_doc,
     load_tm,
+    prior_doc,
     prior_targets,
     report_path,
     save_doc,
@@ -309,13 +318,23 @@ def do_extract(src, lang, cfg, tone=None, reset=False):
     text, eol = split_terminator(read_document(src))
     nodes, segments = parse(text, load_dnt(cfg))
 
-    # `prior_targets` rather than `load_doc`: extract is what migrates a state
-    # file the current build refuses to read, so it must be able to read the
+    # `prior_doc` rather than `load_doc`: extract is what migrates a state file
+    # the current build refuses to read, so it must be able to read the
     # translations out of one first. It still refuses a file from a *newer*
     # build, because the next line overwrites it. `--reset` skips that read and
     # so overwrites it anyway — deliberately, and named in the message the newer
     # file raises, because "start over" is exactly what the flag means.
-    prior = {} if reset else prior_targets(src, lang)
+    stored = {} if reset else prior_doc(src, lang)
+
+    # The register is frozen onto the document, and a re-extract that does not
+    # name one keeps the frozen value. Without this a forgotten `--tone` would
+    # quietly return the document to the configured default — and since the
+    # register entered the memory key, that takes every carryover and every
+    # memory hit with it. `--reset` starts from `--tone` or config instead: it
+    # does not read the state file at all, because it has to work on one this
+    # build cannot read.
+    tone = tone or stored.get("tone") or cfg.get("tone", DEFAULT_TONE)
+    prior = prior_targets(stored)
 
     tm = load_tm(lang)
     reused, rejected = 0, 0
@@ -326,10 +345,10 @@ def do_extract(src, lang, cfg, tone=None, reset=False):
         # nor a reviewer can reconstruct, and a stale entry that keeps its key
         # while the mask configuration moves under it is the measured case.
         candidates = []
-        key = segment_key(seg)
+        key = segment_key(seg, tone)
         if key in prior:
             candidates.append(prior[key])
-        hit, hit_origin = tm_lookup(tm, seg)
+        hit, hit_origin = tm_lookup(tm, seg, tone)
         if hit is not None:
             candidates.append((hit, hit_origin))
         for proposal, origin in candidates:
@@ -347,7 +366,7 @@ def do_extract(src, lang, cfg, tone=None, reset=False):
 
     doc = {
         "version": __version__, "source": os.path.relpath(src), "lang": lang,
-        "tone": tone or cfg.get("tone", "technical"),
+        "tone": tone,
         # The document's own line terminator, held here rather than in the
         # skeleton so the model and the reviewer never see it. A state file
         # written before this existed has no key, and "\n" is the right default
@@ -369,6 +388,11 @@ def cmd_extract(args, cfg):
     # segment it matched, and the segment went back to pending because of it.
     if rejected:
         line += f" | {rejected} stale memory hit(s) refused"
+    # Likewise only when it is not the default: the register decides both the
+    # brief and which half of the memory answers, so a document that is in one
+    # should say so on the line that reports what carried over.
+    if canonical_tone(doc["tone"]) != DEFAULT_TONE:
+        line += f" | tone {doc['tone']}"
     _out(line)
 
 
@@ -658,8 +682,14 @@ def build_parser():
     e = sub.add_parser("extract", help="parse a document into segments")
     e.add_argument("src")
     e.add_argument("--lang", required=True)
-    e.add_argument("--tone")
-    e.add_argument("--reset", action="store_true")
+    e.add_argument("--tone", help="register for this document: technical (default) or "
+                                  "literary. Frozen on the document and kept by later "
+                                  "extracts; changing it leaves the existing translations "
+                                  "behind, so run `lx commit` first")
+    e.add_argument("--reset", action="store_true",
+                   help="discard the existing state instead of carrying its translations "
+                        "over. It does not read the old file at all, so the register goes "
+                        "back to --tone or config with everything else")
     e.set_defaults(fn=cmd_extract)
 
     t = sub.add_parser("todo", help="emit pending segments as JSON")
@@ -719,7 +749,7 @@ def build_parser():
     rn = sub.add_parser("run", help="extract, translate, check, repair, render")
     rn.add_argument("src")
     rn.add_argument("--lang", required=True)
-    rn.add_argument("--tone")
+    rn.add_argument("--tone", help="register for this document; see `lx extract --help`")
     rn.add_argument("-o", "--out")
     rn.add_argument("--polish", action="store_true", help="second pass for fluency")
     rn.add_argument("--max-rounds", type=int, default=None)

@@ -20,7 +20,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from scriptorium.cli import do_apply, do_extract, do_render  # noqa: E402
-from scriptorium.config import DEFAULT_CONFIG  # noqa: E402
+from scriptorium.config import DEFAULT_CONFIG, DEFAULT_TONE  # noqa: E402
 from scriptorium.mdparse import parse  # noqa: E402
 from scriptorium.store import (  # noqa: E402
     SEGMENTATION_VERSION,
@@ -86,8 +86,14 @@ def test_a_null_field_read_from_another_writer_is_its_absence_everywhere():
     another tool may."""
     bare = {"hash": "abc123", "target": "x"}
     nulled = {"hash": "abc123", "context": None, "segmentation_version": None,
-              "variant": None, "target": "x"}
+              "variant": None, "tone": None, "target": "x"}
     assert record_key(bare) == record_key(nulled)
+
+    # `tone` extends the rule by one step, because its null is a string the
+    # caller is holding rather than an absence: the default register has to
+    # compare equal to the field being missing, or every entry banked before
+    # registers existed stops answering at once.
+    assert record_key(dict(bare, tone=DEFAULT_TONE)) == record_key(bare)
 
 
 def test_context_separates_one_sentence_in_two_blocks():
@@ -118,6 +124,149 @@ def test_a_record_carries_the_key_fields_and_never_a_null():
                    "segmentation_version": SEGMENTATION_VERSION,
                    "source": "one", "target": "一"}
     assert record_key(rec) == segment_key(seg)
+
+
+# --- the register axis -------------------------------------------------------
+#
+# `tone` is per-*document*, and the memory file is per-project, so two registers
+# inside one project used to cost nothing and fail silently: a paragraph
+# translated as documentation was served verbatim to a novel. See
+# `docs/decisions.md`, 2026-07-29, D4.
+
+#: One English sentence with an obvious answer in each register. The
+#: documentation one is not wrong Chinese — it is wrong *for a novel*, which is
+#: the failure no validator can see (invariant 4).
+LEAVING = b"He left without a word.\n"
+AS_DOCUMENTATION = "他未發一語即行離開。"
+AS_PROSE = "他一句話也沒說就走了。"
+
+
+def test_a_record_carries_the_register_only_when_it_is_not_the_default():
+    seg = {"hash": "abc123", "context": "para", "source": "one", "target": "一"}
+    assert tm_record(seg, "literary")["tone"] == "literary"
+    assert record_key(tm_record(seg, "literary")) == segment_key(seg, "literary")
+
+    # A documentation project's memory file is the file it was before registers
+    # existed, byte for byte — which is what "no whole-memory invalidation"
+    # means at the writing end.
+    assert "tone" not in tm_record(seg, DEFAULT_TONE)
+    assert tm_record(seg, DEFAULT_TONE) == tm_record(seg) == tm_record(seg, None)
+
+
+@pytest.mark.parametrize("typed", ["Literary", " literary ", "LITERARY"])
+def test_case_and_padding_do_not_split_a_register(typed):
+    """The same normalization the brief selection uses, on the other side of the
+    key: two spellings of one register would be two sets of banked wording, and
+    nobody would ever find the split."""
+    seg = {"hash": "abc123", "context": "para"}
+    assert segment_key(seg, typed) == segment_key(seg, "literary")
+    assert record_key({"hash": "abc123", "tone": typed}) == \
+        record_key({"hash": "abc123", "tone": "literary"})
+
+
+def test_tone_in_memory_key_keeps_two_registers_apart(tmp_path, monkeypatch):
+    """One sentence, two documents, one memory file: two entries, and neither is
+    served to the other.
+
+    `tm_path` already holds a novels project apart from a documentation project,
+    because it is relative to the working directory. The register is per-document,
+    so that separation does nothing for two documents in one project — which is
+    why the key had to grow the field rather than the path.
+    """
+    _project(tmp_path, monkeypatch, doc=LEAVING)
+    (tmp_path / "novel.md").write_bytes(LEAVING)
+
+    doc, _reused, _rejected = do_extract("d.md", "zh-TW", CFG)
+    do_apply("d.md", "zh-TW", CFG, {_only(doc)["id"]: AS_DOCUMENTATION})
+    append_tm("zh-TW", tm_records(load_doc("d.md", "zh-TW"), load_tm("zh-TW")))
+
+    # The documentation wording is not offered to the novel at all: not as a hit
+    # that `accept` then refuses — it never reaches `accept`, because the key
+    # does not match.
+    doc, reused, rejected = do_extract("novel.md", "zh-TW", CFG, tone="literary")
+    assert (reused, rejected) == (0, 0)
+    assert _only(doc)["status"] == "pending"
+
+    do_apply("novel.md", "zh-TW", CFG, {_only(doc)["id"]: AS_PROSE})
+    banked = tm_records(load_doc("novel.md", "zh-TW"), load_tm("zh-TW"))
+    assert [r.get("tone") for r in banked] == ["literary"]
+    append_tm("zh-TW", banked)
+
+    tm = load_tm("zh-TW")
+    assert len(tm) == 2
+    _nodes, segs = parse(LEAVING.decode("utf-8"), [])
+    assert tm_lookup(tm, segs[0]) == (AS_DOCUMENTATION, "tm")
+    assert tm_lookup(tm, segs[0], "literary") == (AS_PROSE, "tm")
+
+
+def test_the_register_is_resolved_from_the_document_and_nowhere_else(monkeypatch):
+    """The prompt and the key must never disagree about which register this is.
+
+    Measured before the fix: a state file with no `tone` and a config saying
+    `literary` briefed the model as literary while `tm_records` keyed the result
+    in the default register's tier — the silent cross-register overwrite this
+    axis exists to prevent, arriving through a divergent fallback rather than
+    through the key. `translate_segments` therefore reads the document only; the
+    config decides the register once, at extract, and `do_extract` freezes it.
+    """
+    from scriptorium import translate
+
+    doc = {"lang": "zh-TW",
+           "segments": [{"hash": "h", "context": "para", "source": "a", "target": "b"}]}
+    cfg = dict(DEFAULT_CONFIG, tone="literary")
+
+    briefed = []
+    monkeypatch.setattr(translate, "_system_prompt",
+                        lambda _src, _tgt, tone, _mode: briefed.append(tone) or "")
+    # No segments, so no request is built and no provider is contacted; the
+    # system prompt is assembled before the batch loop, which is the one thing
+    # under test.
+    translate.translate_segments([], doc, cfg, provider_name="local")
+
+    assert briefed == [DEFAULT_TONE]
+    assert [r.get("tone") for r in tm_records(doc, {})] == [None]
+
+
+def test_a_register_change_does_not_carry_the_old_wording_forward(tmp_path, monkeypatch):
+    """The within-document half, which the memory key alone does not cover.
+
+    Carryover is keyed on the *stored* register, so re-extracting into another one
+    carries nothing. The segmentation version deliberately works the other way —
+    this build's on both sides — and the difference is the whole reason: a changed
+    segmentation changes the segment text, so the content hash discriminates on
+    its own, while a changed register leaves the source byte-identical.
+
+    The alternative loses nothing visible at extract and is far worse: the
+    document then holds documentation wording while saying `tone: literary`, and
+    `lx commit` banks all of it under the literary key.
+    """
+    _project(tmp_path, monkeypatch, doc=LEAVING)
+    doc, _reused, _rejected = do_extract("d.md", "zh-TW", CFG)
+    do_apply("d.md", "zh-TW", CFG, {_only(doc)["id"]: AS_DOCUMENTATION})
+
+    doc, reused, rejected = do_extract("d.md", "zh-TW", CFG, tone="literary")
+    assert (reused, rejected) == (0, 0)
+    assert (doc["tone"], _only(doc)["status"]) == ("literary", "pending")
+    assert tm_records(load_doc("d.md", "zh-TW"), load_tm("zh-TW")) == []
+
+
+def test_the_register_is_frozen_on_the_document_and_a_later_extract_keeps_it(
+        tmp_path, monkeypatch):
+    """A forgotten `--tone` must not return the document to the configured
+    default. It was harmless while the register only reached the `Tone:` line;
+    now it would take every carryover and every memory hit with it."""
+    _project(tmp_path, monkeypatch, doc=LEAVING)
+    doc, _reused, _rejected = do_extract("d.md", "zh-TW", CFG, tone="literary")
+    do_apply("d.md", "zh-TW", CFG, {_only(doc)["id"]: AS_PROSE})
+
+    doc, reused, rejected = do_extract("d.md", "zh-TW", CFG)
+    assert (doc["tone"], reused, rejected) == ("literary", 1, 0)
+    assert _only(doc)["target"] == AS_PROSE
+
+    # `--reset` is the exception, and deliberately so: it does not read the state
+    # file at all, because it has to work on one this build cannot read.
+    doc, _reused, _rejected = do_extract("d.md", "zh-TW", CFG, reset=True)
+    assert doc["tone"] == DEFAULT_TONE
 
 
 # --- what happens to a memory written before this key existed ----------------
@@ -151,6 +300,50 @@ def test_an_unversioned_hit_is_marked_so_a_reviewer_can_see_it():
     versioned = dict(LEGACY, context="para", segmentation_version=SEGMENTATION_VERSION)
     tm = {record_key(versioned): versioned["target"]}
     assert [tm_lookup(tm, s)[1] for s in segs] == ["tm", None]
+
+
+def test_legacy_tm_survives_tone_for_a_document_in_the_default_register(
+        tmp_path, monkeypatch):
+    """No whole-memory invalidation, in both tiers.
+
+    The default register *is* the key's null, so a documentation document keys
+    exactly as it did before the field existed. The alternative — key on the
+    register always, and add a second register-blind lookup for the old entries —
+    costs a lookup and lets a documentation-era wording be claimed by a novel,
+    which is the one failure this axis was added to prevent.
+    """
+    _project(tmp_path, monkeypatch, doc=b"A shared sentence.\n")
+    versioned = dict(LEGACY, context="para", segmentation_version=SEGMENTATION_VERSION)
+    append_tm("zh-TW", [LEGACY, versioned])
+    _nodes, segs = parse("A shared sentence.\n", [])
+
+    # The fully-keyed tier, which carries no `tone` field because it predates one.
+    tm = load_tm("zh-TW")
+    assert tm_lookup(tm, segs[0]) == (LEGACY["target"], "tm")
+    assert tm_lookup(tm, segs[0], DEFAULT_TONE) == (LEGACY["target"], "tm")
+
+    # And the unversioned tier below it, reached only through the fallback.
+    bare = {record_key(LEGACY): LEGACY["target"]}
+    assert tm_lookup(bare, segs[0], DEFAULT_TONE) == (LEGACY["target"], "tm:legacy")
+
+    # End to end, because that is where a whole-memory invalidation would show.
+    doc, reused, rejected = do_extract("d.md", "zh-TW", CFG)
+    assert (reused, rejected) == (1, 0)
+    assert _only(doc)["target"] == LEGACY["target"]
+
+
+def test_a_literary_document_is_not_offered_the_unversioned_tier():
+    """The register's half of the rule `variant` already had, one step along.
+
+    A pre-variant record cannot be *known* to be the right form. A pre-register
+    record is stronger than that: it is documentation-register wording by
+    construction, because the build that wrote it ended every zh-TW brief with
+    "Write technical documentation register" whatever `tone` said.
+    """
+    tm = {record_key(LEGACY): LEGACY["target"]}
+    _nodes, segs = parse("A shared sentence.\n", [])
+    assert tm_lookup(tm, segs[0], "literary") == (None, None)
+    assert tm_lookup(tm, segs[0], DEFAULT_TONE) == (LEGACY["target"], "tm:legacy")
 
 
 def test_a_segment_with_a_variant_is_not_offered_a_pre_variant_record():
