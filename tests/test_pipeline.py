@@ -502,24 +502,23 @@ def test_normalize_canonicalizes_a_long_hard_break_run_to_two_spaces(run, eol):
 @pytest.mark.parametrize("text,want", [
     ("a  b", "a b"),                              # the run the op exists for
     ("a    b", "a b"),
-    (f"{_L1} \n{_L2}", f"{_L1}\n{_L2}"),          # one space is not a hard break
-    (f"{_L1} \r\n{_L2}", f"{_L1}\r\n{_L2}"),      # and is not one before a CRLF
-                                                  # either: the removal side of a
-                                                  # line end is as easy to get
-                                                  # wrong as the keeping side
-    (f"{_L1}\t\t\r\n{_L2}", f"{_L1}\r\n{_L2}"),   # likewise for a tab run
-    (f"{_L1}\r\n   \r\n{_L2}", f"{_L1}\r\n\r\n{_L2}"),   # and a blank-only line
-    (f"{_L1}\t\t\n{_L2}", f"{_L1}\n{_L2}"),       # nor is a tab run — turning it
-                                                  # into two spaces would invent
-                                                  # a break nobody wrote
-    (f"{_L1}\n   \n{_L2}", f"{_L1}\n\n{_L2}"),    # a blank-only line has no
-                                                  # break to protect
-    (f"{_L1}  ", _L1),                            # nothing follows, so the run
-    ("abc  ", "abc"),                             # marks nothing. Not ending in
-                                                  # fullwidth punctuation, which
-                                                  # `punct` strips on its own \u2014
-                                                  # these reach `collapse_space`
-    ("\u7d50\u5c3e\u3002  ", "\u7d50\u5c3e\u3002"),   # and this one does not
+    # One space is not a hard break; a tab run is not one either — making it
+    # two spaces would invent a break nobody wrote — and a blank-only line has
+    # none to protect. Each is repeated before a CRLF, because the removal side
+    # of a line end is as easy to get wrong as the keeping side: only the CRLF
+    # rows fail when the line-end pass stops recognizing a carriage return.
+    (f"{_L1} \n{_L2}", f"{_L1}\n{_L2}"),
+    (f"{_L1} \r\n{_L2}", f"{_L1}\r\n{_L2}"),
+    (f"{_L1}\t\t\n{_L2}", f"{_L1}\n{_L2}"),
+    (f"{_L1}\t\t\r\n{_L2}", f"{_L1}\r\n{_L2}"),
+    (f"{_L1}\n   \n{_L2}", f"{_L1}\n\n{_L2}"),
+    (f"{_L1}\r\n   \r\n{_L2}", f"{_L1}\r\n\r\n{_L2}"),
+    # Nothing follows, so the run marks nothing. The first two do not end in
+    # fullwidth punctuation, so they are the rows that actually reach
+    # `collapse_space` — `punct` strips the third on its own.
+    (f"{_L1}  ", _L1),
+    ("abc  ", "abc"),
+    ("\u7d50\u5c3e\u3002  ", "\u7d50\u5c3e\u3002"),
 ])
 def test_normalize_still_removes_whitespace_that_means_nothing(text, want):
     assert normalize(text, "zh-TW", CFG) == want
