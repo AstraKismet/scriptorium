@@ -238,10 +238,16 @@ repair, check, preview and commit from the toolbar. A field saves when it loses
 focus, and the text is normalized on the way in, including repairing placeholder
 brackets a model mangled.
 
-It binds to loopback, and it is a shell over the same functions the CLI calls, so
-there is no second implementation to drift. Binding it to another network
-interface prints a warning, because it can spend money through configured
-providers.
+It is a shell over the same functions the CLI calls, so there is no second
+implementation to drift.
+
+It binds to loopback, and loopback was never the whole answer: any page in your
+browser can POST to a local port. So every path it is given — the source, and the
+output path — is confined to the directory it was started in, and it answers only
+requests from the page it served itself. `curl` and `lx` are unaffected, because
+neither sends an `Origin`. Binding it to another network interface prints a
+warning: it can spend money through configured providers, and the cross-origin
+check degrades when there is no loopback address to compare against.
 
 ## Driving it from an agent
 
@@ -320,7 +326,7 @@ that lost.
 ## Development
 
 ```bash
-python -m pytest -q                # 253 passed, no network
+python -m pytest -q                # 303 passed, no network
 python -m ruff check src tests
 ```
 
