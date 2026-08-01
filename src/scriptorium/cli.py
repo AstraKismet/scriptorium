@@ -673,23 +673,28 @@ def append_glossary_rows(cfg, rows):
     if not rows:
         return 0
     path = cfg.get("glossary", "config/glossary.csv")
-    existing = GLOSSARY_HEADER.encode("utf-8")
-    if os.path.exists(path):
-        with open(path, "rb") as f:
-            existing = f.read()
-    # The file's own terminator, not this platform's. `lx init` writes LF, but a
-    # glossary is hand-maintained and an editor on Windows may well have saved it
-    # as CRLF — appending LF rows to that leaves a file with both, in the one
-    # place this function exists to leave alone. `load_glossary` reads either.
-    eol = b"\r\n" if b"\r\n" in existing else b"\n"
-    if existing and not existing.endswith(b"\n"):
-        # A hand-edited file whose last line has no terminator. Without this the
-        # first appended row would be glued onto the end of an existing one,
-        # which is the one way a pure append can still destroy a row.
-        existing += eol
-    body = b"".join(f"{r['source']},,,error".encode() + eol for r in rows)
     tmp = path + ".tmp"
+    # The read is inside the guard with the write. A glossary that cannot be
+    # opened and one that cannot be replaced are the same problem to the person
+    # holding the keyboard, and a traceback out of either is the same unhelpful
+    # answer — so there is one refusal, not one plus a crash.
     try:
+        existing = GLOSSARY_HEADER.encode("utf-8")
+        if os.path.exists(path):
+            with open(path, "rb") as f:
+                existing = f.read()
+        # The file's own terminator, not this platform's. `lx init` writes LF, but
+        # a glossary is hand-maintained and an editor on Windows may well have
+        # saved it as CRLF — appending LF rows to that leaves a file with both, in
+        # the one place this function exists to leave alone. `load_glossary` reads
+        # either.
+        eol = b"\r\n" if b"\r\n" in existing else b"\n"
+        if existing and not existing.endswith(b"\n"):
+            # A hand-edited file whose last line has no terminator. Without this
+            # the first appended row would be glued onto the end of an existing
+            # one, which is the one way a pure append can still destroy a row.
+            existing += eol
+        body = b"".join(f"{r['source']},,,error".encode() + eol for r in rows)
         parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
@@ -700,15 +705,19 @@ def append_glossary_rows(cfg, rows):
         # Read-only, or open in a spreadsheet, which is not an exotic state for a
         # CSV a person maintains — it is Tuesday. Unhandled, `os.replace` ended
         # the command in a traceback and exit 1; every other refusal in this
-        # project is one sentence and exit 2.
+        # project is one sentence and exit 2. What is reachable differs by
+        # platform — POSIX replaces a read-only file happily, because it asks the
+        # directory rather than the file — so the guard covers the operation
+        # rather than the cause.
         try:
             os.remove(tmp)
         except OSError:
             pass
         raise GlossaryWriteError(
-            f"could not write {path} ({e.strerror or e}). That is the file "
-            f"`lx terms --append` adds rows to — check it is not read-only and not open "
-            f"in another program, then run the command again. It is unchanged.") from None
+            f"could not use {path} ({e.strerror or e}). That is the file "
+            f"`lx terms --append` adds rows to — check the path in lx.config.json, and "
+            f"that the file is not read-only or open in another program. It is "
+            f"unchanged.") from None
     return len(rows)
 
 

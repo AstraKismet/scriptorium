@@ -18,7 +18,6 @@ import json
 import os
 import pathlib
 import re
-import stat
 import subprocess
 import sys
 
@@ -68,6 +67,19 @@ def _project(tmp_path, document=NOVEL, name="novel.md"):
     r = _lx(["extract", name, "--lang", "zh-TW"], tmp_path, env)
     assert r.returncode == 0, r.stderr.decode("utf-8", "replace")
     return env
+
+
+def _reconfigure(tmp_path, **fields):
+    """Overwrite keys in the project's lx.config.json, on bytes.
+
+    `Path.write_text` only learned `newline=` in 3.10 and the declared floor is
+    3.9, so every write in this file goes through bytes — the same reason
+    `test_cli.py` holds its fixtures as byte strings.
+    """
+    path = tmp_path / "lx.config.json"
+    config = json.loads(path.read_bytes().decode("utf-8"))
+    config.update(fields)
+    path.write_bytes(json.dumps(config, ensure_ascii=False).encode("utf-8"))
 
 
 def _rows(stdout):
@@ -276,10 +288,7 @@ def test_terms_refuses_non_english_source_rather_than_answering(tmp_path):
     language that has none the command would report success and propose nothing —
     a wrong answer that looks like a right one."""
     env = _project(tmp_path)
-    config = json.loads((tmp_path / "lx.config.json").read_text(encoding="utf-8"))
-    config["source_lang"] = "ja"
-    (tmp_path / "lx.config.json").write_text(
-        json.dumps(config, ensure_ascii=False), encoding="utf-8", newline="\n")
+    _reconfigure(tmp_path, source_lang="ja")
 
     r = _lx(["terms", "novel.md", "--lang", "zh-TW"], tmp_path, env)
     assert r.returncode == 2
@@ -290,9 +299,7 @@ def test_terms_refuses_non_english_source_rather_than_answering(tmp_path):
 
     # A regional English tag is still English: the refusal reads the primary
     # subtag, or `en-GB` would be turned away for spelling itself out.
-    config["source_lang"] = "en-GB"
-    (tmp_path / "lx.config.json").write_text(
-        json.dumps(config, ensure_ascii=False), encoding="utf-8", newline="\n")
+    _reconfigure(tmp_path, source_lang="en-GB")
     assert _lx(["terms", "novel.md", "--lang", "zh-TW"], tmp_path, env).returncode == 0
 
 
@@ -376,22 +383,29 @@ def test_terms_append_keeps_the_line_terminator_the_file_already_had(tmp_path):
 
 def test_terms_append_refuses_in_one_sentence_when_the_glossary_cannot_be_written(tmp_path):
     """A CSV open in a spreadsheet, or saved read-only, is not an exotic state for
-    a file a person maintains. Unhandled, `os.replace` ended the command in a
-    traceback and exit 1; every other refusal here is one sentence and exit 2."""
+    a file a person maintains. Unhandled, the write ended the command in a
+    traceback and exit 1; every other refusal here is one sentence and exit 2.
+
+    The cause used here is a `glossary` path whose parent is a *file*, because it
+    is the one cause that behaves identically on all four runners. Read-only is
+    the cause that actually happens, and it only reaches this guard on Windows —
+    POSIX replaces a read-only file happily, since it asks the directory's
+    permissions rather than the file's. That is why the guard covers the
+    operation and not the cause, and why the test does too.
+    """
     env = _project(tmp_path)
-    path = tmp_path / GLOSSARY
-    before = path.read_bytes()
-    os.chmod(path, stat.S_IREAD)
-    try:
-        r = _lx(["terms", "novel.md", "--lang", "zh-TW", "--append"], tmp_path, env)
-    finally:
-        os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+    _reconfigure(tmp_path, glossary="config/glossary.csv/zh-TW.csv")
+    real = tmp_path / GLOSSARY
+    before = real.read_bytes()
+
+    r = _lx(["terms", "novel.md", "--lang", "zh-TW", "--append"], tmp_path, env)
     assert r.returncode == 2, r.stderr.decode("utf-8", "replace")
     message = r.stderr.decode("utf-8")
     assert "Traceback" not in message
-    assert GLOSSARY in message.replace("\\", "/")
+    assert "zh-TW.csv" in message
+    assert "lx.config.json" in message
     # The claim the message makes about the file has to be true.
-    assert path.read_bytes() == before
+    assert real.read_bytes() == before
     assert not (tmp_path / (GLOSSARY + ".tmp")).exists()
 
 
@@ -427,13 +441,14 @@ def test_terms_feeds_glossary_enforcement_end_to_end(tmp_path):
     assert _lx(["terms", "novel.md", "--lang", "zh-TW", "--append"],
                tmp_path, env).returncode == 0
 
+    # The hand edit, on bytes: `Path.write_text` has no `newline=` on 3.9, and a
+    # text-mode write would put CRLF into the fixture on Windows.
     path = tmp_path / GLOSSARY
-    text = path.read_text(encoding="utf-8")
+    text = path.read_bytes().decode("utf-8")
     assert "Ashcombe,,,error\n" in text
-    path.write_text(
+    path.write_bytes(
         text.replace("Ashcombe,,,error\n",
-                     "Ashcombe,灰岸,阿什科姆;艾什康,error\n"),
-        encoding="utf-8", newline="\n")
+                     "Ashcombe,灰岸,阿什科姆;艾什康,error\n").encode("utf-8"))
 
     glossary = load_glossary({"glossary": str(path)})
     seg = next(s for s in _segments(tmp_path) if "Ashcombe" in s["masked"])
