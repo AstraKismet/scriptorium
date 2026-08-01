@@ -151,7 +151,17 @@ The write itself concatenates the existing bytes and appends, through a temporar
 file and `os.replace`. "Never rewrite or reorder an existing row" therefore holds
 by construction rather than by care, and the one way a pure append can still
 destroy a row — a hand-edited file whose last line has no terminator, where the
-first appended row would be glued onto it — is closed explicitly.
+first appended row would be glued onto it — is closed explicitly. Appended rows
+carry the terminator the file already had rather than the platform's, because a
+hand-maintained glossary saved as CRLF must not come back with both.
+
+The read and the write are under one guard, and it covers the *operation* rather
+than the cause. Measured on CI, 2026-08-02: a read-only `config/glossary.csv`
+raises on Windows and not on Linux, because POSIX `os.replace` asks the
+directory's permissions and not the file's. A guard written against the cause
+would therefore have been a guard that fires on one platform, and a test written
+against it passed on `windows-latest` and failed on both Ubuntu runners — which
+is how this was found.
 
 **Not done, and named so it is not mistaken for an oversight.** Non-English
 source is refused with a message rather than answered: the whole rule is English
