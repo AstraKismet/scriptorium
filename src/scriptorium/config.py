@@ -12,6 +12,18 @@ STATE = ".lx"
 #: string, and a drift between them silently invalidates the whole memory.
 DEFAULT_TONE = "technical"
 
+#: The glossary's own first two lines. Named once because two places write them:
+#: `write_templates` scaffolding a fresh project, and `lx terms --append` creating
+#: the file when the project never ran `lx init`. A second, drifted copy of a
+#: header is the kind of thing nobody notices until two projects disagree about
+#: what column three means.
+GLOSSARY_HEADER = (
+    "source,target,forbidden,severity\n"
+    "# forbidden is ;-separated; severity is error or warn\n"
+    "# a row with an empty target is a proposal from `lx terms` and enforces\n"
+    "# nothing until someone writes the rendering in\n"
+)
+
 DEFAULT_CONFIG = {
     "source_lang": "en",
     "targets": ["zh-TW"],
@@ -24,6 +36,27 @@ DEFAULT_CONFIG = {
     "normalize": {"zh-TW": ["punct", "pangu", "collapse_space"]},
     "lexicon_extra": {},
     "checks_disabled": [],
+    # `lx terms` is a heuristic, so its knobs are configuration rather than a
+    # fixed table — the same rule chapter detection follows. Invariant 4 keeps
+    # judgement out of `checks.py`; this command proposes rather than decides,
+    # and what counts as a proposal is the project's call.
+    "terms": {
+        # 2, not 3: a name seen once is not enforceable terminology, and anything
+        # higher silently drops the secondary characters a novel is full of. The
+        # output is a list a person edits, so a spare row costs one keystroke
+        # and a missing one costs the whole point of the command.
+        "min_count": 2,
+        # A full stop after one of these does not end a sentence, so the name
+        # that follows keeps its mid-sentence evidence. `Mr. Darcy` is the case:
+        # without this, a character named only after an honorific never appears
+        # anywhere this command would call mid-sentence.
+        "abbreviations": ["Mr", "Mrs", "Ms", "Dr", "Prof", "St", "Sr", "Jr",
+                          "Mt", "Capt", "Lt", "Sgt", "Col", "Gen", "Rev", "Hon"],
+        # The one English word that is capitalized everywhere and is never a
+        # term. Kept as a list rather than a rule because the next entry a
+        # project needs is a project's own.
+        "stopwords": ["I", "I'm", "I'll", "I've", "I'd"],
+    },
     "providers": {
         "local": {
             "kind": "openai",
@@ -176,8 +209,7 @@ def write_templates():
         os.makedirs(d, exist_ok=True)
     if not os.path.exists("config/glossary.csv"):
         with open("config/glossary.csv", "w", encoding="utf-8", newline="\n") as f:
-            f.write("source,target,forbidden,severity\n"
-                    "# forbidden is ;-separated; severity is error or warn\n")
+            f.write(GLOSSARY_HEADER)
         created.append("config/glossary.csv")
     if not os.path.exists("config/dnt.txt"):
         with open("config/dnt.txt", "w", encoding="utf-8", newline="\n") as f:
