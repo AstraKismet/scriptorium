@@ -35,6 +35,10 @@ $LX run <src> --lang <lang> --polish
 `$LX providers` lists configured backends. `$LX web` opens the review workbench for
 a human.
 
+`$LX terms <src> --lang <lang>` proposes glossary rows from the source text with
+the target column left empty. Propose, do not fill: how a name renders is the
+human's decision, and an unfilled row enforces nothing until they make it.
+
 `⟦n⟧` in a segment is protected content — copy it verbatim, reposition it freely,
 never invent or drop one.
 

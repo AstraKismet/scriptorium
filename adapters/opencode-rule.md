@@ -31,4 +31,6 @@ Read `tools/scriptorium/skill/SKILL.md` for the segment payload format and
 - Do not hand-edit files under `.lx/` or hand-write a localization report.
 - Do not claim success without a green `check`.
 - Terminology comes from `config/glossary.csv`. If a needed term is missing, add a
-  row rather than deciding case by case.
+  row rather than deciding case by case. `lx terms <src> --lang <lang>` proposes
+  the rows from the source; it leaves the target column empty, and filling it in
+  is the human's call, not yours.
