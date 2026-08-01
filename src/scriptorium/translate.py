@@ -197,6 +197,13 @@ def _glossary_hints(text, glossary):
     low = text.lower()
     hints = []
     for row in glossary:
+        # A row with no target is a candidate `lx terms` proposed and nobody has
+        # decided on yet. `Ashcombe -> ` in the required-terminology block tells
+        # the model to render the name as nothing, so an unfinished row must be
+        # silent rather than harmful — which is what `checks.check_segment`
+        # already does with one, so the two halves of the glossary path agree.
+        if not row["target"]:
+            continue
         pat = rf"(?<![A-Za-z]){re.escape(row['source'].lower())}(?![A-Za-z])"
         if re.search(pat, low):
             hints.append(f"{row['source']} -> {row['target']}")

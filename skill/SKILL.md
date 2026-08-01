@@ -78,7 +78,7 @@ In practice that means: do not begin a translation with `1. `, `- `, `#`, or `> 
 
 ## Setting up a project
 
-`lx init` writes `lx.config.json`, `config/glossary.csv`, and `config/dnt.txt`. Before a first real run, fill in the glossary and the do-not-translate list — most quality complaints are terminology complaints, and both files are cheap to populate by skimming the source for repeated domain nouns. Templates and field meanings are in `config/` alongside this skill.
+`lx init` writes `lx.config.json`, `config/glossary.csv`, and `config/dnt.txt`. Before a first real run, fill in the glossary and the do-not-translate list — most quality complaints are terminology complaints. Do not skim for the terms by hand: `lx terms SRC --lang L --append` proposes them from the source and writes the rows, leaving the target column empty for you to fill. An unfilled row enforces nothing, so appending is safe on a project already in flight. Templates and field meanings are in `config/` alongside this skill.
 
 Wire `lx check` into CI so translations cannot regress silently — re-extract first, so a source edit surfaces as pending work rather than passing quietly:
 

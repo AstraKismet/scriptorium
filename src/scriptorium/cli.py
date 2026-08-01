@@ -12,6 +12,7 @@ from . import __version__
 from .checks import check_segment
 from .config import (
     DEFAULT_TONE,
+    GLOSSARY_HEADER,
     canonical_tone,
     dump_json,
     load_config,
@@ -104,6 +105,20 @@ _LANG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,34}\Z")
 
 class UnsafePath(ValueError):
     """A caller-supplied path this project will not open. The message says why."""
+
+
+class UnsupportedSource(ValueError):
+    """A command that only works on one kind of source was given another.
+
+    Raised rather than answered, and caught in :func:`main` for exit 2, because
+    the alternative for `lx terms` on a non-English document is a list of quiet
+    nonsense — Chinese and Japanese have no capitalization for the rule to read,
+    so it would propose nothing and report success.
+    """
+
+
+class GlossaryWriteError(OSError):
+    """The glossary could not be replaced, and nothing in it was changed."""
 
 
 def confined_path(value, field="path", root=None):
@@ -410,8 +425,13 @@ def cmd_todo(args, cfg):
     for seg in pending_segments(doc, args.all, args.limit):
         item = {"id": seg["id"], "kind": seg["kind"], "text": seg["masked"]}
         low = seg["masked"].lower()
+        # A row with no target is a candidate `lx terms` proposed and nobody has
+        # decided yet. Handing an agent `{"term": "Ashcombe", "use": ""}` asks it
+        # to render the name as nothing, so an unfinished row stays silent —
+        # which is what `checks.check_segment` already does with one.
         hints = [{"term": r["source"], "use": r["target"]} for r in glossary
-                 if re.search(rf"(?<![A-Za-z]){re.escape(r['source'].lower())}(?![A-Za-z])", low)]
+                 if r["target"]
+                 and re.search(rf"(?<![A-Za-z]){re.escape(r['source'].lower())}(?![A-Za-z])", low)]
         if hints:
             item["glossary"] = hints
         if seg.get("issues"):
@@ -423,6 +443,342 @@ def cmd_todo(args, cfg):
                  "reorder if grammar needs it, never invent or drop them",
         "segments": items,
     }, ensure_ascii=False, indent=2))
+
+
+# ── terms ──────────────────────────────────────────────────────────────────
+
+#: The letters a word can be made of. ASCII plus Latin-1 Supplement through
+#: Latin Extended-B, minus `×` and `÷`, which sit inside that block and are not
+#: letters. `mdparse` already reaches for the same range to decide whether a
+#: block has translatable text in it; an ASCII-only class cut `René` down to
+#: `Ren` and split `Müller` into `M` and an invisible `ller`, and a novel in
+#: English is full of names that are not.
+_LETTER = "A-Za-zÀ-ÖØ-öø-ɏ"
+
+#: A word as this command counts one: letters, with an internal apostrophe or
+#: hyphen kept inside the token, so `O'Brien` and `Anne-Marie` are one candidate
+#: rather than two halves of nothing.
+_WORD_RE = re.compile(rf"[{_LETTER}]+(?:['’-][{_LETTER}]+)*")
+
+#: A possessive, trimmed off the end of a candidate. `Ashcombe's carriage` and
+#: `Ashcombe walked` are one name, and counting them as two splits the evidence
+#: for a minor character across two rows that each fall under the threshold.
+_POSSESSIVE_RE = re.compile(r"['’][Ss]\Z")
+
+#: What ends a sentence. `…` is here because a name after `…` is at a
+#: sentence start exactly as one after `...` is, and only the second spelling
+#: would be caught by the full stop.
+_SENTENCE_END = ".!?…"
+
+#: An opening quotation mark. It includes `'` and `’`, which are apostrophes far
+#: more often than quotes — safely, because the rule below reads only the
+#: character *adjacent* to the token: a possessive apostrophe is followed by a
+#: space, so `the Smiths' Manor` never reaches this set, while `He said, 'The
+#: door…'` does and is suppressed like its double-quoted twin.
+_OPEN_QUOTES = "\"“‘«'’"
+
+#: An exclamation or question mark kept inside a closing quote, which does *not*
+#: end the sentence the attribution belongs to. English punctuates dialogue as
+#: `"Run," Ashcombe said.` — comma, handled by adjacency — but as `"Run!"
+#: Ashcombe said.`, keeping the mark. A full stop is deliberately absent: `"Run."
+#: Ashcombe left.` is two sentences, and treating it as one would suppress a real
+#: sentence opener for nothing.
+_DIALOGUE_END_RE = re.compile(r"^[!?…]+[\"”’'»]")
+
+
+def _sentence_start(gap, previous, abbreviations):
+    """Does a token begin a sentence, given the text between it and the one before?
+
+    `gap` is that text verbatim, `previous` the word token in front of it. This
+    is the whole substance of the command: a capitalized token at a sentence
+    start carries no evidence that it is a proper noun, because English
+    capitalizes every sentence's first word.
+
+    Four rules, in the order they fire.
+
+    **An opening quote wins, and only when it is adjacent to the token.** Dialogue
+    opens a sentence, so `He said, "The door…"` must suppress `The` — the comma is
+    not a terminator and nothing else would. But `"` is also a *closing* quote,
+    and `"Run," Ashcombe said.` is the commonest shape in a novel, where treating
+    the `"` as an opening would suppress the one name in the line. The gap tells
+    them apart by position: an opening quote is the last character before the
+    token, a closing one has whitespace after it. Measured on both shapes.
+
+    **A `!` or `?` inside a closing quote does not end the attribution's
+    sentence.** `"Run!" Ashcombe said.` is how English punctuates it — the mark
+    stays inside the quote and the attribution continues the sentence — so
+    without this a character attributed only that way has no mid-sentence
+    occurrence anywhere. A full stop is excluded on purpose: `"Run." Ashcombe
+    left.` is genuinely two sentences, because English writes a comma, not a
+    period, when an attribution follows. `"Run!" She turned away.` is the
+    residual false positive, and it is the accepted one — the two shapes cannot
+    be told apart without a table of attribution verbs, which is judgement.
+
+    **An abbreviation's full stop does not end a sentence.** `Mr. Darcy` is why:
+    without this, a character named only after an honorific has no mid-sentence
+    occurrence anywhere and is never proposed. The exception is narrow on purpose
+    — only a `.` that opens the gap, only after a word in the configured list.
+
+    **Otherwise, any sentence terminator in the gap.** This over-suppresses after
+    an unlisted abbreviation, and that is the accepted cost: the failure is a
+    missing candidate for a name that occurs mid-sentence nowhere else, and the
+    list is configuration precisely so a project can extend it.
+    """
+    if gap and gap[-1] in _OPEN_QUOTES:
+        return True
+    dialogue = _DIALOGUE_END_RE.match(gap)
+    if dialogue:
+        gap = gap[dialogue.end():]
+    elif previous in abbreviations and gap.startswith("."):
+        gap = gap[1:]
+    return any(ch in _SENTENCE_END for ch in gap)
+
+
+def candidate_terms(segments, min_count=2, abbreviations=(), stopwords=()):
+    """Rank runs of capitalized words by frequency. ``[{source, count, …}]``.
+
+    Reads `seg["masked"]`, never the raw source, so code spans, URLs and
+    do-not-translate terms are already `⟦n⟧` and cannot be proposed as names —
+    which is also why this command does not have to re-solve masking.
+
+    **A candidate is a maximal run of capitalized tokens separated by exactly one
+    space.** A single token is a run of length one. *Lost:* also emitting each
+    word of a longer run as its own candidate, which turns `Ashcombe Hall` into
+    three rows and a two-hundred-name novel into six hundred. A name that also
+    stands alone is already its own run wherever it does.
+
+    *Lost:* joining a run across any whitespace, so that a line break inside a
+    wrapped paragraph does not split `Ashcombe Hall`. The glossary matches on the
+    literal source string — `checks.check_segment` and `translate._glossary_hints`
+    both search for it with a word-boundary regex — so a run joined across a
+    newline would propose a row that can never fire. A row that cannot fire is
+    worse than two rows that can.
+
+    **A run whose first token opens a sentence also records its tail.** `Then
+    Ashcombe spoke.` is one run, `Then Ashcombe`, and it opens the sentence — so
+    without this the maximal-run rule swallows the one occurrence of `Ashcombe`
+    that was genuinely mid-sentence, and a name that follows `Then`, `But` or
+    `And` loses evidence it actually had. Position is per token: the tail did not
+    open the sentence, whatever the head did.
+
+    **A candidate needs one occurrence that is not sentence-initial.** That is the
+    filter; `min_count` is only a floor on how often it was seen at all. Requiring
+    `min_count` *mid-sentence* occurrences was the alternative and loses: a
+    character name leads sentences constantly, so a name seen forty times with one
+    mid-sentence occurrence is a real name and would have been dropped. The bias
+    is deliberate — a spare row costs one keystroke, a missing one costs the
+    discovery this command exists for.
+    """
+    abbreviations, stopwords = set(abbreviations), set(stopwords)
+    counts, mid = Counter(), Counter()
+    examples = {}
+
+    def record(words, initial, sid):
+        source = " ".join(words[:-1] + [_POSSESSIVE_RE.sub("", words[-1])])
+        # An honorific is not a proper noun, and it is the one word in the
+        # abbreviation list guaranteed to appear mid-sentence — `said Mr. Darcy`
+        # — so left in it outranks every real name in the ranking it is supposed
+        # to be helping. A single character is dropped for a harder reason: a
+        # glossary row `J` fires on every segment containing a bare J, so it is
+        # not enforceable terminology under any wording.
+        if source in stopwords or source in abbreviations or len(source) < 2:
+            return
+        counts[source] += 1
+        if initial:
+            return
+        mid[source] += 1
+        # Only mid-sentence occurrences are worth pointing a reviewer at: they
+        # are the evidence. Three, because a list of four hundred segment ids
+        # for a main character is not an example of anything.
+        seen = examples.setdefault(source, [])
+        if sid not in seen and len(seen) < 3:
+            seen.append(sid)
+
+    def flush(words, initial, sid):
+        record(words, initial, sid)
+        if initial and len(words) > 1:
+            record(words[1:], False, sid)
+
+    for seg in segments:
+        text = seg.get("masked") or ""
+        tokens, end, previous = [], None, ""
+        for m in _WORD_RE.finditer(text):
+            word = m.group(0)
+            if end is None:
+                # The first token of a segment starts a sentence. A segment is a
+                # whole block — a paragraph, a heading, a cell — so nothing that
+                # came before it is in the same sentence.
+                initial, joins = True, False
+            else:
+                gap = text[end : m.start()]
+                initial = _sentence_start(gap, previous, abbreviations)
+                joins = gap == " "
+            tokens.append((word, word[0].isupper(), initial, joins))
+            end, previous = m.end(), word
+
+        run, run_initial = [], False
+        for word, capitalized, initial, joins in tokens:
+            if run and capitalized and joins:
+                run.append(word)
+                continue
+            if run:
+                flush(run, run_initial, seg["id"])
+            run, run_initial = ([word], initial) if capitalized else ([], False)
+        if run:
+            flush(run, run_initial, seg["id"])
+
+    # `target` is carried as an explicit empty string rather than left out. A
+    # consumer of `--json` should be able to assert the emptiness — it is this
+    # command's contract, not a field nobody got round to filling — and an
+    # absent key asserts nothing.
+    rows = [{"source": s, "target": "", "count": n,
+             "mid_sentence": mid[s], "examples": examples[s]}
+            for s, n in counts.items() if n >= min_count and mid[s]]
+    # Frequency first, then the term itself: two candidates seen the same number
+    # of times must come out in the same order on every machine, or `--append`
+    # writes a different glossary depending on who ran it.
+    rows.sort(key=lambda r: (-r["count"], r["source"]))
+    return rows
+
+
+def append_glossary_rows(cfg, rows):
+    """Add rows to the glossary, leaving every byte already in it alone.
+
+    The file is rewritten through a temporary one rather than opened in append
+    mode: the existing bytes are *concatenated*, never reparsed or reformatted,
+    so "never rewrite or reorder an existing row" holds by construction rather
+    than by care, and a crash halfway through leaves a hand-maintained file
+    intact. `dump_json` already pays the same price for the state file.
+
+    No CSV quoting, because a candidate cannot need it: a run of capitalized
+    tokens joined by single spaces contains no comma and cannot begin with `#`.
+    `load_glossary` splits on `,` with no quoting at all, so a writer that could
+    emit a comma would be writing rows that file cannot read back.
+
+    **Invariant 11 is not applied to `cfg["glossary"]` here, and that is a
+    decision.** The path is read out of a configuration file, which the invariant
+    names as untrusted, and this is the first thing in the tree that *writes* to
+    such a path. It is exempt on the invariant's own stated ground — configuration
+    is written by hand — and confining it now would be worse than useless in two
+    ways: `load_glossary` reads the same path unconfined, so the command could
+    read a glossary it refused to append to, and a project that legitimately
+    shares `../shared/glossary.csv` between two books would break with no decision
+    recorded. The exemption ends the moment configuration becomes writable over
+    HTTP, and it binds every path-valued configuration key rather than this one:
+    `glossary`, `dnt` and `output_pattern` are confined at use time or they are
+    not writable over HTTP. Recorded in `docs/decisions.md`, 2026-08-02,
+    "Terminology is discovered by suppressing sentence-initial capitals" —
+    tracked, unlike the work packages that also carry it.
+    """
+    if not rows:
+        return 0
+    path = cfg.get("glossary", "config/glossary.csv")
+    existing = GLOSSARY_HEADER.encode("utf-8")
+    if os.path.exists(path):
+        with open(path, "rb") as f:
+            existing = f.read()
+    # The file's own terminator, not this platform's. `lx init` writes LF, but a
+    # glossary is hand-maintained and an editor on Windows may well have saved it
+    # as CRLF — appending LF rows to that leaves a file with both, in the one
+    # place this function exists to leave alone. `load_glossary` reads either.
+    eol = b"\r\n" if b"\r\n" in existing else b"\n"
+    if existing and not existing.endswith(b"\n"):
+        # A hand-edited file whose last line has no terminator. Without this the
+        # first appended row would be glued onto the end of an existing one,
+        # which is the one way a pure append can still destroy a row.
+        existing += eol
+    body = b"".join(f"{r['source']},,,error".encode() + eol for r in rows)
+    tmp = path + ".tmp"
+    try:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(tmp, "wb") as f:
+            f.write(existing + body)
+        os.replace(tmp, path)
+    except OSError as e:
+        # Read-only, or open in a spreadsheet, which is not an exotic state for a
+        # CSV a person maintains — it is Tuesday. Unhandled, `os.replace` ended
+        # the command in a traceback and exit 1; every other refusal in this
+        # project is one sentence and exit 2.
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise GlossaryWriteError(
+            f"could not write {path} ({e.strerror or e}). That is the file "
+            f"`lx terms --append` adds rows to — check it is not read-only and not open "
+            f"in another program, then run the command again. It is unchanged.") from None
+    return len(rows)
+
+
+def do_terms(src, lang, cfg, min_count=None, append=False):
+    """Propose glossary rows from a document's own source text.
+
+    **The target column is left empty, and that is the line this command does not
+    cross.** Which characters render `Ashcombe` as 灰岸 rather than 阿什科姆 is
+    judgement, and invariant 4 keeps judgement in a person's hands; a command that
+    invented the target would have moved it into `checks.py`'s input one step
+    upstream. Extraction is mechanically decidable and belongs in code. See
+    `docs/decisions.md`, 2026-08-02, "Terminology is discovered by suppressing
+    sentence-initial capitals, and the target column stays empty" — which is the
+    entry that states this rule; D3 of 2026-07-29 decided only that the discovery
+    problem belongs to a command rather than to the translation memory.
+
+    Candidates already in the glossary are dropped in every mode, not only under
+    `--append`: what is missing is the whole question, and a proposal list that
+    repeats what the project already decided is a list nobody reads twice.
+    Case-insensitively, because that is how `check_segment` and
+    `_glossary_hints` match a row against source text.
+    """
+    primary = str(cfg.get("source_lang", "en")).split("-")[0].lower()
+    if primary != "en":
+        raise UnsupportedSource(
+            f"`lx terms` reads English source text, and source_lang is "
+            f"{cfg.get('source_lang')!r}. The whole rule is English capitalization, so on "
+            f"another source language it would report success and propose nothing. Set "
+            f"source_lang to \"en\" in lx.config.json if the source really is English, or "
+            f"fill config/glossary.csv by hand.")
+
+    doc = load_doc(src, lang)
+    opts = cfg.get("terms") or {}
+    if min_count is None:
+        min_count = opts.get("min_count", 2)
+    found = candidate_terms(doc["segments"], min_count,
+                            opts.get("abbreviations", ()), opts.get("stopwords", ()))
+    known = {r["source"].lower() for r in load_glossary(cfg)}
+    fresh = [r for r in found if r["source"].lower() not in known]
+    return {
+        "source": doc["source"], "lang": doc["lang"],
+        "glossary": cfg.get("glossary", "config/glossary.csv"),
+        "min_count": min_count,
+        "known": len(found) - len(fresh),
+        "appended": append_glossary_rows(cfg, fresh) if append else 0,
+        "terms": fresh,
+    }
+
+
+def cmd_terms(args, cfg):
+    report = do_terms(args.src, args.lang, cfg, args.min_count, args.append)
+    if args.json:
+        _out(json.dumps(report, ensure_ascii=False, indent=2))
+        return
+    if args.append:
+        _out(f"{report['source']} [{report['lang']}]  {len(report['terms'])} new "
+             f"candidate(s), {report['known']} already known")
+        _out(f"appended {report['appended']} row(s) to {report['glossary']} — fill in "
+             f"the target column; a row with an empty target enforces nothing")
+        return
+    # Comment lines rather than plain ones, because `lx terms doc.md --lang zh-TW
+    # > terms.csv` is the invocation this default exists for and `load_glossary`
+    # skips a line starting with `#`. The summary rides along inside a file that
+    # is still a valid glossary fragment.
+    _out(f"# {len(report['terms'])} candidate term(s) from {report['source']}, seen "
+         f"{report['min_count']}+ time(s)"
+         + (f"; {report['known']} already in {report['glossary']}" if report["known"] else ""))
+    _out("# fill in the target column; a row with an empty target enforces nothing")
+    for row in report["terms"]:
+        _out(f"{row['source']},,,error")
 
 
 # ── apply ──────────────────────────────────────────────────────────────────
@@ -699,6 +1055,18 @@ def build_parser():
     t.add_argument("--limit", type=int, default=0)
     t.set_defaults(fn=cmd_todo)
 
+    tm = sub.add_parser("terms", help="propose glossary rows from the source text")
+    tm.add_argument("src")
+    tm.add_argument("--lang", required=True)
+    tm.add_argument("--min-count", type=int, default=None,
+                    help="occurrences before a candidate is proposed; default from the "
+                         "`terms` block of lx.config.json")
+    tm.add_argument("--append", action="store_true",
+                    help="add candidates the glossary does not have; existing rows are "
+                         "never rewritten or reordered")
+    tm.add_argument("--json", action="store_true")
+    tm.set_defaults(fn=cmd_terms)
+
     a = sub.add_parser("apply", help="ingest translations")
     a.add_argument("src")
     a.add_argument("--lang", required=True)
@@ -774,7 +1142,8 @@ def main(argv=None):
     cfg = load_config(args.config)
     try:
         args.fn(args, cfg)
-    except (FileNotFoundError, StateVersionError) as e:
+    except (FileNotFoundError, StateVersionError, UnsupportedSource,
+            GlossaryWriteError) as e:
         print(f"lx: {e}", file=sys.stderr)
         sys.exit(2)
     except BrokenPipeError:

@@ -118,6 +118,7 @@ CI 上有一組語料庫在把關，裡面收了 28 份刻意刁難的輸入，L
 | `lx init` | 建立設定與狀態骨架 |
 | `lx extract SRC --lang L` | 解析成 segment、遮罩標記、重用翻譯記憶（小說加 `--tone literary`） |
 | `lx todo SRC --lang L` | 以 JSON 吐出待譯 segment，供 agent 翻譯 |
+| `lx terms SRC --lang L` | 從原文挑出候選術語、開成詞彙表的列（加 `--append` 直接寫進去） |
 | `lx apply SRC --lang L --file F` | 收回譯文，自動正規化 |
 | `lx translate SRC --lang L` | 用設定好的模型翻譯（`--mode draft\|polish\|repair`） |
 | `lx check SRC --lang L` | 驗證；有 error 時以 1 結束（`--json` 可拿到完整報告） |
@@ -129,6 +130,16 @@ CI 上有一組語料庫在把關，裡面收了 28 份刻意刁難的輸入，L
 | `lx providers` / `lx stats` | 後端 / 覆蓋率 |
 
 `translate`、`repair`、`run` 都吃 `--dry-run`，只回報會做哪些工作，不會真的呼叫模型。
+
+詞彙表管得住一致性，卻沒辦法在你把書讀完之前，先告訴你這兩百個專有名詞是哪些。
+`lx terms` 就是來開這張清單的：把原文裡出現在句首以外位置的大寫詞組挑出來，
+依出現次數排序，直接寫成詞彙表的列，**譯法那一欄留空**。名字要怎麼譯是判斷，
+判斷留給你——指令負責把清單找出來，你決定怎麼寫；沒寫之前，那一列什麼都不會做。
+
+```bash
+lx terms novel.md --lang zh-TW              # 印到 stdout，導出來慢慢改
+lx terms novel.md --lang zh-TW --append     # 沒收錄過的直接補進詞彙表
+```
 
 ## 驗證規則
 

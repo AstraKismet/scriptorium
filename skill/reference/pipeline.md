@@ -26,6 +26,8 @@ the second, third, and seventh translation of a document nearly free.
 | `lx todo SRC --lang L` | emit pending segments as JSON |
 | `lx todo SRC --lang L --all` | emit every segment, with `fix` notes on failing ones |
 | `lx todo SRC --lang L --limit N` | first N pending segments, for batching |
+| `lx terms SRC --lang L [--json]` | propose glossary rows from the source; target column left empty |
+| `lx terms SRC --lang L --append` | add only candidates the glossary does not have |
 | `lx apply SRC --lang L --file F` | ingest translations (`-` reads stdin), auto-normalize |
 | `lx check SRC --lang L [--json]` | validate; exit 1 if any error |
 | `lx render SRC --lang L -o OUT` | rebuild the target document |
@@ -36,6 +38,32 @@ the second, third, and seventh translation of a document nearly free.
 `apply` accepts three shapes: `{"s0001": "..."}`, `[{"id": "s0001", "text": "..."}]`,
 or `{"segments": [...]}`. Unknown ids are reported and ignored rather than failing
 the batch.
+
+## Filling the glossary
+
+`lx terms` reads the extracted state, not the raw file, so code spans, URLs and
+do-not-translate terms are already masked and cannot be proposed. A candidate is
+a maximal run of capitalized tokens joined by exactly one space, seen at least
+`terms.min_count` times, **with at least one occurrence that does not open a
+sentence** — English capitalizes every sentence's first word, so a token that
+only ever appears there is evidence of nothing.
+
+```
+$ lx terms novel.md --lang zh-TW
+# 47 candidate term(s) from novel.md, seen 2+ time(s); 3 already in config/glossary.csv
+# fill in the target column; a row with an empty target enforces nothing
+Ashcombe,,,error
+Ashcombe Hall,,,error
+```
+
+The target column is empty and stays empty: the command does not decide how a
+name renders. An unfilled row is inert — it reaches neither the request nor the
+check — so `--append` can be run against a live project without changing a
+single result until someone writes the renderings in.
+
+Tune the heuristic per project under `"terms"` in `lx.config.json`: `min_count`,
+`abbreviations` (a full stop after one of these does not end a sentence, which is
+what keeps `Mr. Darcy` discoverable), and `stopwords`.
 
 ## Incremental re-translation
 

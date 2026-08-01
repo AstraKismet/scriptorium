@@ -130,6 +130,7 @@ It does not mean the translation is good; that is what review is for.
 | `lx init` | scaffold config and state |
 | `lx extract SRC --lang L` | parse to segments, mask markup, reuse translation memory (`--tone literary` for prose) |
 | `lx todo SRC --lang L` | pending segments as JSON, for an agent to translate |
+| `lx terms SRC --lang L` | propose glossary rows from the source text (`--append` to add them) |
 | `lx apply SRC --lang L --file F` | ingest translations, auto-normalize |
 | `lx translate SRC --lang L` | translate with a configured model (`--mode draft\|polish\|repair`) |
 | `lx check SRC --lang L` | validate; exit 1 on error (`--json` for the full report) |
@@ -142,6 +143,18 @@ It does not mean the translation is good; that is what review is for.
 
 `--dry-run` on `translate`, `repair` and `run` reports the work without calling a
 model.
+
+The glossary enforces consistency, but it cannot tell you what a book's two
+hundred proper nouns are before you have read it. `lx terms` proposes them:
+capitalized runs the source uses somewhere other than the start of a sentence,
+ranked by frequency, emitted as glossary rows with the **target column empty**.
+Choosing how a name renders is judgement and stays with you — the command finds
+the list, you decide the wording, and a row does nothing at all until you have.
+
+```bash
+lx terms novel.md --lang zh-TW              # to stdout, redirect and edit
+lx terms novel.md --lang zh-TW --append     # add unseen ones to the glossary
+```
 
 ## Validation rules
 

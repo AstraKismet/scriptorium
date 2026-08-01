@@ -3,6 +3,177 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-08-02 · Terminology is discovered by suppressing sentence-initial capitals, and the target column stays empty
+
+Closing HANDOFF-016, which implements the second half of D3 below: the glossary
+already enforces name consistency and cannot tell you what a book's two hundred
+proper nouns are. `lx terms <src> --lang <lang>` proposes them.
+
+**A candidate is a maximal run of capitalized tokens joined by exactly one
+space.** *Lost:* also emitting each word of a longer run as its own candidate,
+which turns `Ashcombe Hall` into three rows and a two-hundred-name novel into six
+hundred; a name that also stands alone is already its own run wherever it does.
+*Lost, and this one is not cosmetic:* joining a run across any whitespace, so a
+line break inside a wrapped paragraph would not split `Ashcombe Hall`. The
+glossary matches on the **literal source string** — `check_segment` §4 and
+`translate._glossary_hints` both search for it with the same word-boundary regex
+— so a run joined across a newline proposes a row that can never fire. Two rows
+that work beat one that cannot, and the wrapped case is instead covered by the
+two single-token runs it produces.
+
+A word is letters through Latin Extended-B, not ASCII: `René`, `Müller` and
+`Françoise` are ordinary in an English novel, and an ASCII class cut the first to
+`Ren` and split the second into `M` and a fragment the tool could not see. That
+is a *wrong* answer rather than a missing one, which is the worse kind. A run's
+last token is stripped of a possessive — `Ashcombe's carriage` and `Ashcombe
+walked` are one name, and counting them separately splits a minor character's
+evidence across two rows that each fall under the threshold.
+
+**The suppression rule, which is the part most likely to be tuned later.** A
+token is *sentence-initial*, and therefore evidence of nothing, when it is the
+first token of its segment, or when the text between it and the previous token
+ends in an opening quote, or contains one of `.!?…`. Three exceptions, in the
+order they fire:
+
+1. **A quote counts only when it is adjacent to the token.** `He said, "The door
+   is locked."` must suppress `The` — the comma is not a terminator and nothing
+   else would catch it, and dialogue openings are constant in a novel. But `"` is
+   also a *closing* quote, and `"Run," Ashcombe said.` is the commonest line in a
+   book; reading that `"` as an opening would suppress the one name in the
+   sentence. Position separates them: an opening quote is the last character
+   before the token, a closing one has whitespace after it. Adjacency is also
+   what lets `'` and `’` stay in the set despite being apostrophes far more often
+   than quotes — a possessive apostrophe is followed by a space, so `the Smiths'
+   Manor` never reaches the rule, while British single-quoted dialogue does and
+   is suppressed like its double-quoted twin.
+2. **A `!` or `?` kept inside a closing quote does not end the attribution's
+   sentence.** `"Run!" Ashcombe said.` is how English punctuates it — the mark
+   stays inside the quote and the attribution continues — so without this a
+   character attributed only that way has no mid-sentence occurrence anywhere.
+   A full stop is excluded deliberately: English writes a *comma* when an
+   attribution follows, so `"Run." Ashcombe left.` really is two sentences, and
+   stripping the stop would suppress a genuine sentence opener for nothing. The
+   residual false positive is `"Run!" She turned away.`, and it is accepted —
+   telling it from the attribution case needs a table of attribution verbs, which
+   is judgement.
+3. **A full stop after a configured abbreviation does not end a sentence.**
+   `Mr. Darcy` is the case: without it a character named only after an honorific
+   has no mid-sentence occurrence anywhere and is never proposed.
+
+Sentence position is per *token*, not per run: a run whose head opens a sentence
+also records its tail. `Then Ashcombe spoke.` is one run, `Then Ashcombe`, and
+without the tail the maximal-run rule swallows the one occurrence of `Ashcombe`
+that was genuinely mid-sentence — so a name after `Then`, `But` or `And` loses
+evidence it actually had.
+
+Two candidates are dropped outright. An **honorific in the configured
+abbreviation list** is not a proper noun and is the one word guaranteed to occur
+mid-sentence — `said Mr. Darcy` — so left in, it outranks every real name in the
+ranking it was added to help. A **single character** is dropped for a harder
+reason: a glossary row `J` fires on every segment containing a bare J, so it is
+not enforceable terminology under any wording a person could give it.
+
+**A candidate is proposed when its total count reaches `min_count` *and* at least
+one occurrence is not sentence-initial.** *Lost:* requiring `min_count`
+mid-sentence occurrences, which is the tighter and more obvious rule. A character
+name leads sentences constantly, so a name seen forty times with one mid-sentence
+occurrence is a real name and would have been dropped. The bias is deliberate and
+one-directional: the output is a list a person edits, so a spare row costs one
+keystroke and a missing one costs the discovery the command exists for.
+
+**Measured, 2026-08-02, on this repository's own tracked Markdown**, holding
+`min_count` at 2 and everything else in this entry fixed, and varying only the
+sentence-initial rule:
+
+| Document | candidates without the rule | with it | suppressed |
+|---|---|---|---|
+| `README.md` | 26 | 14 | 46% |
+| `AGENTS.md` | 35 | 11 | 68% |
+| `docs/decisions.md` | 97 | 54 | 44% |
+| `tests/corpus/long-manual.md` | 28 | 1 | 96% |
+
+On `AGENTS.md` the eleven survivors are exactly `API CLI EPUB English HTTP JSON
+Markdown Python Skeleton UI XLIFF`, and what the rule removes is `An Anything Do
+Documents Every If It Never New No Not Nothing Novels Read That The They This
+Three What When Where Why Working`. `long-manual.md` keeps one term, `CPU`, which
+is correct — it is generated boilerplate with no proper nouns in it.
+
+The two false positives are worth naming, because both come from the same shape
+and it is the shape the rule is weakest on. `Skeleton` survives `AGENTS.md`
+because of `**(2a) Skeleton.**`: the gap in front of it is `") "`, which holds no
+terminator, so the label reads as mid-sentence. `The` survives `decisions.md` on
+exactly 2 of its 150-odd occurrences, both of the form `**D3 · The translation
+memory…**`, where the separator `·` sits where a full stop would. A structural
+marker standing in for a sentence boundary is what these two documents are full
+of and what a novel does not have — they are documents *about* prose rather than
+prose. `The` also shows the recall bias's price plainly: two positions out of a
+hundred and fifty were enough to promote it, which is the same generosity that
+keeps a real name seen forty times with one mid-sentence occurrence.
+
+**Be exact about what was measured.** The corpus is documentation; the
+repository contains no novel. The two exceptions above — the quote-position rule
+and the abbreviation rule — were therefore measured on constructed sentences of
+the shapes a novel has, which are fixtures in `tests/test_terms.py`, not on a
+book. The first book to go through the pipeline is what will tune `min_count`
+and the abbreviation list, and both are configuration under `"terms"` in
+`lx.config.json` for exactly that reason: a heuristic is judgement, and invariant
+4 keeps a fixed table of judgement out of the deterministic half.
+
+**The target column is left empty, and that is the line the command does not
+cross.** Which characters render `Ashcombe` as 灰岸 rather than 阿什科姆 is
+judgement in a person's hands; a command that invented the target would have
+moved it into `checks.py`'s *input*, which is invariant 4 violated one step
+upstream where nobody would look for it. So the command finds the list and a
+person decides the wording.
+
+That made an unfilled row's inertness a property rather than a coincidence, and
+one half of it was missing. `check_segment` §4 already skipped a row whose target
+is falsy, but `translate._glossary_hints` did not — it would have put
+`Ashcombe -> ` in the required-terminology block, telling the model to render the
+name as nothing, and `cli.cmd_todo` would have sent an agent the same instruction
+as `{"term": "Ashcombe", "use": ""}`. Both now skip an empty target, so
+`lx terms --append` is safe to run against a project already in flight: nothing
+changes until someone writes a rendering in.
+
+**`--append` writes to `cfg["glossary"]`, and invariant 11 is not applied to
+it.** That is a decision, not an oversight. The path is read out of a
+configuration file, which the invariant names as untrusted, and this is the first
+thing in the tree that *writes* to such a path — but it is exempt on the
+invariant's own stated ground, that configuration is written by hand, and
+confining it now would be worse than useless twice over: `load_glossary` reads
+the same path unconfined, so the command could read a glossary it refused to
+append to, and a project legitimately sharing `../shared/glossary.csv` between
+two books would break with no decision recorded. The exemption ends the moment
+configuration becomes writable over HTTP. HANDOFF-206 carries that; so does this
+entry, which is what the note in the deleted package pointed at.
+
+The write itself concatenates the existing bytes and appends, through a temporary
+file and `os.replace`. "Never rewrite or reorder an existing row" therefore holds
+by construction rather than by care, and the one way a pure append can still
+destroy a row — a hand-edited file whose last line has no terminator, where the
+first appended row would be glued onto it — is closed explicitly.
+
+**Not done, and named so it is not mistaken for an oversight.** Non-English
+source is refused with a message rather than answered: the whole rule is English
+capitalization, so on Chinese or Japanese the command would report success and
+propose nothing, which is a wrong answer wearing a right one's exit code.
+Multi-word mining beyond capitalized runs is not attempted. Neither `store.py`
+nor `checks.py` was touched; D3 settled the first and the enforcement path in the
+second was already measured.
+
+Two defects were raised in review, confirmed, and deliberately left, because
+fixing either *here* would make this one command look like it had a guarantee the
+project does not give. **Two concurrent `--append` runs lose one writer's rows**
+— a read-modify-write with no lock — which is precisely what `store.save_doc` and
+`config.dump_json` also do, through the same `path + ".tmp"` and `os.replace`.
+Serializing one writer and not the others buys nothing and hides the shape.
+**A hand-edited `"terms": "oops"` in `lx.config.json` crashes with an
+`AttributeError`** rather than a message; so does `"batch": 25`, and so would
+every other mistyped key, because nothing in `config.py` validates a type. An
+`isinstance` guard on this one key would read as "configuration is checked". Both
+belong to a config-schema and a state-locking package respectively, not to this
+one.
+
 ## 2026-07-29 · The register is a real axis, and the translation memory can see it
 
 Closing HANDOFF-013, which implements D4 of the entry below. The knob was already
