@@ -175,7 +175,8 @@ src/scriptorium/
   normalize.py   deterministic repair: punctuation width, CJK/Latin spacing
   checks.py      validators; error severity fails the build. Invariant 2b lives
                  here: block-start containment, host escaping, placeholder pairs
-  store.py       .lx/ state, the translation-memory key, the memory itself
+  store.py       .lx/state.db (document state, SQLite), the translation-memory
+                 key, the memory itself (.lx/tm.*.jsonl, still JSONL and tracked)
   config.py      layered config, glossary, do-not-translate list
   translate.py   batching, concurrency, JSON tolerance, per-segment retry
   providers/     openai_compat (primary), anthropic; base holds transport + retry
@@ -194,7 +195,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 474 passed; no network
+python -m pytest -q                 # 484 passed; no network
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
 
@@ -315,9 +316,11 @@ most of what happens here, which is exactly why the case surprises people.
   identity here is `os.path.relpath(src)` against `os.getcwd()`, so a resolved
   path silently becomes a second document — measured under a junction and under
   an 8.3 short-name cwd. `lang` gets `cli.language_tag` instead, because it is not
-  a path but a filename *component* that `store_path`, `report_path` and `tm_path`
-  interpolate; a language tag has a decidable shape, so a whitelist refuses every
-  separator by construction.
+  a path but a filename *component* that `report_path` and `tm_path` interpolate;
+  a language tag has a decidable shape, so a whitelist refuses every separator by
+  construction. It stayed a whitelist after document state moved into SQLite, where
+  `lang` is a column value: two of the three paths it feeds are still files, and a
+  check that narrows as storage changes is a check nobody can rely on.
 - A document's line terminator is a document-level fact, held in `doc["eol"]` and
   re-imposed once at render — never carried inside a segment, where the model and
   the reviewer would both have to reproduce a control character neither can be
@@ -364,9 +367,13 @@ most of what happens here, which is exactly why the case surprises people.
   skeleton is only readable by the parser that wrote it. An unknown extension is
   refused rather than guessed. The registry serves formats whose document is one
   decoded string; a container format — EPUB — widens it rather than squeezing in.
-- A slot is a record — `original` / `role` / `pair_id` / `can_reorder` — and the
-  document state file carries `state_version`, which `store.py` refuses to read
-  when it is older than the build. A format whose markup pairs must emit those
+- A slot is a record — `original` / `role` / `pair_id` / `can_reorder` — and each
+  document row carries `state_version`, which `store.py` refuses to read when it
+  is older than the build. That is the *content* version, and it is separate from
+  `PRAGMA user_version` (`SCHEMA_VERSION`), the database's own shape: a newer
+  content version is escapable with `lx extract --reset` on the one document, a
+  newer schema is not escapable at all and is refused at the connection. See
+  `docs/decisions.md`, 2026-08-02. A format whose markup pairs must emit those
   records from its own masking step; entering a segment without them is what
   multiplies the "green but broken" rate with every format added. The model still
   sees a bare `⟦n⟧`: the type lives beside the slot map, never inside the token.

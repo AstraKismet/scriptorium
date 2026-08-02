@@ -4,8 +4,9 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 
-from .config import DEFAULT_TONE, STATE, canonical_tone, dump_json, load_json
+from .config import DEFAULT_TONE, STATE, canonical_tone
 
 #: Shape of a document state file. Bumped when a reader of an older file would be
 #: wrong rather than merely incomplete. `__version__` cannot serve here: it moves
@@ -16,6 +17,30 @@ from .config import DEFAULT_TONE, STATE, canonical_tone, dump_json, load_json
 #: 3 — segments carry ``context`` and ``variant``, the two axes the translation
 #:     memory key gained beside the content hash.
 STATE_VERSION = 3
+
+#: The shape of the *database* — its tables and columns — held in
+#: ``PRAGMA user_version``. Distinct from :data:`STATE_VERSION`, and the two
+#: answer different questions on purpose:
+#:
+#: * this one is what a build must be able to read at all. A newer schema holds
+#:   columns this build has no statement for, so it is refused at the connection
+#:   and no command runs. There is no per-document escape from that, because the
+#:   refusal happens before any document has been named.
+#: * ``STATE_VERSION`` is what a *document row* means. Versions 2 and 3 were both
+#:   changes to the JSON inside a segment, which no schema could have caught, and
+#:   the escape from one is still ``lx extract --reset`` on the one document.
+#:
+#: Collapsing them into one number was the alternative. It loses the escape
+#: hatch: a whole-database refusal makes ``--reset`` unreachable, so a content
+#: bump would force every document in the project to be re-extracted at once,
+#: and the message that promises otherwise would become false.
+SCHEMA_VERSION = 1
+
+#: Seconds a writer waits for another process's write lock before giving up.
+#: `lx web` and `lx run` in one directory is the case this exists for; WAL keeps
+#: readers out of the way entirely, so what is being waited on is only the other
+#: writer's transaction, and those are a few segments long.
+BUSY_TIMEOUT = 5.0
 
 #: How the parsers cut a document into segments. Bumped when a change to that
 #: decision changes segment text — rewrapping a list continuation, merging two
@@ -131,7 +156,27 @@ def doc_id(src):
     return re.sub(r"[^A-Za-z0-9._-]", "_", rel)
 
 
-def store_path(src, lang):
+def db_path():
+    """The one working-state database for the project rooted at the cwd.
+
+    One file, not one per document. `tracked` becomes a query instead of a
+    directory walk, and the cross-document reads a status contract needs cost
+    nothing. *Lost:* a database per document, which would have removed even the
+    brief write contention between `lx run` on one document and the workbench on
+    another. It was not worth three files per document in `.lx/` — a `.db` with
+    its `-wal` and `-shm` sidecars — for a lock that is held for the length of
+    one batch.
+    """
+    return os.path.join(STATE, "state.db")
+
+
+def legacy_store_path(src, lang):
+    """Where a build before the database kept this document's state.
+
+    Kept only so the "no state" message can say what happened to someone whose
+    `.lx/` predates the move. Nothing reads the file: it is regenerable and
+    gitignored, which is what made the move free in the first place.
+    """
     return os.path.join(STATE, "docs", f"{doc_id(src)}.{lang}.json")
 
 
@@ -143,129 +188,432 @@ def tm_path(lang):
     return os.path.join(STATE, f"tm.{lang}.jsonl")
 
 
-def _refuse_if_newer(doc, src, lang):
-    """Return the file's state version, refusing one this build cannot represent.
+# ── the state database ─────────────────────────────────────────────────────
+#
+# Three tables, and the shape of them is the whole storage decision.
+#
+# `documents` holds one row per (document, language) carrying every
+# document-level fact as JSON — `source`, `lang`, `tone`, `format`, `encoding`,
+# `eol`, and whatever a parser reported about what it guessed. They are read
+# together and never queried across, so promoting them to columns would buy
+# nothing and cost a schema migration every time a format learns a new fact.
+#
+# `nodes` is the skeleton, one row per node, in `pos` order. The raw value lives
+# in its own **BLOB** column rather than inside the JSON, and that column is
+# invariant 2a's storage half: SQLite hands back exactly the bytes it was given,
+# while a UTF-8 JSON file cannot hold a byte sequence that is not valid text at
+# all (measured: `UnicodeEncodeError: surrogates not allowed`, which is what
+# refuses an older Big5 or Shift-JIS novel today). Nothing writes bytes there
+# yet — HANDOFF-208 is what changes the parsers — and the column takes either,
+# because SQLite stores a `str` as TEXT and a `bytes` as BLOB in the same
+# declared column and returns each unchanged.
+#
+# `segments` promotes the fields something other than the segment's own body
+# needs to read: its id, the three that identify it for carryover, and the two a
+# narrow write updates. Everything else stays JSON in `body`. There is no unique
+# index on the identity, deliberately — a document may hold the same sentence
+# twice, and uniqueness of a *memory entry* belongs to the memory file. Nor is
+# any comparison made on those three in SQL, which is what keeps `NULL` from
+# meaning something here that it does not mean in `tm_key`.
+_SCHEMA = """
+CREATE TABLE documents (
+    doc_id        TEXT NOT NULL,
+    lang          TEXT NOT NULL,
+    state_version INTEGER NOT NULL,
+    meta          TEXT NOT NULL,
+    PRIMARY KEY (doc_id, lang)
+);
+CREATE TABLE nodes (
+    doc_id TEXT NOT NULL,
+    lang   TEXT NOT NULL,
+    pos    INTEGER NOT NULL,
+    raw    BLOB,
+    body   TEXT NOT NULL,
+    PRIMARY KEY (doc_id, lang, pos)
+);
+CREATE TABLE segments (
+    doc_id       TEXT NOT NULL,
+    lang         TEXT NOT NULL,
+    seg_id       TEXT NOT NULL,
+    pos          INTEGER NOT NULL,
+    content_hash TEXT,
+    context      TEXT,
+    variant      TEXT,
+    status       TEXT,
+    target       TEXT,
+    body         TEXT NOT NULL,
+    PRIMARY KEY (doc_id, lang, seg_id)
+);
+CREATE INDEX segments_carry ON segments (doc_id, lang, content_hash);
+"""
+
+#: One entry per step from schema version *n* to *n+1*. The first step is the
+#: creation of a fresh database, which is why a new file (``user_version`` 0)
+#: and an upgrade run through the same loop rather than through two code paths
+#: that would have to be kept agreeing.
+_MIGRATIONS = [lambda conn: conn.executescript(_SCHEMA)]
+
+
+def _migrate(conn):
+    found = conn.execute("PRAGMA user_version").fetchone()[0]
+    if found > SCHEMA_VERSION:
+        raise StateVersionError(
+            f"{db_path()} was written by a newer scriptorium: its schema is version "
+            f"{found} and this build reads {SCHEMA_VERSION}. Upgrade scriptorium, or "
+            f"delete {db_path()} and re-run `lx extract` — the state is rebuilt from "
+            f"the sources and the translation memory, which that does not touch.")
+    if found == SCHEMA_VERSION:
+        return
+    with conn:
+        for step in range(found, SCHEMA_VERSION):
+            _MIGRATIONS[step](conn)
+        # Not a parameter: PRAGMA takes no placeholders. The value is a module
+        # constant and never a caller's string.
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+
+def _connect(create=True):
+    """An open connection, or ``None`` when there is no database and none is wanted.
+
+    Opened per call and closed by the caller rather than cached on the module.
+    Every path here is relative to the process's working directory — `doc_id` is
+    `os.path.relpath` by construction — and both the test suite and the workbench
+    change it, so a cached handle would answer for whichever project happened to
+    be current when it was first opened.
+    """
+    path = db_path()
+    if not create and not os.path.exists(path):
+        return None
+    if create:
+        os.makedirs(STATE, exist_ok=True)
+    conn = sqlite3.connect(path, timeout=BUSY_TIMEOUT)
+    # WAL, so a reader never blocks the writer and the workbench can render a
+    # preview while `lx run` is committing a batch. It costs the two sidecar
+    # files and rules out a `.lx/` on a network share, which is not a place
+    # working state belongs. See `docs/decisions.md`, 2026-08-02.
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    try:
+        _migrate(conn)
+    except Exception:
+        conn.close()
+        raise
+    return conn
+
+
+def _refuse_if_newer(found, src, lang):
+    """Refuse a document row this build cannot represent. Returns its version.
 
     The two directions are not symmetrical and must not be handled in one place.
-    An *older* file is readable in the sense that matters — extract rebuilds it —
+    An *older* row is readable in the sense that matters — extract rebuilds it —
     so only the readers that would misinterpret it refuse. A *newer* one holds
-    fields this build does not know about, and every write here is a whole-file
-    rewrite, so any path that could save over it has to stop first. That includes
-    the extract path, which does not go through :func:`load_doc` at all.
+    fields this build does not know about, and a save replaces the whole
+    document, so any path that could write over it has to stop first. That
+    includes the extract path, which does not go through :func:`load_doc` at all.
     """
-    found = doc.get("state_version", 1)
     if found > STATE_VERSION:
         raise StateVersionError(
             f"state for {src} [{lang}] is version {found}, newer than the {STATE_VERSION} "
             f"this build reads — upgrade scriptorium, or start over with "
-            f"`lx extract {src} --lang {lang} --reset`, which discards the newer file "
+            f"`lx extract {src} --lang {lang} --reset`, which discards the newer state "
             f"(anything in it and not in the translation memory is lost that way).")
     return found
 
 
-def load_doc(src, lang):
-    p = store_path(src, lang)
-    if not os.path.exists(p):
-        raise FileNotFoundError(
-            f"no state for {src} [{lang}] — run `lx extract {src} --lang {lang}` first")
-    doc = load_json(p)
-    if _refuse_if_newer(doc, src, lang) < STATE_VERSION:
-        raise StateVersionError(
-            f"state for {src} [{lang}] is version {doc.get('state_version', 1)}, this build "
-            f"reads {STATE_VERSION} — run `lx extract {src} --lang {lang}` to rebuild it. "
-            f"Translations already in the file are carried over by content hash, "
-            f"so do not pass --reset.")
+def _no_state(src, lang):
+    message = f"no state for {src} [{lang}] — run `lx extract {src} --lang {lang}` first"
+    legacy = legacy_store_path(src, lang)
+    if os.path.exists(legacy):
+        # Not migrated, and deliberately so: `.lx/docs/` is regenerable and
+        # gitignored, so re-extracting is both the cheaper answer and the one
+        # that cannot half-succeed. Saying where it went is the whole debt.
+        message += (f" (state now lives in {db_path()}; {legacy} was written by an "
+                    f"older build and is no longer read — extract rebuilds it, and "
+                    f"anything committed to the translation memory carries over)")
+    raise FileNotFoundError(message)
+
+
+# ── document rows ──────────────────────────────────────────────────────────
+
+def _node_row(pos, node):
+    # `v` is lifted out of the JSON and into the BLOB column; every other field
+    # stays in `body`. A segment node has no `v` at all and stores NULL, which
+    # is what tells the reader not to put the key back.
+    body = {k: v for k, v in node.items() if k != "v"}
+    return (pos, node.get("v"), json.dumps(body, ensure_ascii=False))
+
+
+def _node(raw, body):
+    node = json.loads(body)
+    if raw is not None:
+        node["v"] = raw
+    return node
+
+
+#: Segment fields that are columns rather than JSON. `hash`, `context` and
+#: `variant` are what carryover looks a segment up by; `status` and `target` are
+#: what a narrow write updates. Their names differ where SQL would rather they
+#: did — `hash` is a function in SQLite and `id` invites confusion with a rowid.
+_SEG_COLUMNS = (("seg_id", "id"), ("content_hash", "hash"), ("context", "context"),
+                ("variant", "variant"), ("status", "status"), ("target", "target"))
+
+
+def _seg_row(pos, seg):
+    body = {k: v for k, v in seg.items() if k not in {f for _, f in _SEG_COLUMNS}}
+    return (seg["id"], pos, seg.get("hash"), seg.get("context"), seg.get("variant"),
+            seg.get("status"), seg.get("target"), json.dumps(body, ensure_ascii=False))
+
+
+def _segment(row):
+    seg = json.loads(row[-1])
+    for value, (_, field) in zip(row, _SEG_COLUMNS):
+        seg[field] = value
+    return seg
+
+
+_SEG_READ = ("SELECT seg_id, content_hash, context, variant, status, target, body "
+             "FROM segments WHERE doc_id=? AND lang=? ORDER BY pos")
+
+
+def _meta(row_meta, state_version):
+    doc = json.loads(row_meta)
+    doc["state_version"] = state_version
     return doc
+
+
+def _read_meta(conn, src, lang):
+    row = conn.execute("SELECT state_version, meta FROM documents WHERE doc_id=? AND lang=?",
+                       (doc_id(src), lang)).fetchone()
+    return None if row is None else _meta(row[1], row[0])
+
+
+def load_doc(src, lang):
+    conn = _connect(create=False)
+    if conn is None:
+        _no_state(src, lang)
+    try:
+        doc = _read_meta(conn, src, lang)
+        if doc is None:
+            _no_state(src, lang)
+        if _refuse_if_newer(doc["state_version"], src, lang) < STATE_VERSION:
+            raise StateVersionError(
+                f"state for {src} [{lang}] is version {doc['state_version']}, this build "
+                f"reads {STATE_VERSION} — run `lx extract {src} --lang {lang}` to rebuild "
+                f"it. Translations already in the state are carried over by content hash, "
+                f"so do not pass --reset.")
+        did = doc_id(src)
+        doc["nodes"] = [_node(raw, body) for raw, body in conn.execute(
+            "SELECT raw, body FROM nodes WHERE doc_id=? AND lang=? ORDER BY pos", (did, lang))]
+        doc["segments"] = [_segment(row) for row in conn.execute(_SEG_READ, (did, lang))]
+        return doc
+    finally:
+        conn.close()
 
 
 def prior_doc(src, lang):
-    """The stored state, read the way extract has to read it. ``{}`` if there is none.
+    """The stored document-level facts, without its skeleton. ``{}`` if there is none.
 
     Deliberately not :func:`load_doc` for the *older* direction: this is the one
-    reader that must work across a bump, because re-extracting is how a stale
-    file is migrated and carrying the translations over is the whole point of
-    doing it that way. Only fields that no bump has changed are read.
+    reader that must work across a bump, because re-extracting is how stale state
+    is migrated and carrying the translations over is the whole point of doing it
+    that way. Only fields that no bump has changed are read.
 
-    A file from a *newer* build is refused, because the caller is about to
-    replace it. Reading it here and letting the write proceed was the first
-    shape of this function, and it silently downgraded such a file — with a green
-    exit code, while `lx check` on the same file refused to touch it.
+    A row from a *newer* build is refused, because the caller is about to replace
+    it. Reading it here and letting the write proceed was the first shape of this
+    function, and it silently downgraded such a document — with a green exit code,
+    while `lx check` on the same one refused to touch it.
 
-    Split out of :func:`prior_targets` on 2026-07-29 so that extract can read the
-    document's register from the same parse it reads its translations from. The
-    alternative was a second full read of a file that is a whole book.
+    Split out of :func:`prior_targets` on 2026-07-29 so that extract could read
+    the register from the same parse it read the translations from; since the
+    move to SQLite it does not read the segments at all, which is the same saving
+    reached properly — `prior_targets` is now a query over three columns rather
+    than a walk over a whole book held in memory.
     """
-    p = store_path(src, lang)
-    if not os.path.exists(p):
+    conn = _connect(create=False)
+    if conn is None:
         return {}
-    doc = load_json(p, {})
-    _refuse_if_newer(doc, src, lang)
-    return doc
+    try:
+        doc = _read_meta(conn, src, lang)
+        if doc is None:
+            return {}
+        _refuse_if_newer(doc["state_version"], src, lang)
+        return doc
+    finally:
+        conn.close()
 
 
-def prior_targets(doc):
-    """``{key: (target, origin)}`` from a state file :func:`prior_doc` has read.
+def prior_targets(src, lang):
+    """``{key: (target, origin)}`` for what this document already holds.
 
-    The keys are :func:`segment_key`, not the content hash alone, because the
+    The keys are :func:`tm_key`, not the content hash alone, because the
     collision the context axis removes is a within-document one first: a sentence
     that appears as a paragraph and as a blockquote used to carry over from one to
     the other. The segmentation version is this build's on both sides rather than
-    the file's, and that is not an oversight — this field guards the memory across
-    time, while here the source has just been re-parsed by this build, so a
+    the stored one, and that is not an oversight — that field guards the memory
+    across time, while here the source has just been re-parsed by this build, so a
     changed segmentation has already changed the segment text and the content hash
-    discriminates on its own. Keying on the file's version instead would make
+    discriminates on its own. Keying on the stored version instead would make
     every bump silently discard the translations `lx extract` promises to carry.
 
     The register does **not** get that treatment, and the difference is the point:
     a changed segmentation changes the segment text, so the hash discriminates on
     its own, while a changed register leaves the source byte-identical. So these
-    keys carry the *file's* register, extract looks them up under the new one, and
+    keys carry the *stored* register, extract looks them up under the new one, and
     a document re-extracted into another register carries nothing over. That is
     the intended result — the alternative keeps documentation wording in a
     document now labelled `literary`, and `lx commit` then banks all of it under
     the literary key, which poisons the memory permanently rather than costing
     one re-translation.
+
+    Why the register is read here rather than passed in: it is the one argument a
+    caller could get wrong in a way nothing would report, and both callers would
+    be reading it out of the row this function is already opening.
     """
-    out = {}
-    tone = doc.get("tone")
-    for s in doc.get("segments", []):
-        if not (s.get("hash") and s.get("target")):
-            continue
-        # A file older than version 3 has no `context`. Every build that could
-        # have written one produced Markdown, where the context *is* the kind, so
-        # reading `kind` is the migration rule rather than a guess. Tested for
-        # presence, not truth: a format whose context is legitimately null must
-        # not silently acquire the kind instead.
-        ctx = s["context"] if "context" in s else s.get("kind")
-        key = tm_key(s["hash"], ctx, SEGMENTATION_VERSION, s.get("variant"), tone)
-        out[key] = (s["target"], s.get("origin") or "carryover")
-    return out
+    conn = _connect(create=False)
+    if conn is None:
+        return {}
+    try:
+        meta = _read_meta(conn, src, lang)
+        if meta is None:
+            return {}
+        tone = meta.get("tone")
+        out = {}
+        # `origin` stays inside `body`: it is written and read with the target it
+        # describes and nothing looks a segment up by it, so promoting it would
+        # be a column for one JSON parse per translated segment.
+        for content_hash, context, variant, target, body in conn.execute(
+                "SELECT content_hash, context, variant, target, body FROM segments "
+                "WHERE doc_id=? AND lang=? AND target IS NOT NULL AND target != ''",
+                (doc_id(src), lang)):
+            if not content_hash:
+                continue
+            key = tm_key(content_hash, context, SEGMENTATION_VERSION, variant, tone)
+            out[key] = (target, json.loads(body).get("origin") or "carryover")
+        return out
+    finally:
+        conn.close()
 
 
 def save_doc(src, lang, doc):
+    """Replace a document's stored state entirely: meta, skeleton and segments.
+
+    What `lx extract` does, and the only writer that touches the skeleton. Every
+    other write is :func:`save_segments`, which is the reason a long translation
+    no longer rewrites a whole book to record one batch.
+    """
     # Stamped here rather than by each caller, so a writer cannot forget it and
-    # leave a file that reads as pre-record state.
+    # leave state that reads as pre-record.
     doc["state_version"] = STATE_VERSION
-    dump_json(store_path(src, lang), doc)
+    did = doc_id(src)
+    meta = {k: v for k, v in doc.items() if k not in ("nodes", "segments", "state_version")}
+    conn = _connect()
+    try:
+        with conn:
+            conn.execute("DELETE FROM nodes WHERE doc_id=? AND lang=?", (did, lang))
+            conn.execute("DELETE FROM segments WHERE doc_id=? AND lang=?", (did, lang))
+            conn.execute(
+                "INSERT OR REPLACE INTO documents (doc_id, lang, state_version, meta) "
+                "VALUES (?,?,?,?)",
+                (did, lang, STATE_VERSION, json.dumps(meta, ensure_ascii=False)))
+            conn.executemany(
+                "INSERT INTO nodes (doc_id, lang, pos, raw, body) VALUES (?,?,?,?,?)",
+                [(did, lang, *_node_row(i, n)) for i, n in enumerate(doc.get("nodes", []))])
+            conn.executemany(
+                "INSERT INTO segments (doc_id, lang, seg_id, pos, content_hash, context, "
+                "variant, status, target, body) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                [(did, lang, *_seg_row(i, s)) for i, s in enumerate(doc.get("segments", []))])
+    finally:
+        conn.close()
+
+
+def save_segments(src, lang, segments):
+    """Write these segments and nothing else. Returns how many rows were written.
+
+    The narrow write, and the reason this package exists. `lx apply` and
+    `lx check` touch the segments they changed instead of rewriting a novel's
+    whole skeleton, and — the severe half — a translation run commits each batch
+    as it lands, so a Ctrl-C or a dropped connection at 90% keeps the 90%.
+
+    A segment whose id is not in the stored document is skipped rather than
+    inserted: an id that was never extracted is a caller's mistake, and inserting
+    it would put a segment in the document with no node referring to it.
+    """
+    rows = [(*_seg_row(0, seg)[2:], doc_id(src), lang, seg["id"]) for seg in segments]
+    if not rows:
+        return 0
+    conn = _connect()
+    try:
+        with conn:
+            written = 0
+            for row in rows:
+                written += conn.execute(
+                    "UPDATE segments SET content_hash=?, context=?, variant=?, status=?, "
+                    "target=?, body=? WHERE doc_id=? AND lang=? AND seg_id=?", row).rowcount
+        return written
+    finally:
+        conn.close()
+
+
+def save_targets(src, lang, targets, origin):
+    """Record translated text for these ids, reading nothing first.
+
+    What a translation run calls per batch. It goes through the row rather than
+    through a loaded document on purpose: the point is that a batch is durable
+    the moment it lands, and a read-modify-write of the whole document would put
+    the interrupt window back where it was — and, with the workbench editing the
+    same document, would silently overwrite whatever it had saved meanwhile.
+
+    Issues are cleared with the target for the same reason :func:`cli.do_apply`
+    clears them: they describe wording that has just been replaced.
+    """
+    conn = _connect()
+    try:
+        with conn:
+            written = 0
+            for seg_id, text in targets.items():
+                row = conn.execute(
+                    "SELECT body FROM segments WHERE doc_id=? AND lang=? AND seg_id=?",
+                    (doc_id(src), lang, seg_id)).fetchone()
+                if row is None:
+                    continue
+                body = json.loads(row[0])
+                body["origin"] = origin
+                body.pop("issues", None)
+                written += conn.execute(
+                    "UPDATE segments SET status='translated', target=?, body=? "
+                    "WHERE doc_id=? AND lang=? AND seg_id=?",
+                    (text, json.dumps(body, ensure_ascii=False),
+                     doc_id(src), lang, seg_id)).rowcount
+        return written
+    finally:
+        conn.close()
 
 
 def tracked(lang=None):
-    # Version-independent, like `prior_doc` and for the same reason: `stats`
-    # and the workbench's document list read counts and a source path, so a state
-    # file waiting to be re-extracted should still appear rather than take the
-    # whole listing down.
-    d = os.path.join(STATE, "docs")
-    out = []
-    if not os.path.isdir(d):
+    # Version-independent, like `prior_doc` and for the same reason: `stats` and
+    # the workbench's document list read counts and a source path, so a document
+    # waiting to be re-extracted should still appear rather than take the whole
+    # listing down.
+    #
+    # No `nodes`, deliberately. Both callers count segments and read a source
+    # path, and loading every skeleton in the project to answer "how far along is
+    # each document" is the shape of read this move exists to stop. A caller that
+    # needs a skeleton is asking about one document and calls `load_doc`.
+    conn = _connect(create=False)
+    if conn is None:
+        return []
+    try:
+        out = []
+        for did, dlang, version, meta in conn.execute(
+                "SELECT doc_id, lang, state_version, meta FROM documents ORDER BY doc_id, lang"):
+            if lang and dlang != lang:
+                continue
+            doc = _meta(meta, version)
+            doc["segments"] = [_segment(row) for row in conn.execute(_SEG_READ, (did, dlang))]
+            out.append(doc)
         return out
-    for name in sorted(os.listdir(d)):
-        if not name.endswith(".json"):
-            continue
-        doc = load_json(os.path.join(d, name))
-        if lang and doc.get("lang") != lang:
-            continue
-        out.append(doc)
-    return out
+    finally:
+        conn.close()
 
 
 def load_tm(lang):

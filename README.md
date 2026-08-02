@@ -242,9 +242,9 @@ what is configured and whether each key is present.
 `.lx/tm.<lang>.jsonl` only ever grows, and it is the file worth committing to
 version control.
 
-`.lx/docs/` is working state. It is regenerable only for wording you have already
-banked with `lx commit`, so commit before you clean it. `.lx/reports/` is always
-regenerable.
+`.lx/state.db` is working state — one SQLite database for the project. It is
+regenerable only for wording you have already banked with `lx commit`, so commit
+before you delete it. `.lx/reports/` is always regenerable.
 
 ## Review workbench
 
@@ -352,10 +352,9 @@ is the whole point of this one.
 ## Project status
 
 Markdown and plain text work end to end today: extract, translate, validate,
-repair, render, and a translation memory that survives revisions.
-
-In progress: a SQLite state layer, so a 100k-word document resumes one segment at
-a time instead of rewriting its whole state file.
+repair, render, and a translation memory that survives revisions. Working state
+is SQLite, and a translation run commits each batch as it lands — an interrupted
+100k-word document keeps what it had translated and resumes on the rest.
 
 Queued, roughly in that order: a written and versioned HTTP contract for the
 workbench; EPUB, which is how novels actually circulate; a writable configuration that can point two pipeline stages at

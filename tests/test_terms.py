@@ -23,6 +23,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+import statedb  # noqa: E402
 from scriptorium.cli import candidate_terms  # noqa: E402
 from scriptorium.config import DEFAULT_CONFIG, load_glossary  # noqa: E402
 from scriptorium.translate import _user_message  # noqa: E402
@@ -89,8 +90,7 @@ def _rows(stdout):
 
 
 def _segments(tmp_path, name="novel.md"):
-    state = next((tmp_path / ".lx" / "docs").iterdir())
-    return json.loads(state.read_text(encoding="utf-8"))["segments"]
+    return statedb.segments(tmp_path)
 
 
 def _seg(masked, sid="s0001"):

@@ -87,7 +87,7 @@ never saw them.
 Add a paragraph to the source and re-extract:
 
 ```
-sample.md -> .lx/docs/sample.md.zh-TW.json
+sample.md [zh-TW] -> .lx/state.db
   segments 15 | reused 14 | pending 1
 ```
 

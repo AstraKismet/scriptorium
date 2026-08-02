@@ -34,14 +34,16 @@ from .normalize import normalize, polish_rendered
 from .store import (
     StateVersionError,
     append_tm,
+    db_path,
     load_doc,
     load_tm,
     prior_doc,
     prior_targets,
     report_path,
     save_doc,
+    save_segments,
+    save_targets,
     segment_key,
-    store_path,
     tm_lookup,
     tm_records,
     tracked,
@@ -127,11 +129,11 @@ def confined_path(value, field="path", root=None):
 
     It validates and hands back `value` byte for byte. It deliberately does
     **not** canonicalize. *Lost:* returning `os.path.realpath(value)`, which was
-    measured to split one document into two state files under a junction or an
+    measured to split one document into two rows of state under a junction or an
     8.3-short-name cwd — the GitHub Actions windows-latest layout — and to make
     `/api/render` write into a directory nobody asked for, with no exception to
     point at. Every identity in this project is `os.path.relpath(src)` against
-    `os.getcwd()`: `store.doc_id`, `store.store_path`, `store.report_path`,
+    `os.getcwd()`: `store.doc_id`, `store.report_path`,
     `do_extract`'s `doc["source"]` and `default_output` all read it. Hand any of
     them a resolved path and the same document quietly acquires a second name.
 
@@ -304,12 +306,15 @@ def language_tag(value, field="lang"):
     """Refuse anything that is not a language tag, because `lang` becomes a filename.
 
     A whitelist, not a confinement. `lang` is interpolated straight into a file
-    *name* by `store.store_path`, `store.report_path` and `store.tm_path`, and it
-    reaches all three from a request body. Measured on this repository,
-    2026-07-29: `tm_path("../../../../pwn")` lands one directory above the
-    project, and `store_path("README.md", "../../../../pwn")` lands beside it in
-    the project root — so closing `src` and `out` while leaving `lang` open would
-    have shipped the same write primitive under a different name.
+    *name* by `store.report_path` and `store.tm_path`, and it reaches both from a
+    request body. Measured on this repository, 2026-07-29:
+    `tm_path("../../../../pwn")` lands one directory above the project, and the
+    document state file of the day landed beside it in the project root — so
+    closing `src` and `out` while leaving `lang` open would have shipped the same
+    write primitive under a different name. Document state is a database row since
+    2026-08-02 and `lang` is a column value there, which narrows what this
+    protects but does not remove it: a check that loosens whenever storage moves
+    is a check nobody can rely on.
 
     *Lost:* confining the paths derived from it. That would still allow a tag to
     escape `.lx/` into the project and collide with a source document, and the
@@ -347,6 +352,9 @@ def do_extract(src, lang, cfg, tone=None, reset=False):
     # so overwrites it anyway — deliberately, and named in the message the newer
     # file raises, because "start over" is exactly what the flag means.
     stored = {} if reset else prior_doc(src, lang)
+    # `prior_doc` refuses state from a newer build, and it runs first, so the
+    # query below is never reached for one. `--reset` skips both, which is what
+    # the flag means and what the refusal message promises.
 
     # The register is frozen onto the document, and a re-extract that does not
     # name one keeps the frozen value. Without this a forgotten `--tone` would
@@ -356,7 +364,7 @@ def do_extract(src, lang, cfg, tone=None, reset=False):
     # does not read the state file at all, because it has to work on one this
     # build cannot read.
     tone = tone or stored.get("tone") or cfg.get("tone", DEFAULT_TONE)
-    prior = prior_targets(stored)
+    prior = {} if reset else prior_targets(src, lang)
 
     tm = load_tm(lang)
     reused, rejected = 0, 0
@@ -417,7 +425,7 @@ def do_extract(src, lang, cfg, tone=None, reset=False):
 def cmd_extract(args, cfg):
     doc, reused, rejected = do_extract(args.src, args.lang, cfg, args.tone, args.reset)
     pending = sum(1 for s in doc["segments"] if s["status"] == "pending")
-    _out(f"{args.src} -> {store_path(args.src, args.lang)}")
+    _out(f"{args.src} [{args.lang}] -> {db_path()}")
     line = f"  segments {len(doc['segments'])} | reused {reused} | pending {pending}"
     # Only when it happened, and named as the memory's problem rather than the
     # document's: a rejected reuse means a banked entry no longer fits the
@@ -831,7 +839,7 @@ def cmd_terms(args, cfg):
 def do_apply(src, lang, cfg, incoming, origin="agent"):
     doc = load_doc(src, lang)
     by_id = {s["id"]: s for s in doc["segments"]}
-    applied, unknown = 0, []
+    applied, unknown, changed = 0, [], []
     for sid, text in incoming.items():
         seg = by_id.get(sid)
         if not seg:
@@ -840,8 +848,13 @@ def do_apply(src, lang, cfg, incoming, origin="agent"):
         seg["target"] = normalize(repair_placeholders(text), lang, cfg)
         seg["status"], seg["origin"] = "translated", origin
         seg.pop("issues", None)
+        changed.append(seg)
         applied += 1
-    save_doc(src, lang, doc)
+    # The segments this call touched, not the whole document: apply is what the
+    # workbench calls on every keystroke-sized save, and rewriting a novel's
+    # skeleton to record one edited paragraph is the amplification the state
+    # layer moved to SQLite to remove.
+    save_segments(src, lang, changed)
     return applied, unknown
 
 
@@ -879,7 +892,10 @@ def do_check(src, lang, cfg, persist=True):
         "issues": issues,
     }
     if persist:
-        save_doc(src, lang, doc)
+        # Only the segments, never the skeleton: check reads the document and
+        # writes back one field of each segment, and the nodes it would rewrite
+        # are the largest thing in the state.
+        save_segments(src, lang, doc["segments"])
         dump_json(report_path(src, lang), report)
     return report, doc
 
@@ -978,11 +994,18 @@ def _translate(src, lang, cfg, segments, mode, args):
         _out(f"dry run: {len(segments)} segment(s), {chars} source characters, "
              f"mode={mode}, provider={args.provider or cfg.get('routing', {}).get(mode)}")
         return 0, []
+    origin = f"llm:{mode}"
+    # Each batch is committed as it lands. `do_apply` still runs at the end and
+    # is still the authority on what was applied — it normalizes and reports
+    # unknown ids — but it is no longer the *first* time anything reaches disk,
+    # which is what an interrupted novel depends on. The two writes agree:
+    # `accept` has already normalized the text this one stores.
     results, failures = translate_segments(
         segments, doc, cfg, provider_name=args.provider, mode=mode,
         batch_size=args.batch, concurrency=args.concurrency,
-        progress=Progress(_out))
-    applied, _ = do_apply(src, lang, cfg, results, origin=f"llm:{mode}")
+        progress=Progress(_out),
+        on_batch=lambda ok: save_targets(src, lang, ok, origin))
+    applied, _ = do_apply(src, lang, cfg, results, origin=origin)
     for sid, why in failures:
         _out(f"  unresolved {sid}: {why}")
     return applied, failures

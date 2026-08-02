@@ -292,7 +292,10 @@ def write_templates():
     if not os.path.exists("lx.config.json"):
         dump_json("lx.config.json", DEFAULT_CONFIG)
         created.append("lx.config.json")
-    for d in (os.path.join(STATE, "docs"), os.path.join(STATE, "reports"), "config"):
+    # No `.lx/docs` any more: document state is one SQLite database, created on
+    # first write by `store._connect`. `.lx/reports` is still a directory of JSON
+    # files, because a report is a rebuildable projection rather than state.
+    for d in (STATE, os.path.join(STATE, "reports"), "config"):
         os.makedirs(d, exist_ok=True)
     if not os.path.exists("config/glossary.csv"):
         with open("config/glossary.csv", "w", encoding="utf-8", newline="\n") as f:
