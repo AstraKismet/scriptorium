@@ -3,6 +3,173 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-08-03 · The blanks a segment opens and closes with belong to the source, not to the translator
+
+Closing HANDOFF-019. `translate.accept` did `repair_placeholders(text).strip()`
+before it normalized. HANDOFF-018 left that alone on a stated premise — once an
+indented code block is skeleton, no segment starts with an indent and the strip
+has nothing to damage — and the premise is **false**, which is why 019 exists as
+a package rather than as a line in 018's entry. A list item's second paragraph is
+`- item\n\n    text`, and `mdparse` keeps those four spaces at position 0 of the
+segment on purpose: an indent that follows a newline inside the source cannot be
+held by a raw node, because a raw node can only sit before or after a *whole*
+segment (2026-07-28, "Where a line terminator lives"). Deleting them takes the
+paragraph out of the item.
+
+**Measured before it was designed.** 441 generated documents against
+markdown-it-py, varying format (`mdparse`, `textparse`), container (paragraph at
+the margin, list second and third paragraph in eight spellings, blockquote line,
+blockquote inside a list, ATX and setext heading, table cell, link definition,
+thematic break, empty list item, fence, front matter, a chunk carrying a text
+CR), blank character (space, tab, U+3000, U+00A0, form feed, vertical tab,
+U+2028, U+2029, newline, and five mixes), width (1–8 columns) and which end.
+**76 of the 441 changed what the document is** rather than how it looks — sixteen
+distinct container shapes, where HANDOFF-019's own table listed four.
+
+Two facts from that sweep shaped the rest. `textparse` contributed **zero**
+leading-run segments, because it lifts a first line's indent into the skeleton
+(`emit_raw(indent)`) — the stronger answer, available to it and not to `mdparse`,
+and the reason a model that helpfully adds a U+3000 paragraph indent to a zh-TW
+target still has it removed. And no `tests/corpus/` fixture had such a segment at
+all, so nothing in the suite could see any of it;
+`tests/corpus/list-item-second-paragraph.md` is the file that closes that, built
+on the lazy-continuation shape HANDOFF-018's sweep was blind to so that one file
+serves the round trip as well.
+
+**What `accept` may delete, and what it may not.** The rule is *re-imposition*,
+not preservation: the target is stripped at both ends and then reseated in the
+runs the source has (`normalize.reseat_outer_blanks`). So a model that dropped
+the indent gets it back — invariant 5, fix rather than report — and a model that
+padded a segment with no run of its own still loses the padding, which is the
+reason the strip exists at all. The parallel is `doc["eol"]`: a fact about where
+the text sits in the document, applied once, never carried inside a segment where
+the model and the reviewer would both have to reproduce something invisible.
+
+*Lost:* preserving only a run the target already has. It is the weaker half of
+the same idea and it loses the likeliest case — a model asked to translate an
+indented paragraph answers with a sentence, not with a sentence wearing four
+spaces. *Also lost:* moving the indent into the skeleton, which HANDOFF-019 put
+out of scope and 2026-07-28 already settled; and narrowing the preserved run to
+`" \t"`, which would miss U+3000 and U+00A0 — `str.strip()` deletes both, and the
+set restored has to be the set deleted or the rule is a different rule at the
+edges. `mdparse._indent_columns` counts only space and tab because CommonMark
+does; that is a different question, and conflating the two is the trap here.
+
+**The trailing side is not redundant, and the measurement that says so is on an
+axis the first sweep held constant.** HANDOFF-019 suspected the trailing half was
+already covered by `normalize`, which keeps a Markdown hard break and drops a run
+that means nothing (2026-07-29). Over those 441 documents it looked that way:
+eleven segments carried a trailing run and not one was structural. Every one of
+them, though, was a segment whose *following* line was inside it — a paragraph
+keeps its continuations. `mdparse` emits **one segment per blockquote line**, so
+`> first  \n> second` puts the two spaces of a hard break at the *end* of a
+segment with the newline that gives them meaning outside it, in the skeleton. The
+unconditional `rstrip` deleted the `<br>`. Twenty hand-built cases on that axis
+found six structural shapes the first sweep could not have contained. The
+trailing half is therefore the same rule as the leading half, for a different
+reason, and both are now reseated.
+
+**The order is load-bearing, and it is the second thing the trailing side
+decided.** `reseat_outer_blanks` runs **after** `normalize`, not before.
+`collapse_space` ends in `[ \t]+\Z` and is in zh-TW's default op list, so a
+trailing run handed to `normalize` is deleted again and the fix would be inert
+for the project's primary language. Running `normalize` on the stripped sentence
+is also exactly what it received before this change, so nothing about the ops
+moved underneath it and HANDOFF-011's line-start protection is untouched — that
+one is about a run *inside* the body, and the two are complementary rather than
+overlapping.
+
+**The `do_apply` asymmetry closed for whitespace and stayed open for
+acceptance.** `cli.do_apply` never stripped, so the same document rendered
+differently depending on which of the three equal sources produced its target,
+and a reviewer retyping a paragraph in the workbench's textarea does not reliably
+reproduce the four spaces that keep it inside its list item. It now shares
+`reseat_outer_blanks` and nothing else. What it deliberately still does *not*
+share is refusal: a placeholder set that does not match is reported at `lx check`
+rather than rejected at the door, which is the whole of the 2026-07-29 decision,
+and both halves are now pinned by tests so closing the second one needs a
+decision rather than an edit.
+
+**Adversarial review found two regressions this package introduced, and both are
+in it.** Four independent lenses — callers, degenerate ends, validators, and the
+novel use case with real zh-TW prose instead of identity translations — then
+eight verifiers whose job was to refute what the lenses claimed.
+
+1. **A reseated lead blinded three of the seven block-start rules.** Three
+   patterns in `checks.py` cap the indent they will match, because CommonMark
+   spells them `\s{0,3}`: a heading, a thematic break and a setext underline. A
+   list item's second paragraph *sits* four columns in, so from the moment its
+   target carried the source's four spaces, `'    # 標題'` matched nothing.
+   `lx check` printed `0 error(s)` and exited 0 while markdown-it-py rendered an
+   `<h1>` where the source had a `<p>` — 36 of 172 (marker, indent, hazard)
+   combinations, silent. That is invariant 10's exit code claiming something
+   untrue, arriving because the fix moved the input to a validator without
+   moving the validator. `_block_start` now lstrips the line, which is safe in
+   the must-not-fire direction because every pattern in the table is anchored
+   `^\s*` or `^\s{0,3}`: removing leading blanks can only make a match appear,
+   and both sides of every comparison come through the same function.
+2. **The `do_apply` asymmetry was closed too far.** Two U+3000 at the head of a
+   paragraph is standard Traditional Chinese typography; an English source has no
+   leading run for it to be reseated from, so the strict form deleted it from
+   every paragraph a reviewer typed — and after it, no surface anywhere in the
+   pipeline could produce an indented Chinese paragraph. Neither reporting nor
+   refusing, which is the only thing 2026-07-29 permits. `do_apply` now passes
+   `keep_added_indent=True`: where the source has **no** run, the target keeps its
+   own. It is the leading end only, because a trailing run is invisible in both
+   hosts unless a line follows it in the skeleton, where it is structure the
+   source did not have and `lx check`'s to report.
+
+*The recorded cost of 2:* where the source **does** have a lead, the source still
+wins, so a person writing eight spaces into a four-space segment — an indented
+code block inside the list item — gets four. That run is what keeps the paragraph
+inside the item at all, and a paragraph's translation turning into a code block
+is the larger of the two failures.
+
+**Three further claims were refuted, and one of them reversed a suspicion worth
+recording.** The trailing run is re-imposed *verbatim* while an interior hard
+break is canonicalized to two spaces (2026-07-29), which reads as one document
+answering the same question twice. It is not: the two runs have different
+provenance. The interior run is the translator's and the canonicalization is
+about their output; the segment-final run is the **source's**, and reproducing it
+is invariant 2a's direction. Measured against markdown-it-py over one space,
+two, three, five and a tab: reseating verbatim matches the source's rendering 5
+of 5, and canonicalizing would have *deleted* the single space and the tab —
+bytes the source had, that `_line_end_blanks` drops because it is judging a
+translator's line ending rather than restoring a source's. Also refuted: that
+banking the lead inside the approved wording harms the memory — the key already
+carries the indent, since the indent is part of the source, so an entry never
+crosses containers and reuse reseats it anyway. Keying the memory on the stripped
+source would make one wording one entry across containers and was **not taken**:
+it rewrites every existing record for bytes nothing reads, and it is a
+memory-format decision rather than this package's.
+
+**The mutation pass found three things review had not.** Removing each guard on a
+copy of the tree, seventeen mutants: six survived the first run. Two were *mutually
+redundant strips* — `do_apply` had grown one of its own and `reseat_outer_blanks`
+already had one — measured equivalent over 327600 combinations (every subset of
+the zh-TW ops × 26 body shapes × 15 leading runs × 15 trailing runs × 7 source
+shapes, zero differences), so `do_apply`'s was deleted and one place owns the
+rule. Three were untested rather than redundant: the blank-target guard, which
+only `lx apply` can reach and which is what keeps a cleared segment rendering the
+untranslated marker instead of four truthy spaces; the blank-source guard, where
+`lead` and `trail` would be the *same run* and the answer is wrong rather than
+merely absent; and the trailing end's character class, which had quietly narrowed
+to ASCII with nothing to say so. One is equivalent by construction and is left in
+the harness list, labelled, so the next reader does not re-derive it. The four
+mutants added for the two repairs above — the lstrip removed, `keep_added_indent`
+dropped, widened to override a source's own lead, and widened to the trailing
+end — are all killed.
+
+**`textparse` gains nothing from the leading half, and that is the right
+outcome.** Across 32 parses — eight document shapes × four `paragraph_mode`
+values — plain text produces **zero** segments with a leading run, because it
+lifts a first line's indent into the skeleton. The lead half is inert there by
+construction rather than by accident: where an indent can be taken out of the
+segment entirely, taking it out is the stronger answer, and `mdparse` cannot,
+because a raw node has nowhere to sit. The consequence is that for a `.txt`
+novel — the format novels arrive in — `lx apply` is the *only* path that can put
+a paragraph indent in, which is exactly what `keep_added_indent` exists for.
+
 ## 2026-08-02 · An indented code block is skeleton, and the rule that decides it is state rather than a column
 
 Closing HANDOFF-018. `mdparse` had no branch for an indented code block, so a

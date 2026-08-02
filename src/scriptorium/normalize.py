@@ -65,12 +65,19 @@ _LINE_END_BLANKS_RE = re.compile(r"[ \t]+(?=\r?\n)")
 #: exception either way (``docs/decisions.md``, 2026-07-28).
 #:
 #: Position 0 is protected too, and it is a measured case rather than a rule
-#: invented for symmetry: ``mdparse`` has no indented-code-block branch, so
-#: ``tests/corpus/indented-code-block.md`` arrives as a paragraph whose source
-#: *starts* with the four spaces that make it code. ``translate.accept`` strips a
-#: model's leading whitespace before this is reached, but ``cli.do_apply`` — a
-#: person's or an agent's own words — does not. That asymmetry is not this
-#: module's to fix and is scheduled as HANDOFF-018.
+#: invented for symmetry: a list item's second paragraph is ``- item\n\n    text``,
+#: so the four spaces that keep the paragraph inside the item sit at position 0 of
+#: the segment. An indented code block used to arrive the same way and stopped on
+#: 2026-08-02, when it became skeleton; the list item did not.
+#:
+#: Since 2026-08-03 the *outer* runs no longer depend on this: `accept` strips
+#: before calling here, `cli.do_apply` still does not, and both replace whatever
+#: reaches position 0 with the source's own run afterwards
+#: (:func:`reseat_outer_blanks`). So the position-0 half of this lookbehind is
+#: belt-and-braces now, and the line-start half — every run that follows a newline
+#: *inside* the segment, which is what HANDOFF-011 was about — is not. They are one
+#: regex and cannot be separated, and the direct tests over this function are what
+#: keep both halves pinned rather than the callers.
 _INTERIOR = r"(?<=[\S\r])"
 
 
@@ -157,6 +164,87 @@ def normalize_zh(text, ops):
         # would make `"item\n  "` keep two invisible trailing spaces.
         out = re.sub(r"[ \t]+\Z", "", out)
     return out
+
+
+def reseat_outer_blanks(source, text, keep_added_indent=False):
+    """``text``, wearing the whitespace runs ``source`` opens and closes with.
+
+    Not an op, and deliberately not in :func:`normalize_zh`: it is unconditional,
+    language-independent and driven by the segment rather than by config. It
+    lives here because this module is where a deterministic repair goes
+    (invariant 5) and because both callers already import from it — putting it in
+    `translate.py` beside `accept` would make `cli.do_apply`, which the workbench
+    calls on every save, import the provider stack to answer a question about
+    whitespace.
+
+    **What it exists for.** A run of blanks at position 0 of a segment is not
+    padding, it is the segment's position in the document's structure: a list
+    item's second paragraph is `- item\\n\\n    text`, and the four spaces are
+    what keeps the paragraph inside the item. `accept` used to `.strip()` them
+    off every proposal, which moved the paragraph out of the list — measured
+    2026-08-02 against markdown-it-py across 441 generated shapes, 76 of which
+    changed what the document *is* rather than how it looks. The trailing end is
+    the same rule for a different reason: `mdparse` emits one segment per
+    blockquote line, so the two spaces of a hard break between `> first` and
+    `> second` sit at the end of a segment with the newline that gives them
+    meaning outside it.
+
+    **The runs come from the source, so a model that dropped one gets it back.**
+    Preserving only a run the target already has was the alternative and it loses
+    the case this is most likely to meet: a model asked to translate an indented
+    paragraph answers with a sentence, not with a sentence wearing four spaces.
+    Re-imposing is the same move `doc["eol"]` already makes — a fact about the
+    document, applied once, never carried inside a segment where the model and
+    the reviewer would both have to reproduce something invisible.
+
+    ``str.strip()`` and its one-sided pair with no argument, deliberately: the
+    set of characters preserved here has to be exactly the set `accept` deletes,
+    and naming a class would be a second answer to one question. So U+3000 and
+    U+00A0 — the zh-TW paragraph indent, and what a paste from EPUB leaves — are
+    covered without being enumerated.
+
+    **This is the only place either caller strips.** `accept` strips first as
+    well, because its placeholder comparison and its emptiness test are about the
+    sentence rather than the padding — but `cli.do_apply` does not, and a second
+    strip there was measured redundant over 327600 combinations after the
+    mutation pass found each of the two could be deleted alone. One place, so the
+    contract holds however it is called: the blanks the result opens and closes
+    with are the source's, whatever the input's were.
+
+    ``keep_added_indent`` is `lx apply`'s, and it is the only place the two
+    callers differ: where the source has **no** leading run, the target keeps its
+    own. A model's answer has no business opening with blanks and the strict form
+    is right for it — but a pair of U+3000 at the head of a paragraph is standard
+    Traditional Chinese typography, an English source never has a run for it to
+    be reseated from, and deleting it from a person's or an agent's words is
+    neither reporting them at `lx check` nor refusing them at the door, which is
+    what the 2026-07-29 decision allows. Found by adversarial review 2026-08-03,
+    after the first version of this closed the asymmetry too far and left no
+    surface anywhere in the pipeline able to produce an indented zh-TW paragraph.
+
+    It is the *leading* run only. A trailing run is invisible in both hosts
+    unless a line follows it in the skeleton, where it is a hard break — that is
+    structure the source did not have, and structure is what `lx check` is for
+    reporting. And where the source *does* have a lead, the source still wins:
+    that run is the host's layout and a translator writing a deeper one turns a
+    paragraph into something else. Both costs are recorded in
+    ``docs/decisions.md``, 2026-08-03.
+
+    A blank ``text`` is returned untouched rather than reseated. ``""`` is how
+    `lx apply` clears a segment and how `render` decides to emit the untranslated
+    marker; ``"    "`` is truthy and would render four spaces instead. The blank
+    ``source`` guard has no caller that can reach it — both parsers refuse a
+    block with no translatable text — and is kept rather than dropped because
+    this is a public function shared by two modules, where "lead and trail are
+    the same run" is a wrong answer rather than a missing one.
+    """
+    if not text.strip() or not source.strip():
+        return text
+    lead = source[: len(source) - len(source.lstrip())]
+    trail = source[len(source.rstrip()):]
+    if keep_added_indent and not lead:
+        lead = text[: len(text) - len(text.lstrip())]
+    return lead + text.strip() + trail
 
 
 def ops_for(lang, cfg):

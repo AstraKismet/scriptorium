@@ -242,12 +242,17 @@ def parse(text, dnt=(), opts=None):
                 j += 1
         block = lines[i:j]
 
-        # The first line's indent is skeleton: it is layout, the model has no use
-        # for it, and `translate.accept` strips leading whitespace off every
-        # proposal anyway, so a target could not carry it back. The *continuation*
-        # lines keep theirs, because an indent that sits after a newline inside
-        # the segment cannot be held by a raw node — the same shape, and the same
-        # reasoning, as a wrapped list item in `mdparse`.
+        # The first line's indent is skeleton: it is layout and the model has no
+        # use for it. This is the *stronger* answer to the question `mdparse`
+        # cannot give — where a first-line indent can be lifted out, lifting it
+        # out is better than protecting it downstream, because then no proposal
+        # can carry one in either. A model that helpfully adds a U+3000 paragraph
+        # indent to a zh-TW target still has it removed, since the source it is
+        # reseated against has none (`normalize.reseat_outer_blanks`).
+        #
+        # The *continuation* lines keep theirs, because an indent that sits after
+        # a newline inside the segment cannot be held by a raw node — the same
+        # shape, and the same reasoning, as a wrapped list item in `mdparse`.
         head = block[0]
         indent = head[: len(head) - len(head.lstrip())]
         block[0] = head[len(indent):]

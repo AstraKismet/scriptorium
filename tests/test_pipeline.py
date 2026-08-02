@@ -8,11 +8,11 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from scriptorium.checks import check_segment  # noqa: E402
+from scriptorium.checks import check_segment, containment_problems  # noqa: E402
 from scriptorium.config import DEFAULT_CONFIG  # noqa: E402
 from scriptorium.mask import mask, repair_placeholders, unmask  # noqa: E402
 from scriptorium.mdparse import parse, render  # noqa: E402
-from scriptorium.normalize import normalize  # noqa: E402
+from scriptorium.normalize import normalize, reseat_outer_blanks  # noqa: E402
 from scriptorium.translate import _LANG_TERMS, _system_prompt, accept, parse_reply  # noqa: E402
 
 SAMPLE = """\
@@ -65,10 +65,14 @@ def test_code_and_frontmatter_never_become_segments():
 # `mdparse` had no branch for one, so a chunk indented by four spaces fell
 # through to the paragraph branch and the model was asked to translate Python.
 # Worse: the four spaces that *make* it code sat at position 0 of the segment,
-# where `translate.accept` strips the leading whitespace off every proposal it
-# takes — and a translation-memory hit comes through `accept` too, so a target a
+# where `translate.accept` stripped the leading whitespace off every proposal it
+# took — and a translation-memory hit comes through `accept` too, so a target a
 # person applied with its indent intact was banked with the indent and handed
 # back without it on the next extract. `test_memory.py` owns that cycle.
+#
+# That second half was repaired on its own on 2026-08-03, because a list item's
+# second paragraph reaches position 0 the same way and is not code. See
+# "the blanks a segment opens and closes with belong to the source" below.
 #
 # The rule implemented is CommonMark's, not a four-space test. An indented chunk
 # is code only where a paragraph could not be continued lazily, and only past the
@@ -586,6 +590,53 @@ def test_a_source_link_definition_never_reaches_a_segment_in_the_first_place():
     assert [s["source"] for s in segs] == ["Ordinary prose."]
 
 
+#: The three patterns that cap the indent they will match — CommonMark spells it
+#: `\s{0,3}` — paired with a source that sits four columns in, which is what a
+#: list item's second paragraph is. The other four are anchored `^\s*` and were
+#: never blinded.
+_CAPPED_AT_THREE = [
+    ("heading", "# 標題"),
+    ("thematic break", "***"),
+    ("setext heading", "====="),
+]
+
+
+@pytest.mark.parametrize("opens, target", _CAPPED_AT_THREE,
+                         ids=[n for n, _ in _CAPPED_AT_THREE])
+def test_a_block_start_is_seen_through_the_indent_the_segment_sits_in(opens, target):
+    """The coverage the reseat would have removed, if `_block_start` still read raw lines.
+
+    Since 2026-08-03 an indented segment's target carries the source's leading
+    run by construction, so `'    # 標題'` reaches this rule instead of `'# 標題'`
+    — and three of the seven patterns stop matching at four columns. Measured the
+    day the reseat landed: `lx check` printed `0 error(s)` and exited 0 while
+    markdown-it-py rendered an `<h1>` where the source had a `<p>`, which is
+    invariant 10's exit code claiming something untrue. Found by adversarial
+    review, not by the suite.
+    """
+    source = "    A second paragraph."
+    got, why = accept({"masked": source}, target, "zh-TW", CFG)
+    assert why is None and got == "    " + target
+    assert _structural("para", source, got) == [("containment", "error")]
+    assert containment_problems({"masked": source, "target": got, "kind": "para"}) \
+        == [f"the target opens a {opens}; the source does not"]
+
+
+@pytest.mark.parametrize("opens, target", _CAPPED_AT_THREE,
+                         ids=[n for n, _ in _CAPPED_AT_THREE])
+def test_an_indented_source_that_already_opens_that_block_is_not_flagged(opens, target):
+    """The must-not-fire half: lstripping is monotone, so both sides move together.
+
+    Every pattern in the table is anchored `^\\s*` or `^\\s{0,3}`, so removing a
+    line's leading blanks can only make a match appear. That is safe *because*
+    both sides of the comparison come through `_block_start` — a source that
+    genuinely opens the block keeps answering the same name, and the target is
+    then free to open it too.
+    """
+    source = "    " + target + " source text"
+    assert _structural("para", source, "    " + target + " 譯文") == []
+
+
 def test_containment_is_disableable_like_every_other_rule():
     # Default on at error severity; a project that genuinely needs it off records
     # that choice in its own config.
@@ -753,11 +804,13 @@ _L1, _L2 = "\u7b2c\u4e00\u884c", "\u7b2c\u4e8c\u884c"
     f"{_L1}\u3002  \r\n{_L2}\u3002",      # both at once
     "Hello  \nWorld",                     # no CJK anywhere in the segment
     # Nothing after the break but the newline itself. A parser never emits a
-    # segment ending this way — the terminator is a raw node — but `cli.do_apply`
-    # does not strip what it is given, so a reviewer's or an agent's target does
-    # reach here whole. These are the rows that fail when the trailing strip
-    # anchors on `$`, which in Python also matches before a final newline; the
-    # CRLF pair above cannot catch it, because `$` does not match before a CR.
+    # segment ending this way — the terminator is a raw node — and since
+    # 2026-08-03 neither `accept` nor `cli.do_apply` hands `normalize` one
+    # either, because both strip before they call it. These rows are therefore a
+    # property of this function alone, asserted directly rather than through a
+    # caller: they are what fails when the trailing strip anchors on `$`, which
+    # in Python also matches before a final newline, and the CRLF pair above
+    # cannot catch it because `$` does not match before a CR.
     # Found by the 2026-08-02 mutation pass, on a guard HANDOFF-010 added.
     f"{_L1}  \n",
     f"{_L1}。  \n",
@@ -878,12 +931,13 @@ def test_normalize_keeps_a_continuation_indent_at_its_own_width(name):
     # Three lines of verse: an indent must survive at four, not arrive at two,
     # which is what a lookbehind that only excludes `\n` produces.
     "\u98a8\u5439\u904e\n    \u96e8\u843d\u4e0b\n    \u5929\u4eae\u4e86",
-    # Position 0. `translate.accept` strips a model's leading whitespace before
-    # normalize sees it; `cli.do_apply` \u2014 a person's or an agent's own words \u2014
-    # does not. An indented code block stopped arriving here on 2026-08-02, when
-    # it became skeleton, but position 0 did not: a list item's second paragraph
-    # is `- item\n\n    text` and `mdparse` puts those four spaces at the front
-    # of the segment, where losing them takes the paragraph out of the item.
+    # Position 0. Both callers strip before they reach normalize and reseat the
+    # source's own runs afterwards (2026-08-03), so what arrives here at position
+    # 0 is a line start *inside* a reseated lead \u2014 `"- \n      text"` is the real
+    # shape \u2014 rather than a segment's own indent. The guard is what keeps the two
+    # from being one question: an indented code block stopped arriving here on
+    # 2026-08-02 when it became skeleton, and a list item's second paragraph,
+    # `- item\n\n    text`, never did stop.
     "  \u300c\u958b\u5834\u300d\n\u7b2c\u4e8c\u884c",
     "    \u9019\u662f\u6e05\u55ae\u9805\u76ee\u7684\u7b2c\u4e8c\u6bb5\u3002",
     # An indent need not be made of the characters the op matches. U+3000 is the
@@ -929,6 +983,211 @@ def test_accept_keeps_a_hard_break_the_model_got_right():
               "\u5728\u786c\u63db\u884c\u5f8c\u7e7c\u7e8c\u3002  \n"
               "\u9084\u6709\u7b2c\u4e09\u884c\u3002")
     assert accept(seg, target, "zh-TW", CFG) == (target, None)
+
+
+# --- the blanks a segment opens and closes with belong to the source ---------
+#
+# `accept` did `repair_placeholders(text).strip()`, which deletes a run of blanks
+# at position 0 of the proposed target. HANDOFF-018 left that alone on the stated
+# premise that once an indented code block is skeleton, no segment starts with an
+# indent — and the premise is false. A list item's second paragraph is
+# `- item\n\n    text`, and `mdparse` puts those four spaces at the front of the
+# segment, where deleting them takes the paragraph out of the item.
+#
+# Measured 2026-08-02 against markdown-it-py over 441 generated documents —
+# format x container x blank character x width x which end — of which 76 changed
+# what the document *is* rather than how it looks. Both ends were wrong, and the
+# trailing end only shows up on an axis the first sweep held constant: whether a
+# line the skeleton owns follows the segment. `mdparse` emits one segment per
+# blockquote line, so the two spaces of a hard break between `> first` and
+# `> second` sit at the *end* of a segment with the newline that gives them
+# meaning outside it, and the unconditional rstrip deleted the `<br>`.
+#
+# The rule is re-imposition, not preservation: what the model returns is a
+# sentence, and it is reseated in the source's own runs. So a model that dropped
+# the indent gets it back, and a model that padded a segment with no run of its
+# own still loses the padding — the reason the strip exists in the first place.
+#
+# `normalize.reseat_outer_blanks` runs *after* `normalize`, and that order is
+# load-bearing rather than stylistic: `collapse_space` ends in `[ \t]+\Z` and is
+# in zh-TW's default op list, so a trailing run handed to `normalize` is deleted
+# again. The two tests below that translate to a bare sentence are what fail when
+# the order is swapped.
+
+_SECOND_PARA = "- item one\n\n    A second paragraph.\n"
+_QUOTE_BREAK = "> first line  \n> second line\n"
+
+
+def _seg_named(text, source):
+    seg = next((s for s in parse(text)[1] if s["source"] == source), None)
+    assert seg is not None, f"no segment with source {source!r} in {text!r}"
+    return seg
+
+
+@pytest.mark.parametrize("source, proposal", [
+    # the model reproduced the indent …
+    ("    A second paragraph.", "    譯文。"),
+    # … dropped it …
+    ("    A second paragraph.", "譯文。"),
+    # … or answered with padding of its own instead
+    ("    A second paragraph.", "\n\n  譯文。\n"),
+])
+def test_accept_reseats_a_target_in_the_indent_its_source_has(source, proposal):
+    seg = _seg_named(_SECOND_PARA, source)
+    assert accept(seg, proposal, "zh-TW", CFG) == ("    譯文。", None)
+
+
+@pytest.mark.parametrize("padded", [
+    "  譯文。",
+    "譯文。  ",
+    "\n譯文。\n",
+    "　譯文。　",
+    "\xa0譯文。\xa0",
+    "\t譯文。\t",
+])
+def test_accept_still_removes_padding_a_source_did_not_ask_for(padded):
+    """The half the strip exists for, and the half a naive fix loses.
+
+    Models pad their answers, and every reuse path — model output, a memory hit,
+    a carryover from the document's own prior state — comes through `accept`.
+    """
+    seg = _seg_named(_SECOND_PARA, "item one")
+    assert accept(seg, padded, "zh-TW", CFG) == ("譯文。", None)
+
+
+def test_accept_reseats_the_hard_break_that_ends_a_blockquote_segment():
+    """The trailing end, on the axis the first sweep held constant.
+
+    Not in `tests/corpus/`: the corpus substitutes each segment's *source* back
+    into the skeleton and never calls `accept`, so this shape round-trips there
+    whatever `accept` does with a target. `hard-line-breaks.md` covers the source
+    side; the break that lives at a segment boundary has to be asserted here.
+    """
+    seg = _seg_named(_QUOTE_BREAK, "first line  ")
+    assert accept(seg, "第一行", "zh-TW", CFG) == ("第一行  ", None)
+
+
+@pytest.mark.parametrize("indent", [
+    " ", "   ", "    ", "\t", "　", "\xa0", "　  ", "  　", "\x0c", " ",
+])
+def test_accept_reseats_an_indent_whatever_it_is_made_of(indent):
+    """`str.strip()` takes U+3000 and U+00A0, so the rule that keeps a run has to.
+
+    The zh-TW paragraph indent is U+3000 and a paste from EPUB leaves U+00A0, so
+    a rule written on `" \\t"` would miss the case a novel actually produces.
+    `mdparse._indent_columns` counts only space and tab because CommonMark does —
+    a different question from what `accept` may delete, and conflating the two is
+    the trap.
+    """
+    seg = dict(_seg_named(_SECOND_PARA, "item one"))
+    seg["masked"] = indent + seg["masked"]
+    assert accept(seg, "譯文。", "zh-TW", CFG) == (indent + "譯文。", None)
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\n", "　"])
+def test_accept_refuses_a_blank_target_rather_than_reseating_one(blank):
+    """Emptiness is decided on the sentence, never on the reseated string.
+
+    `lead + "" + trail` is truthy, and `render` reads a truthy target — so a
+    model that answered with nothing would render four spaces where the
+    untranslated marker belongs.
+    """
+    seg = _seg_named(_SECOND_PARA, "    A second paragraph.")
+    assert accept(seg, blank, "zh-TW", CFG) == (None, "empty translation")
+
+
+@pytest.mark.parametrize("source, trail", [
+    ("A paragraph.　", "　"),        # U+3000, what a CJK source document ends on
+    ("A paragraph.\xa0", "\xa0"),    # U+00A0, what a paste from EPUB leaves
+    ("A paragraph.\t", "\t"),
+    ("A paragraph.  ", "  "),
+])
+def test_accept_reseats_a_trailing_run_of_any_blank_too(source, trail):
+    """The set restored has to be the set `str.strip()` deletes, at both ends.
+
+    The leading side is covered by the shapes above; this is the row that fails
+    when only the leading side is widened past ASCII, which is how the two ends
+    come to disagree about what a blank is. Found by the mutation pass — the
+    narrowed `rstrip(" \\t")` survived until this existed.
+    """
+    seg = dict(_seg_named(_SECOND_PARA, "item one"), masked=source)
+    assert accept(seg, "譯文。", "zh-TW", CFG) == ("譯文。" + trail, None)
+
+
+def test_reseating_a_source_that_is_only_blanks_is_a_no_op():
+    """A public function's contract at the degenerate end of its own axis.
+
+    No caller reaches it — both parsers refuse a block with nothing translatable
+    in it — but `lead` and `trail` would be the *same run* for such a source, so
+    the answer without the guard is wrong rather than merely absent, and this is
+    shared by two modules.
+    """
+    assert reseat_outer_blanks("    ", "譯文。") == "譯文。"
+    assert reseat_outer_blanks("", "譯文。") == "譯文。"
+    assert reseat_outer_blanks("  x  ", "") == ""
+    assert reseat_outer_blanks("  x  ", "   ") == "   "
+
+
+def test_accept_reseating_is_idempotent():
+    seg = _seg_named(_SECOND_PARA, "    A second paragraph.")
+    once, _why = accept(seg, "譯文。", "zh-TW", CFG)
+    assert accept(seg, once, "zh-TW", CFG) == (once, None)
+
+
+def test_accept_still_refuses_a_target_whose_placeholders_moved():
+    """The reseat must not run before the placeholder set is compared."""
+    seg = _seg_named("- item\n\n    Run `make build` now.\n", "    Run `make build` now.")
+    assert seg["masked"] == "    Run ⟦1⟧ now."
+    got, why = accept(seg, "現在執行。", "zh-TW", CFG)
+    assert got is None and "placeholder mismatch" in why
+
+
+@pytest.mark.parametrize("text, source", [
+    # the four shapes HANDOFF-019 measured, plus the two the sweep added
+    ("- item one\n\n    A second paragraph.\n", "    A second paragraph."),
+    ("1. item one\n\n   A second paragraph.\n", "   A second paragraph."),
+    ("- outer\n  - inner\n\n    A second paragraph.\n", "    A second paragraph."),
+    (">     Indented inside a blockquote.\n", "    Indented inside a blockquote."),
+    ("- [ ] a task\n\n  A second paragraph.\n", "  A second paragraph."),
+    ("- item wraps and\ncontinues at the margin.\n\n    A second paragraph.\n",
+     "    A second paragraph."),
+])
+def test_an_indent_a_segment_owns_survives_a_translation_to_itself(text, source):
+    """End to end through `render`, on the bytes, for every measured shape.
+
+    Translating each segment to its own source is the strongest form: any
+    difference in the rendered file is something the pipeline did, since the
+    words did not change.
+    """
+    nodes, segs = parse(text)
+    assert any(s["source"] == source for s in segs), \
+        f"{source!r} is no longer a segment of {text!r}"
+    for seg in segs:
+        target, why = accept(seg, seg["masked"], "zh-TW", CFG)
+        assert why is None, (seg["id"], why)
+        seg["target"], seg["status"] = target, "translated"
+    out, missing = render({"nodes": nodes, "segments": segs, "lang": "zh-TW"}, CFG)
+    assert (missing, out) == (0, text)
+
+
+def test_every_corpus_segment_reseated_by_accept_still_renders_the_file():
+    """The sweep the parametrized rows above cannot be.
+
+    `test_corpus_roundtrips_byte_for_byte` substitutes each segment's *source*
+    and never calls `accept`, so nothing in the corpus could see this defect —
+    which is why HANDOFF-019 needed a fixture at all. This is the same corpus put
+    through the acceptance path instead.
+    """
+    for path in _corpus_files():
+        text = path.read_bytes().decode("utf-8")
+        nodes, segs = parse(text)
+        for seg in segs:
+            target, why = accept(seg, seg["masked"], "zh-TW", CFG)
+            assert why is None, (path.name, seg["id"], why)
+            seg["target"], seg["status"] = target, "translated"
+        out, missing = render({"nodes": nodes, "segments": segs, "lang": "zh-TW"}, CFG)
+        assert missing == 0, path.name
+        assert out == text, _explain(path.name, text, out)
 
 
 @pytest.mark.parametrize("reply", [

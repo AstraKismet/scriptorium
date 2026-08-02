@@ -250,7 +250,25 @@ def _profile(seg):
 
 
 def _block_start(line, table):
-    """Name of the block this line would open in this host, or ``None``."""
+    """Name of the block this line would open in this host, or ``None``.
+
+    The line's own leading blanks come off first, and that is a correctness fix
+    rather than tidiness. Three of the seven patterns cap the indent they will
+    match — CommonMark's ``\\s{0,3}`` for a heading, a thematic break and a setext
+    underline — so a segment that *sits* four columns in hides all three. A list
+    item's second paragraph is exactly that segment, and since 2026-08-03 its
+    target carries the source's four spaces by construction
+    (``normalize.reseat_outer_blanks``), so the blinding was reachable from every
+    caller at once: `'    # 標題'` matched nothing, `lx check` exited 0, and
+    markdown-it-py rendered an ``<h1>`` where the source had a ``<p>``.
+
+    Safe in the must-not-fire direction because it is monotone: every pattern
+    here is anchored with ``^\\s*`` or ``^\\s{0,3}``, so removing leading blanks
+    can only make a match appear, never disappear — and both sides of every
+    comparison in :func:`containment_problems` come through this function, so a
+    source that legitimately opens a block keeps answering the same name it did.
+    """
+    line = line.lstrip()
     for name, rx in table:
         if rx.match(line):
             return name
