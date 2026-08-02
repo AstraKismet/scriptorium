@@ -513,3 +513,60 @@ def test_a_fresh_segment_carries_both_new_axes(field):
     produces a file that reads as current and keys wrongly."""
     _nodes, segs = parse("A sentence.\n", [])
     assert field in segs[0]
+
+
+# --- what the memory used to launder on the way back in ----------------------
+
+#: An indented code block, a tab-indented one, and prose either side. The four
+#: spaces are what make the first block code, and until 2026-08-02 they were at
+#: position 0 of a translatable segment.
+CODE_DOC = (
+    b"Introducing an indented code block.\n"
+    b"\n"
+    b"    def indented():\n"
+    b"        return 'four spaces, not a fence'\n"
+    b"\n"
+    b"Closing paragraph.\n"
+)
+
+
+def test_an_indented_code_block_survives_a_state_rebuilt_from_the_memory(
+        tmp_path, monkeypatch):
+    """The cycle that reached disk without anything saying so.
+
+    Reproduced 2026-08-02 before the fix: `lx apply` with the indent intact,
+    `lx commit`, delete the state database, `lx extract` — which reported
+    `reused=2 rejected=0` and handed the code segment back four spaces shorter,
+    because reuse goes through `translate.accept` and `accept` strips a
+    proposal's leading whitespace. The key is the source hash and is untouched by
+    that, and `tm_records` only rewrites when the stored target differs from the
+    banked one, so the two never converged. `lx check` exited 0 the whole way,
+    and a real CommonMark render turns the shortened block from `<pre><code>`
+    into a reflowed `<p>`: a document changes its rendered structure merely by
+    having its state rebuilt.
+
+    A unit test on `accept` cannot see any of that — the laundering needs the
+    round trip. The assertion is on the rendered bytes rather than on the segment
+    list, because bytes are what the defect changed.
+    """
+    _project(tmp_path, monkeypatch, doc=CODE_DOC)
+    doc, _reused, _rejected = do_extract("d.md", "zh-TW", CFG)
+    assert [s["source"] for s in doc["segments"]] == [
+        "Introducing an indented code block.", "Closing paragraph."]
+    do_apply("d.md", "zh-TW", CFG,
+             {s["id"]: f"第{k}段譯文。" for k, s in enumerate(doc["segments"])})
+    append_tm("zh-TW", tm_records(load_doc("d.md", "zh-TW"), load_tm("zh-TW")))
+    first, missing = do_render("d.md", "zh-TW", CFG)
+    assert missing == 0
+
+    # Delete the working state and rebuild it from the memory alone. Nothing
+    # about this step looks like an edit to the document, which is the point.
+    for leftover in (tmp_path / ".lx").glob("state.db*"):
+        leftover.unlink()
+    _doc2, reused, rejected = do_extract("d.md", "zh-TW", CFG)
+    assert (reused, rejected) == (2, 0)
+    second, missing = do_render("d.md", "zh-TW", CFG)
+
+    assert (missing, second) == (0, first)
+    assert "    def indented():\n        return 'four spaces, not a fence'" in second
+    assert "\n\nClosing paragraph." not in second      # the prose *was* translated
