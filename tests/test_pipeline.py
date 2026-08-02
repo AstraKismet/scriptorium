@@ -507,6 +507,15 @@ _L1, _L2 = "\u7b2c\u4e00\u884c", "\u7b2c\u4e8c\u884c"
                                           # CRLF inside the segment
     f"{_L1}\u3002  \r\n{_L2}\u3002",      # both at once
     "Hello  \nWorld",                     # no CJK anywhere in the segment
+    # Nothing after the break but the newline itself. A parser never emits a
+    # segment ending this way — the terminator is a raw node — but `cli.do_apply`
+    # does not strip what it is given, so a reviewer's or an agent's target does
+    # reach here whole. These are the rows that fail when the trailing strip
+    # anchors on `$`, which in Python also matches before a final newline; the
+    # CRLF pair above cannot catch it, because `$` does not match before a CR.
+    # Found by the 2026-08-02 mutation pass, on a guard HANDOFF-010 added.
+    f"{_L1}  \n",
+    f"{_L1}。  \n",
 ])
 def test_normalize_keeps_a_markdown_hard_break(text):
     assert normalize(text, "zh-TW", CFG) == text
@@ -540,9 +549,120 @@ def test_normalize_canonicalizes_a_long_hard_break_run_to_two_spaces(run, eol):
     (f"{_L1}  ", _L1),
     ("abc  ", "abc"),
     ("\u7d50\u5c3e\u3002  ", "\u7d50\u5c3e\u3002"),
+    # A run that begins the segment's last line with nothing after it indents
+    # nothing, and goes for the same reason a blanks-only line is emptied. This
+    # is the row that fails if the line-start guard is put on the `\Z` strip too.
+    (f"{_L1}\n  ", f"{_L1}\n"),
+    # A lone CR is a character in a sentence, not a line ending
+    # (`docio.split_terminator`), so what follows it is interior text. The row
+    # that fails if the guard's class is widened to `[^ \t\r\n]`.
+    ("a\r  b", "a\r b"),
+    # `punct`'s two whitespace rules, in their interior form. Both keep a
+    # line-start indent now, and both must still do their own job in the middle
+    # of a line \u2014 the rows that fail if the guard is bolted on with a `+` where
+    # the rule wanted nothing at all.
+    (f"{_L1}  \u300c\u5f15\u8ff0\u300d", f"{_L1}\u300c\u5f15\u8ff0\u300d"),
+    ("\u7d50\u5c3e\u3002  \u63a5\u8457", "\u7d50\u5c3e\u3002\u63a5\u8457"),
 ])
 def test_normalize_still_removes_whitespace_that_means_nothing(text, want):
     assert normalize(text, "zh-TW", CFG) == want
+
+
+# A run of blanks at the *start* of a line is a wrapped block's continuation
+# indent \u2014 inside the segment by construction, because a raw node can only sit
+# before or after a whole one (AGENTS.md invariant 3). The source side of this is
+# already gated by `tests/corpus/`, which substitutes sources back into the
+# skeleton and never calls `normalize`; that is exactly why nothing here saw the
+# ops rewriting it. These are the target side.
+#
+# Confirmed against a real CommonMark render (markdown-it-py, 2026-08-02) rather
+# than assumed: for a prose continuation the damage is cosmetic \u2014 lazy
+# continuation makes `- item\n continued` and `- item\n    continued` one
+# paragraph either way \u2014 and for a continuation that could open a block it is
+# structural. `- outer\n    - nested` renders as a nested list and
+# `- outer\n - nested` as two siblings; an indented code block stops being
+# `<pre><code>` and becomes `<p>`.
+
+#: Named rather than swept, so deleting a fixture is a failure with a name.
+_INDENT_FIXTURES = [
+    "list-continuation-indent.md",              # four spaces, two, and an ordered three
+    "list-continuation-two-space-indent.md",    # dash and star markers
+    "crlf-list-items.md",                       # the same over CRLF
+    "indented-code-block.md",                   # spaces and tabs, and at position 0
+    "html-block.md",                            # interior indent between masked tags
+]
+
+
+def _opens_a_line_with_a_blank(text):
+    return any(line[:1] in (" ", "\t") for line in text.split("\n"))
+
+
+@pytest.mark.parametrize("name", _INDENT_FIXTURES)
+def test_normalize_keeps_a_continuation_indent_at_its_own_width(name):
+    """Parsed from the fixture, never quoted from it, so it keeps testing the file."""
+    text = (CORPUS / name).read_bytes().decode("utf-8")
+    segs = parse(text)[1]
+    assert any(_opens_a_line_with_a_blank(s["masked"]) for s in segs), (
+        f"{name} no longer has a segment with an indented line in it, so this "
+        f"test measures nothing \u2014 fix the fixture list, not the fixture")
+    for seg in segs:
+        assert normalize(seg["masked"], "zh-TW", CFG) == seg["masked"], seg["id"]
+
+
+@pytest.mark.parametrize("text", [
+    # The shapes a zh-TW indented block actually opens on. Every one of these
+    # lost its indent to `punct` outright \u2014 it deletes the run rather than
+    # shortening it \u2014 which is why that op could not stay out of scope.
+    "\u7b2c\u4e00\u884c\n  \u300c\u5f15\u8ff0\u300d",
+    "\u7b2c\u4e00\u884c\n    \u2014\u2014\u4ed6\u8aaa",
+    "\u7b2c\u4e00\u884c\n  \uff08\u8a3b\uff09",
+    "\u7b2c\u4e00\u884c\n  \u2026\u2026\u7136\u5f8c",
+    # And the ones that only `collapse_space` reached.
+    "\u7b2c\u4e00\u884c\n    \u4ed6\u8aaa\u8a71",
+    "\u7b2c\u4e00\u884c\n    hello",
+    "\u7b2c\u4e00\u884c\n\t\t\u300c\u5f15\u8ff0\u300d",
+    # Fullwidth punctuation ending the line before, where `punct`'s other
+    # whitespace rule would reach if its lookbehind could see past a newline.
+    "\u7b2c\u4e00\u884c\u3002\n    \u7e8c\u884c",
+    # Three lines of verse: an indent must survive at four, not arrive at two,
+    # which is what a lookbehind that only excludes `\n` produces.
+    "\u98a8\u5439\u904e\n    \u96e8\u843d\u4e0b\n    \u5929\u4eae\u4e86",
+    # Position 0. `translate.accept` strips a model's leading whitespace before
+    # normalize sees it; `cli.do_apply` \u2014 a person's or an agent's own words \u2014
+    # does not, and `mdparse` puts an indented code block's four spaces here.
+    "  \u300c\u958b\u5834\u300d\n\u7b2c\u4e8c\u884c",
+    "    def indented():\n        return 'four spaces, not a fence'",
+    # An indent need not be made of the characters the op matches. U+3000 is the
+    # zh-TW paragraph indent \u2014 `textparse._blank` and `_indented` both know it \u2014
+    # and a mixed \u3000+spaces indent is what a paste from a PDF, or a model padding
+    # a Chinese line to its source's column, produces. These rows fail when the
+    # guard's class names ASCII blanks instead of `\S`: the U+3000 survives and
+    # the spaces behind it do not. Found by adversarial review, 2026-08-02.
+    "\u6cb3\u6c34\u6536\u4e0b\u4e00\u5207\uff0c\n\u3000  \u300c\u53ea\u9084\u7528\u4e0d\u4e0a\u7684\u3002\u300d",
+    "\u6cb3\u6c34\u6536\u4e0b\u4e00\u5207\uff0c\n\u3000    \u4ed6\u8f49\u904e\u8eab",
+    "\u7b2c\u4e00\u884c\n\xa0   \u300c\u5f15\u8ff0\u300d",
+    "\u6cb3\u6c34\u6536\u4e0b\u4e00\u5207\uff0c\n\u3000\u3000\u4ed6\u8f49\u904e\u8eab",
+    # A form feed separates chapters in an older .txt, and U+2028 is in
+    # `tests/corpus-text/line-separator-control-chars.txt` precisely because
+    # `str.split("\n")` does not break on it.
+    "\u7b2c\u4e00\u884c\n\x0c  \u300c\u5f15\u8ff0\u300d",
+    "\u7b2c\u4e00\u884c\n\u2028  \u300c\u5f15\u8ff0\u300d",
+])
+def test_normalize_keeps_a_continuation_indent_verbatim_in_a_target(text):
+    assert normalize(text, "zh-TW", CFG) == text
+
+
+def test_a_blank_between_words_is_kept_when_it_could_be_an_indent():
+    """The price of the guard's class, stated rather than discovered later.
+
+    One character of context cannot tell an ideographic space used *between
+    words* from one opening an indent, so a run behind either is left alone. The
+    two failures are not the same size: a surplus space is invisible where a
+    deleted indent reflows a code block into prose. `docs/decisions.md`,
+    2026-08-02.
+    """
+    assert normalize("a\u3000  b", "zh-TW", CFG) == "a\u3000  b"
+    assert normalize("a  b", "zh-TW", CFG) == "a b"
 
 
 def test_accept_keeps_a_hard_break_the_model_got_right():

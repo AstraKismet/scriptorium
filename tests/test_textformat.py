@@ -5,7 +5,8 @@ else — the same rule as `tests/corpus/`, and for the same reason: every file i
 it is collected as a fixture, so the explanation lives here.
 
 The properties covered, one file each: hard-wrapped prose separated by blank
-lines; one paragraph per line; indent-marked paragraphs with no blank lines;
+lines; one paragraph per line; indent-marked paragraphs with no blank lines; a
+block set off by a uniform indent, so that its continuation lines carry one;
 CRLF; terminators already mixed; no trailing newline; CR-only terminators; a
 UTF-8 byte-order mark; UTF-16 with a mark in both byte orders; Windows Big5;
 chapter headings beside the lines that must not be read as one; scene breaks and
@@ -48,6 +49,7 @@ from scriptorium.checks import check_segment  # noqa: E402
 from scriptorium.cli import do_extract, do_render  # noqa: E402
 from scriptorium.config import DEFAULT_CONFIG, TEXT_DEFAULTS  # noqa: E402
 from scriptorium.docio import UndecodableDocument, decode_document, write_document  # noqa: E402
+from scriptorium.normalize import normalize  # noqa: E402
 from scriptorium.textparse import describe, parse  # noqa: E402
 
 CORPUS = pathlib.Path(__file__).parent / "corpus-text"
@@ -420,6 +422,28 @@ def test_a_blocks_first_line_indent_is_skeleton_and_its_continuations_are_not():
     # middle of a segment — the same shape as a wrapped list item in `mdparse`,
     # and the reasoning is in `docs/decisions.md`, 2026-07-28.
     assert segs[0]["source"] == "Indented head\n    continued here."
+
+
+def test_a_verse_blocks_continuation_indent_survives_normalize():
+    """The target side of the shape above, which no round-trip fixture can see.
+
+    `_substituted` puts each segment's *source* back and never calls `normalize`,
+    so an op that rewrites an indent leaves every round-trip test in this file
+    green — which is how `collapse_space` rewrote one for as long as it existed.
+
+    In a novel this is verse, an epigraph, a quoted letter: any block set off by
+    a uniform indent, where the shape *is* the content and there is no equivalent
+    of Markdown's "the list marker is in the skeleton" to soften the loss.
+    """
+    text = (CORPUS / "indented-verse.txt").read_bytes().decode("utf-8")
+    seg = next(s for s in parse(text, (), OPTS)[1] if "\n    " in s["source"])
+    assert normalize(seg["source"], "zh-TW", CFG) == seg["source"]
+
+    # And a translation of it. A zh-TW verse line opens on 「 or —— more often
+    # than not, and every such character is in `normalize.FULLWIDTH`: before
+    # 2026-08-02 `punct` deleted the indent ahead of it outright.
+    target = "河水收下人給的一切，\n    「只還回它用不上的。」"
+    assert normalize(target, "zh-TW", CFG) == target
 
 
 def test_blocks_with_nothing_to_translate_stay_in_the_skeleton():
