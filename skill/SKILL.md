@@ -38,6 +38,8 @@ Run `check` until it exits 0 before rendering. `check` writes `.lx/reports/<doc>
   "glossary": [{"term": "index", "use": "索引"}] }
 ```
 
+Alongside them, at the top level, `todo` carries what the whole batch has to be told: `tone`, the register; `voice`, the language and register brief plus the project's narrator notes; and `voice_notes`, one entry per character the emitted segments actually mention. **Read them before translating.** They are the same instructions the model path receives, and for prose they are most of the difference between a passing translation and a readable one — `voice_notes` is where a project says that this character says 您 and that one says 你.
+
 `⟦n⟧` stands for a code span, URL, math block, template variable, or protected brand name. Treat it as an opaque noun: **copy it exactly, move it wherever the target grammar wants it, never invent one, never drop one.** Everything else in `text` is prose you can translate freely.
 
 Return a JSON object mapping id to translated text, then feed it to `apply`. Batch 20–40 segments per turn so surrounding context stays visible; long documents stay resumable because state lives in `.lx/`, not in the conversation.
@@ -80,7 +82,7 @@ Those are the Markdown rules. In a **plain-text** document nothing opens a block
 
 ## Setting up a project
 
-`lx init` writes `lx.config.json`, `config/glossary.csv`, and `config/dnt.txt`. Before a first real run, fill in the glossary and the do-not-translate list — most quality complaints are terminology complaints. Do not skim for the terms by hand: `lx terms SRC --lang L --append` proposes them from the source and writes the rows, leaving the target column empty for you to fill. An unfilled row enforces nothing, so appending is safe on a project already in flight. Templates and field meanings are in `config/` alongside this skill.
+`lx init` writes `lx.config.json`, `config/glossary.csv`, `config/dnt.txt`, and `config/style.txt`. Before a first real run, fill in the glossary and the do-not-translate list — most quality complaints are terminology complaints. `config/style.txt` is for prose: the narrator's voice above the first `[name]` block, one block per character below it, `#` for notes to yourself. It ships all comments, so it does nothing until you write in it. Do not skim for the terms by hand: `lx terms SRC --lang L --append` proposes them from the source and writes the rows, leaving the target column empty for you to fill. An unfilled row enforces nothing, so appending is safe on a project already in flight. Templates and field meanings are in `config/` alongside this skill.
 
 Wire `lx check` into CI so translations cannot regress silently — re-extract first, so a source edit surfaces as pending work rather than passing quietly:
 

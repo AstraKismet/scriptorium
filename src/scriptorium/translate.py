@@ -12,7 +12,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from .checks import check_segment
-from .config import DEFAULT_TONE, canonical_tone, load_dnt, load_glossary
+from .config import DEFAULT_TONE, canonical_tone, load_dnt, load_glossary, load_style
 from .mask import placeholder_ids, repair_placeholders
 from .normalize import normalize
 from .providers import build as build_provider
@@ -164,13 +164,34 @@ Reply with a single JSON object mapping segment id to the revised text, and
 nothing else."""
 
 
-def _brief(target_lang, tone):
+#: What introduces the project's own preamble. Named, because the model has to
+#: be able to tell "this project's narrator sounds like X" from the register
+#: brief above it: one is a fact about Traditional Chinese prose, the other is a
+#: fact about this book, and a paragraph that arrives unlabelled reads as more
+#: of the former.
+_STYLE_HEAD = ("This project's style sheet. It refines the register above for "
+               "this particular book; where it is silent, the register stands.")
+
+#: And what introduces the per-character notes in a batch's own message. It says
+#: *why* these characters and not others — the batch mentions them — so their
+#: absence from the next request is not read as a change of instruction.
+_STYLE_BATCH_HEAD = ("Voice notes from the style sheet, for the characters this "
+                     "batch mentions:")
+
+
+def brief(target_lang, tone):
     """The language brief for a register, or ``None`` for an unbriefed language.
 
     An unrecognized register takes the default one's brief rather than none: the
     knob is free text by design, and a language losing its terminology because
     somebody typed a register nobody has written yet is a far worse trade than
     a novel briefed as documentation, which is what happened before D4 anyway.
+
+    Public, and called by `cli.cmd_todo` as well as from here. `AGENTS.md`
+    treats an API model, an agent in its own context and a human as three equal
+    sources of a translation, so a register that reaches only the first of them
+    reaches one third of the pipeline — which is what HANDOFF-013 left behind
+    and `docs/decisions.md`, 2026-07-29, records as not-taken.
     """
     register = canonical_tone(tone)
     parts = (_LANG_BRIEFS.get((target_lang, register))
@@ -181,15 +202,37 @@ def _brief(target_lang, tone):
     return "\n".join(p for p in (head, _LANG_TERMS.get(target_lang), rules) if p)
 
 
-def _system_prompt(source_lang, target_lang, tone, mode, context=False):
+def style_preamble_text(preamble):
+    """The always-on half of the style sheet as it reaches a prompt, or ``""``."""
+    return f"{_STYLE_HEAD}\n\n{preamble}" if preamble else ""
+
+
+def _system_prompt(source_lang, target_lang, tone, mode, context=False, style=""):
+    """The instructions that hold for the whole document, assembled once.
+
+    ``style`` is the style sheet's **preamble only**. Per-character blocks are
+    not here: they are selected per batch, and per-batch content lives in the
+    user message beside the required terminology, which is where this project
+    has always put it. Two consequences were what decided it — this string stays
+    identical across every request of a run, so a local runtime's prefix cache
+    survives the whole book, and `retry_one` needs no second assembly. The
+    losing alternative put the matched blocks here and rebuilt the prompt per
+    batch; `docs/decisions.md`, 2026-08-02.
+    """
     if mode == "polish":
         base = _POLISH_RULES.format(target_lang=target_lang)
     else:
         base = _BASE_RULES.format(source_lang=source_lang, target_lang=target_lang, tone=tone)
+    # Order is the decision, not the assembly: `_CONTEXT_RULES` above the brief
+    # for D4's reason, the brief above the style sheet so a project refines its
+    # register rather than replacing it, and the style sheet last because the
+    # last thing read is what wins a contradiction.
+    parts = [base]
     if context:
-        base = f"{base}\n\n{_CONTEXT_RULES}"
-    brief = _brief(target_lang, tone)
-    return f"{base}\n\n{brief}" if brief else base
+        parts.append(_CONTEXT_RULES)
+    parts.append(brief(target_lang, tone))
+    parts.append(style_preamble_text(style))
+    return "\n\n".join(p for p in parts if p)
 
 
 # ── response parsing ───────────────────────────────────────────────────────
@@ -216,6 +259,28 @@ def parse_reply(text):
 
 # ── batch payloads ─────────────────────────────────────────────────────────
 
+#: The letters a name can be made of, for deciding where one ends. ASCII plus
+#: Latin-1 Supplement through Latin Extended-B, the same range `cli._LETTER`
+#: documents and for the same reason: a novel in English is full of names that
+#: are not ASCII, and with a bare `[A-Za-z]` boundary `José` matches inside
+#: `Josée` — `é` is not in the class, so the lookahead lets it through.
+_NAME_LETTER = "A-Za-zÀ-ÖØ-öø-ɏ"
+
+
+def mentions(low, term):
+    """Does ``low`` — already lower-cased — contain ``term`` as a whole word?
+
+    One implementation, three callers: the glossary hints below, the style
+    sheet's block selection, and `cli.cmd_todo`, which had a fourth copy of this
+    regex inline. Three copies of a matching rule is how the glossary and the
+    style sheet come to disagree about whether `Ashcombe's` mentions Ashcombe,
+    which is the kind of divergence nobody finds by reading.
+    """
+    return re.search(
+        rf"(?<![{_NAME_LETTER}]){re.escape(term.lower())}(?![{_NAME_LETTER}])",
+        low) is not None
+
+
 def _glossary_hints(text, glossary):
     low = text.lower()
     hints = []
@@ -227,10 +292,46 @@ def _glossary_hints(text, glossary):
         # already does with one, so the two halves of the glossary path agree.
         if not row["target"]:
             continue
-        pat = rf"(?<![A-Za-z]){re.escape(row['source'].lower())}(?![A-Za-z])"
-        if re.search(pat, low):
+        if mentions(low, row["source"]):
             hints.append(f"{row['source']} -> {row['target']}")
     return hints
+
+
+def style_notes(segments, blocks):
+    """The style-sheet blocks this set of segments actually mentions, in file order.
+
+    **Matched against the batch, not against each segment.** A batch is
+    twenty-five consecutive paragraphs — a scene — and a character active in a
+    scene is named somewhere in it even though most individual paragraphs of
+    their dialogue do not name them. Per-segment matching was the alternative
+    and it loses exactly the dialogue this feature exists for.
+
+    What it deliberately does not attempt is *who is speaking*. That is
+    judgement, HANDOFF-015 puts it out of scope, and it is not what the
+    selection needs: "this text contains this name" is mechanically decidable,
+    which is what lets the notes be selected in code at all rather than being
+    sent in full to every request.
+
+    The honest residue: a scene whose speaker is named only in the paragraph
+    before the batch begins gets no note. The preamble is what covers a rule
+    that must never be missed, and the limits are sized on the assumption that
+    anything load-bearing lives there.
+    """
+    if not blocks:
+        return []
+    # The masked form, so a name inside a protected span is not matched — the
+    # same text the model is about to be shown, which is the only text a
+    # selection rule may honestly claim to be about.
+    low = "\n".join(seg["masked"] for seg in segments).lower()
+    return [b for b in blocks if any(mentions(low, n) for n in b["names"])]
+
+
+def _style_block_text(blocks):
+    """Matched blocks as they reach a request, or ``""`` when none matched."""
+    if not blocks:
+        return ""
+    bodies = [f"{', '.join(b['names'])}:\n{b['notes']}" for b in blocks]
+    return _STYLE_BATCH_HEAD + "\n\n" + "\n\n".join(bodies) + "\n\n"
 
 
 def _neighbour_context(doc, segments, window):
@@ -308,7 +409,7 @@ def _attach(item, side, nids, present, source):
         item[f"{side}_text"] = "\n\n".join(texts)
 
 
-def _user_message(segments, glossary, mode, context=None):
+def _user_message(segments, glossary, mode, context=None, style_blocks=None):
     terms = []
     for seg in segments:
         terms.extend(_glossary_hints(seg["masked"], glossary))
@@ -333,7 +434,12 @@ def _user_message(segments, glossary, mode, context=None):
     if terms:
         uniq = sorted(set(terms))
         head = "Required terminology for this batch:\n" + "\n".join(f"- {t}" for t in uniq) + "\n\n"
-    return head + json.dumps(payload, ensure_ascii=False, indent=1)
+    # Voice above terminology, and terminology closest to the payload. The
+    # terminology block is the half `checks.py` enforces afterwards, so it is
+    # the half that must not be pushed away from the text it governs; voice is
+    # the broader instruction and takes the outer position.
+    return _style_block_text(style_notes(segments, style_blocks or [])) + head + json.dumps(
+        payload, ensure_ascii=False, indent=1)
 
 
 def _chunks(items, size):
@@ -421,6 +527,11 @@ def translate_segments(segments, doc, cfg, provider_name=None, mode="draft",
     workers = max(1, concurrency or batch_cfg.get("concurrency", 2))
 
     glossary = load_glossary(cfg)
+    # Loaded once per run and refused loudly if it is malformed, because a style
+    # sheet that half-applies is a whole book translated under voice
+    # instructions the person believes are in force. `StyleSheetError` reaches
+    # `cli.main` for exit 2.
+    style_preamble, style_blocks = load_style(cfg)
     # Built once, from the document, and closed over by both request paths — so
     # `retry_one` gets its neighbours for free rather than needing the segment
     # list threaded into it. A payload of one has nothing to point at, so both
@@ -428,7 +539,7 @@ def translate_segments(segments, doc, cfg, provider_name=None, mode="draft",
     # where a hard sentence ends up and where the context was worst.
     context = _neighbour_context(doc, segments, batch_cfg.get("context", 1))
     briefed = any(b or a for b, a in context[0].values())
-    system = _system_prompt(source_lang, lang, tone, mode, briefed)
+    system = _system_prompt(source_lang, lang, tone, mode, briefed, style_preamble)
 
     results, failures = {}, []
     lock = threading.Lock()
@@ -441,8 +552,12 @@ def translate_segments(segments, doc, cfg, provider_name=None, mode="draft",
             note = ("\nThis segment previously came back with the wrong placeholders. "
                     "Copy every ⟦n⟧ exactly as it appears.")
         try:
+            # A payload of one selects its own notes: the retried segment's
+            # names, not the batch's. Narrower than the batch that failed, and
+            # free — the selection is a function of the segments passed in.
             reply = provider.complete(
-                system, _user_message([seg], glossary, mode, context) + note)
+                system,
+                _user_message([seg], glossary, mode, context, style_blocks) + note)
             got = parse_reply(reply).get(seg["id"], "")
         except Exception as e:  # noqa: BLE001 - surfaced to the caller
             return None, str(e)
@@ -450,7 +565,8 @@ def translate_segments(segments, doc, cfg, provider_name=None, mode="draft",
 
     def run_batch(idx, batch):
         try:
-            reply = provider.complete(system, _user_message(batch, glossary, mode, context))
+            reply = provider.complete(
+                system, _user_message(batch, glossary, mode, context, style_blocks))
             mapping = parse_reply(reply)
         except Exception as e:  # noqa: BLE001
             progress(f"batch {idx + 1}/{len(batches)} failed ({e}); retrying segment by segment")
