@@ -3,6 +3,107 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-08-02 · Document state is one SQLite database, and a batch is durable when it lands
+
+HANDOFF-202. `.lx/docs/*.json` is gone; document state lives in `.lx/state.db`.
+The translation memory is untouched and stays JSONL — its git diffability is the
+entire reason it is versioned, and a binary blob produces unresolvable conflicts
+in exactly the two-machines-or-two-branches case this tool exists for.
+
+**The defect that made this urgent was not rewrite amplification.** The package
+was written claiming every segment write rewrote the whole state file; measured
+against the tree at `f11fb53`, it did not — `save_doc` had three call sites, all
+at the end of a whole command. The severe half was the other one: **there was no
+intermediate persistence at all.** `cli._translate` ran `translate_segments` over
+the entire list and called `do_apply` once, so a 100k-word novel — some 2,000
+paragraph segments and eighty requests at the default batch size, tens of minutes
+to hours of model time — lost every translated segment to one Ctrl-C or one
+dropped connection at 90%, because nothing had been written yet.
+
+So `translate_segments` gained `on_batch`, called under the same lock as
+`results`, and both callers pass `store.save_targets`. The CLI's final `do_apply`
+still runs and is still the authority on what was applied; it is simply no longer
+the first thing to reach disk. `tests/test_state.py::test_resume_after_interrupt_
+keeps_every_completed_batch` cuts a provider off mid-run with `KeyboardInterrupt`
+— not an `Exception`, which `run_batch` deliberately catches and retries — and
+asserts the completed batches survived and the resumed run asks for the rest and
+only the rest.
+
+**Two version numbers, and they answer different questions.** `PRAGMA
+user_version` (`SCHEMA_VERSION`) is the *database shape*: a newer one holds
+columns this build has no statement for, so it is refused at the connection,
+before any document has been named. `documents.state_version` (`STATE_VERSION`,
+still 3) is what a *document row means*: versions 2 and 3 were both changes to
+the JSON inside a segment, which no schema could have caught. *Lost:* collapsing
+them into one number, which the package suggested. It kills the escape hatch —
+a database-wide refusal makes `lx extract --reset` unreachable, so a content bump
+would force every document in the project to be re-extracted at once and the
+sentence that refusal message prints would become false. `STATE_VERSION` is not
+bumped by this work: no older build can see the database at all, so there is
+nothing to misread. HANDOFF-208 bumps it, because raw-nodes-as-bytes is not
+readable under any older interpretation.
+
+**Raw skeleton nodes are a BLOB column, not JSON text.** A raw node's value is
+lifted out of the node's JSON into its own column; a `str` goes in as TEXT and a
+`bytes` as BLOB, and each comes back as what it was. Nothing writes bytes yet —
+HANDOFF-208 changes the parsers — but this is what makes that package a column
+type rather than a base64 scheme, and it is why a damaged source can become
+readable at all: `json.dumps` accepts the surrogate a `surrogateescape` decode
+produces and the *file write* then dies with `UnicodeEncodeError: surrogates not
+allowed`, so no serializer option ever avoided it.
+
+**Segment identity is three nullable columns, and no comparison is made on them
+in SQL.** `content_hash`, `context` and `variant` are read out and the key is
+built by `store.tm_key`, where absent and null have been one value since
+HANDOFF-007 because the key is a tuple of read fields. This is the answer to the
+question the package asked about `NULL` in a unique index: **there is no unique
+index on the identity**, deliberately. A `WHERE variant = ?` never matches a
+NULL, and a UNIQUE index treats two NULLs as distinct — both would have been
+silent — and beyond that a document may legitimately hold the same sentence
+twice, so uniqueness there would be wrong even if the nulls behaved. Uniqueness
+of a *memory entry* belongs to the memory file, which this package does not
+touch. `tone` needs no column: it is per-document, lives in `meta`, and its own
+collapse stays inside `tm_key` where no caller can route around it.
+
+**`prior_targets` changed shape, reversing part of the 2026-07-29 split.** It was
+`prior_targets(doc)` over a document `prior_doc` had already read, so that extract
+would not read a whole book twice. It is now `prior_targets(src, lang)`, a query
+over four columns, and `prior_doc` returns document-level facts with no skeleton
+and no segments — the same saving reached properly rather than by sharing one
+full read. The casualty is the `kind`-for-a-missing-`context` migration rule: in
+JSON, presence was observable and a pre-version-3 file could be read that way; a
+column is present or NULL and cannot tell absence from a legitimate null. It
+migrated a file format that no longer exists, so it went with it.
+
+**Concurrency: WAL, and it is enough. Measured, not assumed** — the package asked
+for exactly this. Two writer processes doing 100 narrow `save_targets` each
+against one `.lx/state.db`, with a third process reading whole documents in a
+loop: zero `SQLITE_BUSY`, all 200 writes landed, `PRAGMA integrity_check` ok, and
+855 full document loads completed alongside them in three seconds. The
+counterfactual, same shape on a rollback journal: writers took 0.55s and 1.30s
+against WAL's 0.01s, and the reader completed 14,857 iterations against WAL's
+124,348 — no errors either way, because the 5-second `busy_timeout` absorbs the
+blocking rather than surfacing it. So the rollback journal is not *incorrect*
+here; it is one to two orders of magnitude slower under precisely the `lx web`
+plus `lx run` case, which is the case this project has. What WAL costs: the
+`-wal` and `-shm` sidecars, which exist while a process holds the database open
+and are removed on the last clean close — hence `.lx/state.db*` as a glob in
+`.gitignore`, since a committed WAL is a half-written transaction somebody else
+has to recover — and it rules out a `.lx/` on a network share, which is not a
+place working state belongs.
+
+**One database, not one per document.** `tracked` becomes a query and the
+cross-document reads a status contract will need cost nothing. *Lost:* a database
+per document, which would have removed even the brief write contention between
+`lx run` on one document and the workbench on another — not worth three files per
+document in `.lx/` for a lock held for the length of one batch.
+
+**No migration is written, and `.lx/docs/*.json` is not read.** It is regenerable
+and gitignored, which is what made the move free; re-extracting is both cheaper
+than a migration and unable to half-succeed. The whole debt is a sentence: when
+state is missing and a legacy file is sitting there, the "no state" message says
+where state lives now and that the translation memory carries over.
+
 ## 2026-08-02 · Decoding successfully is not decoding correctly, and cp950 is not reversible
 
 Three findings from the adversarial review of the plain-text branch, before it

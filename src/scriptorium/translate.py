@@ -276,12 +276,21 @@ class Progress:
 
 
 def translate_segments(segments, doc, cfg, provider_name=None, mode="draft",
-                       batch_size=None, concurrency=None, progress=None):
+                       batch_size=None, concurrency=None, progress=None, on_batch=None):
     """Translate ``segments`` in place-safe fashion; returns (results, failures).
 
     ``results`` maps segment id to text. ``failures`` is a list of
     ``(segment_id, reason)`` for segments the model could not produce a usable
     answer for after an individual retry.
+
+    ``on_batch`` is called with each batch's accepted results as they land, and
+    it is what makes a long run survivable. A 100k-word novel is on the order of
+    2,000 segments and, at the default batch size, some eighty requests — tens of
+    minutes to hours of model time — and until this existed a Ctrl-C or one
+    dropped connection at 90% discarded every translated segment, because nothing
+    was written until the whole list came back. It runs under the same lock as
+    ``results``, so the writes are serialized and a batch is durable before the
+    next one is reported.
     """
     progress = progress or Progress()
     lang = doc["lang"]
@@ -346,6 +355,8 @@ def translate_segments(segments, doc, cfg, provider_name=None, mode="draft",
         with lock:
             results.update(local_ok)
             failures.extend(local_bad)
+            if on_batch and local_ok:
+                on_batch(dict(local_ok))
         progress(f"batch {idx + 1}/{len(batches)} · {len(local_ok)} ok"
                  + (f" · {len(local_bad)} unresolved" if local_bad else ""))
 
