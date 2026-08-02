@@ -92,7 +92,7 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
 
    *Deliberate exception, not a gap:* a wrapped block's interior line breaks and
    the indentation that follows them are inside the segment, so the model does
-   see them — 79 of 2394 segments across the tracked documentation. They cannot
+   see them — 149 of 1467 segments across the tracked documentation. They cannot
    be masked or held in the skeleton without splitting one wrapped sentence into
    several segments. `docs/decisions.md`, 2026-07-28, "Where a line terminator
    lives", records why that alternative lost. Do not "fix" this by stripping
@@ -213,7 +213,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 737 passed; no network
+python -m pytest -q                 # 748 passed; no network
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
 

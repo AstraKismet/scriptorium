@@ -305,7 +305,9 @@ def test_an_indented_chunk_that_is_prose_is_still_translated(text, prose):
     # The two HANDOFF-020 added. Pinned here as well as in their own tests
     # below, because this is the list a later change reads when it wants to know
     # what it moved.
-    ("blockquote-indented-code.md", 8),
+    # 10 rather than 8: a quoted list item's deep chunk is deliberately still
+    # translatable, see `_QUOTED_PROSE`.
+    ("blockquote-indented-code.md", 10),
     ("indented-fence-run.md", 8),
 ])
 def test_the_indented_code_rule_moved_no_other_fixture_s_segment_count(name, count):
@@ -348,14 +350,22 @@ def test_the_indented_code_rule_moved_no_other_fixture_s_segment_count(name, cou
 _QUOTED_CODE = [
     ">     def quoted():",
     ">         return 'four columns past the marker'",
-    ">       def deep():",
-    ">           return 'six columns clears the floor'",
     ">\t\tdef tabbed():",
     ">\t\t\treturn 'two tabs past the marker'",
 ]
 _QUOTED_PROSE = [
     "    a lazy continuation of the sentence above it.",
     "    Four columns is below this item's floor, so it is a second paragraph.",
+    # The repair this package deliberately does not make, kept in the fixture so
+    # the trade is visible rather than merely written down. Six columns clears
+    # CommonMark's floor for this item and *is* a code block there — but the
+    # quote's interior tracks an open list as a boolean rather than a column, so
+    # nothing inside a quoted list is code. Six of the eight regressions
+    # adversarial review found on 2026-08-03 lived in that column's arithmetic,
+    # and every one of them lost prose; this costs a visible translated code
+    # block instead. `docs/decisions.md` of that date has the reasoning.
+    "      def deep():",
+    "          return 'six columns clears the floor'",
 ]
 
 
@@ -422,7 +432,6 @@ def test_an_indented_fence_run_is_a_chunk_and_the_prose_below_it_survives():
     ("> intro\n>\n>     def x():\n>         return 1\n", "return 1"),
     (">     def x():\n", "def x():"),
     ("> a\n\n>     def x():\n", "def x():"),
-    ("> - item\n>\n>       def deep():\n", "def deep():"),
     # A quote line that is blank closes the quote's paragraph in three spellings.
     ("> intro\n>  \n>     def x():\n", "def x():"),
     ("> intro\n>\t\n>     def x():\n", "def x():"),
@@ -435,12 +444,6 @@ def test_an_indented_fence_run_is_a_chunk_and_the_prose_below_it_survives():
     # level's margin rule, one container down, and the same defect quietly
     # coming back.
     ("> - item\n>\n> margin text\n>\n>     def x():\n", "def x():"),
-    # The other side of the quoted list marker's origin: `-` then a tab puts the
-    # item's content two columns past the quote, so eight columns clears the
-    # floor and is code. Measuring the prefix from zero scores that tab as four
-    # and keeps this translatable — the safe direction for this spelling, which
-    # is exactly why only the `1.\t` family exposed the defect.
-    ("> -\titem\n>\n>         def x():\n", "def x():"),
     # U+3000 and U+00A0 are not indentation, so neither line opens a list item
     # and the chunk below is measured against four columns rather than against a
     # phantom item's floor of seven. `LIST_RE`'s leading `\s*` said otherwise:
@@ -453,18 +456,24 @@ def test_an_indented_fence_run_is_a_chunk_and_the_prose_below_it_survives():
     # run. Bounding by the opener instead stops there and hands its body to the
     # model.
     ("- item\n\n    ```\n   three columns\nprose.\n", "three columns"),
+    # A blank line inside an unclosed run does not end it: the run reaches the
+    # container's end, so the containment loop steps over blanks for the same
+    # reason the chunk loop does. Without that step the run stops at the blank
+    # and everything below it is handed to the model.
+    ("- an item\n\n  ```\n  code body\n\n  more code body\nprose after.\n",
+     "more code body"),
 ], ids=["indented-backtick-run", "indented-tilde-run", "indented-longer-run",
         "three-columns-is-still-a-fence", "a-fence-indented-into-an-item",
         "a-fence-in-an-ordered-item", "a-fence-in-a-nested-item",
         "an-unclosed-margin-fence", "an-unclosed-one-column-fence",
         "a-margin-fence-under-an-item", "a-quoted-chunk",
         "a-quoted-chunk-runs-on", "a-quoted-chunk-opens-the-file",
-        "a-blank-line-reopens-the-quote", "a-quoted-chunk-under-a-quoted-item",
+        "a-blank-line-reopens-the-quote",
         "a-quote-blank-with-a-space", "a-quote-blank-with-a-tab",
         "two-tabs-after-the-marker", "a-quoted-margin-block-closes-the-item",
-        "a-tab-in-a-quoted-bullet-marker",
         "an-ideographic-space-opens-no-item", "a-no-break-space-opens-no-item",
-        "an-unclosed-run-holds-a-shallower-line"])
+        "an-unclosed-run-holds-a-shallower-line",
+        "an-unclosed-run-holds-a-blank-line"])
 def test_a_chunk_in_a_fence_run_or_a_quote_leaves_no_segment_behind(text, body):
     assert body not in "\n".join(s["source"] for s in parse(text)[1])
     assert identity_roundtrip(text) == text
@@ -488,6 +497,43 @@ def test_a_chunk_in_a_fence_run_or_a_quote_leaves_no_segment_behind(text, body):
     ("> intro\n>     a lazy continuation.\n", "a lazy continuation."),
     ("> - item\n>\n>     a second paragraph of the quoted item.\n",
      "a second paragraph of the quoted item."),
+    # …and its deeper sibling, which CommonMark *does* call code. The quote's
+    # interior tracks an open list as a boolean rather than a column, so nothing
+    # inside a quoted list is code: the column was six of the eight regressions
+    # adversarial review found, every one losing prose. This is what that costs.
+    ("> - item\n>\n>       def deep():\n", "def deep():"),
+    ("> -\titem\n>\n>         def x():\n", "def x():"),
+    # A bare `> -` opens an empty list item CommonMark still counts, and `LIST_RE`
+    # does not match it because it wants whitespace after the marker.
+    ("> -\n>     a\n>\n>     text\n", "text"),
+    ("> 1)\n>     a\n>\n>     text\n", "text"),
+    # A quote marker that is itself indented under an open paragraph is not a
+    # blockquote at all — it is that paragraph's lazy continuation.
+    ("prose paragraph\n    >     def x():\n", "def x():"),
+    # A quoted line the *table* loop consumes, the third branch that reads one
+    # without being the quote branch.
+    ("| a |\n|---|\n> q | p\n>     still prose\n", "still prose"),
+    ("> Note | caveat\n|---|---|\n>     still prose\n", "still prose"),
+    # A quoted line the *fence* loop consumes, the fourth.
+    ("- [ ] item\n      ```\n> intro\n      ```\n>     still prose\n",
+     "still prose"),
+    # A fence marker below the item's content column is not inside the item, so
+    # its own indentation is bounded at the document's floor and not the item's.
+    # Reading it as the item's calls a four-column marker a fence where
+    # CommonMark calls it an indented chunk, and the fence then runs away.
+    ("   - an item\n    ```\n\nprose after the run.\n", "prose after the run."),
+    # Where the fence *is* inside the item, the run stops at the item's end —
+    # bounded by the upper estimate of the content column, because a floor below
+    # the real one runs past that end.
+    ("- [ ] item\n      ```\n  > intro to the quote\n>     a lazy continuation.\n",
+     "intro to the quote"),
+    # …and the line that ends the container may be the fence's own closing
+    # marker, which is otherwise re-read as a fresh opener and reaches end of
+    # file from the margin.
+    ("-\titem\n\n  ```\n```\n\nprose after the fence.\n", "prose after the fence."),
+    # Two blank quote lines in a row: the second reaches the rule that closes a
+    # list open inside the quote, and a blank line closes no list.
+    ("> - a\n>\n>\n>     a second paragraph.\n", "a second paragraph."),
     ("> intro\n>\n>    three columns only.\n", "three columns only."),
     # A quote line that is blank to `str.strip()` and not to CommonMark is
     # content, so it keeps the quote's paragraph open — the same distinction the
@@ -564,6 +610,16 @@ def test_a_chunk_in_a_fence_run_or_a_quote_leaves_no_segment_behind(text, body):
         "prose-below-a-contained-run", "a-run-that-cannot-interrupt-a-paragraph",
         "an-ideographic-space-before-a-run", "a-no-break-space-before-a-run",
         "a-lazy-continuation-inside-a-quote", "a-quoted-item-second-paragraph",
+        "a-quoted-item-deep-chunk", "a-tab-in-a-quoted-bullet-marker",
+        "a-bare-quoted-list-marker", "a-bare-quoted-ordered-marker",
+        "an-indented-quote-marker-under-a-paragraph",
+        "a-quoted-line-the-table-branch-consumes",
+        "a-quoted-table-row-that-opens-the-quote",
+        "a-quoted-line-the-fence-branch-consumes",
+        "a-fence-marker-below-the-item-s-content-column",
+        "a-contained-run-stops-at-the-item-s-end",
+        "the-container-s-end-is-the-fence-s-closer",
+        "two-blank-quote-lines-close-no-list",
         "three-columns-inside-a-quote", "an-ideographic-space-quote-line",
         "a-no-break-space-quote-line", "an-ideographic-space-before-the-marker",
         "one-tab-after-the-marker", "a-tab-after-the-marker-s-space",

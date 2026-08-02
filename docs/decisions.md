@@ -169,9 +169,9 @@ HANDOFF-018 settled that a change altering no surviving segment's text needs
 neither, and this change **does** alter some — Defect B's recovered prose is a new
 segment, and the narrowed classes merge a `　``` ` line into the paragraph above
 it. So the rule was re-derived instead of assumed, and the measurement is the one
-that matters rather than the one that is easy: across 153023 generated documents,
-248950 segments are identical in text *and* kind, 42005 are no longer emitted,
-42548 are newly emitted, and **0 have the same text under a different kind**. That
+that matters rather than the one that is easy: across 158855 generated documents,
+264023 segments are identical in text *and* kind, 40812 are no longer emitted,
+45968 are newly emitted, and **0 have the same text under a different kind**. That
 last number is the whole argument. The memory key is the content hash plus the
 context: identical text keeps its key and deserves its banked wording, changed
 text gets a new hash and misses by construction, and there is no third case where
@@ -192,11 +192,11 @@ back into the skeleton, so a block that stopped being translated round-trips
 perfectly and a block handed to the model round-trips perfectly too. The evidence
 is therefore elsewhere.
 
-A differential sweep against markdown-it-py over **153023 generated documents**,
+A differential sweep against markdown-it-py over **158855 generated documents**,
 comparing three answers per input: what the parent segmented, what the new parser
 segments, and what CommonMark calls code. **0 regressions**, round-trip
-byte-exact on every document, and code reaching the model down from 47691 markers
-to 26774. The axes, written down beside the number because a sweep is blind to
+byte-exact on every document, and code reaching the model down from 48933 markers
+to 29602. The axes, written down beside the number because a sweep is blind to
 the axis it does not vary: the block above the chunk *including that block's own
 line shapes*; the chunk's indent over 0–16 columns plus tab spellings and three
 non-indent whitespace characters; the chunk's first line in nine spellings; what
@@ -206,7 +206,7 @@ twenty-six, including list markers spelled with a tab; a lead whose quoted line
 another branch consumes; an unclosed fence's opener and closer at every indent
 below thirteen; and the terminator classes.
 
-**1629 markers of code newly reach the model, in two families, and both are the
+**1905 markers of code newly reach the model, in two families, and both are the
 recorded cost of decisions above rather than new defects.** The larger family is
 a chunk four columns in directly after a construct that leaves a paragraph open —
 a blockquote whose last line was a bare `>`, or an empty link definition. That is
@@ -220,11 +220,11 @@ The smaller family is `min`'s own cost: an unclosed fence indented between one
 column and the item's prefix width has its bound raised above the item's real
 content column and stops sooner than CommonMark ends it.
 
-A mutation pass over **30 guards, of which 28 turn the suite red**, each with the
+A mutation pass over **37 guards, of which 33 turn the suite red**, each with the
 test that caught it. The harness runs a green baseline first and refuses to report
 without one: the first run reported all 26 killed by the same test in half a
 second, because the tree it built was missing `examples/` and the mutants were
-never reached. Two survivors, both equivalent by construction. `filled` in the
+never reached. Four survivors, every one measured equivalent over the whole sweep. `filled` in the
 quoted-code condition is measured equivalent over 158543 documents — every
 spelling of a blank quote line in eight contexts plus the whole sweep, comparing
 segment sources, kinds and skeleton bytes, zero differences — and is labelled at
@@ -250,17 +250,81 @@ third package running in which a large count read like proof and was not.
    overshoots. The sweep's indents stopped at 8, so a checkbox item's
    `code_floor` of 10 was never reached and the branch was never entered.
 
-The sweep now carries all four axes and is 153023 documents. Each finding was
+The sweep now carries all four axes. Each finding was
 re-derived here before being believed — run against the parent, the new parser
 and markdown-it-py — and one of the review's own rows was wrong in the other
 direction: `> -\titem` puts the item's content two columns past the quote, so
 eight columns *is* code there, and the origin bug was the safe direction for that
 spelling. It is pinned in both directions now.
 
-The review ran five lenses; a session limit killed four of them and the
-completeness critic before they reported. What one lens found is above. The
-remaining lenses are unfinished work, not a clean result, and this entry does not
-claim otherwise.
+### The second round changed the design rather than patching it
+
+A session limit killed four of the five lenses in the first round. Re-run against
+the repaired code, they found **eight more regressions**, all prose becoming
+skeleton, and together they said something the individual fixes did not: the
+quote branch was re-implementing block parsing one container down without a
+container stack, and each new edge case was another way to be wrong about a
+column nobody could compute.
+
+Six of the eight lived in `quote_list_col`'s arithmetic — a tab in the marker
+measured from the wrong origin, a tab *after* the marker measuring prefix and
+content from different origins, a bare `> -` that `LIST_RE` does not match at
+all, and a quoted list marker on a line some other branch had already eaten. So
+the column is gone. **`quote_list` is a boolean**: while any list is open inside
+the quote, nothing in it is code. That gives up
+`> - item\n>\n>       def deep():` — a repair not made, costing a visible
+translated code block — to remove a family of ways to lose text silently. The
+seventh, `prose\n    >     def x():`, is answered by requiring the quote's own
+marker at column 0: an indented `>` under an open paragraph is not a blockquote
+but a lazy continuation, and this parser does not get to guess which.
+
+The eighth is the one worth generalizing. **Four branches read a line carrying a
+`>` marker and only one of them is the quote branch** — the list branch's
+continuation loop stops at a list, heading or fence but not at a blockquote; the
+table loop takes every consecutive line holding a `|`; and the fence branch takes
+everything up to its closing marker. A quoted line any of them swallows never
+reaches the quote branch, so the interior state keeps its opening value, and the
+opening value is the one that turns the next quoted line into skeleton. Three of
+the four had the hole. It is now one function, `_quote_state`, called from all
+four, because the next branch to grow a swallowing loop will forget too.
+
+**The unclosed-fence bound took six spellings, and the last three came from
+review.** After `min(list_col, ind)` (above) came bounding the *search* and not
+only the unclosed fallback — because once the indent gate moved which line is the
+opener, the leftover markers re-paired across the container's end and swallowed
+everything between them. That bound then cut off genuine closers, so the line
+that ends the container is now tested as this fence's own closing marker before
+the fence is called unclosed: otherwise the marker is re-read as a fresh opener,
+and an opener at the margin with nothing to close it reaches end of file. And the
+gate itself needed the same containment question the floor did — a marker below
+the item's content column is judged at the document's floor, not the item's.
+Each spelling was measured, each fixed the previous one's family, and each is
+pinned by a row: 84, 1158, 1373, 400, 52, 77 and 33 shapes in turn.
+
+The final shape of the bound is **two** estimates of the item's content column
+pointing opposite ways, because `list_col` is the item's whole prefix and
+CommonMark's content column can be anywhere between one past the marker and
+there. Whether the fence is *inside* the item is asked against the lower bound,
+since judging "outside" wrongly selects the margin's floor and swallows the
+document; where to *stop* is the upper bound, since a floor below the real
+content column runs past the item's end.
+
+Two defects the round found are **pre-existing and out of scope**, recorded so
+they are not rediscovered: a backtick fence whose info string contains a backtick
+(`` ```js` ``) is not a fence in CommonMark and swallows the whole document here,
+in the parent as well; and an indented chunk under a heading that itself follows
+a U+3000 line is skeleton in both builds. Neither is a regression and both cost a
+document silently.
+
+**One claim in this repository's own documentation was wrong and is now
+measured.** Invariant 3 said "79 of 2394 segments across the tracked
+documentation" carry an interior line break followed by indentation. Measured
+today: **149 of 1460**. It drifted with the documentation rather than with this
+change — and the way it surfaced is worth keeping, because the entry you are
+reading is what exposed it. Under the *parent* parser, `docs/decisions.md` with
+this entry in it yields **9 segments**; under the repaired one, 451. The prose
+describing Defect B contains an indented run of backticks, so the old parser
+swallowed the decision log from that line to the end of the file.
 
 Two `tests/corpus/` fixtures, `blockquote-indented-code.md` and
 `indented-fence-run.md`, neither shape having existed in the corpus. Both hold
