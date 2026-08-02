@@ -17,11 +17,27 @@ from .store import seg_hash
 
 __all__ = ["parse", "render"]
 
-FENCE_RE = re.compile(r"^(\s*)(`{3,}|~{3,})")
+#: Only a space and a tab indent a fence, the same character class
+#: `_indent_columns` counts and for the same reason. `\s` reaches U+3000, U+00A0,
+#: a form feed and U+2028; U+3000 is the zh-TW paragraph indent, so `　```` `
+#: was read as a fence and the whole block it opened — to end of file when it
+#: closed nowhere — became skeleton. CommonMark calls that line a paragraph.
+#: How far it may be indented is *not* in this pattern: the bound is three
+#: columns past the container's content column, which only the loop knows.
+FENCE_RE = re.compile(r"^([ \t]*)(`{3,}|~{3,})")
 HEADING_RE = re.compile(r"^(\s{0,3}#{1,6}\s+)(.*?)(\s*#*\s*)$")
 SETEXT_RE = re.compile(r"^\s{0,3}(=+|-{2,})\s*$")
 LIST_RE = re.compile(r"^(\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?)(.*)$")
-QUOTE_RE = re.compile(r"^(\s*>\s?)(.*)$")
+#: Same character class as `FENCE_RE`, and it became load-bearing on the same
+#: day. `\s` reaches U+3000, so `>　` was read as the marker plus its optional
+#: space, leaving empty content — a blank quote line, which closes the quote's
+#: paragraph and makes the indented line below it code. CommonMark reads `　` as
+#: content, so the line below is a lazy continuation and is prose. `　>` was the
+#: same mistake at the other end: `_columns` scores U+3000 as one column, which
+#: moved the quote's content column and put an ordinary paragraph four columns
+#: in. Both directions turn prose into skeleton, which is the failure this parser
+#: refuses everywhere else.
+QUOTE_RE = re.compile(r"^([ \t]*>[ \t]?)(.*)$")
 HR_RE = re.compile(r"^\s{0,3}(?:\*{3,}|-{3,}|_{3,})\s*$")
 TABLE_SEP_RE = re.compile(r"^\s*\|?[\s:|-]+\|[\s:|-]*$")
 DEF_RE = re.compile(r"^(\s*\[[^\]]+\]:\s*)(.*)$")
@@ -47,15 +63,30 @@ def _columns(s):
     return col
 
 
-def _indent_columns(line):
-    """Columns of ``line``'s leading space/tab run.
+def _indent_columns(line, col=0):
+    """Columns of ``line``'s leading space/tab run, starting at document column ``col``.
 
     Only those two characters indent. ``str.lstrip()`` would also eat U+3000, a
     form feed and U+00A0, none of which CommonMark counts — and U+3000 in
     particular is the zh-TW paragraph indent, so counting it would turn ordinary
     translated prose into a code block.
+
+    ``col`` exists because a tab stop is absolute in the line and a blockquote's
+    content is not at column 0. `> \\tdef x():` has a tab starting at column 2,
+    which advances to 4 and is therefore *two* columns of indent; measuring the
+    content string on its own scores the same tab as four and calls the line
+    code. Measured against markdown-it-py, 2026-08-03, in 2276 generated shapes:
+    it is a paragraph.
     """
-    return _columns(line[: len(line) - len(line.lstrip(" \t"))])
+    start = col
+    for ch in line:
+        if ch == "\t":
+            col += TAB_STOP - col % TAB_STOP
+        elif ch == " ":
+            col += 1
+        else:
+            break
+    return col - start
 
 
 def _carries_a_text_cr(line):
@@ -180,6 +211,17 @@ def parse(text, dnt=(), opts=None):
     #: prose became skeleton and stopped being translated at all.
     para_open = False
 
+    #: The same two questions asked *inside* the innermost blockquote, where
+    #: `para_open` and `list_col` cannot answer them. `mdparse` emits one segment
+    #: per quoted line and never descends into the quote, so a quoted chunk's
+    #: indent has to be measured after the `>` marker — the quote's content
+    #: column — and against a list item opened inside the quote rather than one
+    #: opened outside it. `quote_para` is the lazy-continuation half:
+    #: `> intro\n>     def x():` is one paragraph, `> intro\n>\n>     def x():` is
+    #: a code block, and the bare `>` between them is the whole difference.
+    quote_para = False
+    quote_list_col = None
+
     while i < n:
         line = lines[i]
         ind = _indent_columns(line)
@@ -202,12 +244,55 @@ def parse(text, dnt=(), opts=None):
         if line.strip() and ind == 0 and not lazy and not LIST_RE.match(line):
             list_col = None
 
+        # The column at which an indented chunk becomes code, read here rather
+        # than at the branch that consumes one because the fence branch needs the
+        # same number: CommonMark bounds a fence's own indentation at three
+        # columns *past its container's content column*, which is `code_floor`
+        # minus one exactly.
+        code_floor = CODE_INDENT if list_col is None else list_col + CODE_INDENT
+
         m = FENCE_RE.match(line)
-        if m:
+        if m and ind < code_floor:
             fence = m.group(2)[0] * 3
+            # The closing search keeps its unbounded `\s*`, and the two are not
+            # the same question. Bounding the *opening* indent leaves more text
+            # translatable, which is this parser's direction wherever it cannot
+            # know; bounding the closing one would run every fence further and
+            # turn more of a document into skeleton — and it cannot be bounded
+            # correctly here anyway, since a closing fence's indent is measured
+            # after its container's prefix, which this parser never strips.
             j = i + 1
             while j < n and not re.match(rf"^\s*{re.escape(fence)}", lines[j]):
                 j += 1
+            if j >= n:
+                # Nothing closed it, so its extent is a guess rather than a fact,
+                # and the guess is bounded by the container the fence opened in:
+                # CommonMark ends an unclosed fence where its container ends, and
+                # a list item ends at the first non-blank line below its content
+                # column. Measured 2026-08-03: without this,
+                # `- item\n\n      ```\n    ```\n\ntext` swallowed `text` to end
+                # of file, in 84 generated shapes.
+                #
+                # Two things the bound is not, both measured on the way here. It
+                # is not the *fence's own* indent, which reaches too far: a
+                # ` ``` ` one column in at the margin legitimately holds content
+                # at column 0, and bounding by the opener handed 1158 markers of
+                # that content to the model. And it does not apply to a fence
+                # that is not *in* the item — one at the margin under an open
+                # item runs to end of file the way CommonMark says, so `ind >=
+                # list_col` is load-bearing: the margin rule above declines to
+                # close an item on a `lazy` line, and a fence is not a lazy
+                # continuation because it may interrupt a paragraph. 1373 markers
+                # of `- item\n```\n\ntext`.
+                #
+                # With no list open the whole test is vacuous and the run reaches
+                # end of file exactly as it did before, which is what
+                # `tests/corpus/fences-and-unclosed.md` pins.
+                floor = list_col if list_col is not None and ind >= list_col else 0
+                j = i
+                while j + 1 < n and (not lines[j + 1].strip()
+                                     or _indent_columns(lines[j + 1]) >= floor):
+                    j += 1
             j = min(j, n - 1)
             emit_raw("\n".join(lines[i : j + 1]) + "\n")
             i = j + 1
@@ -230,6 +315,15 @@ def parse(text, dnt=(), opts=None):
             # everything before it. `lazy and ...` was the first spelling and the
             # widened sweep refuted it in 1482 documents.
             para_open = line.strip(" \t\r") != ""
+            # A real blank line closes the blockquote itself, so both interior
+            # answers go back to their opening values. A line that is blank only
+            # to `str.strip()` does not: it is content, so it is a lazy
+            # continuation of whatever the quote had open, and `> a\n　\n>     x`
+            # is still one paragraph. Nothing else resets these — a heading or a
+            # table does close a blockquote, and leaving the state alone across
+            # one only ever keeps text translatable.
+            if not para_open:
+                quote_para, quote_list_col = False, None
             continue
 
         if HR_RE.match(line) or SETEXT_RE.match(line):
@@ -256,7 +350,6 @@ def parse(text, dnt=(), opts=None):
         # interrupt a paragraph — is `lazy`. Reading it off the paragraph
         # branch's reach instead was the first attempt and it was wrong in the
         # one direction that costs a translation; see `para_open` above.
-        code_floor = CODE_INDENT if list_col is None else list_col + CODE_INDENT
         if not lazy and ind >= code_floor and not _carries_a_text_cr(line):
             # `i + 1`, not `i`. Line `i` has already passed exactly the tests the
             # loop below applies, so re-testing it is a no-op — but only while
@@ -332,9 +425,55 @@ def parse(text, dnt=(), opts=None):
 
         m = QUOTE_RE.match(line)
         if m:
-            emit_raw(m.group(1))
-            emit_seg(m.group(2), "quote")
-            emit_raw("\n")
+            prefix, content = m.group(1), m.group(2)
+            # CommonMark's blank line one container down: only a space and a tab
+            # make one, so `> 　` is content and keeps the quote's paragraph open.
+            filled = content.strip(" \t\r") != ""
+            cind = _indent_columns(content, _columns(prefix))
+            # A quoted block at the marker's own column closes a list item open
+            # inside the quote — the document level's margin rule, one container
+            # down, with `quote_para` standing in for `lazy` for the same reason
+            # it does there. Without it, one `> - item` anywhere keeps every
+            # later quoted chunk in the document translatable.
+            if filled and cind == 0 and not quote_para and not LIST_RE.match(content):
+                quote_list_col = None
+            quote_floor = (CODE_INDENT if quote_list_col is None
+                           else quote_list_col + CODE_INDENT)
+            # `filled` here is redundant and kept for the reader, the way the
+            # chunk loop's `lines[j].strip()` is: a blank quote line takes the
+            # other branch to the same bytes, because `emit_seg` refuses a source
+            # with nothing translatable in it and emits exactly what this one
+            # would. Measured 2026-08-03 over 88971 documents — every spelling of
+            # a blank quote line in eight contexts, plus the whole differential
+            # sweep — comparing segment sources, kinds and skeleton bytes: zero
+            # differences. That is what separates a redundant guard from an
+            # untested one, and the mutation harness lists it as equivalent so
+            # the next reader does not re-derive it.
+            quoted_code = (filled and not quote_para and cind >= quote_floor
+                           and not _carries_a_text_cr(line))
+            if quoted_code:
+                # Code inside the quote: the marker goes into the skeleton with
+                # it, because the quote branch's usual split — marker raw,
+                # content segment — is what handed the model Python to translate.
+                # One line at a time, since that is how this branch reads a quote
+                # at all; consecutive lines land in one raw node regardless.
+                emit_raw(line + "\n")
+            else:
+                emit_raw(prefix)
+                emit_seg(content, "quote")
+                emit_raw("\n")
+            if (m2 := LIST_RE.match(content)):
+                # The whole prefix, checkbox included, exactly as the document
+                # level takes it: never smaller than CommonMark's content column,
+                # so the floor it produces is never too low.
+                quote_list_col = _columns(m2.group(1))
+            # `not quoted_code`, not `filled` alone: a code block opens no
+            # paragraph, so the *next* quoted line is measured against the floor
+            # too rather than read as a lazy continuation of it. Without this the
+            # first line of a quoted chunk moves into the skeleton and every line
+            # under it stays a segment — half a repair, which is worse than none
+            # because the block renders as code with its body translated.
+            quote_para = filled and not quoted_code
             i += 1
             # Every quote line, including a bare `>`. Reading the bare one as
             # closing the paragraph — which is what CommonMark does — was tried
