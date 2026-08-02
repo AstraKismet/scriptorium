@@ -246,8 +246,11 @@ def parse(text, dnt=(), opts=None):
         # An indented code block, held in the skeleton the way a fenced one
         # already is. Two spellings of one construct were being treated
         # oppositely: the model was asked to translate Python, and the four
-        # spaces that make it code sat at position 0 of the segment where
-        # `translate.accept` strips them off every proposal it takes.
+        # spaces that make it code sat at position 0 of the segment, where
+        # `translate.accept` stripped them off every proposal it took. Only the
+        # first half of that is this branch's to fix — a list item's second
+        # paragraph reaches position 0 the same way and is not code, so the
+        # stripping was repaired separately in `normalize.reseat_outer_blanks`.
         #
         # CommonMark's other half of the rule — an indented chunk cannot
         # interrupt a paragraph — is `lazy`. Reading it off the paragraph

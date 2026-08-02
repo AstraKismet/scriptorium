@@ -32,7 +32,7 @@ from .docio import (
 )
 from .formats import UnknownFormat
 from .mask import repair_placeholders
-from .normalize import normalize, polish_rendered
+from .normalize import normalize, polish_rendered, reseat_outer_blanks
 from .store import (
     StateVersionError,
     append_tm,
@@ -876,7 +876,29 @@ def do_apply(src, lang, cfg, incoming, origin="agent"):
         if not seg:
             unknown.append(sid)
             continue
-        seg["target"] = normalize(repair_placeholders(text), lang, cfg)
+        # Half of `accept`, and only that half. A person's or an agent's words
+        # are still never refused here — that asymmetry is deliberate and
+        # `docs/decisions.md`, 2026-07-29, records why — but the blanks a segment
+        # opens and closes with are the host syntax's, not the translator's, and
+        # a reviewer retyping a paragraph in a textarea does not reliably
+        # reproduce the four spaces that keep it inside its list item. Leaving
+        # this side alone made one document render differently depending on which
+        # of the three equal sources produced its target.
+        #
+        # No `.strip()` of its own: `reseat_outer_blanks` does that, and a second
+        # one here is dead weight. Measured over 327600 combinations — every
+        # subset of the zh-TW ops x 26 body shapes x 15 leading runs x 15 trailing
+        # runs x 7 source shapes — with zero differences, after the mutation pass
+        # found the two strips could each be deleted with the suite still green.
+        #
+        # `keep_added_indent` is where this path stops being `accept`'s: an
+        # English source has no leading run, so the strict form deletes the
+        # U+3000 pair a zh-TW reviewer types at the head of a paragraph — and
+        # after it, no surface in the pipeline could produce an indented Chinese
+        # paragraph at all. Adversarial review, 2026-08-03.
+        seg["target"] = reseat_outer_blanks(
+            seg["masked"], normalize(repair_placeholders(text), lang, cfg),
+            keep_added_indent=True)
         seg["status"], seg["origin"] = "translated", origin
         seg.pop("issues", None)
         changed.append(seg)
