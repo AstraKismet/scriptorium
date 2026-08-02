@@ -154,6 +154,36 @@ def test_a_byte_order_mark_decides_the_codec_and_survives_into_the_skeleton(name
     assert not any(s["source"].startswith("﻿") for s in segs)
 
 
+def test_a_doubled_byte_order_mark_is_skeleton_too():
+    """Not hypothetical: it is what Python's bare `utf-16` codec writes.
+
+    Encoding a string that already begins U+FEFF with `utf-16` emits a second
+    mark, so a file that has been through such a tool carries two. Taking only
+    the first hands the second to the model inside the segment source and splits
+    that paragraph's memory hash away from every other copy of it.
+    """
+    nodes, segs = parse("﻿﻿Chapter One\n\nBody.\n", (), OPTS)
+    assert nodes[0] == {"t": "raw", "v": "﻿﻿"}
+    assert not any("﻿" in s["source"] for s in segs)
+    assert _substituted("﻿﻿Chapter One\n\nBody.\n") == "﻿﻿Chapter One\n\nBody.\n"
+
+
+def test_the_recorded_paragraph_mode_is_the_one_the_skeleton_was_cut_with():
+    """`describe` and `parse` have to answer the same question the same way.
+
+    A byte-order mark is not whitespace, so a file beginning `\\ufeff\\n\\n` has a
+    non-blank first line before the mark is taken out and a blank one after.
+    Measured 2026-08-02: `describe` said `blank-line` for a document `parse` had
+    cut one paragraph per line, so `doc["paragraph_mode"]` and the `lx extract`
+    line both stated something the skeleton contradicted.
+    """
+    text = "﻿\n\nHer name was Ada.\nShe did not answer.\n"
+    mode = describe(text, OPTS)["paragraph_mode"]
+    hosts = {s["host"] for s in parse(text, (), OPTS)[1]}
+    assert mode == "line"
+    assert hosts == {"text-line"}, "the host is what the recorded mode has to match"
+
+
 def test_a_mark_overrides_the_configured_candidates():
     # Otherwise a project that pins `encodings` to one codec makes every marked
     # file undecodable, and the mark is the one declaration the file itself makes.

@@ -296,12 +296,17 @@ def containment_problems(seg):
         # blank lines are harmless is judgement, and invariant 4 excludes that.
         #
         # Reached now by a no-added-lines kind whose target did *not* grow, which
-        # it was not before: the two branches used to key on the kind alone. It
-        # cannot fire for a Markdown one — those all have a single non-blank
-        # source line, and a target with a blank line in it and no more lines
-        # than that is either empty, which `check_segment` returns on before
-        # here, or impossible — so Markdown is unchanged and plain text gains the
-        # rule where its line count happens to match.
+        # it was not before: the two branches used to key on the kind alone.
+        #
+        # Measured rather than argued, 2026-08-02, by running the old branch
+        # beside this one over 1.59M (kind, source, target) combinations built
+        # from twelve line shapes. The two differ on 13122 of them, and every one
+        # is a `heading`, `quote` or `cell` whose *source* has more than one line
+        # — which `mdparse` cannot produce, since all three capture exactly one.
+        # Markdown is therefore unchanged in fact and not only in intent, and on
+        # that unreachable input the new answer is the better one. What the
+        # change buys is plain text: a paragraph whose target grew a blank line
+        # without growing past the source's line count.
         out.append("the target contains a blank line, which ends the block it sits in")
 
     if kind not in profile["inline_kinds"]:

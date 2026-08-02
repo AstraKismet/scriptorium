@@ -27,7 +27,7 @@ from .mask import has_translatable_text, mask, strip_placeholders
 from .skeleton import render
 from .store import seg_hash
 
-__all__ = ["MARKER", "parse", "render"]
+__all__ = ["MARKER", "describe", "parse", "render", "split_document"]
 
 #: What stands in for an untranslated segment. Not Markdown's HTML comment: in a
 #: .txt file that is four words of visible junk pretending to be invisible.
@@ -107,6 +107,32 @@ def _indented(line):
     return line[:1].isspace()
 
 
+def split_document(text):
+    """``(bom, lines, trailing_nl)`` — the document cut the way :func:`parse` cuts it.
+
+    One helper for the two functions that have to agree about it, because they
+    did not. A byte-order mark is **not** whitespace, so a file beginning
+    ``\\ufeff\\n\\n`` has a non-blank first line before the mark is taken out and a
+    blank one after: measured 2026-08-02, ``describe`` reported ``blank-line``
+    for a document ``parse`` had already cut one paragraph per line, so the state
+    file and the ``lx extract`` line both stated something the skeleton
+    contradicted.
+
+    The whole leading *run* of marks comes out, not one. A doubled mark is not
+    hypothetical — it is exactly what Python's bare ``utf-16`` codec writes over
+    text that already carries one, which is why :mod:`.docio` never names that
+    codec — and left in place the second rides into the first segment's source,
+    where the model is asked to reproduce it and the memory key splits.
+    """
+    body = text.lstrip("﻿")
+    bom = text[: len(text) - len(body)]
+    lines = body.split("\n")
+    trailing_nl = body.endswith("\n")
+    if trailing_nl and lines and lines[-1] == "":
+        lines.pop()          # the split artifact, not a real blank line
+    return bom, lines, trailing_nl
+
+
 def describe(text, opts=None):
     """Facts about how this document was cut, for the document's own state file.
 
@@ -115,11 +141,7 @@ def describe(text, opts=None):
     at ``lx extract`` is what turns a wrong guess from something the reviewer
     discovers on page four into something they read on the line that made it.
     """
-    opts = opts or {}
-    lines = text.split("\n")
-    if text.endswith("\n") and lines and lines[-1] == "":
-        lines.pop()
-    return {"paragraph_mode": paragraph_mode(lines, opts)}
+    return {"paragraph_mode": paragraph_mode(split_document(text)[1], opts or {})}
 
 
 def _chapter_patterns(opts):
@@ -139,18 +161,12 @@ def parse(text, dnt=(), opts=None):
     opts = opts or {}
 
     # A byte-order mark decodes to a character, and it is a byte the pipeline did
-    # not decide to change, so it goes in the skeleton whole. Left in the text it
-    # would ride into the first segment's source — U+FEFF is not whitespace, so
-    # `strip()` does not take it — and the model would be asked to reproduce an
-    # invisible character. `mdparse` still carries it inside a segment; that is
-    # the older behaviour its fixture pins, not a standard to copy.
-    bom = "﻿" if text.startswith("﻿") else ""
-    body = text[len(bom):]
-
-    lines = body.split("\n")
-    trailing_nl = body.endswith("\n")
-    if trailing_nl and lines and lines[-1] == "":
-        lines.pop()          # the split artifact, not a real blank line
+    # not decide to change, so it goes in the skeleton whole rather than riding
+    # into the first segment's source. `mdparse` still carries it inside a
+    # segment; that is the older behaviour its fixture pins, not a standard to
+    # copy. `split_document` says why the run is taken rather than one mark, and
+    # why `describe` has to call the same helper.
+    bom, lines, trailing_nl = split_document(text)
 
     mode = paragraph_mode(lines, opts)
     chapters = _chapter_patterns(opts)

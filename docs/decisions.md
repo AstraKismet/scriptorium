@@ -105,9 +105,14 @@ European source reads as Shift-JIS — and it is **announced** rather than hidde
 
 **A byte-order mark decides, and is kept.** It overrides the candidate list,
 because it is a declaration the file makes about itself. It is not stripped: it
-decodes to U+FEFF and `textparse` puts it in the skeleton as a raw node, so the
-model never sees it and the same paragraph hashes identically whether or not its
-file carried one. Every mark maps to a **concrete** codec — never bare `utf-16`
+decodes to U+FEFF and `textparse` puts it in the skeleton as a raw node — the
+whole leading *run* of them, because a doubled mark is exactly what the codec
+note below produces — so the model never sees it and the same paragraph hashes
+identically whether or not its file carried one. `describe` and `parse` split the
+document through one helper for the same reason: a mark is not whitespace, so a
+file beginning `﻿\n\n` has a non-blank first line before the mark comes out
+and a blank one after, and two copies of the split disagreed about the paragraph
+shape they then reported. Every mark maps to a **concrete** codec — never bare `utf-16`
 or `utf-8-sig`, which write a mark of their own on top of the one in the text, so
 a document round-tripping through them gains three bytes each time.
 
