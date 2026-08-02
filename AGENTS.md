@@ -104,6 +104,9 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    used to arrive the same way and no longer does — it became skeleton on
    2026-08-02, which is what `mask.py` could not do for it. See
    `docs/decisions.md` of that date, "An indented code block is skeleton".
+   The two containers that rule left behind — a chunk inside a blockquote, and an
+   indented run of fence characters, which swallowed every paragraph after it —
+   closed on 2026-08-03, same file, "A quoted chunk is skeleton".
 
    Because that run is inside the segment and the model may not reproduce it, the
    **blanks a segment opens and closes with are re-imposed from the source** on
@@ -210,7 +213,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 671 passed; no network
+python -m pytest -q                 # 737 passed; no network
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
 

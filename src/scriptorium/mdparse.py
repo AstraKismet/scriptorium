@@ -27,7 +27,18 @@ __all__ = ["parse", "render"]
 FENCE_RE = re.compile(r"^([ \t]*)(`{3,}|~{3,})")
 HEADING_RE = re.compile(r"^(\s{0,3}#{1,6}\s+)(.*?)(\s*#*\s*)$")
 SETEXT_RE = re.compile(r"^\s{0,3}(=+|-{2,})\s*$")
-LIST_RE = re.compile(r"^(\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?)(.*)$")
+#: The third pattern whose whitespace class is load-bearing, and the one whose
+#: `\s` survived HANDOFF-020's first pass. Only the *leading* run is narrowed:
+#: it is the one measured as columns, and `\s` reaching U+3000 made `　- item` a
+#: list item that CommonMark reads as an ordinary paragraph. That mattered
+#: quietly until the quote branch started depending on it — the list branch's
+#: continuation loop then swallowed the quote line below it, so `quote_para` was
+#: never set, and the next quoted line went into the skeleton. Found by
+#: adversarial review 2026-08-03, in 56 shapes across U+3000, U+00A0 and a form
+#: feed. The runs *after* the marker keep `\s`: they are not measured against a
+#: column, and narrowing them would change what counts as a list marker rather
+#: than where its content begins.
+LIST_RE = re.compile(r"^([ \t]*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?)(.*)$")
 #: Same character class as `FENCE_RE`, and it became load-bearing on the same
 #: day. `\s` reaches U+3000, so `>　` was read as the marker plus its optional
 #: space, leaving empty content — a blank quote line, which closes the quote's
@@ -50,17 +61,22 @@ TAB_STOP = 4
 CODE_INDENT = 4
 
 
-def _columns(s):
+def _columns(s, col=0):
     """Display columns of ``s``, expanding tabs to CommonMark's four-column stops.
 
     ``len(s)`` is the obvious alternative and gets every tab wrong: one tab is
     four columns, so ``\\tdef x():`` opens a code block that
     ``len(line) - len(line.lstrip())`` scores as a single column of indent.
+
+    ``col`` is the document column ``s`` starts at, and it matters for the same
+    reason it does in :func:`_indent_columns`: a tab stop is absolute in the
+    line. A list marker inside a blockquote starts at the quote's content column,
+    so ``1.\\t`` measured from 0 is four columns and measured from 2 is six.
     """
-    col = 0
+    start = col
     for ch in s:
         col += TAB_STOP - col % TAB_STOP if ch == "\t" else 1
-    return col
+    return col - start
 
 
 def _indent_columns(line, col=0):
@@ -285,10 +301,26 @@ def parse(text, dnt=(), opts=None):
                 # continuation because it may interrupt a paragraph. 1373 markers
                 # of `- item\n```\n\ntext`.
                 #
+                # `min` rather than a test, because `list_col` is deliberately
+                # the item's whole prefix and is therefore *larger* than
+                # CommonMark's content column. For the code floor that is
+                # conservative — too high only keeps text translatable — but read
+                # as "is the fence inside the item" it inverts: `- [ ] item` puts
+                # `list_col` at 6 while the item's content starts at 2, so a
+                # fence indented 2 was judged outside the item, took floor 0, and
+                # swallowed the rest of the document. That is the exact failure
+                # this branch exists to remove, and adversarial review found it in
+                # 400 shapes on 2026-08-03; the sweep's indents stopped at 8, so a
+                # checkbox item's `code_floor` of 10 was never reached and this
+                # branch was never entered. Taking the smaller of the two is right
+                # in both directions: a lower floor only ever runs the fence
+                # further, so where the two disagree the conservative answer is
+                # the one that stops sooner.
+                #
                 # With no list open the whole test is vacuous and the run reaches
                 # end of file exactly as it did before, which is what
                 # `tests/corpus/fences-and-unclosed.md` pins.
-                floor = list_col if list_col is not None and ind >= list_col else 0
+                floor = 0 if list_col is None else min(list_col, ind)
                 j = i
                 while j + 1 < n and (not lines[j + 1].strip()
                                      or _indent_columns(lines[j + 1]) >= floor):
@@ -443,8 +475,8 @@ def parse(text, dnt=(), opts=None):
             # chunk loop's `lines[j].strip()` is: a blank quote line takes the
             # other branch to the same bytes, because `emit_seg` refuses a source
             # with nothing translatable in it and emits exactly what this one
-            # would. Measured 2026-08-03 over 88971 documents — every spelling of
-            # a blank quote line in eight contexts, plus the whole differential
+            # would. Measured 2026-08-03 over 158543 documents — every spelling
+            # of a blank quote line in eight contexts, plus the whole differential
             # sweep — comparing segment sources, kinds and skeleton bytes: zero
             # differences. That is what separates a redundant guard from an
             # untested one, and the mutation harness lists it as equivalent so
@@ -466,7 +498,18 @@ def parse(text, dnt=(), opts=None):
                 # The whole prefix, checkbox included, exactly as the document
                 # level takes it: never smaller than CommonMark's content column,
                 # so the floor it produces is never too low.
-                quote_list_col = _columns(m2.group(1))
+                #
+                # Measured from the quote's content column, not from zero. The
+                # prefix starts where the quote's content starts, so `> 1.\t`
+                # puts that tab at column 4 and it advances to 8 — six columns of
+                # marker, where measuring the prefix alone scores four and drops
+                # the floor by two. Found by adversarial review 2026-08-03 in 42
+                # shapes, every one a list prefix containing a tab, after a
+                # sweep that spelled a quoted list only as `- `, `- [ ] ` and
+                # `1. `. Same origin bug as `_indent_columns` above, one line
+                # further down, and the sweep that caught the first did not vary
+                # the axis that hides the second.
+                quote_list_col = _columns(m2.group(1), _columns(prefix))
             # `not quoted_code`, not `filled` alone: a code block opens no
             # paragraph, so the *next* quoted line is measured against the floor
             # too rather than read as a lazy continuation of it. Without this the
@@ -504,6 +547,19 @@ def parse(text, dnt=(), opts=None):
                 # would make it representable, and would also cut a wrapped
                 # sentence into fragments the model must translate blind. So the
                 # indent stays in the source, where it round-trips.
+                #
+                # This loop does not stop at a blockquote marker — the paragraph
+                # branch's copy does — so a quoted line inside an item is read
+                # *here* and never reaches the quote branch. The quote's interior
+                # state would then keep whatever it had, and its opening value,
+                # False, is the one that turns the next quoted line into
+                # skeleton: `-\titem\n   > intro\n>     chunk` lost `chunk` in 40
+                # generated shapes. Recorded where the line is actually consumed,
+                # rather than by teaching this loop to stop — stopping would
+                # re-cut every list item that contains a blockquote, which is a
+                # segmentation change and a different package's decision.
+                if (mq := QUOTE_RE.match(lines[j])):
+                    quote_para = mq.group(2).strip(" \t\r") != ""
                 body.append(lines[j])
                 j += 1
             emit_raw(prefix)

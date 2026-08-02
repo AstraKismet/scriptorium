@@ -435,6 +435,24 @@ def test_an_indented_fence_run_is_a_chunk_and_the_prose_below_it_survives():
     # level's margin rule, one container down, and the same defect quietly
     # coming back.
     ("> - item\n>\n> margin text\n>\n>     def x():\n", "def x():"),
+    # The other side of the quoted list marker's origin: `-` then a tab puts the
+    # item's content two columns past the quote, so eight columns clears the
+    # floor and is code. Measuring the prefix from zero scores that tab as four
+    # and keeps this translatable — the safe direction for this spelling, which
+    # is exactly why only the `1.\t` family exposed the defect.
+    ("> -\titem\n>\n>         def x():\n", "def x():"),
+    # U+3000 and U+00A0 are not indentation, so neither line opens a list item
+    # and the chunk below is measured against four columns rather than against a
+    # phantom item's floor of seven. `LIST_RE`'s leading `\s*` said otherwise:
+    # 706 markers of code across the sweep, and the reason its class is narrowed
+    # even though the quote defect it caused is now fixed a second way.
+    ("　- a paragraph, not a list item\n\n    def x():\n", "def x():"),
+    ("\xa0- a paragraph, not a list item\n\n    def x():\n", "def x():"),
+    # An unclosed run inside an item ends where the item does, so a line between
+    # the item's content column and the fence's own indent is still inside the
+    # run. Bounding by the opener instead stops there and hands its body to the
+    # model.
+    ("- item\n\n    ```\n   three columns\nprose.\n", "three columns"),
 ], ids=["indented-backtick-run", "indented-tilde-run", "indented-longer-run",
         "three-columns-is-still-a-fence", "a-fence-indented-into-an-item",
         "a-fence-in-an-ordered-item", "a-fence-in-a-nested-item",
@@ -443,7 +461,10 @@ def test_an_indented_fence_run_is_a_chunk_and_the_prose_below_it_survives():
         "a-quoted-chunk-runs-on", "a-quoted-chunk-opens-the-file",
         "a-blank-line-reopens-the-quote", "a-quoted-chunk-under-a-quoted-item",
         "a-quote-blank-with-a-space", "a-quote-blank-with-a-tab",
-        "two-tabs-after-the-marker", "a-quoted-margin-block-closes-the-item"])
+        "two-tabs-after-the-marker", "a-quoted-margin-block-closes-the-item",
+        "a-tab-in-a-quoted-bullet-marker",
+        "an-ideographic-space-opens-no-item", "a-no-break-space-opens-no-item",
+        "an-unclosed-run-holds-a-shallower-line"])
 def test_a_chunk_in_a_fence_run_or_a_quote_leaves_no_segment_behind(text, body):
     assert body not in "\n".join(s["source"] for s in parse(text)[1])
     assert identity_roundtrip(text) == text
@@ -498,6 +519,36 @@ def test_a_chunk_in_a_fence_run_or_a_quote_leaves_no_segment_behind(text, body):
     ("> intro\n>\n>     def x():\rprose after a text CR\r", "prose after a text CR"),
     ("> - item\n> continues at the quote's margin\n>\n>     second paragraph.\n",
      "second paragraph."),
+    # The four adversarial review found on 2026-08-03 after a sweep of 83451
+    # documents had reported zero. Each lives on an axis that sweep held
+    # constant, and every one of them stopped prose being translated.
+    #
+    # A list marker inside a quote starts at the quote's content column, so a tab
+    # in the marker advances from there. Measuring the prefix from column 0
+    # scores `1.\t` as four columns instead of six and drops the floor by two.
+    ("> 1.\titem\n>\n>         a second paragraph of the quoted item.\n",
+     "a second paragraph of the quoted item."),
+    ("> 10.\titem\n>\n>         a second paragraph of the quoted item.\n",
+     "a second paragraph of the quoted item."),
+    # U+3000 is not indentation, so this opens no list item — but `LIST_RE`'s
+    # `\s*` said it did, the list branch swallowed the quote line below it, and
+    # the quote's paragraph state was therefore never set at all.
+    ("　- a paragraph, not a list item\n   > intro\n>     a lazy continuation.\n",
+     "a lazy continuation."),
+    ("\xa0- a paragraph, not a list item\n   > intro\n>     a lazy continuation.\n",
+     "a lazy continuation."),
+    # …and where there *is* a list item, the same loop still consumes the quoted
+    # line, so the state is recorded where the line is read instead.
+    ("-\titem\n   > intro\n>     a lazy continuation.\n", "a lazy continuation."),
+    ("- item\n  > intro\n>     a lazy continuation.\n", "a lazy continuation."),
+    # `list_col` is the item's whole prefix and overshoots CommonMark's content
+    # column, so reading it as "is the fence inside the item" judged a fence at
+    # two columns to be outside a `- [ ] ` item, took the margin's bound of zero,
+    # and swallowed the rest of the file.
+    ("- [ ] item\n\n          ```\n  ```\nprose after the item.\n",
+     "prose after the item."),
+    ("-    item\n\n         ```\n   ```\nprose after the item.\n",
+     "prose after the item."),
     # The three that knowingly disagree with CommonMark, all conservative and all
     # inherited rather than invented. The first two are the document level's own
     # divergences arriving one container down: a list item's floor is its whole
@@ -519,6 +570,13 @@ def test_a_chunk_in_a_fence_run_or_a_quote_leaves_no_segment_behind(text, body):
         "an-ideographic-space-line-outside-the-quote",
         "a-shallower-line-below-a-quoted-chunk",
         "a-text-cr-inside-a-quote", "a-quoted-item-that-wraps",
+        "a-tab-in-a-quoted-list-marker", "a-tab-in-a-longer-quoted-marker",
+        "an-ideographic-space-is-not-a-list-item",
+        "a-no-break-space-is-not-a-list-item",
+        "a-quoted-line-the-list-branch-consumes",
+        "a-quoted-line-inside-a-plain-item",
+        "an-unclosed-fence-below-a-checkbox-item-s-prefix",
+        "an-unclosed-fence-below-a-padded-item-s-prefix",
         "a-quoted-task-list-checkbox", "a-chunk-inside-a-nested-quote",
         "a-bare-quote-marker-still-does-not-close"])
 def test_prose_in_a_fence_run_or_a_quote_is_still_translated(text, prose):
