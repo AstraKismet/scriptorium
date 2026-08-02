@@ -13,11 +13,13 @@ from .checks import check_segment
 from .config import (
     DEFAULT_TONE,
     GLOSSARY_HEADER,
+    StyleSheetError,
     canonical_tone,
     dump_json,
     load_config,
     load_dnt,
     load_glossary,
+    load_style,
     write_templates,
 )
 from .docio import (
@@ -463,10 +465,33 @@ def pending_segments(doc, include_all=False, limit=0):
 
 
 def cmd_todo(args, cfg):
+    """Emit pending segments, and everything the translator has to be told.
+
+    ``voice`` and ``voice_notes`` are what make an agent a peer of the model
+    rather than a third of the pipeline working blind. `AGENTS.md` treats an API
+    model, an agent in its own context and a human as three equal sources of a
+    translation, and until this landed the register brief reached only
+    `translate_segments` — so an agent produced documentation prose for a novel
+    and `lx commit` banked it under the literary key anyway. Both fields are the
+    *same strings* the model path assembles, from the same two functions in
+    `translate`, so the two paths cannot drift into briefing differently.
+
+    Both keys are always present, empty rather than absent when there is nothing
+    to say: a consumer that has to branch on a missing key breaks the first time
+    a project has no style sheet, and HANDOFF-203 and HANDOFF-207 will freeze
+    this shape.
+    """
+    # Lazily, the way `do_extract` imports `accept`: importing `translate` pulls
+    # in the provider stack, and `lx todo` is the command that exists precisely
+    # because nobody here is calling a model.
+    from .translate import brief, mentions, style_notes, style_preamble_text
+
     doc = load_doc(args.src, args.lang)
     glossary = load_glossary(cfg)
+    style_preamble, style_blocks = load_style(cfg)
+    segments = pending_segments(doc, args.all, args.limit)
     items = []
-    for seg in pending_segments(doc, args.all, args.limit):
+    for seg in segments:
         item = {"id": seg["id"], "kind": seg["kind"], "text": seg["masked"]}
         low = seg["masked"].lower()
         # A row with no target is a candidate `lx terms` proposed and nobody has
@@ -474,15 +499,21 @@ def cmd_todo(args, cfg):
         # to render the name as nothing, so an unfinished row stays silent —
         # which is what `checks.check_segment` already does with one.
         hints = [{"term": r["source"], "use": r["target"]} for r in glossary
-                 if r["target"]
-                 and re.search(rf"(?<![A-Za-z]){re.escape(r['source'].lower())}(?![A-Za-z])", low)]
+                 if r["target"] and mentions(low, r["source"])]
         if hints:
             item["glossary"] = hints
         if seg.get("issues"):
             item["fix"] = seg["issues"]
         items.append(item)
+    # Selected against the whole emitted set rather than per segment — the same
+    # rule `translate.style_notes` applies to a batch, so an agent handed twenty
+    # paragraphs sees exactly what the model would have seen for the same twenty.
+    notes = style_notes(segments, style_blocks)
     _out(json.dumps({
         "source": doc["source"], "lang": doc["lang"], "tone": doc["tone"],
+        "voice": "\n\n".join(p for p in (brief(doc["lang"], doc["tone"]),
+                                         style_preamble_text(style_preamble)) if p),
+        "voice_notes": [{"names": b["names"], "notes": b["notes"]} for b in notes],
         "rules": "placeholders \u27e6n\u27e7 are opaque; copy them verbatim, "
                  "reorder if grammar needs it, never invent or drop them",
         "segments": items,
@@ -709,8 +740,8 @@ def append_glossary_rows(cfg, rows):
     shares `../shared/glossary.csv` between two books would break with no decision
     recorded. The exemption ends the moment configuration becomes writable over
     HTTP, and it binds every path-valued configuration key rather than this one:
-    `glossary`, `dnt` and `output_pattern` are confined at use time or they are
-    not writable over HTTP. Recorded in `docs/decisions.md`, 2026-08-02,
+    `glossary`, `dnt`, `style` and `output_pattern` are confined at use time or
+    they are not writable over HTTP. Recorded in `docs/decisions.md`, 2026-08-02,
     "Terminology is discovered by suppressing sentence-initial capitals" —
     tracked, unlike the work packages that also carry it.
     """
@@ -1215,7 +1246,8 @@ def main(argv=None):
     try:
         args.fn(args, cfg)
     except (FileNotFoundError, StateVersionError, UnsupportedSource,
-            GlossaryWriteError, UnknownFormat, UndecodableDocument) as e:
+            GlossaryWriteError, UnknownFormat, UndecodableDocument,
+            StyleSheetError) as e:
         print(f"lx: {e}", file=sys.stderr)
         sys.exit(2)
     except BrokenPipeError:
