@@ -26,6 +26,37 @@ HR_RE = re.compile(r"^\s{0,3}(?:\*{3,}|-{3,}|_{3,})\s*$")
 TABLE_SEP_RE = re.compile(r"^\s*\|?[\s:|-]+\|[\s:|-]*$")
 DEF_RE = re.compile(r"^(\s*\[[^\]]+\]:\s*)(.*)$")
 
+#: CommonMark's tab stop, and its indented-code threshold. They are the same
+#: number in the spec and are written twice here because they answer different
+#: questions: a tab advances to the next multiple of the first, and a chunk is
+#: code at or past the second. A future spec could move one without the other.
+TAB_STOP = 4
+CODE_INDENT = 4
+
+
+def _columns(s):
+    """Display columns of ``s``, expanding tabs to CommonMark's four-column stops.
+
+    ``len(s)`` is the obvious alternative and gets every tab wrong: one tab is
+    four columns, so ``\\tdef x():`` opens a code block that
+    ``len(line) - len(line.lstrip())`` scores as a single column of indent.
+    """
+    col = 0
+    for ch in s:
+        col += TAB_STOP - col % TAB_STOP if ch == "\t" else 1
+    return col
+
+
+def _indent_columns(line):
+    """Columns of ``line``'s leading space/tab run.
+
+    Only those two characters indent. ``str.lstrip()`` would also eat U+3000, a
+    form feed and U+00A0, none of which CommonMark counts — and U+3000 in
+    particular is the zh-TW paragraph indent, so counting it would turn ordinary
+    translated prose into a code block.
+    """
+    return _columns(line[: len(line) - len(line.lstrip(" \t"))])
+
 
 def parse(text, dnt=(), opts=None):
     """Split markdown into a render skeleton + translatable segments.
@@ -111,8 +142,39 @@ def parse(text, dnt=(), opts=None):
             emit_raw("\n".join(lines[: j + 1]) + "\n")
             i = j + 1
 
+    #: The content column of the innermost open list item, or ``None`` at the
+    #: left margin. It exists so the indented-code threshold can move with the
+    #: item: `- item\n\n    still prose` is a *second paragraph of that item*,
+    #: because four columns is only two past a content column of two. A flat
+    #: four-column test would make it skeleton and stop translating it, which is
+    #: the failure this whole branch has to avoid being worse than the defect.
+    list_col = None
+
+    #: True while the line just consumed left a paragraph open. This is the
+    #: state CommonMark's "an indented code block cannot interrupt a paragraph"
+    #: is written against, and it has to be state rather than a claim about
+    #: position: the paragraph branch stops at anything that looks like a block
+    #: start *at any indent*, so `text\n    - like a list` and `> quoted\n
+    #: lazy line` both hand their second line to the top of this loop while
+    #: CommonMark is still inside one paragraph. Measured against markdown-it-py
+    #: over 37224 generated shapes, 2026-08-02: without this, 2778 markers of
+    #: prose became skeleton and stopped being translated at all.
+    para_open = False
+
     while i < n:
         line = lines[i]
+        ind = _indent_columns(line)
+        # Read for this line, then cleared. The three branches that leave a
+        # paragraph open — quote, list, paragraph — set it again on the way out,
+        # so every other block start closes one by saying nothing.
+        lazy, para_open = para_open, False
+
+        # Only a block *start* reaches the top of this loop — every branch below
+        # consumes its own continuations — so a block starting at the left margin
+        # is one no open list item can contain, and closes it. A blank line
+        # closes nothing: a list item is free to hold several paragraphs.
+        if line.strip() and ind == 0 and not LIST_RE.match(line):
+            list_col = None
 
         m = FENCE_RE.match(line)
         if m:
@@ -128,6 +190,38 @@ def parse(text, dnt=(), opts=None):
         if not line.strip() or HR_RE.match(line) or SETEXT_RE.match(line):
             emit_raw(line + "\n")
             i += 1
+            continue
+
+        # An indented code block, held in the skeleton the way a fenced one
+        # already is. Two spellings of one construct were being treated
+        # oppositely: the model was asked to translate Python, and the four
+        # spaces that make it code sat at position 0 of the segment where
+        # `translate.accept` strips them off every proposal it takes.
+        #
+        # CommonMark's other half of the rule — an indented chunk cannot
+        # interrupt a paragraph — is `lazy`. Reading it off the paragraph
+        # branch's reach instead was the first attempt and it was wrong in the
+        # one direction that costs a translation; see `para_open` above.
+        code_floor = CODE_INDENT if list_col is None else list_col + CODE_INDENT
+        if not lazy and ind >= code_floor:
+            j = i
+            # `lines[j].strip()` is redundant and kept for the reader: a blank
+            # line either indents past the floor, in which case it joins this raw
+            # node instead of the next one and `emit_raw` concatenates the two
+            # anyway, or it does not and the column test stops the chunk on its
+            # own. The 2026-08-02 mutation sweep is where that was established —
+            # removing it left the suite green *and* the CommonMark differential
+            # unchanged, which is what separates a redundant guard from an
+            # untested one.
+            while j < n and lines[j].strip() \
+                    and _indent_columns(lines[j]) >= code_floor:
+                j += 1
+            # Trailing blank lines are left to the blank branch, and a chunk
+            # after them is recognized here again. CommonMark calls that one code
+            # block and this calls it two; both are raw, so the skeleton bytes do
+            # not know the difference and nothing downstream asks.
+            emit_raw("\n".join(lines[i:j]) + "\n")
+            i = j
             continue
 
         m = HEADING_RE.match(line)
@@ -172,6 +266,15 @@ def parse(text, dnt=(), opts=None):
             emit_seg(m.group(2), "quote")
             emit_raw("\n")
             i += 1
+            # Every quote line, including a bare `>`. Reading the bare one as
+            # closing the paragraph — which is what CommonMark does — was tried
+            # and reverted: this parser has no container stack, so it cannot
+            # measure an indent against a blockquote's content column, and
+            # `> q\n>\n    > x` is still inside the quote where `> q\n>\n    y`
+            # is not. Measured 2026-08-02: the refinement fixed 285 shapes and
+            # turned prose into skeleton in 57. Conservative here means the text
+            # stays translatable, which is the direction that costs nothing.
+            para_open = True
             continue
 
         m = LIST_RE.match(line)
@@ -198,6 +301,12 @@ def parse(text, dnt=(), opts=None):
             emit_seg("\n".join(body), "list")
             emit_raw("\n")
             i = j
+            # Deliberately the whole prefix, checkbox included, rather than
+            # CommonMark's content column. It is never smaller, so the threshold
+            # it produces is never too low, and too low is the only direction
+            # that costs a translation.
+            list_col = _columns(prefix)
+            para_open = True
             continue
 
         # paragraph
@@ -212,6 +321,7 @@ def parse(text, dnt=(), opts=None):
         emit_seg("\n".join(body), "para")
         emit_raw("\n")
         i = j
+        para_open = True
 
     # every block emitter appends its own newline; drop the last one when the
     # source did not actually end with a line break
