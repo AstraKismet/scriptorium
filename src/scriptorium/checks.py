@@ -154,24 +154,12 @@ def pair_problems(target, slots):
 # heading; a heading carrying a blank line split into two blocks; a blockquote
 # carrying a newline dropped its second half out of the quote.
 
-#: Kinds whose content is an *inline* context in the host, where a line-initial
-#: marker is literal text rather than a block start. `## # x` is a heading whose
-#: text begins with a hash, and `| - x |` is a cell containing a dash — applying
-#: the block rule to either would fail correct work, which is the direction the
-#: zh-TW lexicon had to be audited for on 2026-07-28.
-_INLINE_KINDS = frozenset({"heading", "cell"})
-
-#: Kinds the host gives exactly one line. Any added line leaves the block: a
-#: second line of a heading is a new paragraph, and a second line of a blockquote
-#: is outside the quote.
-_SINGLE_LINE_KINDS = frozenset({"heading", "quote", "cell"})
-
 #: Read in :mod:`.mdparse`'s own order, with its own patterns. Whether a line
 #: opens a block is the parser's question; a second copy of these regexes here
 #: would be a second answer to it, and the copy is the one nobody re-reads when a
 #: flavour detail changes. A format that is not Markdown brings its own kinds and
 #: its own table — the shape of the rule does not change with it.
-_BLOCK_STARTS = (
+_MARKDOWN_BLOCK_STARTS = (
     ("code fence", FENCE_RE),
     ("thematic break", HR_RE),
     ("setext heading", SETEXT_RE),
@@ -189,9 +177,81 @@ _BLOCK_STARTS = (
 )
 
 
-def _block_start(line):
-    """Name of the block this line would open, or ``None``."""
-    for name, rx in _BLOCK_STARTS:
+#: What a host lets a segment do, keyed by ``seg["host"]``. Three questions, and
+#: every format answers all three:
+#:
+#: ``block_starts``   which line shapes open a block, in the parser's own order.
+#: ``inline_kinds``   kinds whose content is an *inline* context, where a
+#:                    line-initial marker is literal text. `## # x` is a heading
+#:                    whose text begins with a hash and `| - x |` is a cell
+#:                    containing a dash; applying the block rule to either would
+#:                    fail correct work, which is the direction the zh-TW lexicon
+#:                    had to be audited for on 2026-07-28.
+#: ``no_added_lines`` kinds whose target may not have more lines than its source,
+#:                    with the message to say so.
+#:
+#: Plain text answers differently on all three, and the difference is the reason
+#: this is a table rather than three module constants. No line of plain text opens
+#: anything — a line of dialogue beginning ``- `` is dialogue, not a list item —
+#: so its block table is empty and that whole rule goes quiet.
+#:
+#: It gets **two** rows, because the containment question genuinely has two
+#: answers for one format. Where paragraphs are separated by blank lines, a
+#: paragraph is a run of wrapped lines and a translation is free to re-wrap it:
+#: comparing line counts there is precisely the rule ``docs/decisions.md``
+#: rejected on 2026-07-28 for failing correct work, and invariant 4 excludes it.
+#: Where every line *is* a paragraph, an added line is not a re-wrap — it is a
+#: second paragraph — and the same comparison becomes decidable. So the parser
+#: records which shape the document is in, as ``host``, and the rule follows the
+#: shape rather than guessing at it.
+_MARKDOWN_PROFILE = {
+    "block_starts": _MARKDOWN_BLOCK_STARTS,
+    "inline_kinds": frozenset({"heading", "cell"}),
+    # A heading, a blockquote line and a cell get exactly one line in Markdown.
+    # Any added line leaves the block: a second line of a heading is a new
+    # paragraph, and a second line of a blockquote is outside the quote.
+    "no_added_lines": frozenset({"heading", "quote", "cell"}),
+    "line_message": ("a {kind} segment is one line in the host; a line break "
+                     "in the target leaves the block"),
+}
+
+#: Paragraphs separated by blank lines. A chapter title is still one line — a
+#: break in it leaves a second line of a title standing as a paragraph — but a
+#: body paragraph may be re-wrapped freely.
+_TEXT_PROFILE = {
+    "block_starts": (),
+    "inline_kinds": frozenset(),
+    "no_added_lines": frozenset({"heading"}),
+    "line_message": ("a {kind} is one line in a plain-text document; a line break "
+                     "in the target leaves it"),
+}
+
+#: One paragraph per line, which is how a great many .txt novels are written.
+#: Here the rule reaches the body too, because there is no wrapping for it to be
+#: confused with.
+_TEXT_LINE_PROFILE = dict(_TEXT_PROFILE, no_added_lines=frozenset({"heading", "para"}),
+                          line_message=("the target has more lines than the source, and in "
+                                        "this document a line break starts a new paragraph"))
+
+#: Markdown is the fallback for an absent or unrecognized host, because every
+#: state file written before formats existed holds Markdown and says nothing.
+#: An unrecognized one is not an error: a validator that raised on a `host` it
+#: had not met would take down `lx check` for a document it could still mostly
+#: judge, and `xhtml` already appears as a test value with no parser behind it.
+_HOST_PROFILES = {
+    "markdown": _MARKDOWN_PROFILE,
+    "text": _TEXT_PROFILE,
+    "text-line": _TEXT_LINE_PROFILE,
+}
+
+
+def _profile(seg):
+    return _HOST_PROFILES.get(seg.get("host") or "markdown", _MARKDOWN_PROFILE)
+
+
+def _block_start(line, table):
+    """Name of the block this line would open in this host, or ``None``."""
+    for name, rx in table:
         if rx.match(line):
             return name
     return None
@@ -217,16 +277,16 @@ def containment_problems(seg):
     and the same restraint applies as in :func:`pair_problems`.
     """
     kind = seg.get("kind") or "para"
+    profile = _profile(seg)
     slots = seg.get("slots") or {}
     src = unmask(seg["masked"], slots)
     tgt = unmask(seg.get("target") or "", slots)
     src_lines, tgt_lines = src.split("\n"), tgt.split("\n")
+    table = profile["block_starts"]
     out = []
 
-    if kind in _SINGLE_LINE_KINDS:
-        if len(tgt_lines) > len(src_lines):
-            out.append(f"a {kind} segment is one line in the host; a line break "
-                       f"in the target leaves the block")
+    if kind in profile["no_added_lines"] and len(tgt_lines) > len(src_lines):
+        out.append(profile["line_message"].format(kind=kind))
     elif (any(not ln.strip() for ln in tgt_lines)
             and not any(not ln.strip() for ln in src_lines)):
         # A leading or trailing newline counts, because `"x\n".split("\n")`
@@ -234,15 +294,23 @@ def containment_problems(seg):
         # paragraph and structural in a list item, where the blank line ends the
         # list — one rule rather than a carve-out per kind, since deciding which
         # blank lines are harmless is judgement, and invariant 4 excludes that.
+        #
+        # Reached now by a no-added-lines kind whose target did *not* grow, which
+        # it was not before: the two branches used to key on the kind alone. It
+        # cannot fire for a Markdown one — those all have a single non-blank
+        # source line, and a target with a blank line in it and no more lines
+        # than that is either empty, which `check_segment` returns on before
+        # here, or impossible — so Markdown is unchanged and plain text gains the
+        # rule where its line count happens to match.
         out.append("the target contains a blank line, which ends the block it sits in")
 
-    if kind not in _INLINE_KINDS:
-        opens = _block_start(tgt_lines[0])
-        if opens and opens != _block_start(src_lines[0]):
+    if kind not in profile["inline_kinds"]:
+        opens = _block_start(tgt_lines[0], table)
+        if opens and opens != _block_start(src_lines[0], table):
             out.append(f"the target opens a {opens}; the source does not")
-        later = {_block_start(ln) for ln in src_lines[1:]}
+        later = {_block_start(ln, table) for ln in src_lines[1:]}
         for i, line in enumerate(tgt_lines[1:], start=2):
-            opens = _block_start(line)
+            opens = _block_start(line, table)
             if opens and opens not in later:
                 out.append(f"line {i} of the target opens a {opens}; "
                            f"a translation may not add a block")

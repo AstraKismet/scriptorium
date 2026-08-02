@@ -3,6 +3,177 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-08-02 · Plain text lands, and the format registry lands with it
+
+Closing HANDOFF-017. A novel could not enter the pipeline at all before this: the
+only parser was Markdown's and every path reached it regardless of what the file
+was called. Plain text is the cheapest format that changes that, and being the
+first non-Markdown one it brings the registry that was deferred out of
+HANDOFF-007 to land with it. Suite 362 → 464.
+
+**The registry is keyed by extension and the format is frozen onto the
+document.** `formats.py` maps `.md`/`.markdown`/`.mdown`/`.mkd` to `markdown` and
+`.txt`/`.text` to `text`; `formats.map` in configuration overrides the table and
+is the only override there is. `lx extract` records `doc["format"]`, and every
+later command reads it from there rather than from the path.
+
+*Lost: a `--format` flag.* A skeleton is only readable by the parser that wrote
+it, so extract and render have to agree; a flag lets one invocation disagree with
+the next, and the disagreement surfaces as a corrupted render rather than as an
+error. *Lost: falling back to Markdown for an unknown extension*, which is
+today's behaviour and is harmless for a `.rst` and silent ruin for anything
+binary. It is refused instead, with a message naming `formats.map`. Nothing in
+the suite or the corpus depended on the fallback — every fixture is `.md`.
+
+**No `STATE_VERSION` bump.** The field's own test is whether a reader of an
+*older* file would be wrong, and it would not: a state file written before this
+has no `format` and no `host`, and every such file is Markdown, so the defaults
+are right rather than merely tolerable. *Lost: bumping to 4 anyway*, so that a
+downgraded build refuses a plain-text state file instead of applying Markdown
+containment rules to it. That failure is real but visible — it reports false
+`containment` errors, it cannot corrupt a render, because `render` is shared and
+format-independent — and the bump would cost every existing user a re-extract of
+every document to protect against a build downgrade.
+
+**`context` for plain text is the block kind, exactly as for Markdown.** Two
+values, `para` and `heading`. *Lost: `None`*, which makes every context-free
+segment of every format share one entry. *Lost: a paragraph index or a chapter
+identifier*, which looks more precise and is the worst of the three: position in
+the key drives exact reuse to zero and makes inserting one paragraph invalidate
+every entry after it. Keying on the kind also means a paragraph banked from a
+Markdown document answers for the same paragraph in a `.txt` — the two formats
+mask differently, and `translate.accept` is what makes that safe, which is the
+same reasoning that keeps the mask configuration out of the key.
+
+**Which document shape a file is in is recorded on `host`, not on `kind`.** Plain
+text arrives in three shapes and the containment rule genuinely differs between
+two of them: where paragraphs are separated by blank lines a translation may
+re-wrap freely, and where every line *is* a paragraph an added line is a second
+paragraph. `checks.py` is given a segment and nothing else, so the shape has to
+be a segment field — and it is `host` (`text` / `text-line`) rather than `kind`,
+because `kind` becomes `context` and a second kind would stop one wording being
+one memory entry across the two shapes for no gain.
+
+That is also the correction to this package's first design, which put *every*
+plain-text kind under a "the target may not have more lines than the source"
+rule. That reinstates the line-count comparison this log rejected on 2026-07-28,
+and applied to a wrapped paragraph it fails correct work at error severity: a
+blank-line-mode paragraph is a maximal run of non-blank lines, so a re-wrapped
+target re-parses to the same one block. The rule now applies only where an added
+line provably leaves the block, which is what `_SINGLE_LINE_KINDS` always meant.
+
+**`checks.py` gains a per-host profile table**, three questions per host: which
+line shapes open a block, which kinds are inline, and which kinds may not gain a
+line. Markdown's row is today's constants unchanged and its behaviour is
+bit-identical. Plain text's block table is **empty** — no line of plain text
+opens anything, and a line of dialogue beginning `- ` is dialogue. An
+unrecognized host falls back to Markdown rather than raising: `xhtml` already
+appears as a test value with no parser behind it, and a validator that took down
+`lx check` over a host it had not met would be worse than one that judges most of
+the document.
+
+**Encoding detection: first success wins, and the candidate list was measured
+rather than assumed.** Default `["utf-8", "shift_jis", "cp950", "gbk",
+"cp1252"]`. Every entry earns its place:
+
+- **`cp950`, not `big5`.** Python's `big5` codec rejects 裏, 碁, 恒 and 墻, which
+  are ordinary in Windows-authored Traditional Chinese. Measured on this
+  repository: a Big5 novel containing 裏 fails every double-byte candidate and is
+  read by `cp1252` as Latin-1 gibberish — the worst outcome available, because it
+  is durable. The mojibake is hashed by `store.seg_hash` and banked into
+  `.lx/tm.*.jsonl`, which invariant 9 calls a source of truth. This was the
+  single highest-value change in the audit and it is pinned by a test.
+- **`shift_jis` before the Chinese candidates.** It fails on the Big5 and GBK
+  samples, so it costs them nothing, and without it `gbk` swallows Japanese.
+- **`gbk`, not `gb18030`.** The superset argument that wins for `cp950` loses
+  here: `gb18030` accepted the Big5, Shift-JIS and Latin-1 samples too.
+- **`cp1252` last and still present.** A Windows-authored English novel with
+  smart quotes is the commonest non-UTF-8 source there is, and dropping it
+  refuses that file outright. Measured: none of its five undefined bytes can
+  occur in a standard Big5 or GB2312 stream, so for those it is a *total*
+  catch-all rather than a near one. Only its position keeps a Chinese novel from
+  reaching it.
+
+*Lost: refusing when more than one candidate decodes.* It is the package's own
+"refuse rather than mangle" posture pushed one step too far — because `cp1252`
+accepts every ordinary Big5, GBK and Shift-JIS document, "more than one
+succeeded" is true of nearly every non-UTF-8 novel there is, so the rule refuses
+the primary use case and deletes detection rather than making it safe. What is
+left is the irreducible overlap — simplified Chinese reads as Big5, a Latin-1
+European source reads as Shift-JIS — and it is **announced** rather than hidden:
+`lx extract` prints the codec it chose and the paragraph shape it decided.
+
+**A byte-order mark decides, and is kept.** It overrides the candidate list,
+because it is a declaration the file makes about itself. It is not stripped: it
+decodes to U+FEFF and `textparse` puts it in the skeleton as a raw node, so the
+model never sees it and the same paragraph hashes identically whether or not its
+file carried one. Every mark maps to a **concrete** codec — never bare `utf-16`
+or `utf-8-sig`, which write a mark of their own on top of the one in the text, so
+a document round-tripping through them gains three bytes each time.
+
+**A decode that yields a NUL is rejected**, which is how a BOM-less UTF-16 file
+is refused instead of silently becoming interleaved rubbish: it is valid UTF-8
+and decodes without raising. No plain-text novel contains a NUL.
+
+**A file whose bytes are invalid in its own encoding is refused, not repaired.**
+Substituting U+FFFD changes bytes invariant 2a promises to preserve, and the
+damage is durable for the same reason the mojibake above is. Reading one needs
+raw skeleton nodes held as bytes rather than as JSON text — measured: a surrogate
+from `errors="surrogateescape"` survives `json.dumps`, and dies at the file write
+with `UnicodeEncodeError: surrogates not allowed` — which is the scheduled state
+layer's work. The refusal message says so.
+
+**Rendered output is always UTF-8.** `docio.write_document` has encoded UTF-8
+since it existed and nothing changes. Writing a zh-TW translation back in the
+source's Big5 would raise on the first target character outside the codepage, on
+a document the user has already paid a model to produce. `doc["encoding"]`
+records what the source was, so the decision is reversible; nothing reads it back
+today. The byte-for-byte round-trip property is therefore asserted at the
+skeleton, through the detected codec, which is where `tests/corpus/` already
+asserts it — and the CLI path is asserted against the source's characters
+encoded as UTF-8.
+
+**Paragraph segmentation: `auto` chooses between two shapes and names the
+third.** `auto` asks whether a blank line ever *separates* two runs of text —
+not whether one exists, which is true of a file whose only blank line is its last
+and would join its paragraphs into one segment. It never guesses `indent`
+(hard-wrapped, no blank lines, an indented first line marking each paragraph),
+because the available test — some lines indented, some not — is equally true of a
+one-paragraph-per-line file containing a single indented line, and guessing wrong
+there joins the entire book. A project with such a novel writes one config line.
+Both remaining misfires are announced on the `lx extract` line that made them.
+
+**A block's first-line indent is skeleton; its continuation lines' indents are
+not.** The first is layout the model has no use for, and `translate.accept`
+strips leading whitespace off every proposal anyway. The second cannot be
+skeleton at all: it sits after a newline that is *inside* the segment, and a raw
+node can only go before or after a whole segment. Identical in shape and in
+reasoning to a wrapped list item — 2026-07-28, "Where a continuation indent
+lives".
+
+**Recorded residuals**, none of them hidden:
+
+- Editing `chapter_patterns` re-classifies a block between `heading` and `para`
+  while its text stays byte-identical, which orphans its banked wording with no
+  hash change to explain it. It is the only knob in this package with that
+  property. Change it before a book is translated, or accept re-translating the
+  affected titles.
+- `mask.py`'s inline patterns are Markdown- and i18n-flavoured, so `$5 or $10`
+  in a novel is masked as a math span and the model never sees the word between
+  the figures. Per-format mask patterns are a real design question and a
+  different package; this one does not touch `mask.py` beyond sharing one
+  predicate.
+- The workbench lists only what `sources` matches, and the default is
+  `docs/**/*.md`. A novel project sets its own glob. *Lost: widening the
+  default* — a blanket `**/*.txt` sweeps up `config/dnt.txt`, and inventing a
+  `book/` convention is a convention nobody asked for.
+- `normalize`'s `collapse_space` still eats a uniformly-indented block's
+  continuation indentation, so verse, epigraphs and quoted letters lose their
+  shape on translation. Plain text is what makes that defect load-bearing rather
+  than cosmetic; it has its own package.
+- A bare Roman-numeral chapter heading (`XVII`) has letters in it, so it becomes
+  a segment with nothing to translate. It reports `untranslated` at warn.
+
 ## 2026-08-02 · Terminology is discovered by suppressing sentence-initial capitals, and the target column stays empty
 
 Closing HANDOFF-016, which implements the second half of D3 below: the glossary

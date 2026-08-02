@@ -1,0 +1,4 @@
+Chapter One
+
+This line ends CRLF.
+This one ends LF.

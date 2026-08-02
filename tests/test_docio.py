@@ -50,7 +50,9 @@ CASES = [pytest.param(p, id=p.name) for p in _corpus_files()]
 def test_read_helper_returns_the_bytes_on_disk(path):
     # The whole point of the helper. Text mode would delete every CR here, and
     # utf-8-sig would eat the BOM fixture's first three bytes — both silently.
-    assert read_document(path) == path.read_bytes().decode("utf-8")
+    # It returns the encoding beside the text since formats landed, because the
+    # document's state file records it the way it records `eol`.
+    assert read_document(path) == (path.read_bytes().decode("utf-8"), "utf-8")
 
 
 @pytest.mark.parametrize("path", CASES)
@@ -131,7 +133,7 @@ def test_a_uniform_crlf_document_hands_the_model_no_carriage_return():
     — an invisible control character it was expected to copy, with no check able
     to tell whether it had.
     """
-    raw = read_document(CORPUS / "crlf-line-endings.md")
+    raw, _enc = read_document(CORPUS / "crlf-line-endings.md")
     fed, eol = split_terminator(raw)
     assert eol == "\r\n"
     _nodes, segs = parse(fed, [])
@@ -148,7 +150,7 @@ def test_crlf_and_lf_twins_share_translation_memory():
     not share a memory entry. The LF hash is also what text-mode reads produced
     all along, which is why no existing `.lx/` state or `tm.*.jsonl` moves.
     """
-    crlf = read_document(CORPUS / "crlf-line-endings.md")
+    crlf, _enc = read_document(CORPUS / "crlf-line-endings.md")
     lf = crlf.replace("\r\n", "\n")
     assert "\r" in crlf, "fixture must actually be CRLF"
     hashes = [[s["hash"] for s in parse(split_terminator(t)[0], [])[1]] for t in (crlf, lf)]
@@ -176,7 +178,7 @@ def test_mixed_terminators_keep_todays_behaviour_and_still_round_trip():
     segment carries a CR, the residual has been closed and this test should be
     replaced, not deleted.
     """
-    raw = read_document(CORPUS / "crlf-mixed-terminators.md")
+    raw, _enc = read_document(CORPUS / "crlf-mixed-terminators.md")
     fed, eol = split_terminator(raw)
     assert (fed, eol) == (raw, "\n")
     _nodes, segs = parse(fed, [])

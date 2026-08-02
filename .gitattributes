@@ -9,3 +9,13 @@
 # where the runner sets core.autocrlf=true, it is the only thing standing
 # between the corpus and a rewritten line ending.
 tests/corpus/** -text
+
+# The plain-text corpus needs the same protection and more of it. Its fixtures
+# are not all UTF-8 — one is Windows Big5, two are UTF-16 — and `text=auto`
+# guesses per file, so a fixture git decides is text has its terminators
+# rewritten on commit, on every platform, not only on Windows checkout. `-text`
+# turns the guess off; `-diff` stops git rendering the UTF-16 and Big5 ones as
+# mojibake in a diff, which is not correctness but is the difference between a
+# reviewable patch and a screen of noise.
+tests/corpus-text/** -text -diff
+tests/corpus-text-undecodable/** -text -diff

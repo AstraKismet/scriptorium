@@ -20,8 +20,14 @@ import os
 import re
 import sys
 
-__all__ = ["read_document", "write_document", "write_document_to_stdout",
+__all__ = ["UndecodableDocument", "decode_document", "read_document",
+           "write_document", "write_document_to_stdout",
            "split_terminator", "apply_terminator"]
+
+
+class UndecodableDocument(ValueError):
+    """A file whose bytes are not valid in any encoding tried. Refused, not mangled."""
+
 
 # A CRLF pair, an LF that is not part of one, and a CR that is not part of one.
 # Counted separately because the three answer different questions: the first is
@@ -34,16 +40,121 @@ _LONE_CR_RE = re.compile(r"\r(?!\n)")
 _ANY_LF_RE = re.compile(r"\r?\n")
 
 
-def read_document(path):
-    """Decode a source document, preserving every line terminator it contains.
+#: Byte-order marks, longest first. The order is load-bearing rather than tidy:
+#: UTF-32-LE begins with the whole UTF-16-LE mark, so reading them the other way
+#: round decodes a UTF-32 file as UTF-16 and produces text made of NUL characters.
+#:
+#: Each maps to a **concrete** codec, never to bare ``utf-16`` or ``utf-8-sig``.
+#: Measured: ``"﻿Hello".encode("utf-16")`` is ``b'\xff\xfe\xff\xfeH\x00…'`` —
+#: those codecs write a mark of their own on top of the one already in the text,
+#: so a document that round-trips through them gains three bytes every time.
+_BOMS = (
+    (b"\x00\x00\xfe\xff", "utf-32-be"),
+    (b"\xff\xfe\x00\x00", "utf-32-le"),
+    (b"\xef\xbb\xbf", "utf-8"),
+    (b"\xff\xfe", "utf-16-le"),
+    (b"\xfe\xff", "utf-16-be"),
+)
 
-    Deliberately **not** ``utf-8-sig``. A byte-order mark is a byte the pipeline
-    did not decide to change, so it belongs in the skeleton like any other;
+
+def decode_document(data, encodings=("utf-8",), name="the document"):
+    """``(text, encoding)`` for a document's bytes, or refuse to guess.
+
+    Deliberately **not** ``utf-8-sig``, and no mark is stripped. A byte-order
+    mark is a byte the pipeline did not decide to change, so it decodes to
+    U+FEFF and belongs in the skeleton like any other;
     ``tests/corpus/bom-utf8-heading.md`` is the fixture that proves it survives.
-    Stripping it here would silently make that fixture pass for the wrong reason.
+    Because the mark stays in the text, encoding back with the same concrete
+    codec reproduces the original bytes with no special case at the write end.
+
+    A mark, when there is one, **decides** — it is a declaration rather than a
+    guess, and it overrides the candidate list. Without one the candidates are
+    tried in order with ``errors="strict"`` and the first that decodes wins.
+
+    Two rules keep that from mangling a file instead of refusing it:
+
+    - A decode that yields a NUL character is rejected. UTF-16 without a mark is
+      the case: ``"Hello".encode("utf-16-le")`` is valid UTF-8, and it decodes to
+      ``'H\\x00e\\x00…'`` rather than raising. No plain-text novel contains a NUL,
+      so nothing legitimate is lost, and the file is refused with a message
+      instead of silently becoming interleaved rubbish.
+    - Nothing falls back to ``latin-1``, which decodes every possible byte and
+      would make refusal impossible. ``cp1252`` is the closest the default list
+      comes and it is deliberately last: measured 2026-08-02, none of its five
+      undefined bytes can occur in a standard Big5 or GB2312 stream, so for those
+      it is a *total* catch-all rather than a near one. What keeps refusal
+      reachable is that a damaged file is usually damaged in a way cp1252 also
+      rejects — a truncated multi-byte sequence ends on one of those five bytes
+      often enough — and what keeps a Chinese novel from reaching it is the order
+      of the candidates in front of it, not any property of cp1252 itself.
+
+    First success wins, and *ambiguity is not an error*. Refusing when more than
+    one candidate decodes was the alternative and it refuses the primary use
+    case: measured, cp1252 accepts every ordinary Big5, GBK and Shift-JIS
+    document, so "more than one succeeded" is true of nearly every non-UTF-8
+    novel there is. The residual — simplified Chinese read as Big5, a Latin-1
+    European source read as Shift-JIS — is announced by ``lx extract``, which
+    prints the winning encoding, and fixed by reordering the candidate list.
+    """
+    by_bom = False
+    for bom, enc in _BOMS:
+        if data.startswith(bom):
+            candidates, by_bom = (enc,), True
+            break
+    else:
+        candidates = tuple(encodings) or ("utf-8",)
+
+    tried = []
+    for enc in candidates:
+        try:
+            text = data.decode(enc)
+        except UnicodeDecodeError as e:
+            tried.append(f"{enc} (invalid byte at offset {e.start})")
+            continue
+        except LookupError:
+            tried.append(f"{enc} (no such codec in this Python)")
+            continue
+        if "\x00" in text:
+            tried.append(f"{enc} (decodes, but to text containing NUL — "
+                         f"almost always UTF-16 or UTF-32 without a byte-order mark)")
+            continue
+        return text, enc
+
+    # A byte-order mark overrides the candidate list, so telling the reader to
+    # edit that list would be advice that changes nothing. The mark is a
+    # declaration the file makes about itself, and a file that declares one and
+    # then contradicts it is damaged in the second sense below, not misconfigured.
+    hint = (f"Its byte-order mark declares {candidates[0]}, which overrides the configured "
+            f"candidates, and the bytes after it do not decode as that.\n"
+            if by_bom else
+            "If you know the encoding, put it first in \"formats\": "
+            "{\"text\": {\"encodings\": [...]}} in lx.config.json — a name Python knows, "
+            "such as \"cp950\", \"gbk\", \"shift_jis\" or \"utf-16-le\".\n")
+    raise UndecodableDocument(
+        f"{name} could not be decoded. Tried: {'; '.join(tried)}.\n"
+        f"{hint}"
+        f"If the file really does contain bytes that are invalid in its own encoding — a "
+        f"truncated download, a damaged archive — it is refused rather than repaired with "
+        f"replacement characters, because that silently changes bytes this project promises "
+        f"to preserve. Reading one needs the state layer to hold raw skeleton nodes as bytes "
+        f"rather than as JSON text, which is scheduled and not built; until then, repair the "
+        f"file with a tool that shows you what it changed.")
+
+
+def read_document(path, encodings=("utf-8",)):
+    """``(text, encoding)`` for a source document, every terminator preserved.
+
+    Returns the encoding as well as the text because the document's own state
+    file records it, the same way it records ``eol``: both are facts about the
+    file that the segments must not carry and that a later command must not have
+    to re-derive.
+
+    The default is UTF-8 alone, which is what this function did before formats
+    existed and what Markdown still asks for. A format with more candidates
+    passes them; :func:`formats.encodings` is where they come from.
     """
     with open(path, "rb") as f:
-        return f.read().decode("utf-8")
+        return decode_document(f.read(), encodings, name=str(path))
 
 
 def split_terminator(text):
