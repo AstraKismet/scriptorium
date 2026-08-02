@@ -58,6 +58,25 @@ def _indent_columns(line):
     return _columns(line[: len(line) - len(line.lstrip(" \t"))])
 
 
+def _carries_a_text_cr(line):
+    """Does this line hold a carriage return that is not its own terminator?
+
+    ``parse`` splits on ``"\\n"`` alone, so a CR at the end of a line is the CRLF
+    the document arrived with, and a CR anywhere else is a character in a
+    sentence — `docs/decisions.md`, 2026-07-28, "a lone CR is text, not a line
+    terminator". CommonMark disagrees and calls it a line ending, and that
+    disagreement is exactly why such a line may not be offered to the code
+    branch: a CR-only document is *one* line to ``split("\\n")``, so
+    ``'    def x():\\rprose\\r'`` would put the entire file into the skeleton and
+    stop translating ``prose``. Measured against markdown-it-py, 2026-08-02,
+    which renders it as a code block followed by a paragraph.
+
+    Conservative in the same direction as everywhere else here: where this parser
+    cannot know a block's real boundaries, the text stays translatable.
+    """
+    return "\r" in line.rstrip("\r")
+
+
 def parse(text, dnt=(), opts=None):
     """Split markdown into a render skeleton + translatable segments.
 
@@ -203,7 +222,7 @@ def parse(text, dnt=(), opts=None):
         # branch's reach instead was the first attempt and it was wrong in the
         # one direction that costs a translation; see `para_open` above.
         code_floor = CODE_INDENT if list_col is None else list_col + CODE_INDENT
-        if not lazy and ind >= code_floor:
+        if not lazy and ind >= code_floor and not _carries_a_text_cr(line):
             j = i
             # `lines[j].strip()` is redundant and kept for the reader: a blank
             # line either indents past the floor, in which case it joins this raw
@@ -214,7 +233,8 @@ def parse(text, dnt=(), opts=None):
             # unchanged, which is what separates a redundant guard from an
             # untested one.
             while j < n and lines[j].strip() \
-                    and _indent_columns(lines[j]) >= code_floor:
+                    and _indent_columns(lines[j]) >= code_floor \
+                    and not _carries_a_text_cr(lines[j]):
                 j += 1
             # Trailing blank lines are left to the blank branch, and a chunk
             # after them is recognized here again. CommonMark calls that one code

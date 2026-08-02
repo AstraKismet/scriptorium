@@ -130,11 +130,16 @@ def test_an_indented_code_block_is_skeleton_and_never_reaches_the_model():
     # columns hold. The next row is the other half: the line below it is the
     # item's prose and must survive.
     ("- item\n\n        deep code\n    a shallower line of the item.\n", "deep code"),
+    # A CRLF document reaches `parse` as LF text when its terminators are
+    # uniform, but a *mixed* one keeps its CRs, and a CR at the end of a line is
+    # a terminator rather than text. Those lines are still code.
+    ("Para.\r\n\r\n    def x():\r\n        return 1\r\n\r\nClose.\n", "def x():"),
 ], ids=["after-a-paragraph", "after-a-heading", "after-a-setext-underline",
         "after-a-thematic-break", "after-a-table", "at-the-start-of-the-file",
         "one-tab", "two-spaces-and-a-tab", "inside-a-list-item",
         "prose-directly-below", "across-a-blank-line",
-        "a-margin-block-closes-the-item", "a-chunk-stops-at-its-own-floor"])
+        "a-margin-block-closes-the-item", "a-chunk-stops-at-its-own-floor",
+        "a-crlf-terminator-is-not-text"])
 def test_an_indented_chunk_that_is_code_leaves_no_segment_behind(text, code):
     assert code not in "\n".join(s["source"] for s in parse(text)[1])
     assert identity_roundtrip(text) == text
@@ -194,6 +199,13 @@ def test_an_indented_chunk_that_is_code_leaves_no_segment_behind(text, code):
     ("\xa0\xa0\xa0\xa0A no-break space indent is not four columns.\n",
      "A no-break space indent is not four columns."),
     ("\x0c   A form feed is not indentation.\n", "A form feed is not indentation."),
+    # A CR-only document — Classic Mac OS — is *one* line to `str.split("\n")`,
+    # because this parser treats a lone CR as text rather than as a terminator
+    # (`docs/decisions.md`, 2026-07-28). CommonMark calls it two lines, a code
+    # block and a paragraph. The parser cannot know where the chunk ends, so it
+    # declines to make any of it skeleton and the prose stays translatable.
+    ("    def x():\rprose after a bare carriage return\r",
+     "prose after a bare carriage return"),
     # The two that knowingly disagree with CommonMark, both conservative.
     #
     # A bare `>` closes the paragraph inside a blockquote, so CommonMark opens a
@@ -214,7 +226,8 @@ def test_an_indented_chunk_that_is_code_leaves_no_segment_behind(text, code):
         "a-tab-is-four-columns", "a-shallower-line-below-a-chunk",
         "a-tab-inside-the-list-marker", "a-margin-list-the-table-branch-claims",
         "three-spaces-at-the-margin", "ideographic-space", "no-break-space",
-        "form-feed", "bare-quote-marker", "task-list-checkbox"])
+        "form-feed", "a-bare-carriage-return-inside-the-line",
+        "bare-quote-marker", "task-list-checkbox"])
 def test_an_indented_chunk_that_is_prose_is_still_translated(text, prose):
     assert prose in "\n".join(s["source"] for s in parse(text)[1])
     assert identity_roundtrip(text) == text
