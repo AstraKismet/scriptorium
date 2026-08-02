@@ -70,14 +70,22 @@ _LINE_END_BLANKS_RE = re.compile(r"[ \t]+(?=\r?\n)")
 #: the segment. An indented code block used to arrive the same way and stopped on
 #: 2026-08-02, when it became skeleton; the list item did not.
 #:
-#: Since 2026-08-03 the *outer* runs no longer depend on this: `accept` strips
-#: before calling here, `cli.do_apply` still does not, and both replace whatever
-#: reaches position 0 with the source's own run afterwards
-#: (:func:`reseat_outer_blanks`). So the position-0 half of this lookbehind is
-#: belt-and-braces now, and the line-start half — every run that follows a newline
-#: *inside* the segment, which is what HANDOFF-011 was about — is not. They are one
-#: regex and cannot be separated, and the direct tests over this function are what
-#: keep both halves pinned rather than the callers.
+#: The two callers reach position 0 differently since 2026-08-03, and only one of
+#: them makes this guard redundant. `translate.accept` strips before calling here,
+#: so what arrives at position 0 is already a non-blank character and the run it
+#: will wear is put back afterwards by :func:`reseat_outer_blanks`. `cli.do_apply`
+#: does neither: it passes the person's text through unstripped, and with
+#: ``keep_added_indent=True`` a run the source has no counterpart for is *kept*
+#: rather than replaced — so it reaches here, and this lookbehind is the only thing
+#: standing between it and `collapse_space`. Measured by neutering the guard:
+#: ``'  譯文。'`` applied to an unindented source stores ``' 譯文。'`` without it and
+#: ``'  譯文。'`` with it, and four of five indent shapes differ the same way, while
+#: nothing on `accept`'s path moves at all.
+#:
+#: So: load-bearing for `lx apply`, inert for `accept`, and the line-start half —
+#: every run that follows a newline *inside* the segment, which is what
+#: HANDOFF-011 was about — load-bearing for both. One regex, three jobs, and it
+#: cannot be split.
 _INTERIOR = r"(?<=[\S\r])"
 
 
