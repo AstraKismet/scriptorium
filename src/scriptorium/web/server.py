@@ -34,7 +34,7 @@ from ..cli import (
 from ..config import load_config
 from ..docio import write_document
 from ..providers import available
-from ..store import append_tm, load_doc, load_tm, tm_records, tracked
+from ..store import append_tm, load_doc, load_tm, save_targets, tm_records, tracked
 
 STATIC = os.path.join(os.path.dirname(__file__), "static")
 
@@ -477,10 +477,14 @@ def _translate_job(src, lang, cfg, body):
             if not segments:
                 log("nothing to do")
                 return
+            # Committed per batch, as on the CLI path: the job outlives the
+            # request that started it, and a workbench closed mid-run must not
+            # be how an hour of model time is discarded.
             results, failures = translate_segments(
                 segments, doc, cfg, provider_name=body.get("provider"), mode=mode,
                 batch_size=body.get("batch"), concurrency=body.get("concurrency"),
-                progress=Progress(log))
+                progress=Progress(log),
+                on_batch=lambda ok: save_targets(src, lang, ok, f"llm:{mode}"))
             applied, _ = do_apply(src, lang, cfg, results, origin=f"llm:{mode}")
             with _JOB_LOCK:
                 state["applied"], state["failures"] = applied, failures

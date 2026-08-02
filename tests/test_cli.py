@@ -16,6 +16,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+import statedb  # noqa: E402
 from scriptorium.cli import force_utf8  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -199,14 +200,14 @@ def test_state_from_before_typed_slots_is_refused_with_the_command_that_fixes_it
     assert _lx(["apply", "d.md", "--lang", "zh-TW", "--file", "t.json"],
                tmp_path, env).returncode == 0
 
-    # Downgrade the state file to the shape this build replaced: no version key,
-    # slots as plain strings.
-    state = next((tmp_path / ".lx" / "docs").iterdir())
-    doc = json.loads(state.read_text(encoding="utf-8"))
-    doc.pop("state_version", None)
-    for seg in doc["segments"]:
-        seg["slots"] = {k: v["original"] for k, v in seg["slots"].items()}
-    state.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+    # Downgrade the state to the shape this build replaced: version 1, slots as
+    # plain strings. The version is a per-document column now rather than a key
+    # in a JSON file — `PRAGMA user_version` is the *schema*, which this test is
+    # not about, and which no re-extract could fix if it were.
+    statedb.set_state_version(tmp_path, 1)
+    statedb.edit_segments(
+        tmp_path, lambda body: {**body, "slots": {k: v["original"]
+                                                  for k, v in body["slots"].items()}})
 
     r = _lx(["check", "d.md", "--lang", "zh-TW"], tmp_path, env)
     assert r.returncode == 2, r.stdout.decode("utf-8", "replace")
@@ -215,14 +216,17 @@ def test_state_from_before_typed_slots_is_refused_with_the_command_that_fixes_it
     assert "lx extract d.md --lang zh-TW" in message
 
     assert _lx(["extract", "d.md", "--lang", "zh-TW"], tmp_path, env).returncode == 0
-    doc = json.loads(state.read_text(encoding="utf-8"))
+    doc = statedb.documents(tmp_path)[0]
+    segs = statedb.segments(tmp_path)
     assert doc["state_version"] == 3
-    assert doc["segments"][0]["target"] == target
-    assert doc["segments"][0]["slots"]["1"]["role"] == "open"
-    # The carryover crossed a file with no `context` at all, which is every state
-    # file written before version 3. It works because `prior_targets` reads `kind`
-    # when the key is absent — the migration rule, asserted where it is used.
-    assert doc["segments"][0]["context"] == doc["segments"][0]["kind"]
+    assert segs[0]["target"] == target
+    assert segs[0]["slots"]["1"]["role"] == "open"
+    # The carryover crossed the bump because `prior_targets` reads the identity
+    # off its own columns, which no content bump touches. That is what replaced
+    # the `kind`-for-a-missing-`context` migration rule the JSON reader needed:
+    # a column is present or it is NULL, and a format whose context is
+    # legitimately null keeps it.
+    assert segs[0]["context"] == segs[0]["kind"]
     assert _lx(["check", "d.md", "--lang", "zh-TW"], tmp_path, env).returncode == 0
 
 
@@ -241,26 +245,25 @@ def test_state_from_a_newer_build_is_not_silently_overwritten(tmp_path):
     assert _lx(["init"], tmp_path, env).returncode == 0
     assert _lx(["extract", "d.md", "--lang", "zh-TW"], tmp_path, env).returncode == 0
 
-    state = next((tmp_path / ".lx" / "docs").iterdir())
-    doc = json.loads(state.read_text(encoding="utf-8"))
-    doc["state_version"] = 99
-    doc["segments"][0]["field_from_the_future"] = "must not be lost"
-    state.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+    statedb.set_state_version(tmp_path, 99)
+    statedb.edit_segments(tmp_path,
+                          lambda body: {**body, "field_from_the_future": "must not be lost"})
 
     for cmd in (["check"], ["extract"], ["render", "--fallback", "-o", "out.md"]):
         r = _lx([cmd[0], "d.md", "--lang", "zh-TW", *cmd[1:]], tmp_path, env)
         assert r.returncode == 2, f"{cmd[0]} did not refuse: {r.stdout.decode('utf-8', 'replace')}"
         assert "--reset" in r.stderr.decode("utf-8")
 
-    after = json.loads(state.read_text(encoding="utf-8"))
-    assert after["state_version"] == 99
-    assert "field_from_the_future" in after["segments"][0]
+    assert statedb.documents(tmp_path)[0]["state_version"] == 99
+    assert "field_from_the_future" in statedb.segments(tmp_path)[0]
 
     # --reset is the escape hatch the message names, and it must actually work.
+    # It still can, which is the reason the content version stayed a per-document
+    # column instead of collapsing into `PRAGMA user_version`: a database-wide
+    # refusal would make this sentence false for everyone with two documents.
     assert _lx(["extract", "d.md", "--lang", "zh-TW", "--reset"], tmp_path, env).returncode == 0
-    after = json.loads(state.read_text(encoding="utf-8"))
-    assert after["state_version"] == 3
-    assert "field_from_the_future" not in after["segments"][0]
+    assert statedb.documents(tmp_path)[0]["state_version"] == 3
+    assert "field_from_the_future" not in statedb.segments(tmp_path)[0]
 
 
 # --- what `lx init` scaffolds, and what the pipeline writes back -------------
@@ -292,8 +295,13 @@ def test_state_and_rendered_output_keep_the_source_terminator(tmp_path):
     assert _lx(["init"], tmp_path, env).returncode == 0
     assert _lx(["extract", "zh.md", "--lang", "zh-TW"], tmp_path, env).returncode == 0
 
-    state = next((tmp_path / ".lx" / "docs").iterdir())
-    assert b"\r" not in state.read_bytes(), f"{state.name} carries a CR"
+    # The terminator is a document-level fact and lives in one place. Asserted on
+    # the skeleton rather than on the state file's bytes, which is what this said
+    # while the state was JSON: a CR anywhere in a node is the defect — the model
+    # and the reviewer would both have to reproduce it — and the state file no
+    # longer has bytes of its own to inspect.
+    assert statedb.documents(tmp_path)[0]["eol"] == "\n"
+    assert not any("\r" in n.get("v", "") for n in statedb.nodes(tmp_path)), "a node carries a CR"
 
     r = _lx(["render", "zh.md", "--lang", "zh-TW", "--fallback", "-o", "out.md"],
             tmp_path, env)

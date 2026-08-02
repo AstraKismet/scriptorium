@@ -97,7 +97,9 @@ gh auth refresh -h github.com -s workflow
 
 ## What is and is not committed
 
-`.lx/docs/` and `.lx/reports/` are regenerable and ignored. `.lx/tm.*.jsonl` —
+`.lx/state.db` and `.lx/reports/` are regenerable and ignored — the database
+carries `-wal` and `-shm` sidecars while a command is running, and they are
+ignored with it. `.lx/tm.*.jsonl` —
 the translation memory — is deliberately **not** ignored: it holds wording a human
 has already approved, and losing it means paying for that review twice.
 

@@ -14,6 +14,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+import statedb  # noqa: E402
 from scriptorium.cli import UnsafePath, confined_path  # noqa: E402
 from scriptorium.web import server as web_server  # noqa: E402
 from scriptorium.web.server import _Handler, _own_hosts, _own_origins  # noqa: E402
@@ -228,9 +229,9 @@ def test_extract_src_cannot_reach_outside_the_project(base, tmp_path, monkeypatc
     # pin: `_post` validates `src` on its own line. Mutation proved it unpinned
     # — a build that kept only the null-and-type half of the check answered 200
     # here and created `.lx/docs/.._.._outside.md.zh-TW.json` holding the
-    # foreign file's segments. Both spellings, and the state directory listing
-    # is asserted rather than the status alone, because a 403 sent after the
-    # extract would leave the read already done and the state file as evidence.
+    # foreign file's segments. Both spellings, and what the state holds is
+    # asserted rather than the status alone, because a 403 sent after the
+    # extract would leave the read already done and the state as evidence.
     src, root = _project(base, tmp_path, monkeypatch)
     outside = tmp_path / "outside.md"
     outside.write_text("# Not yours\n\nOne sentence.\n", encoding="utf-8")
@@ -238,7 +239,7 @@ def test_extract_src_cannot_reach_outside_the_project(base, tmp_path, monkeypatc
         with pytest.raises(urllib.error.HTTPError) as e:
             _post(base, "/api/extract", {"src": spelling, "lang": "zh-TW"})
         assert e.value.code == 403
-    assert not any("outside" in p.name for p in (root / ".lx" / "docs").iterdir())
+    assert not any("outside" in d["source"] for d in statedb.documents(root))
 
 
 def test_lang_cannot_walk_out_of_the_state_directory(base, tmp_path, monkeypatch):
@@ -288,7 +289,7 @@ def test_a_json_null_does_not_skip_the_checks(base, tmp_path, monkeypatch):
     with pytest.raises(urllib.error.HTTPError) as e:
         _post(base, "/api/render", {"src": src, "lang": None, "fallback": True})
     assert e.value.code == 403
-    assert not any((root / ".lx" / "docs").glob("*.None.json"))
+    assert not any(d["lang"] == "None" for d in statedb.documents(root))
     assert not (root / "i18n" / "None").exists()
 
 

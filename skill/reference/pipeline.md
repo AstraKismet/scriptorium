@@ -7,12 +7,12 @@ lx.config.json            project settings
 config/glossary.csv       source,target,forbidden,severity
 config/dnt.txt            verbatim do-not-translate terms, one per line
 .lx/
-  docs/<doc>.<lang>.json  render skeleton + segments + targets + status
+  state.db                render skeleton + segments + targets + status, SQLite
   tm.<lang>.jsonl         translation memory, append-only
   reports/<doc>.<lang>.json  last check result
 ```
 
-`.lx/docs/*.json` is the working state and is safe to delete and rebuild.
+`.lx/state.db` is the working state and is safe to delete and rebuild.
 `.lx/tm.*.jsonl` is the asset worth keeping in version control: it is what makes
 the second, third, and seventh translation of a document nearly free.
 

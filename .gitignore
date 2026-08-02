@@ -1,4 +1,7 @@
 # pipeline state — regenerable from sources, except the translation memory
+# state.db carries its -wal and -shm sidecars, which is why this is a glob: a
+# committed WAL file is a half-written transaction someone else has to recover.
+.lx/state.db*
 .lx/docs/
 .lx/reports/
 # keep .lx/tm.*.jsonl: the memory is the asset, and it belongs in history
