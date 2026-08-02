@@ -21,7 +21,7 @@ one. Without installing, `python -m scriptorium` works in place of `lx`.
 ## Before you propose a change as finished
 
 ```bash
-python -m pytest -q             # 496 passed; no network, no model
+python -m pytest -q             # 547 passed; no network, no model
 python -m ruff check src tests
 ```
 
