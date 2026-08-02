@@ -765,6 +765,34 @@ def test_apply_keeps_the_paragraph_indent_a_zh_TW_translator_types(
     assert out == "　　他走進房間。\n\n　　她沒有抬頭。\n"
 
 
+@pytest.mark.parametrize("typed, stored", [
+    ("  譯文。", "  譯文。"),          # two ASCII spaces: `collapse_space` eats them
+    ("    譯文。", "    譯文。"),      # four, the width a reviewer copies
+    ("  \t譯文。", "  \t譯文。"),      # a mixed run
+    ("　  他走進房間。", "　  他走進房間。"),   # U+3000 then spaces, what a PDF paste leaves
+])
+def test_an_indent_apply_keeps_survives_normalization_on_the_way_through(
+        tmp_path, monkeypatch, typed, stored):
+    """`_INTERIOR` is load-bearing on this path, and only on this path.
+
+    `accept` strips before `normalize` sees anything, so position 0 there is
+    always a non-blank character. `do_apply` does neither — it passes the person's
+    text through unstripped, and `keep_added_indent` then *keeps* the run instead
+    of replacing it — so the run meets `collapse_space` on the way. Measured by
+    neutering the lookbehind: four of these five shapes come back one space
+    shorter without it, and nothing on `accept`'s path moves at all.
+
+    The direct tests over `normalize` pin the regex; this pins the claim that a
+    caller depends on it, which is the part that was written down wrongly twice.
+    """
+    _project(tmp_path, monkeypatch, doc=b"He walked into the room.\n")
+    parsed, _r, _j = do_extract("d.md", "zh-TW", CFG)
+    seg = parsed["segments"][0]
+    do_apply("d.md", "zh-TW", CFG, {seg["id"]: typed}, origin="human")
+    saved = next(s for s in load_doc("d.md", "zh-TW")["segments"] if s["id"] == seg["id"])
+    assert saved["target"] == stored
+
+
 def test_a_model_s_own_indent_is_still_stripped_where_apply_s_is_kept(
         tmp_path, monkeypatch):
     """The half that did not move, asserted beside the half that did.
