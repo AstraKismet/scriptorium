@@ -3,6 +3,85 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-08-02 · A segment travels with its neighbours, and the reference form cost 2x what D5 estimated
+
+HANDOFF-014, implementing D5 of the 2026-07-29 re-founding. Each request item
+now carries the segments either side of it as read-only source: `before_id` /
+`after_id` when that neighbour is another item of the same request, `before_text`
+/ `after_text` when it is not. `retry_one` gets both sides inlined, which was the
+point — it sends one segment alone, and that is where a hard sentence ends up.
+The window is `batch.context`, one segment either side, and `0` turns the feature
+off including the paragraph of system prompt that explains it.
+
+**Adjacency is the document's, never the caller's list.** `_neighbour_context`
+reads `doc["segments"]`, the same authority `tone` and `eol` already have for
+facts about a document rather than about one request. *Lost:* taking the
+`segments` argument as document order, which is what a reading of `_chunks`
+suggests — it does slice consecutive segments. But `lx repair` passes only the
+failing segments and `lx translate --ids` passes whatever the user named, and
+under either the payload would have told the model that segment 5 and segment 40
+are consecutive prose. A confident lie about flow is worse than no context.
+
+**The field shape was measured, and the first one was wrong.** D5 said "about
+two extra segments per batch of 25 — roughly 8%". The text cost is indeed about
+that; what the estimate did not count is the *container*. `_user_message`
+serializes with `indent=1`, so a neighbour written `[{"id": "s0004"}]` costs some
+48 characters where the id inside it costs 8. Measured at `batch.size` 25,
+`batch.context` 1, as a ratio of the same request with no context (characters of
+the user message — no tokenizer may be vendored under invariant 1, and the three
+variants serialize the same text in the same script, so the character ratio is a
+faithful proxy):
+
+| document | chars/segment | nested `[{"id":…}]` | shipped `before_id` | naive |
+|---|---|---|---|---|
+| `tests/corpus/long-manual.md` | 45 | 1.95x | **1.50x** | 2.30x |
+| `docs/decisions.md` | 415 | 1.25x | **1.16x** | 2.85x |
+| `README.md` | 104 | 1.63x | **1.35x** | 2.56x |
+
+The cost tracks *segment length*, not batch size: the per-item field is fixed
+overhead, so a 415-character prose paragraph absorbs it and a 45-character table
+cell does not. Prose is the use case this exists for, and the number that governs
+is 1.16x — against the naive form's 2.85x, which is what D5's "roughly 3x" meant
+and is confirmed. Larger batches are cheaper (1.12x on prose at `batch.size` 50,
+1.27x at 10) because the inlined text lives only at the two edges. The retry path
+is 2.3–2.8x for the one segment it re-sends, which is the price of having no
+batch to borrow from and was accepted in advance. The system prompt grows 625
+characters, once per run.
+
+*Lost:* the nested list-of-objects form, on the numbers above alone. *Lost:* a
+positional convention — "the items are in document order, so your neighbours are
+the items beside you", which measured 1.05–1.07x and would have hit D5's
+estimate. It makes *silence* carry meaning: a missing `before` would have to mean
+"the item above is my previous paragraph" in a contiguous batch and "I am the
+start of the document" in the first one, with an override rule for repair mode
+where the array is not document order at all. This project puts determinism in
+code and asks the model for judgement; a three-clause inference about array
+position is neither. Nine points of request size on the primary use case is not
+worth buying with it.
+
+**A guard that survived the mutation sweep was removed rather than kept.** An
+early `if window <= 0: return None` looked load-bearing and was not: a window of
+0 slices `ids[i:i]` on both sides, so every entry is empty, no item gains a field
+and nothing is briefed. Seventeen mutations were applied one at a time to a copy
+of the tree and all seventeen turn the suite red; that one did not, and an inert
+branch a later reader would take for load-bearing is worse than the dictionary it
+saved building. `ids[max(0, i - window):i]` **is** load-bearing and stayed — at
+`i=1` with a window of 2 the unclamped slice is `ids[-1:1]`, which is empty, so
+the second segment of a document would silently lose the first.
+
+**Neighbours do not enter the translation-memory key**, and `store.py` was not
+touched. Same reasoning the key already applies to the mask configuration: it is
+deliberately blind to what produced a proposal, and `translate.accept` is what
+makes the blindness safe. A paragraph translated beside different neighbours is
+still the same wording under the same key. *Lost:* a context hash in the key,
+which invalidates the entire memory on any edit anywhere in the document.
+
+**No new provider request field** — invariant 7 holds, and
+`tests/test_provider.py::test_neighbour_context_survives_an_actual_request` runs
+a real `translate_segments` against the mock HTTP server and asserts the body
+still has exactly `model`, `messages`, `temperature`, `max_tokens`, `stream`.
+`checks.py` was not touched either: continuity is judgement, invariant 4.
+
 ## 2026-08-02 · Document state is one SQLite database, and a batch is durable when it lands
 
 HANDOFF-202. `.lx/docs/*.json` is gone; document state lives in `.lx/state.db`.
