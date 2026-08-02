@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from .checks import check_segment
 from .config import DEFAULT_TONE, canonical_tone, load_dnt, load_glossary, load_style
 from .mask import placeholder_ids, repair_placeholders
-from .normalize import normalize
+from .normalize import normalize, reseat_outer_blanks
 from .providers import build as build_provider
 
 # ── prompts ────────────────────────────────────────────────────────────────
@@ -465,7 +465,14 @@ def accept(seg, text, lang, cfg):
     `lx apply` deliberately does not come through here. It carries a person's or
     an agent's own words, and refusing those at the door with no way to override
     is worse than reporting them at `lx check`, where a reviewer is already
-    looking. See ``docs/decisions.md``, 2026-07-29.
+    looking. See ``docs/decisions.md``, 2026-07-29. It does share
+    :func:`normalize.reseat_outer_blanks`, because that one is not a refusal:
+    whichever of the three sources produced a target, the blanks a segment opens
+    and closes with are the host syntax's and not the translator's.
+
+    The strip is still here and still unconditional — models pad their answers,
+    and every reuse path comes through this function — but what it takes off the
+    ends is put back from the source rather than dropped.
     """
     text = repair_placeholders(text).strip()
     want, got = sorted(placeholder_ids(seg["masked"])), sorted(placeholder_ids(text))
@@ -473,7 +480,13 @@ def accept(seg, text, lang, cfg):
         return None, f"placeholder mismatch (expected {want}, got {got})"
     if not text:
         return None, "empty translation"
-    return normalize(text, lang, cfg), None
+    # Reseated **after** normalization, not before, and the order is measured
+    # rather than stylistic: `collapse_space` ends in `[ \t]+\Z`, which is in
+    # zh-TW's default op list, so a trailing run handed to `normalize` is deleted
+    # again and the fix is inert for the project's primary language. Running
+    # `normalize` on the stripped sentence is also exactly what it received
+    # before this change, so nothing about the ops moved underneath it.
+    return reseat_outer_blanks(seg["masked"], normalize(text, lang, cfg)), None
 
 
 class Progress:

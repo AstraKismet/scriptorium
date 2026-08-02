@@ -105,6 +105,14 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    2026-08-02, which is what `mask.py` could not do for it. See
    `docs/decisions.md` of that date, "An indented code block is skeleton".
 
+   Because that run is inside the segment and the model may not reproduce it, the
+   **blanks a segment opens and closes with are re-imposed from the source** on
+   every proposal — `normalize.reseat_outer_blanks`, shared by `translate.accept`
+   and `cli.do_apply`. The trailing end is the same rule for a different reason:
+   `mdparse` emits one segment per blockquote line, so a hard break's two spaces
+   sit at a segment's end with the newline that means them in the skeleton. See
+   `docs/decisions.md`, 2026-08-03.
+
 4. **Checks are mechanically decidable.** A rule belongs in `checks.py` only if a
    program can decide it without judgement. Anything requiring taste goes in the
    prompt or in human review. Context-dependent vocabulary is judgement — that is
@@ -202,7 +210,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 604 passed; no network
+python -m pytest -q                 # 667 passed; no network
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
 
@@ -296,6 +304,20 @@ committed-clean before it is dispatched.** Reverting an edit is
 worker's own — it cannot tell them apart. Read-only delegation is exempt and is
 most of what happens here, which is exactly why the case surprises people.
 
+A fifth, added 2026-08-03 after two consecutive packages: **a sweep is blind to
+the axis it does not vary, so record the axes beside the number and hand the
+claim to an adversarial pass.** Scaling inside the dimensions you chose never
+reaches one that is absent, and a large count reads like proof. HANDOFF-018 swept
+37224 documents, reported 0, and review found four regressions on the one axis
+held constant; HANDOFF-019 swept 441 across five named axes, reported the
+trailing side harmless, and twenty cases on the axis it held constant found six
+structural shapes. Its adversarial pass then found two regressions the *repaired*
+code had introduced — one of them a validator silently blinded by the repair —
+which neither the sweep nor a green mutation run could see, because both were
+aimed at the code the package had thought about. `docs/conventions/delegated-work.md`
+§6.7 has both halves — reviewing someone else's measurement, and distrusting your
+own.
+
 ## Git and commits
 
 - Remote is `github-astrakismet:AstraKismet/scriptorium.git`. **The alias is not
@@ -358,8 +380,12 @@ most of what happens here, which is exactly why the case surprises people.
   keeps one wording one entry across machines — so `translate.accept` is what
   makes the blindness safe. Carryover from a document's own prior state is a
   proposal on the same terms, and the memory is tried when it is refused.
-  `lx apply` is the deliberate exception: a person's words are reported at
-  `lx check`, not refused at the door.
+  `lx apply` is the deliberate exception, and only for *refusal*: a person's words
+  are reported at `lx check`, not rejected at the door. It shares
+  `reseat_outer_blanks` all the same, because a run of blanks at a segment's edge
+  belongs to the host syntax rather than to whichever of the three sources wrote
+  the target — closing that half on 2026-08-03 was what stopped one document
+  rendering differently depending on who translated it.
 - The project style sheet (`config/style.txt`) says how *this book* sounds, where
   the register brief says how the target language's prose is written. Its two
   halves are injected differently and that is the design, not an accident: the

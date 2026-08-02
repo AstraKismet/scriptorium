@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from scriptorium.cli import do_apply, do_extract, do_render  # noqa: E402
 from scriptorium.config import DEFAULT_CONFIG, DEFAULT_TONE  # noqa: E402
 from scriptorium.mdparse import parse  # noqa: E402
+from scriptorium.normalize import normalize  # noqa: E402
 from scriptorium.store import (  # noqa: E402
     SEGMENTATION_VERSION,
     append_tm,
@@ -570,3 +571,249 @@ def test_an_indented_code_block_survives_a_state_rebuilt_from_the_memory(
     assert (missing, second) == (0, first)
     assert "    def indented():\n        return 'four spaces, not a fence'" in second
     assert "\n\nClosing paragraph." not in second      # the prose *was* translated
+
+
+#: The shape HANDOFF-018's fix does *not* reach, because it is not code: a list
+#: item's second paragraph. `mdparse` keeps its four spaces at position 0 of the
+#: segment on purpose — a raw node can only sit before or after a whole segment,
+#: so an indent that follows a newline inside the source cannot be held by one —
+#: and CommonMark reads them as what keeps the paragraph inside the item.
+INDENTED_ITEM_DOC = (
+    b"- item one\n"
+    b"\n"
+    b"    A second paragraph of the item.\n"
+    b"\n"
+    b"1. an ordered item\n"
+    b"\n"
+    b"   A second paragraph, indented three.\n"
+)
+
+
+def test_an_indent_a_segment_owns_survives_a_state_rebuilt_from_the_memory(
+        tmp_path, monkeypatch):
+    """The same laundering cycle as above, on the shape that is still a segment.
+
+    HANDOFF-018 closed this for an indented code block by moving it into the
+    skeleton, and recorded the premise that nothing else could arrive with an
+    indent at position 0. Measured while closing it: false. The cycle is
+    unchanged — `lx apply` with the indent intact, `lx commit`, delete the state
+    database, `lx extract` — and reuse still goes through `translate.accept`, so
+    before the fix the second paragraph came back four columns shorter and left
+    the list item. `lx check` exited 0 at every step, both times.
+
+    Asserted on the rendered bytes rather than on the segment list, because bytes
+    are what the defect changed and what a reader would have had to notice.
+    """
+    _project(tmp_path, monkeypatch, doc=INDENTED_ITEM_DOC)
+    doc, _reused, _rejected = do_extract("d.md", "zh-TW", CFG)
+    indented = [s for s in doc["segments"] if s["source"][:1].isspace()]
+    assert [s["source"] for s in indented] == [
+        "    A second paragraph of the item.",
+        "   A second paragraph, indented three.",
+    ], [s["source"] for s in doc["segments"]]
+
+    # A person's words, applied with the indent intact — what a reviewer who
+    # copied the source line would produce. `do_apply` is the path that never
+    # stripped, so this is the target that used to be banked whole and handed
+    # back short. No digits in the wording: `pangu` spaces CJK against them, and
+    # this test is about blanks at the ends rather than in the middle.
+    words = ["首段譯文。", "次段譯文。", "第三段譯文。", "末段譯文。"]
+    do_apply("d.md", "zh-TW", CFG,
+             {s["id"]: (s["source"][: len(s["source"]) - len(s["source"].lstrip())]
+                        + words[k])
+              for k, s in enumerate(doc["segments"])})
+    append_tm("zh-TW", tm_records(load_doc("d.md", "zh-TW"), load_tm("zh-TW")))
+    first, missing = do_render("d.md", "zh-TW", CFG)
+    assert missing == 0
+    assert "\n\n    次段譯文。\n" in first
+    assert "\n\n   末段譯文。\n" in first
+
+    for leftover in (tmp_path / ".lx").glob("state.db*"):
+        leftover.unlink()
+    _doc2, reused, rejected = do_extract("d.md", "zh-TW", CFG)
+    assert (reused, rejected) == (4, 0)
+    second, missing = do_render("d.md", "zh-TW", CFG)
+    assert (missing, second) == (0, first)
+
+
+def test_a_memory_entry_banked_without_the_indent_gets_it_back_on_reuse(
+        tmp_path, monkeypatch):
+    """The other half of the laundering, and the half a build cannot avoid.
+
+    Every entry banked before this fix holds the *stripped* wording, because
+    `accept` is what wrote it. The key is the source hash — which includes the
+    indent, since the indent is part of the source — so those entries still
+    match, and matching is what makes them dangerous: a short target reused into
+    an indented segment is how the defect would have kept arriving after the
+    repair. `accept` decides the runs from the segment in front of it rather than
+    from the entry, so the entry is reseated instead of trusted.
+    """
+    _project(tmp_path, monkeypatch, doc=b"- item one\n\n    A second paragraph.\n")
+    doc, _r, _j = do_extract("d.md", "zh-TW", CFG)
+    seg = next(s for s in doc["segments"] if s["source"].startswith("    "))
+
+    # Written straight to the memory, bypassing `do_apply` on purpose: this is an
+    # entry an older build wrote, and no current path can produce one.
+    banked = dict(seg, target="這是第二段。", origin="human")
+    append_tm("zh-TW", [tm_record(banked, DEFAULT_TONE)])
+
+    for leftover in (tmp_path / ".lx").glob("state.db*"):
+        leftover.unlink()
+    doc2, reused, rejected = do_extract("d.md", "zh-TW", CFG)
+    assert (reused, rejected) == (1, 0)
+    assert next(s["target"] for s in doc2["segments"] if s["id"] == seg["id"]) \
+        == "    這是第二段。"
+    out, missing = do_render("d.md", "zh-TW", CFG)
+    assert missing == 1                                  # `item one` is untranslated
+    assert "\n\n    這是第二段。\n" in out
+
+
+@pytest.mark.parametrize("applied", [
+    "這是第二段。",              # the indent dropped, which a textarea invites
+    "    這是第二段。",          # reproduced
+    "\n  這是第二段。  \n",      # an agent's padding instead
+])
+def test_apply_seats_a_person_s_words_in_the_indent_the_same_way_accept_does(
+        tmp_path, monkeypatch, applied):
+    """The half of the `do_apply` / `accept` asymmetry that had to close.
+
+    HANDOFF-018 kept that asymmetry deliberately and for a different reason — a
+    person's or an agent's words are reported at `lx check`, never refused at the
+    door (`docs/decisions.md`, 2026-07-29) — and this does not touch that half:
+    nothing here can return `None`. What it closes is a document rendering
+    differently depending on which of the three equal sources produced its
+    target, over a run of blanks that belongs to the host syntax rather than to
+    the translator.
+    """
+    _project(tmp_path, monkeypatch, doc=b"- item one\n\n    A second paragraph.\n")
+    doc, _r, _j = do_extract("d.md", "zh-TW", CFG)
+    seg = next(s for s in doc["segments"] if s["source"].startswith("    "))
+    applied_n, unknown = do_apply("d.md", "zh-TW", CFG, {seg["id"]: applied})
+    assert (applied_n, unknown) == (1, [])
+    stored = next(s for s in load_doc("d.md", "zh-TW")["segments"] if s["id"] == seg["id"])
+    assert stored["target"] == "    這是第二段。"
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\n", "　"])
+def test_apply_clearing_a_segment_does_not_leave_an_indent_standing_alone(
+        tmp_path, monkeypatch, blank):
+    """The reachable half of `reseat_outer_blanks`'s blank-text guard.
+
+    `accept` never reaches it — it refuses an empty proposal before reseating —
+    but `lx apply` and the workbench's save endpoint do, and clearing a segment
+    is what a reviewer does when a paragraph needs redoing. Reseated, a cleared
+    target becomes `"    "`, which is *truthy*: `render` would emit four spaces
+    where the untranslated marker belongs and report nothing missing. Found by
+    the mutation pass; nothing else in the suite could see the guard.
+    """
+    _project(tmp_path, monkeypatch, doc=b"- item one\n\n    A second paragraph.\n")
+    doc, _r, _j = do_extract("d.md", "zh-TW", CFG)
+    seg = next(s for s in doc["segments"] if s["source"].startswith("    "))
+    do_apply("d.md", "zh-TW", CFG, {seg["id"]: blank})
+    stored = next(s for s in load_doc("d.md", "zh-TW")["segments"] if s["id"] == seg["id"])
+    # What `normalize` made of it and nothing more — not the four spaces in front.
+    assert stored["target"] == normalize(blank, "zh-TW", CFG)
+
+
+def test_apply_clearing_a_segment_still_renders_the_untranslated_marker(
+        tmp_path, monkeypatch):
+    """The consequence, on the one blank `render` can tell apart.
+
+    `render` reads a target for truth, so only `""` reaches the marker branch —
+    which is exactly the value the reseat would have destroyed. A whitespace-only
+    target renders as whitespace and always has; that is `render`'s question, not
+    this one's.
+    """
+    _project(tmp_path, monkeypatch, doc=b"- item one\n\n    A second paragraph.\n")
+    doc, _r, _j = do_extract("d.md", "zh-TW", CFG)
+    do_apply("d.md", "zh-TW", CFG, {s["id"]: "譯文。" for s in doc["segments"]})
+    seg = next(s for s in doc["segments"] if s["source"].startswith("    "))
+    do_apply("d.md", "zh-TW", CFG, {seg["id"]: ""})
+    out, missing = do_render("d.md", "zh-TW", CFG, fallback=False)
+    assert missing == 1
+    assert "    A second paragraph." not in out and "譯文。" in out
+
+
+@pytest.mark.parametrize("doc, name", [
+    (b"He walked into the room.\n\nShe did not look up.\n", "novel.md"),
+    (b"He walked into the room.\n\nShe did not look up.\n", "novel.txt"),
+])
+def test_apply_keeps_the_paragraph_indent_a_zh_TW_translator_types(
+        tmp_path, monkeypatch, doc, name):
+    """Where the source has no run, a person's own is theirs to keep.
+
+    Two U+3000 at the head of a paragraph is standard Traditional Chinese
+    typography, and an English source has no leading run for it to be reseated
+    from — so the strict form deletes it, silently, from every paragraph of a
+    novel. That is neither reporting a person's words at `lx check` nor refusing
+    them at the door, and after it no surface in the pipeline could produce an
+    indented Chinese paragraph at all. Both formats, because `textparse` lifts a
+    first line's indent into the skeleton and therefore *never* gives a segment a
+    lead to be reseated from: for plain text this is the only branch there is.
+
+    Found by adversarial review 2026-08-03, against the first version of this
+    package, which closed the `do_apply` asymmetry too far.
+    """
+    _project(tmp_path, monkeypatch, doc=doc, name=name)
+    parsed, _r, _j = do_extract(name, "zh-TW", CFG)
+    do_apply(name, "zh-TW", CFG,
+             {s["id"]: "　　" + w for s, w in zip(parsed["segments"],
+                                                 ["他走進房間。", "她沒有抬頭。"])},
+             origin="human")
+    out, missing = do_render(name, "zh-TW", CFG)
+    assert missing == 0
+    assert out == "　　他走進房間。\n\n　　她沒有抬頭。\n"
+
+
+def test_a_model_s_own_indent_is_still_stripped_where_apply_s_is_kept(
+        tmp_path, monkeypatch):
+    """The half that did not move, asserted beside the half that did.
+
+    `accept` is a gate and `lx apply` is not, which is the whole of the
+    2026-07-29 decision. A model padding a Chinese line to its source's column is
+    the case the strip exists for, and it stays stripped on that path.
+    """
+    _project(tmp_path, monkeypatch, doc=b"He walked into the room.\n")
+    parsed, _r, _j = do_extract("d.md", "zh-TW", CFG)
+    seg = parsed["segments"][0]
+    assert accept(seg, "　　他走進房間。", "zh-TW", CFG) == ("他走進房間。", None)
+    do_apply("d.md", "zh-TW", CFG, {seg["id"]: "　　他走進房間。"}, origin="human")
+    stored = next(s for s in load_doc("d.md", "zh-TW")["segments"] if s["id"] == seg["id"])
+    assert stored["target"] == "　　他走進房間。"
+
+
+def test_apply_does_not_let_a_deeper_indent_replace_the_one_the_source_has(
+        tmp_path, monkeypatch):
+    """And where the source *does* have a run, the source still wins.
+
+    The recorded cost of the rule above: a person writing eight spaces into a
+    segment whose source has four means an indented code block inside the list
+    item, and they get four. That run is the host's layout — it is what keeps the
+    paragraph inside the item at all — and a translation of a paragraph turning
+    into a code block is the larger of the two failures. `docs/decisions.md`,
+    2026-08-03.
+    """
+    _project(tmp_path, monkeypatch, doc=b"- item one\n\n    A second paragraph.\n")
+    parsed, _r, _j = do_extract("d.md", "zh-TW", CFG)
+    seg = next(s for s in parsed["segments"] if s["source"].startswith("    "))
+    do_apply("d.md", "zh-TW", CFG, {seg["id"]: "        這是程式碼"}, origin="human")
+    stored = next(s for s in load_doc("d.md", "zh-TW")["segments"] if s["id"] == seg["id"])
+    assert stored["target"] == "    這是程式碼"
+
+
+def test_apply_still_takes_a_target_accept_would_refuse(tmp_path, monkeypatch):
+    """The half that stays open, pinned so closing it needs a decision.
+
+    A placeholder set that does not match is what `accept` refuses. `lx apply`
+    takes it and lets `lx check` say so, which is the whole of the 2026-07-29
+    decision — and reseating the blanks must not have quietly turned this path
+    into a second acceptance gate.
+    """
+    _project(tmp_path, monkeypatch, doc=b"- item\n\n    Run `make build` now.\n")
+    doc, _r, _j = do_extract("d.md", "zh-TW", CFG)
+    seg = next(s for s in doc["segments"] if s["source"].startswith("    "))
+    assert seg["masked"] == "    Run ⟦1⟧ now."
+    assert accept(seg, "現在執行。", "zh-TW", CFG)[0] is None
+    assert do_apply("d.md", "zh-TW", CFG, {seg["id"]: "現在執行。"}) == (1, [])
+    stored = next(s for s in load_doc("d.md", "zh-TW")["segments"] if s["id"] == seg["id"])
+    assert stored["target"] == "    現在執行。"

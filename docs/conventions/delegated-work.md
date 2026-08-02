@@ -183,6 +183,27 @@ observed; none is theoretical.
    and what each looks like at its degenerate end (empty, whitespace, one
    element, absent), rather than checking the total. This is §5's rule applied
    to evidence: re-review means re-deriving, not reading and agreeing.
+
+   **The same rule pointed at a measurement you produced yourself.** A sweep is
+   blind to the axis it does not vary, and scaling inside the remaining
+   dimensions never reaches a dimension that is absent — so a big number is
+   evidence about the axes you chose, never about the ones you did not. Before
+   trusting your own zero: write down the axes the sweep varied, name what it
+   held constant, and hand the **claim** — not the sweep — to an adversarial pass
+   whose job is to find the missing axis rather than to re-run the same one
+   wider. Record the axis list beside the number, because a number without it
+   cannot be reviewed under the paragraph above.
+
+   Measured twice, on consecutive packages. HANDOFF-018: 37224 generated
+   documents, 0 counterexamples reported, and adversarial review then found four
+   regressions — all on the one axis the sweep never varied, the shape of the
+   chunk's own lines. HANDOFF-019, whose author had that entry in front of them:
+   441 documents across five named axes said the trailing half of a strip was
+   harmless everywhere, and the axis held constant was *whether a line the
+   skeleton owns follows the segment*. Twenty hand-built cases on that axis alone
+   found six structural shapes. The second one is the more useful of the two,
+   because knowing the failure mode did not prevent it — only enumerating the
+   axes did.
 8. **A writing worker destroys work it was not given.** See §2a; the countermeasure
    is isolation before dispatch rather than review afterwards, because the damage
    is to uncommitted state that no review can see.
