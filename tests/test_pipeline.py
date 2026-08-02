@@ -134,12 +134,26 @@ def test_an_indented_code_block_is_skeleton_and_never_reaches_the_model():
     # uniform, but a *mixed* one keeps its CRs, and a CR at the end of a line is
     # a terminator rather than text. Those lines are still code.
     ("Para.\r\n\r\n    def x():\r\n        return 1\r\n\r\nClose.\n", "def x():"),
+    # The must-still-be-code half of the four guards below. A thematic break
+    # with nothing above it is still a break; a link definition that has a
+    # destination is still a definition; and a line Python calls blank but
+    # CommonMark does not opens a paragraph that a *real* blank then closes.
+    ("---\n    def x():\n", "def x():"),
+    ("[x]: https://example.invalid\n    def x():\n", "def x():"),
+    ("First paragraph.\n　\n\n    def x():\n", "def x():"),
+    # A heading may interrupt a paragraph, and it closes it. The branches that
+    # say nothing about the paragraph state — heading, fence, table, and a chunk
+    # itself — rely on the reset at the top of the loop to close it for them, and
+    # this row is the only one where that reset is observable.
+    ("Paragraph.\n# Heading\n    def x():\n", "def x():"),
 ], ids=["after-a-paragraph", "after-a-heading", "after-a-setext-underline",
         "after-a-thematic-break", "after-a-table", "at-the-start-of-the-file",
         "one-tab", "two-spaces-and-a-tab", "inside-a-list-item",
         "prose-directly-below", "across-a-blank-line",
         "a-margin-block-closes-the-item", "a-chunk-stops-at-its-own-floor",
-        "a-crlf-terminator-is-not-text"])
+        "a-crlf-terminator-is-not-text", "a-thematic-break-underlines-nothing",
+        "a-link-definition-with-a-destination", "a-real-blank-still-closes",
+        "after-a-heading-that-interrupted-a-paragraph"])
 def test_an_indented_chunk_that_is_code_leaves_no_segment_behind(text, code):
     assert code not in "\n".join(s["source"] for s in parse(text)[1])
     assert identity_roundtrip(text) == text
@@ -199,6 +213,30 @@ def test_an_indented_chunk_that_is_code_leaves_no_segment_behind(text, code):
     ("\xa0\xa0\xa0\xa0A no-break space indent is not four columns.\n",
      "A no-break space indent is not four columns."),
     ("\x0c   A form feed is not indentation.\n", "A form feed is not indentation."),
+    # The four found by adversarial review on 2026-08-02, after a 37224-shape
+    # sweep had reported zero. Each is a line the *dispatch* misreads, so each
+    # was invisible to a sweep that varied the block above the chunk without
+    # varying that block's own shape. They are ordinary hand-written Markdown.
+    #
+    # A list item whose text wraps to the left margin: the continuation is at
+    # column 0 and does not close the item, so the second paragraph is still
+    # measured against the item's floor of six and not against four.
+    ("- item wraps and\ncontinues at the left margin.\n"
+     "\n    a second paragraph of the item.\n", "a second paragraph of the item."),
+    # A line that is blank to `str.strip()` and not to CommonMark. It is content,
+    # so it opens a paragraph rather than merely keeping one open — the heading
+    # row is the degenerate end that refuted the first spelling of this guard.
+    ("First paragraph.\n　\n    an indented continuation.\n",
+     "an indented continuation."),
+    ("First paragraph.\n\xa0\n    an indented continuation.\n",
+     "an indented continuation."),
+    ("# Heading\n　\n    an indented continuation.\n", "an indented continuation."),
+    # `=====` and `--` underline nothing when no paragraph is open, so CommonMark
+    # reads them as paragraph text and the indented line as their continuation.
+    ("=====\n    indented prose after it.\n", "indented prose after it."),
+    ("--\n    indented prose after it.\n", "indented prose after it."),
+    # A link definition with no destination is not a link definition.
+    ("[x]:\n    indented prose after it.\n", "indented prose after it."),
     # A CR-only document — Classic Mac OS — is *one* line to `str.split("\n")`,
     # because this parser treats a lone CR as text rather than as a terminator
     # (`docs/decisions.md`, 2026-07-28). CommonMark calls it two lines, a code
@@ -206,6 +244,11 @@ def test_an_indented_chunk_that_is_code_leaves_no_segment_behind(text, code):
     # declines to make any of it skeleton and the prose stays translatable.
     ("    def x():\rprose after a bare carriage return\r",
      "prose after a bare carriage return"),
+    # The same guard on a chunk's *continuation* line rather than its first. The
+    # chunk loop starts at `i + 1`, so the opening line's copy of this test can
+    # no longer stand in for this one.
+    ("Para.\n\n    def a():\n    b\rprose after a text CR\n",
+     "prose after a text CR"),
     # The two that knowingly disagree with CommonMark, both conservative.
     #
     # A bare `>` closes the paragraph inside a blockquote, so CommonMark opens a
@@ -226,7 +269,16 @@ def test_an_indented_chunk_that_is_code_leaves_no_segment_behind(text, code):
         "a-tab-is-four-columns", "a-shallower-line-below-a-chunk",
         "a-tab-inside-the-list-marker", "a-margin-list-the-table-branch-claims",
         "three-spaces-at-the-margin", "ideographic-space", "no-break-space",
-        "form-feed", "a-bare-carriage-return-inside-the-line",
+        "form-feed",
+        "a-lazy-continuation-does-not-close-the-item",
+        "an-ideographic-space-line-is-not-blank",
+        "a-no-break-space-line-is-not-blank",
+        "a-content-line-opens-a-paragraph-after-a-heading",
+        "an-equals-run-that-underlines-nothing",
+        "a-dash-run-that-underlines-nothing",
+        "a-link-definition-with-no-destination",
+        "a-bare-carriage-return-inside-the-line",
+        "a-text-cr-on-a-continuation-line",
         "bare-quote-marker", "task-list-checkbox"])
 def test_an_indented_chunk_that_is_prose_is_still_translated(text, prose):
     assert prose in "\n".join(s["source"] for s in parse(text)[1])

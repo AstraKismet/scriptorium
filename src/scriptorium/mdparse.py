@@ -188,11 +188,18 @@ def parse(text, dnt=(), opts=None):
         # so every other block start closes one by saying nothing.
         lazy, para_open = para_open, False
 
-        # Only a block *start* reaches the top of this loop — every branch below
-        # consumes its own continuations — so a block starting at the left margin
-        # is one no open list item can contain, and closes it. A blank line
-        # closes nothing: a list item is free to hold several paragraphs.
-        if line.strip() and ind == 0 and not LIST_RE.match(line):
+        # A block starting at the left margin is one no open list item can
+        # contain, and closes it. Three things it is not:
+        #
+        # * a blank line — a list item is free to hold several paragraphs;
+        # * another list — the branch below sets the new column on its way out;
+        # * a **lazy continuation**, which is at the margin and is still inside
+        #   the item. `- item wraps and\ncontinues here\n\n    second para` is
+        #   one item with two paragraphs, and without `not lazy` the second one
+        #   is measured against four columns instead of six and becomes
+        #   skeleton. Found by adversarial review 2026-08-02, after a 37224-shape
+        #   sweep that varied the block *above* the chunk and never wrapped one.
+        if line.strip() and ind == 0 and not lazy and not LIST_RE.match(line):
             list_col = None
 
         m = FENCE_RE.match(line)
@@ -206,9 +213,34 @@ def parse(text, dnt=(), opts=None):
             i = j + 1
             continue
 
-        if not line.strip() or HR_RE.match(line) or SETEXT_RE.match(line):
+        if not line.strip():
             emit_raw(line + "\n")
             i += 1
+            # CommonMark's blank line holds nothing but spaces and tabs.
+            # `str.strip()` answers True for U+3000, U+00A0, U+2028, U+2029, a
+            # form feed, a vertical tab and four more, so a line that looks
+            # empty to Python may not close the paragraph above it — and U+3000
+            # is the zh-TW paragraph indent, U+00A0 what a paste from EPUB or a
+            # word processor leaves, so such a line is ordinary material here.
+            # The block stays raw either way; only the paragraph state differs.
+            #
+            # It *opens* one rather than merely keeping one open, because such a
+            # line is content: `# h\n　\n    chunk` puts the chunk inside the
+            # U+3000 line's own paragraph even though the heading closed
+            # everything before it. `lazy and ...` was the first spelling and the
+            # widened sweep refuted it in 1482 documents.
+            para_open = line.strip(" \t\r") != ""
+            continue
+
+        if HR_RE.match(line) or SETEXT_RE.match(line):
+            emit_raw(line + "\n")
+            i += 1
+            # A `=====` or `--` with no paragraph above it underlines nothing,
+            # so CommonMark reads it as ordinary paragraph text and the indented
+            # line below it as that paragraph's lazy continuation. A thematic
+            # break is a break either way, and a real underline has just turned
+            # the paragraph above into a heading — both close.
+            para_open = not lazy and not HR_RE.match(line)
             continue
 
         # An indented code block, held in the skeleton the way a fenced one
@@ -223,7 +255,14 @@ def parse(text, dnt=(), opts=None):
         # one direction that costs a translation; see `para_open` above.
         code_floor = CODE_INDENT if list_col is None else list_col + CODE_INDENT
         if not lazy and ind >= code_floor and not _carries_a_text_cr(line):
-            j = i
+            # `i + 1`, not `i`. Line `i` has already passed exactly the tests the
+            # loop below applies, so re-testing it is a no-op — but only while
+            # the two conditions agree. Start at `i` and the day they stop
+            # agreeing the loop exits with `j == i`, `i = j` advances nothing,
+            # and `parse` spins forever on a real document. Found 2026-08-02 by
+            # the mutation harness itself hanging for 56 minutes on a mutant
+            # that removed the carriage-return guard from one side only.
+            j = i + 1
             # `lines[j].strip()` is redundant and kept for the reader: a blank
             # line either indents past the floor, in which case it joins this raw
             # node instead of the next one and `emit_raw` concatenates the two
@@ -256,6 +295,14 @@ def parse(text, dnt=(), opts=None):
         if m:
             emit_raw(line + "\n")
             i += 1
+            # A link definition with no destination is not one. `[x]:` is a
+            # paragraph to CommonMark, and the indented line under it is that
+            # paragraph's lazy continuation rather than code. Only the empty
+            # destination is answered here: deciding whether a *non*-empty one
+            # is a well-formed link destination is a parser this file does not
+            # have, and every case it would catch fails in the safe direction —
+            # the text stays translatable.
+            para_open = not m.group(2).strip()
             continue
 
         # table

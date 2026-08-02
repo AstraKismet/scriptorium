@@ -48,6 +48,46 @@ quote, list, paragraph — and cleared by every other block start by saying
 nothing. Re-measured at the final sweep size, 37224 documents: 2778 markers of
 prose would become skeleton without it, and 0 do with it.
 
+**A sweep is blind to the axis it does not vary, and this one had four.** The
+37224-shape sweep varied the block *above* the chunk, the indent, the chunk body
+and the trailing block — and never varied the *shape of that block's own lines*.
+Adversarial review found four regressions living in that gap, every one of them
+ordinary hand-written Markdown, every one silent: `lx check` green, `render`
+reporting `missing=0`, and English prose reaching a zh-TW document.
+
+1. **A list item whose text wraps to the left margin.** The continuation line is
+   at column 0, so it looked like a block that closes the item — and it is not,
+   it is still inside it. `- item wraps and\ncontinues here\n\n    second para`
+   measured the second paragraph against four columns instead of six.
+2. **A line that is blank to Python and not to CommonMark.** `str.strip()`
+   answers True for U+3000, U+00A0, U+2028, a form feed and five more; CommonMark's
+   blank line holds nothing but spaces and tabs. U+3000 is the zh-TW paragraph
+   indent and U+00A0 is what a paste from EPUB leaves, so such a line is ordinary
+   material here rather than a curiosity. The first fix kept a paragraph open
+   across one; the widened sweep refuted that too, in 1482 documents — such a
+   line is *content*, so it **opens** a paragraph even after a heading closed
+   everything before it.
+3. **`=====` or `--` with nothing above it.** It underlines nothing, so
+   CommonMark reads it as paragraph text and the indented line below as its lazy
+   continuation. A thematic break, and a real underline, both still close.
+4. **A link definition with no destination.** `[x]:` is a paragraph. Only the
+   empty destination is answered; deciding whether a non-empty one is well-formed
+   is a parser this file does not have, and every case that leaves uncaught fails
+   in the safe direction.
+
+A fifth came from sweeping the *terminator* classes separately, which the
+generated sweep also did not vary: **a CR-only document is one line to
+`str.split("\n")**, because this parser treats a lone CR as text rather than as
+a terminator (2026-07-28, below). `'    def x():\rprose\r'` therefore put the
+entire file into the skeleton. A CR at the *end* of a line is exempt — that is
+the CRLF a mixed-terminator document arrived with, and those lines are still
+code.
+
+The lesson is the one `docs/conventions/delegated-work.md` §6 already records
+about measurements: a large count across a shape set missing one dimension reads
+like proof and is not. The sweep is now 57024 documents with those axes in it,
+and reports 0.
+
 **Two divergences from CommonMark are deliberate, and both are conservative.**
 
 *A bare `>` does not close the paragraph for this purpose.* CommonMark says it
@@ -87,23 +127,49 @@ an old document row is stale, not unreadable, and `store.py` refuses only a
 *newer* one.
 
 Measured rather than argued, on a project extracted by the old build and then
-opened by the new one: re-extract reports `reused=2 rejected=0`, both surviving
-targets carry over, the rendered bytes are **identical** before and after, and
-`lx check` goes from one warning to none. The banked record for the old code
-segment stays in the log as an orphan that no parser can ever emit a matching
-source for again.
+opened by the new one: re-extract reports `reused=2 rejected=0` and both
+surviving targets carry over. Be exact about the byte claim, because the first
+draft of this entry was not: the rendered bytes are identical **when the code
+segment's target equalled its source**, which is the undamaged case. A document
+whose code block was genuinely mistranslated renders differently afterwards —
+the code reverts to its source bytes. That is the repair, not a regression, and
+it is the one thing a re-extract is allowed to change.
+
+The record banked for the old code segment stays in the log, and it is **not**
+unreachable — the first draft of this entry claimed it was, and adversarial
+review refuted it in one shape. A four-column chunk under a `- ` item is
+deliberately kept translatable, so `- item\n\n    def indented():…` still emits a
+segment whose source is byte-identical to the old code segment's, and the memory
+answers it. That is a content-keyed memory doing exactly its job — same
+characters, same wording — and it is why the version decision above survives the
+correction rather than being undone by it.
 
 **Verification.** `tests/corpus/` cannot see any of this — it substitutes each
 segment's *source* back into the skeleton, so a block that stopped being
 translated round-trips perfectly. So the evidence is elsewhere: the corpus
 segmentation diffed before and after (2 of 1680 segments changed, both the code
-blocks); a differential sweep against markdown-it-py over 37224 generated
-documents; a hard-coded segment count per fixture including 1572 for the 112k
-manual; and a mutation sweep over 20 guards of which 19 turn the suite red. The
-single survivor is `lines[j].strip()` inside the chunk loop, established
-redundant — a blank line either indents past the floor, in which case it joins a
-raw node that `emit_raw` concatenates anyway, or it does not and the column test
-stops the chunk — and kept with that reasoning written at the line.
+blocks); the differential sweep above, 57024 documents; a hard-coded segment
+count per fixture including 1572 for the 112k manual; and a mutation sweep over
+30 guards of which 29 turn the suite red. The single survivor is
+`lines[j].strip()` inside the chunk loop, established redundant — a blank line
+either indents past the floor, in which case it joins a raw node that `emit_raw`
+concatenates anyway, or it does not and the column test stops the chunk — and
+kept with that reasoning written at the line.
+
+**The chunk loop starts at `i + 1`, and the mutation harness is what found out
+why.** It hung for 56 minutes on a mutant that removed the carriage-return guard
+from the *opening* condition while leaving it on the continuation: the loop then
+exited with `j == i`, `i = j` advanced nothing, and `parse` spun forever. The
+real code never reaches that state, because the two conditions agree on line `i`
+— but the agreement is invisible and load-bearing, and the failure it guards
+against is an unresponsive parser on a user's document rather than a wrong
+answer. Starting at `i + 1` says out loud that line `i` has already qualified,
+and makes the loop advance by construction. Two further guards became untested
+the moment it changed, because the opening line's copy of each test had been
+standing in for the continuation's; both now have a row of their own. This is the
+mutation-survivor rule from `docs/conventions/delegated-work.md` §6 arriving from
+a new direction — a *timeout*, not a red suite, was the signal, so the harness
+grew one.
 
 **What this did not fix, measured while closing it.** HANDOFF-018 left
 `translate.accept`'s `.strip()` alone on the stated grounds that "once the block
