@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from scriptorium.providers import build  # noqa: E402
 from scriptorium.providers.base import ProviderError  # noqa: E402
+from scriptorium.translate import translate_segments  # noqa: E402
 
 SEEN = {}
 
@@ -231,6 +232,76 @@ def test_backoff_is_capped_jittered_and_survives_a_date():
     assert p._backoff(0, "-5") == 0.0
     # An HTTP-date is not parsed; it falls through to the backoff we control.
     assert 1.0 <= p._backoff(0, "Wed, 21 Oct 2015 07:28:00 GMT") < 2.0
+
+
+TRANSLATED = {"requests": [], "bodies": []}
+
+
+class TranslatingHandler(BaseHTTPRequestHandler):
+    """Reads the request the way a model would, and answers every id it was asked for.
+
+    Every other handler here replies with one fixed string, which is enough to
+    test transport. This one is the far end of a real `translate_segments` run,
+    so what it records is what actually crossed the wire — the check the
+    neighbour-context work needed and could not get from a stub object.
+    """
+
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        body_in = json.loads(self.rfile.read(n))
+        user = body_in["messages"][1]["content"]
+        items = json.loads(user[user.index("["):])
+        TRANSLATED["bodies"].append(body_in)
+        TRANSLATED["requests"].append(items)
+        answer = json.dumps({i["id"]: "已翻譯。" for i in items}, ensure_ascii=False)
+        body = json.dumps({"choices": [{"message": {"content": answer}}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+@pytest.fixture(scope="module")
+def translating():
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), TranslatingHandler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{httpd.server_address[1]}/v1"
+    httpd.shutdown()
+
+
+def test_neighbour_context_survives_an_actual_request(translating):
+    """Neighbour fields are message content and nothing else — invariant 7 holds.
+
+    The request body keeps exactly the fields it had; a local runtime rejects
+    what it does not recognize, so a context feature that reached for a request
+    field would have cost llama.cpp support.
+    """
+    TRANSLATED["requests"].clear()
+    TRANSLATED["bodies"].clear()
+    segments = [{"id": f"s000{i}", "kind": "para", "masked": f"Sentence number {i}."}
+                for i in range(1, 5)]
+    doc = {"lang": "zh-TW", "tone": "literary", "segments": segments}
+    cfg = dict(_cfg(translating), glossary="", dnt="",
+               batch={"size": 2, "concurrency": 1, "context": 1})
+
+    results, failures = translate_segments(segments, doc, cfg, provider_name="local")
+    assert failures == []
+    assert set(results) == {s["id"] for s in segments}
+
+    assert all(set(b) == {"model", "messages", "temperature", "max_tokens", "stream"}
+               for b in TRANSLATED["bodies"])
+
+    first, second = TRANSLATED["requests"]
+    assert [i["id"] for i in first] == ["s0001", "s0002"]
+    assert set(first[0]) == {"id", "kind", "text", "after_id"}     # first of the document
+    assert first[0]["after_id"] == "s0002"                         # inside the batch
+    assert first[1]["after_text"] == "Sentence number 3."          # across the boundary
+    assert second[0]["before_text"] == "Sentence number 2."
+    assert set(second[1]) == {"id", "kind", "before_id", "text"}   # last of the document
 
 
 def test_a_stalled_read_gives_an_actionable_message(stalling):

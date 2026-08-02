@@ -179,7 +179,18 @@ DEFAULT_CONFIG = {
         },
     },
     "routing": {"draft": "local", "polish": "local", "repair": "local"},
-    "batch": {"size": 25, "concurrency": 2, "max_repair_rounds": 3},
+    # `context`: how many segments either side travel with each request item as
+    # read-only source, so that a pronoun, a speaker or a tense has something to
+    # resolve against. `0` turns the feature off entirely, including the
+    # paragraph of the system prompt that describes it.
+    #
+    # The default is nearly free because a neighbour already in the payload is
+    # referenced by id rather than repeated: only the two edges of a batch carry
+    # text, and a retry — where there is no batch to borrow from — carries both
+    # sides. Widening it is not free and the growth is linear: each extra
+    # segment of window inlines two more at every batch edge and two more on
+    # every retried segment.
+    "batch": {"size": 25, "concurrency": 2, "max_repair_rounds": 3, "context": 1},
 }
 
 

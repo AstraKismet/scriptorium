@@ -217,7 +217,7 @@ def test_the_register_is_resolved_from_the_document_and_nowhere_else(monkeypatch
 
     briefed = []
     monkeypatch.setattr(translate, "_system_prompt",
-                        lambda _src, _tgt, tone, _mode: briefed.append(tone) or "")
+                        lambda _src, _tgt, tone, _mode, _ctx=False: briefed.append(tone) or "")
     # No segments, so no request is built and no provider is contacted; the
     # system prompt is assembled before the batch loop, which is the one thing
     # under test.
