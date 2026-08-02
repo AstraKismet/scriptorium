@@ -1,7 +1,8 @@
-"""Project configuration, glossary, and do-not-translate list."""
+"""Project configuration, glossary, do-not-translate list, and style sheet."""
 
 import json
 import os
+import re
 
 STATE = ".lx"
 
@@ -23,6 +24,68 @@ GLOSSARY_HEADER = (
     "# a row with an empty target is a proposal from `lx terms` and enforces\n"
     "# nothing until someone writes the rendering in\n"
 )
+
+#: The style sheet's own first lines. A comments-only file, so a scaffolded
+#: project has a style sheet that teaches its own format and injects nothing —
+#: the same thing `config/dnt.txt` does, and the reason is the same: a
+#: hand-authored format nobody can discover is a format nobody writes. The
+#: example is inside the comments rather than beside them, because a live
+#: example in a scaffolded file would be sent to the model on the first run.
+STYLE_HEADER = """\
+# This project's style sheet: how the narrator sounds, and how each character
+# speaks. Everything here reaches the translator except lines starting with #,
+# which are notes to yourself.
+#
+# Lines before the first [name] block are sent with EVERY request — keep them
+# to the narrator and to rules that hold everywhere.
+#
+# A [name] block is sent only when a batch mentions that name, so the cast can
+# be as large as the book needs. List the forms the name takes in the SOURCE
+# text, separated by commas. `lx terms SRC --lang L` proposes the cast for you.
+#
+# A line of your own that looks like [this] would be read as a block header.
+#
+# Example — the same file with the # removed from the last five lines:
+#
+# The narration is close third person, past tense, anchored on Eleanor.
+#
+# [Eleanor Vance, Eleanor, Miss Vance]
+# She says 您 to her father and to Mr Ashcombe, 你 to her sister.
+# Her diction is precise and a little cold; no 呢, no 嘛.
+"""
+
+#: Two limits rather than one total, because the sheet's two halves have
+#: different costs. The preamble rides on **every** request — some eighty of
+#: them for a 100k-word novel — while a `[name]` block rides only on the batches
+#: that mention it. One total limit would have to be tight enough for the
+#: always-on half, which would cap the cast at the size of a short story and
+#: throw away the reason the format has blocks at all.
+#:
+#: There is deliberately **no cap on the number of blocks one request may
+#: carry.** The injected set is bounded by the names the batch itself contains,
+#: so a request carrying forty of them is a request about forty characters —
+#: which is exactly when the notes are wanted. `_glossary_hints` has always
+#: worked this way. Measured ratios are in `docs/decisions.md`, 2026-08-02.
+STYLE_PREAMBLE_MAX = 2000
+STYLE_BLOCK_MAX = 800
+
+#: A block header: a line that is nothing but a bracketed, comma-separated list
+#: of the names this block answers to. Anchored on the stripped line, so a
+#: bracketed line indented by an editor is still a header — and so a bracket
+#: *inside* a sentence is not.
+_STYLE_BLOCK_RE = re.compile(r"^\[(.+)\]$")
+
+
+class StyleSheetError(ValueError):
+    """The style sheet could not be read, and nothing of it reached the model.
+
+    Raised rather than warned, and caught in `cli.main` for exit 2. The
+    alternative is a sheet that silently half-applies: a run that translates a
+    whole book under voice instructions the person believes are in force and
+    which were dropped at load. That failure is invisible until someone reads
+    the output, which for a novel is hours later.
+    """
+
 
 #: The plain-text format's knobs, all three of them heuristics. They live here
 #: rather than in `textparse.py` for two reasons: `lx init` scaffolds
@@ -111,6 +174,7 @@ DEFAULT_CONFIG = {
     "tone": DEFAULT_TONE,
     "glossary": "config/glossary.csv",
     "dnt": "config/dnt.txt",
+    "style": "config/style.txt",
     "sources": ["docs/**/*.md"],
     "output_pattern": "i18n/{lang}/{path}",
     "length_ratio": {"zh-TW": [0.25, 1.20]},
@@ -292,6 +356,84 @@ def load_dnt(cfg):
     return sorted(set(terms), key=len, reverse=True)
 
 
+def load_style(cfg):
+    """The project's voice notes: ``(preamble, blocks)``. No file means ``("", [])``.
+
+    ``preamble`` is everything before the first ``[name]`` header — the
+    narrator, and whatever holds everywhere — and it is sent with every request.
+    ``blocks`` is a list of ``{"names": [...], "notes": str}``, each sent only
+    when a batch mentions one of its names.
+
+    **Nothing inside a block is parsed.** The header says who the block answers
+    to and that is the whole of the structure; the body is the person's own
+    prose, handed to the model as written. That line is where invariant 4 sits:
+    deciding *whether* to send a block is mechanical — does this text contain
+    this name — while deciding what good narration sounds like is judgement, and
+    a format with `register:` and `address:` fields would have put the second
+    one inside `config.py`. Fields were the losing alternative;
+    `docs/decisions.md`, 2026-08-02.
+
+    Comments are stripped before anything is measured, so a heavily annotated
+    sheet is not refused for prose nobody will ever send.
+    """
+    path = cfg.get("style", "config/style.txt")
+    if not os.path.exists(path):
+        return "", []
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = f.read()
+    except UnicodeDecodeError:
+        # A style sheet for a zh-TW project is full of Chinese, and an editor on
+        # Windows will still offer to save it as cp950. Named rather than left
+        # as a traceback, because "which file" is the whole of the fix.
+        raise StyleSheetError(
+            f"{path} is not valid UTF-8 — re-save it as UTF-8 and run again") from None
+
+    preamble, blocks = [], []
+    names, body = None, []
+
+    def close():
+        if names is not None:
+            blocks.append({"names": names, "notes": "\n".join(body).strip()})
+
+    for lineno, line in enumerate(raw.splitlines(), 1):
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        header = _STYLE_BLOCK_RE.match(stripped)
+        if not header:
+            (body if names is not None else preamble).append(line)
+            continue
+        close()
+        names = [n.strip() for n in header.group(1).split(",") if n.strip()]
+        body = []
+        if not names:
+            raise StyleSheetError(
+                f"{path} line {lineno}: a block header needs at least one name, "
+                f"as in [Eleanor Vance, Eleanor]")
+    close()
+
+    preamble = "\n".join(preamble).strip()
+    if len(preamble) > STYLE_PREAMBLE_MAX:
+        raise StyleSheetError(
+            f"{path}: the lines before the first [name] block are "
+            f"{len(preamble)} characters and the limit is {STYLE_PREAMBLE_MAX} — "
+            f"they ride on every request. Move what belongs to one character "
+            f"into a [name] block, which is only sent where that name appears.")
+    for block in blocks:
+        if len(block["notes"]) > STYLE_BLOCK_MAX:
+            raise StyleSheetError(
+                f"{path}: the [{', '.join(block['names'])}] block is "
+                f"{len(block['notes'])} characters and the limit is "
+                f"{STYLE_BLOCK_MAX} — split it, or cut it to what changes the "
+                f"wording.")
+    # A block whose body is empty after comments are stripped is a header
+    # somebody has not filled in yet. Dropped rather than refused, on the same
+    # ground as a glossary row with an empty target: an unfinished line in a
+    # hand-maintained file must be silent, never harmful.
+    return preamble, [b for b in blocks if b["notes"]]
+
+
 def write_templates():
     """Idempotent scaffolding for a fresh project.
 
@@ -316,4 +458,8 @@ def write_templates():
         with open("config/dnt.txt", "w", encoding="utf-8", newline="\n") as f:
             f.write("# verbatim terms, one per line; longest match wins\n")
         created.append("config/dnt.txt")
+    if not os.path.exists("config/style.txt"):
+        with open("config/style.txt", "w", encoding="utf-8", newline="\n") as f:
+            f.write(STYLE_HEADER)
+        created.append("config/style.txt")
     return created

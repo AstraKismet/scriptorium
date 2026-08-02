@@ -6,6 +6,7 @@
 lx.config.json            project settings
 config/glossary.csv       source,target,forbidden,severity
 config/dnt.txt            verbatim do-not-translate terms, one per line
+config/style.txt          narrator voice, then one [name] block per character
 .lx/
   state.db                render skeleton + segments + targets + status, SQLite
   tm.<lang>.jsonl         translation memory, append-only

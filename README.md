@@ -159,6 +159,35 @@ lx terms novel.md --lang zh-TW              # to stdout, redirect and edit
 lx terms novel.md --lang zh-TW --append     # add unseen ones to the glossary
 ```
 
+The glossary settles what a name *is*. It says nothing about how a person sounds,
+and in a novel that is most of the work. `config/style.txt` is where a project
+records it:
+
+```
+The narration is close third person, past tense, anchored on Eleanor.
+
+[Eleanor Vance, Eleanor, Miss Vance]
+She says 您 to her father and to Mr Ashcombe, 你 to her sister.
+Her diction is precise and a little cold; no 呢, no 嘛.
+
+[Thomas]
+Working-class, warm, elliptical. He calls Eleanor 小姐, never 您.
+
+# A note to myself: decide whether the letters in ch.7 stay formal.
+```
+
+Lines before the first `[name]` block are the narrator's, and ride on every
+request. A `[name]` block rides only on the batches whose text mentions that
+name, so the cast can be as large as the book needs — a forty-character novel
+does not pay forty sets of notes on every request. Lines starting with `#` never
+leave the file.
+
+Nothing inside a block is parsed. Whether to send one is a decision code can
+make; how a character should sound is not, and a format with `register:` and
+`address:` fields would have put the second one in the parser. The same file
+reaches an agent through `lx todo`, which carries the register brief and the
+notes for the segments it emitted.
+
 ## Validation rules
 
 | Rule | Severity | Catches |
@@ -318,12 +347,14 @@ Worth knowing before you adopt it, and all of them measured rather than guessed:
   segmentation. When it lands it will be advisory and never applied
   automatically, since a fuzzy hit differs in its placeholder set by definition.
 - **`escaping` is inert** until a format with an XML host arrives.
-- **Prose support is one register deep.** `--tone literary` selects a narrative
-  brief instead of the documentation one, and the register is part of the memory
-  key, so wording banked under one cannot be served to the other. What is missing
-  is everything *around* a segment: it still reaches the model with its own text
-  and block kind and no neighbours, and there is still nowhere to record how a
-  particular character speaks.
+- **Prose support reaches register, context and voice — and stops there.**
+  `--tone literary` selects a narrative brief and the register is part of the
+  memory key, so wording banked under one cannot be served to the other; each
+  request item carries the segments either side of it as read-only source; and
+  `config/style.txt` holds the narrator's voice and each character's. What none
+  of that gives you is continuity across a book. Nothing knows that a promise was
+  made in chapter 2, and the review workbench still presents segments rather than
+  a chapter you can read as prose.
 
 ## How this differs from the alternatives
 

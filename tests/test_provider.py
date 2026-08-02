@@ -304,6 +304,42 @@ def test_neighbour_context_survives_an_actual_request(translating):
     assert set(second[1]) == {"id", "kind", "before_id", "text"}   # last of the document
 
 
+def test_style_sheet_request_shape_is_message_content_and_nothing_else(
+        translating, tmp_path):
+    """Invariant 7 over the style sheet: both halves are text, neither is a field.
+
+    The temptation a voice feature creates is a `system` array, a `metadata`
+    object, or a per-character `response_format` — and a self-hosted runtime
+    rejects an unknown field rather than ignoring it, so any of the three would
+    cost llama.cpp support. The preamble rides in the system message, the
+    matched blocks ride in the user message, and the body keeps exactly the five
+    keys it had before this landed.
+    """
+    TRANSLATED["requests"].clear()
+    TRANSLATED["bodies"].clear()
+    sheet = tmp_path / "style.txt"
+    sheet.write_text("The narration is close third person.\n\n"
+                     "[Mara]\nShe says 您 to no one.\n", encoding="utf-8")
+    segments = [{"id": "s0001", "kind": "para", "masked": "Mara came down the hill."},
+                {"id": "s0002", "kind": "para", "masked": "The lamps were lit."}]
+    doc = {"lang": "zh-TW", "tone": "literary", "segments": segments}
+    cfg = dict(_cfg(translating), glossary="", dnt="", style=str(sheet),
+               batch={"size": 2, "concurrency": 1, "context": 0})
+
+    results, failures = translate_segments(segments, doc, cfg, provider_name="local")
+    assert failures == []
+    assert set(results) == {"s0001", "s0002"}
+
+    body = TRANSLATED["bodies"][0]
+    assert set(body) == {"model", "messages", "temperature", "max_tokens", "stream"}
+    assert [m["role"] for m in body["messages"]] == ["system", "user"]
+    assert "The narration is close third person." in body["messages"][0]["content"]
+    assert "She says 您 to no one." in body["messages"][1]["content"]
+    # The per-character half is not duplicated into the system message, which is
+    # what keeps that message identical for every request of the run.
+    assert "She says 您 to no one." not in body["messages"][0]["content"]
+
+
 def test_a_stalled_read_gives_an_actionable_message(stalling):
     """A read timeout must reach the user as advice, not as a bare OSError.
 

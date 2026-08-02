@@ -177,7 +177,7 @@ src/scriptorium/
                  here: block-start containment, host escaping, placeholder pairs
   store.py       .lx/state.db (document state, SQLite), the translation-memory
                  key, the memory itself (.lx/tm.*.jsonl, still JSONL and tracked)
-  config.py      layered config, glossary, do-not-translate list
+  config.py      layered config, glossary, do-not-translate list, style sheet
   translate.py   batching, concurrency, JSON tolerance, per-segment retry
   providers/     openai_compat (primary), anthropic; base holds transport + retry
   web/           local review workbench, a shell over cli.py
@@ -195,7 +195,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 496 passed; no network
+python -m pytest -q                 # 514 passed; no network
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
 
@@ -353,6 +353,23 @@ most of what happens here, which is exactly why the case surprises people.
   proposal on the same terms, and the memory is tried when it is refused.
   `lx apply` is the deliberate exception: a person's words are reported at
   `lx check`, not refused at the door.
+- The project style sheet (`config/style.txt`) says how *this book* sounds, where
+  the register brief says how the target language's prose is written. Its two
+  halves are injected differently and that is the design, not an accident: the
+  preamble is document-static and goes in the system prompt after the brief, so
+  that string stays byte-identical for every request of a run; a `[name]` block
+  is per-batch and goes in the user message beside the required terminology,
+  where per-batch content already lives. **Nothing inside a block is parsed** —
+  deciding whether to send one is mechanical, deciding what good narration sounds
+  like is judgement, and invariant 4 is the line between them. A fielded format
+  was the alternative and it puts the second one inside `config.py`. Selection is
+  against the whole batch rather than each segment, because a batch is a scene.
+  See `docs/decisions.md`, 2026-08-02.
+- One matcher answers "does this text contain this name" — `translate.mentions`,
+  used by the glossary hints, the style sheet and `lx todo` alike. It had grown
+  three copies before the style sheet would have made a fourth, and one of them
+  was untested. Its boundary class reaches past ASCII on purpose: with
+  `[A-Za-z]`, `Ana` matches inside `Anaïs`.
 - New language support: add a `(language, register)` entry to `_LANG_BRIEFS` in
   `translate.py` for each register, with the register-independent terminology in
   `_LANG_TERMS` — one string shared, never a copy per register — plus a

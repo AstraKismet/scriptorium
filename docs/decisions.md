@@ -3,6 +3,193 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-08-02 · A project's voice is a sheet of prose, and a character's half of it rides only where their name does
+
+Closing HANDOFF-015, which is option C of the triaged HANDOFF-208 and decision D6
+of the 2026-07-29 re-founding. HANDOFF-013 made the register real and its brief
+ends *"a character keeps their own diction and level of formality wherever they
+speak"* — which nothing in the project could act on, because which character says
+您 and which says 你 is a fact about one book. `config/style.txt` is where a
+project says it.
+
+**The format is prose with named blocks, and nothing inside a block is parsed.**
+Lines before the first `[name]` header are the preamble; a `[Eleanor Vance,
+Eleanor]` header opens a block that answers to any of its names; `#` at the start
+of a line is a note to the person reading the book and never leaves the file. The
+header is the whole of the structure.
+
+*Lost:* a flat file passed through verbatim, with no structure at all. It is the
+smallest possible implementation and it was the recommendation until the option
+set turned out to be incomplete. What it cannot do is send a character's notes
+only where they are relevant, so a novel with forty named characters pays forty
+notes on all eighty requests of the book, and the model reads thirty-eight
+irrelevant ones every time.
+
+*Lost, and this is the one worth recording carefully:* a **fielded** format —
+`address:`, `register:`, `notes:` under each name, parsed into records and
+rendered back into prose. It was rejected before the block form was found, on the
+argument that its structure bought nothing: the only thing per-character data
+enables in a UI is showing a character's rules beside the paragraph where they
+speak, and *who is speaking* is judgement, which invariant 4 keeps out of code
+and which this package puts out of scope. That argument was right about fields
+and wrong about structure. The question a per-batch selection actually asks is
+not "who is speaking" but "**does this text contain this name**" — which is
+mechanically decidable, and which `translate._glossary_hints` has been answering
+since before any of this. The glossary is already a per-entity, human-authored,
+machine-selected store; a character's address form is per-entity data keyed on a
+name. So the block form keeps the selection and drops the fields, and with the
+fields goes the part that would have put an opinion about voice inside
+`config.py`.
+
+*Also lost:* extending `config/glossary.csv` with a voice column. `load_glossary`
+splits on `,` with no quoting, so the first sentence containing a comma is
+unreadable — and it would put an unenforceable judgement in the table
+`checks.py` enforces, which is the confusion invariant 4 exists to prevent.
+*Also lost:* holding the sheet in SQLite. It is authored, not derived; authored
+things in this project live in `config/` as hand-edited files, diffable and
+mergeable, and the store would take both.
+
+**The preamble goes in the system prompt; matched blocks go in the user
+message.** This deviates from HANDOFF-015's IN list, which said the sheet is
+injected into the system prompt after the language brief, and the deviation is
+the entry's reason for existing. The split is not stylistic: static-per-document
+content belongs where the register brief is, and per-batch content belongs where
+`Required terminology for this batch` already is. Three things follow, and each
+is what decided it.
+
+- `_system_prompt` is assembled **once** per run and closed over by `run_batch`
+  and `retry_one` alike. Keeping the batch-varying half out of it means that
+  string is byte-identical for all eighty requests of a book, so a local
+  runtime's prefix cache has something to reuse — the default provider is
+  Ollama on `localhost:11434`, and prefix reuse across requests is the whole
+  reason the assembly was hoisted in the first place. `translate.py` is not in a
+  position to measure that and does not claim a number; the property it
+  guarantees is that the string does not change, which
+  `test_the_system_prompt_is_identical_across_every_batch` asserts.
+- `retry_one` needs no second assembly, and its payload of one selects its own
+  notes: a retried segment is briefed on the characters *it* names, narrower
+  than the batch that failed, for free.
+- The user message is where the enforced half already lives, so voice takes the
+  outer position and terminology stays closest to the payload — `checks.py`
+  validates terminology afterwards and it is the half that must not be pushed
+  away from the text it governs.
+
+*Lost:* putting matched blocks in the system prompt too and rebuilding it per
+batch. It complies with the package's IN line literally and gives the notes
+system-message weight, which is the one real argument for it. Against: it undoes
+the hoist HANDOFF-014 had just stabilized, doubles the assembly onto the retry
+path, and forfeits the identical-prefix property. The weight argument has a
+mitigation already proven in this tree — an imperative head, exactly as
+`Required terminology for this batch:` has, on the path `checks.py` enforces
+downstream.
+
+**Selection is against the batch, not the segment.** A batch is twenty-five
+consecutive paragraphs — a scene — and a character active in a scene is named
+somewhere in it even though most individual paragraphs of their dialogue are not.
+Per-segment matching was the alternative and it loses precisely the dialogue the
+feature exists for. `lx todo` selects against its whole emitted set for the same
+reason, which is also what keeps the agent path and the model path briefed
+identically.
+
+The honest residue: a scene whose speaker is named only in the paragraph *before*
+the batch begins gets no note. The preamble is what covers a rule that must never
+be missed, and the limits below are sized on the assumption that anything
+load-bearing lives there. Widening the haystack to the inlined neighbours
+HANDOFF-014 attaches is a strict improvement and was left out on purpose: it
+makes the selection depend on the batch boundary in a second way, and nothing
+measured says it is needed yet.
+
+**Two limits, 2000 characters of preamble and 800 per block, and no cap on how
+many blocks one request may carry.** Measured 2026-08-02 against a batch of 25
+paragraphs at ~285 characters — the dimensions `translate.py` already states for
+a 100k-word novel, 2,000 segments over some eighty requests. Baseline request
+12,021 characters:
+
+| | request | ratio |
+|---|---|---|
+| no style sheet | 12,021 | 1.00x |
+| preamble at the limit | 14,149 | 1.18x |
+| preamble + 3 blocks at the limit | 16,669 | 1.39x |
+| preamble + 8 blocks at the limit (a crowd scene) | 20,744 | 1.73x |
+| a realistic sheet: 600-char preamble, 3 blocks of 250 | 13,619 | 1.13x |
+
+2000 is not a round number chosen for looking reasonable: it puts the always-on
+half at 1.18x, which is where D5 measured and accepted neighbour context on prose
+(1.16x) — and unlike that feature this one is absent by default. The 1.73x crowd
+scene is stated rather than capped, because the injected set is bounded by the
+names the batch itself contains: a request carrying eight of them is a request
+about eight characters, which is exactly when the notes are wanted.
+`_glossary_hints` has always worked this way. *Lost:* one total limit over the
+whole file, which would have to be tight enough for the always-on half and would
+therefore cap the cast at the size of a short story — throwing away the reason
+the format has blocks. Comments are stripped before anything is measured; a sheet
+annotated by the person reading the book must not be refused for prose nobody
+will ever send.
+
+**The style sheet does not enter the translation-memory key**, on the same
+footing as the glossary, which has never been in it either. D4 put `tone` in
+because tone is *per-document*, so two registers coexist inside one project at no
+cost and overwrite each other silently. A style sheet is per-project and so is
+the memory — `tm_path(lang)` is `.lx/tm.{lang}.jsonl`, relative to the working
+directory — so the locality argument that forced `tone` in does not reach it.
+
+The residue is real and is not paid for with a key axis: a sheet refined at
+chapter 20 means chapters 1–19 were banked under an earlier version of it. That
+is the standing answer to this whole class of problem — a memory hit is a
+*proposal* that goes through `translate.accept` and is re-validated at
+`lx check`, exactly as a glossary edit is. *Lost:* a sixth key field. It would
+invalidate the entire memory on every edit to the sheet, which is a file the
+workflow expects to be edited while reading; the failure it would prevent —
+serving wording banked under different voice instructions — is the failure the
+acceptance path already exists to catch.
+
+**One matcher now serves three callers, and converging them found a real gap.**
+`translate.mentions` is used by `_glossary_hints`, by the style sheet's
+selection, and by `cmd_todo`, which had a fourth copy of the regex inline. Its
+boundary class is `A-Za-zÀ-ÖØ-öø-ɏ`, widened from the bare `[A-Za-z]` the
+glossary used, for the reason `cli._LETTER` already records: with an ASCII-only
+lookahead, `ï` is not a letter, so `Ana` matches inside `Anaïs` and a minor
+character inherits the leading lady's notes. The change is a strict narrowing —
+fewer matches, never more.
+
+The gap: **that `lx todo` attaches a glossary hint only to the segments naming
+the term was never asserted anywhere.** Removing the filter left the suite green.
+Found by the mutation sweep, not by review, and now covered by
+`test_one_matcher_governs_the_glossary_and_the_style_sheet_alike`.
+
+**`lx todo` gains `voice` and `voice_notes`, and both keys are always present.**
+`AGENTS.md` treats an API model, an agent in its own context and a human as three
+equal sources of a translation; until this landed the register brief reached only
+`translate_segments`, so an agent produced documentation prose for a novel and
+`lx commit` banked it under the literary key anyway. That was recorded as
+not-taken on 2026-07-29 and pointed here. Both fields are the same strings the
+model path assembles, from the same two functions, so the paths cannot drift.
+Empty rather than absent when there is nothing to say: HANDOFF-203 and
+HANDOFF-207 will freeze this shape, and a consumer that must branch on a missing
+key breaks on the first project with no style sheet. Confirmed unfrozen before
+adding — both packages are still in `90-later/`.
+
+**`cfg["style"]` joins the config-borne paths invariant 11 names as untrusted**,
+beside `glossary`, `dnt` and `output_pattern`. It is trusted today on the
+invariant's own stated ground — configuration is written by hand — and the
+exemption ends for all four at once the moment configuration becomes writable
+over HTTP. HANDOFF-206 carries that red line and has been corrected to name this
+key.
+
+**`lx init` scaffolds a comments-only sheet.** Present but silent, the trade
+`config/dnt.txt` already makes: a hand-authored format nobody can discover is a
+format nobody writes, and a scaffolded file that reached the model would brief
+every fresh project with an example about a character named Eleanor. The example
+lives inside the comments for exactly that reason.
+
+**Verified by mutation, not by review.** Twenty-four mutants, one per guard this
+change added; the first sweep left two alive and both were real. The Latin
+Extended boundary survived because the test written for it did not discriminate
+— `José` inside `Josée` is blocked by the narrow class too, and the case that
+separates them is an accented letter *after* the name, which is now what the test
+uses. The `cmd_todo` matcher survived because of the untested filter above. After
+both were closed, 24 of 24 turn the suite red. 514 tests pass.
+
 ## 2026-08-02 · A segment travels with its neighbours, and the reference form cost 2x what D5 estimated
 
 HANDOFF-014, implementing D5 of the 2026-07-29 re-founding. Each request item
