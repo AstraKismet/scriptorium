@@ -98,6 +98,13 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    lives", records why that alternative lost. Do not "fix" this by stripping
    them; that is the round-trip defect repaired on the same date.
 
+   The indent is not always interior. A list item's second paragraph is
+   `- item\n\n    text`, so its four spaces sit at *position 0* of the segment,
+   and deleting them takes the paragraph out of the item. An indented code block
+   used to arrive the same way and no longer does — it became skeleton on
+   2026-08-02, which is what `mask.py` could not do for it. See
+   `docs/decisions.md` of that date, "An indented code block is skeleton".
+
 4. **Checks are mechanically decidable.** A rule belongs in `checks.py` only if a
    program can decide it without judgement. Anything requiring taste goes in the
    prompt or in human review. Context-dependent vocabulary is judgement — that is
@@ -195,7 +202,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 547 passed; no network
+python -m pytest -q                 # 604 passed; no network
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
 

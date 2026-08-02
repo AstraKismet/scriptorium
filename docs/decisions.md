@@ -3,6 +3,186 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-08-02 · An indented code block is skeleton, and the rule that decides it is state rather than a column
+
+Closing HANDOFF-018. `mdparse` had no branch for an indented code block, so a
+chunk indented four spaces fell through to the paragraph branch. Two spellings of
+one construct were treated oppositely — a fenced block is skeleton, an indented
+one was a segment — and the model was asked to translate Python.
+
+**The part that reached disk quietly.** The four spaces that *make* it code sat
+at position 0 of the segment, where `translate.accept` does
+`repair_placeholders(text).strip()`. Reuse comes through `accept` too, so a
+target a person applied with its indent intact was banked *with* the indent and
+handed back *without* it. Reproduced end to end: `lx apply` → `lx commit` →
+delete `.lx/state.db` → `lx extract` reported `reused=2 rejected=0` and the
+stored target had lost its four spaces. The key is the source hash and is
+untouched by that, and `tm_records` only rewrites when the stored target differs
+from the banked one, so the two never converged. `lx check` exited 0 the whole
+way. Confirmed against a real CommonMark render (markdown-it-py):
+`'    def x():\n        return 1'` is `<pre><code>`, and the same text with its
+leading indent removed is a `<p>` with the body reflowed. A document changed its
+rendered structure merely by having its state rebuilt, and nothing in the exit
+code said so — which is invariant 10's warning arriving from a new direction.
+
+**The rule is CommonMark's, and the permissive direction is worse than the
+defect.** A four-space test is the obvious implementation and it is wrong twice
+over. An indented chunk is code only where a paragraph could not be continued
+lazily, and only past the content column of any list item it sits inside; getting
+either wrong the permissive way turns ordinary prose into skeleton and stops
+translating it altogether, silently, where the defect being repaired at least
+left the text visible to a reviewer. So the conservative direction is the one
+this parser takes wherever it cannot know.
+
+**Lazy continuation had to be state, not position.** The first implementation
+claimed the rule held "by position": the paragraph branch consumes its own
+indented continuations, so `text\n    more text` never offers that second line to
+the block dispatch. That claim is false, and a differential sweep against
+markdown-it-py found it — 606 of 25344 generated documents turned prose into
+skeleton. The paragraph branch stops at anything that *looks* like a block start
+**at any indent**, so `text\n    - like a list` hands its second line straight to
+the dispatch while CommonMark is still inside one paragraph; and a blockquote is
+emitted one line at a time, so `> quoted\n    lazy line` does the same. `mdparse`
+now carries `para_open`, set by the three branches that leave a paragraph open —
+quote, list, paragraph — and cleared by every other block start by saying
+nothing. Re-measured at the final sweep size, 37224 documents: 2778 markers of
+prose would become skeleton without it, and 0 do with it.
+
+**A sweep is blind to the axis it does not vary, and this one had four.** The
+37224-shape sweep varied the block *above* the chunk, the indent, the chunk body
+and the trailing block — and never varied the *shape of that block's own lines*.
+Adversarial review found four regressions living in that gap, every one of them
+ordinary hand-written Markdown, every one silent: `lx check` green, `render`
+reporting `missing=0`, and English prose reaching a zh-TW document.
+
+1. **A list item whose text wraps to the left margin.** The continuation line is
+   at column 0, so it looked like a block that closes the item — and it is not,
+   it is still inside it. `- item wraps and\ncontinues here\n\n    second para`
+   measured the second paragraph against four columns instead of six.
+2. **A line that is blank to Python and not to CommonMark.** `str.strip()`
+   answers True for U+3000, U+00A0, U+2028, a form feed and five more; CommonMark's
+   blank line holds nothing but spaces and tabs. U+3000 is the zh-TW paragraph
+   indent and U+00A0 is what a paste from EPUB leaves, so such a line is ordinary
+   material here rather than a curiosity. The first fix kept a paragraph open
+   across one; the widened sweep refuted that too, in 1482 documents — such a
+   line is *content*, so it **opens** a paragraph even after a heading closed
+   everything before it.
+3. **`=====` or `--` with nothing above it.** It underlines nothing, so
+   CommonMark reads it as paragraph text and the indented line below as its lazy
+   continuation. A thematic break, and a real underline, both still close.
+4. **A link definition with no destination.** `[x]:` is a paragraph. Only the
+   empty destination is answered; deciding whether a non-empty one is well-formed
+   is a parser this file does not have, and every case that leaves uncaught fails
+   in the safe direction.
+
+A fifth came from sweeping the *terminator* classes separately, which the
+generated sweep also did not vary: **a CR-only document is one line to
+`str.split("\n")**, because this parser treats a lone CR as text rather than as
+a terminator (2026-07-28, below). `'    def x():\rprose\r'` therefore put the
+entire file into the skeleton. A CR at the *end* of a line is exempt — that is
+the CRLF a mixed-terminator document arrived with, and those lines are still
+code.
+
+The lesson is the one `docs/conventions/delegated-work.md` §6 already records
+about measurements: a large count across a shape set missing one dimension reads
+like proof and is not. The sweep is now 57024 documents with those axes in it,
+and reports 0.
+
+**Two divergences from CommonMark are deliberate, and both are conservative.**
+
+*A bare `>` does not close the paragraph for this purpose.* CommonMark says it
+does, so `> q\n>\n    y` is a code block. Reading it that way was implemented,
+measured, and reverted: it fixed 285 generated shapes and turned prose into
+skeleton in 57, because `> q\n>\n    > x` is still inside the quote where
+`> q\n>\n    y` is not. This parser has no container stack and cannot measure an
+indent against a blockquote's content column, so it refuses to open a code block
+after any quote line at all.
+
+*A list item's floor is its whole prefix, checkbox included.* CommonMark's
+content column stops after the marker; `_columns(prefix)` is never smaller than
+that, so the threshold it produces is never too low, and too low is the only
+direction that costs a translation.
+
+Both leave text translatable that CommonMark would call code. That is the status
+quo, not a regression, and it is the trade this whole entry is about.
+
+**Tabs.** One tab is four columns, not one character. `_columns` expands to
+CommonMark's four-column stops, and `_indent_columns` counts only a space and a
+tab: `str.lstrip()` would also eat U+3000, U+00A0 and a form feed, and U+3000 is
+*the* zh-TW paragraph indent — counting it would turn ordinary translated prose
+into a code block. This is the same character class HANDOFF-011's adversarial
+review had to add to `normalize`, arriving at a second op for the same reason.
+
+**Neither version number is bumped, and that is a decision.** *Lost:* bumping
+`SEGMENTATION_VERSION`, which the letter of its docstring invites — this change
+does alter one segment's text, where a chunk sat directly above unindented prose
+and used to be swallowed into one paragraph. What that field buys is that a stale
+record stops answering instead of answering with wording cut for a different
+sentence, and the key is the *content hash*: a segment whose text changed gets a
+new hash and misses the memory by construction, while every surviving segment
+keeps its text and deserves its banked wording. Bumping would discard every entry
+in every project's memory — a novel's whole accumulated wording — to detect a
+change that cannot produce a wrong answer. `STATE_VERSION` likewise stays at 3:
+an old document row is stale, not unreadable, and `store.py` refuses only a
+*newer* one.
+
+Measured rather than argued, on a project extracted by the old build and then
+opened by the new one: re-extract reports `reused=2 rejected=0` and both
+surviving targets carry over. Be exact about the byte claim, because the first
+draft of this entry was not: the rendered bytes are identical **when the code
+segment's target equalled its source**, which is the undamaged case. A document
+whose code block was genuinely mistranslated renders differently afterwards —
+the code reverts to its source bytes. That is the repair, not a regression, and
+it is the one thing a re-extract is allowed to change.
+
+The record banked for the old code segment stays in the log, and it is **not**
+unreachable — the first draft of this entry claimed it was, and adversarial
+review refuted it in one shape. A four-column chunk under a `- ` item is
+deliberately kept translatable, so `- item\n\n    def indented():…` still emits a
+segment whose source is byte-identical to the old code segment's, and the memory
+answers it. That is a content-keyed memory doing exactly its job — same
+characters, same wording — and it is why the version decision above survives the
+correction rather than being undone by it.
+
+**Verification.** `tests/corpus/` cannot see any of this — it substitutes each
+segment's *source* back into the skeleton, so a block that stopped being
+translated round-trips perfectly. So the evidence is elsewhere: the corpus
+segmentation diffed before and after (2 of 1680 segments changed, both the code
+blocks); the differential sweep above, 57024 documents; a hard-coded segment
+count per fixture including 1572 for the 112k manual; and a mutation sweep over
+30 guards of which 29 turn the suite red. The single survivor is
+`lines[j].strip()` inside the chunk loop, established redundant — a blank line
+either indents past the floor, in which case it joins a raw node that `emit_raw`
+concatenates anyway, or it does not and the column test stops the chunk — and
+kept with that reasoning written at the line.
+
+**The chunk loop starts at `i + 1`, and the mutation harness is what found out
+why.** It hung for 56 minutes on a mutant that removed the carriage-return guard
+from the *opening* condition while leaving it on the continuation: the loop then
+exited with `j == i`, `i = j` advanced nothing, and `parse` spun forever. The
+real code never reaches that state, because the two conditions agree on line `i`
+— but the agreement is invisible and load-bearing, and the failure it guards
+against is an unresponsive parser on a user's document rather than a wrong
+answer. Starting at `i + 1` says out loud that line `i` has already qualified,
+and makes the loop advance by construction. Two further guards became untested
+the moment it changed, because the opening line's copy of each test had been
+standing in for the continuation's; both now have a row of their own. This is the
+mutation-survivor rule from `docs/conventions/delegated-work.md` §6 arriving from
+a new direction — a *timeout*, not a red suite, was the signal, so the harness
+grew one.
+
+**What this did not fix, measured while closing it.** HANDOFF-018 left
+`translate.accept`'s `.strip()` alone on the stated grounds that "once the block
+is skeleton, no segment starts with an indent by construction". That premise is
+false. A list item's second paragraph is `- item\n\n    text`, and `mdparse` puts
+those four spaces at the front of the segment: stripped, the paragraph leaves the
+list item — `<li><p>item</p><p>text</p></li>` becomes `<li>item</li>` plus a
+sibling `<p>`. The ordered and nested spellings do the same, and `>     x` inside
+a blockquote is the original defect one container down. `lx apply` does not
+strip, so the same document behaves differently depending on whether a model or a
+person produced the target. No corpus fixture has such a segment at all. Handed
+to HANDOFF-019 rather than absorbed here.
+
 ## 2026-08-02 · A continuation indent survives normalization verbatim, and the same op scoped out twice was guilty twice
 
 Closing HANDOFF-011, the other end of the line from HANDOFF-010. `collapse_space`

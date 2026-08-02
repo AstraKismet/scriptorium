@@ -60,6 +60,251 @@ def test_code_and_frontmatter_never_become_segments():
     assert "title: Guide" not in joined
 
 
+# --- an indented code block is code, not a paragraph -------------------------
+#
+# `mdparse` had no branch for one, so a chunk indented by four spaces fell
+# through to the paragraph branch and the model was asked to translate Python.
+# Worse: the four spaces that *make* it code sat at position 0 of the segment,
+# where `translate.accept` strips the leading whitespace off every proposal it
+# takes — and a translation-memory hit comes through `accept` too, so a target a
+# person applied with its indent intact was banked with the indent and handed
+# back without it on the next extract. `test_memory.py` owns that cycle.
+#
+# The rule implemented is CommonMark's, not a four-space test. An indented chunk
+# is code only where a paragraph could not be continued lazily, and only past the
+# content column of any list item it is sitting inside. Either one wrong in the
+# permissive direction turns prose into skeleton and stops translating it, which
+# is worse than the defect being repaired — so the must-not-fire list below is
+# the longer of the two on purpose. Every row in both was confirmed against a
+# real CommonMark render (markdown-it-py, 2026-08-02), and the two rows that
+# deliberately disagree with it say so.
+
+
+def test_an_indented_code_block_is_skeleton_and_never_reaches_the_model():
+    """Derived from the fixture, never quoted from it, so it keeps testing the file."""
+    text = (CORPUS / "indented-code-block.md").read_bytes().decode("utf-8")
+    nodes, segs = parse(text)
+    lines = text.split("\n")
+    indented = [ln for ln in lines if ln[:1] in (" ", "\t")]
+    assert indented, ("indented-code-block.md no longer contains an indented line, "
+                      "so this test measures nothing — fix the test, not the fixture")
+    joined = "\n".join(s["source"] for s in segs)
+    raw = "".join(n["v"] for n in nodes if n["t"] == "raw")
+    for line in indented:
+        assert line not in joined, line       # never offered to the model
+        assert line in raw, line              # and reproduced byte for byte
+    # The prose around it is still translated. A "fix" that swallowed the whole
+    # file into the skeleton would pass both assertions above and nothing else.
+    assert [ln for ln in lines if ln and ln[:1] not in (" ", "\t")] \
+        == [s["source"] for s in segs]
+
+
+@pytest.mark.parametrize("text, code", [
+    ("Paragraph.\n\n    def x():\n        return 1\n", "def x():"),
+    # A heading, a setext underline and a thematic break each close the
+    # paragraph, so no blank line is needed to open code after one.
+    ("# Heading\n    def x():\n", "def x():"),
+    ("Title\n=====\n    def x():\n", "def x():"),
+    ("Text.\n\n***\n\n    def x():\n", "def x():"),
+    ("| h |\n| --- |\n| c |\n\n    def x():\n", "def x():"),
+    # Nothing before it at all.
+    ("    def x():\n", "def x():"),
+    # One tab is four columns, not one character of indent. This is the row that
+    # fails when the width is taken as `len(line) - len(line.lstrip())`.
+    ("\tdef x():\n", "def x():"),
+    ("  \tdef x():\n", "def x():"),
+    # Eight columns clears a `- ` item's content column by four.
+    ("- item\n\n        deep code\n", "deep code"),
+    # A chunk ends at the first line below its floor, and the prose after it is
+    # a separate block that is still translated.
+    ("    def x():\nParagraph after it.\n", "def x():"),
+    # Two chunks either side of a blank line. CommonMark calls that one code
+    # block and this calls it two; both are raw, so the bytes agree.
+    ("Text.\n\n    print('a')\n\n    print('b')\n", "print('b')"),
+    # A block at the left margin closes the list item above, so the floor drops
+    # back to four. Without that, one list anywhere in a document keeps every
+    # later code block translatable — which is most technical documentation, and
+    # is the defect quietly coming back.
+    ("- item\n\nParagraph at the margin.\n\n    def x():\n", "def x():"),
+    # A chunk inside a list item runs while its own floor holds, not while four
+    # columns hold. The next row is the other half: the line below it is the
+    # item's prose and must survive.
+    ("- item\n\n        deep code\n    a shallower line of the item.\n", "deep code"),
+    # A CRLF document reaches `parse` as LF text when its terminators are
+    # uniform, but a *mixed* one keeps its CRs, and a CR at the end of a line is
+    # a terminator rather than text. Those lines are still code.
+    ("Para.\r\n\r\n    def x():\r\n        return 1\r\n\r\nClose.\n", "def x():"),
+    # The must-still-be-code half of the four guards below. A thematic break
+    # with nothing above it is still a break; a link definition that has a
+    # destination is still a definition; and a line Python calls blank but
+    # CommonMark does not opens a paragraph that a *real* blank then closes.
+    ("---\n    def x():\n", "def x():"),
+    ("[x]: https://example.invalid\n    def x():\n", "def x():"),
+    ("First paragraph.\n　\n\n    def x():\n", "def x():"),
+    # A heading may interrupt a paragraph, and it closes it. The branches that
+    # say nothing about the paragraph state — heading, fence, table, and a chunk
+    # itself — rely on the reset at the top of the loop to close it for them, and
+    # this row is the only one where that reset is observable.
+    ("Paragraph.\n# Heading\n    def x():\n", "def x():"),
+], ids=["after-a-paragraph", "after-a-heading", "after-a-setext-underline",
+        "after-a-thematic-break", "after-a-table", "at-the-start-of-the-file",
+        "one-tab", "two-spaces-and-a-tab", "inside-a-list-item",
+        "prose-directly-below", "across-a-blank-line",
+        "a-margin-block-closes-the-item", "a-chunk-stops-at-its-own-floor",
+        "a-crlf-terminator-is-not-text", "a-thematic-break-underlines-nothing",
+        "a-link-definition-with-a-destination", "a-real-blank-still-closes",
+        "after-a-heading-that-interrupted-a-paragraph"])
+def test_an_indented_chunk_that_is_code_leaves_no_segment_behind(text, code):
+    assert code not in "\n".join(s["source"] for s in parse(text)[1])
+    assert identity_roundtrip(text) == text
+
+
+@pytest.mark.parametrize("text, prose", [
+    # CommonMark's own words: an indented code block cannot interrupt a
+    # paragraph. These two are the headline case and its tab spelling.
+    ("A paragraph line.\n    a lazy continuation.\n", "a lazy continuation."),
+    ("A paragraph line.\n\ta tab lazy continuation.\n", "a tab lazy continuation."),
+    # The paragraph branch stops at anything that looks like a block start at any
+    # indent, so these three reach the block dispatch while CommonMark is still
+    # inside one paragraph. They are why the rule is state and not a claim about
+    # which lines the paragraph branch happens to reach.
+    ("Paragraph.\n    - a list-looking lazy line.\n", "a list-looking lazy line."),
+    ("Paragraph.\n    > a quote-looking lazy line.\n", "a quote-looking lazy line."),
+    ("Paragraph.\n    1. an ordered lazy line.\n", "an ordered lazy line."),
+    # A blockquote is emitted one line at a time, so its lazy continuations reach
+    # the dispatch too.
+    ("> quoted line\n    a lazy quote continuation.\n", "a lazy quote continuation."),
+    # Four columns is only two past a `- ` item's content column, so this is the
+    # item's second paragraph and not code.
+    ("- item\n\n    a second paragraph of the item.\n",
+     "a second paragraph of the item."),
+    ("- item\n\n   three spaces only.\n", "three spaces only."),
+    ("1. item\n\n    still inside the item.\n", "still inside the item."),
+    ("  - item\n\n      inside the indented item.\n", "inside the indented item."),
+    ("- item\n      - a deeply indented nested item.\n",
+     "a deeply indented nested item."),
+    # One tab is four columns and not eight, so it does not clear a `- ` item's
+    # floor of six. `\tdef x():` at the margin is code either way and separates
+    # nothing — this is the row that does.
+    ("- item\n\n\ta tab is four columns.\n", "a tab is four columns."),
+    # The other half of `a-chunk-stops-at-its-own-floor`: the line below the deep
+    # chunk is four columns, which is the item's prose and not code.
+    ("- item\n\n        deep code\n    a shallower line of the item.\n",
+     "a shallower line of the item."),
+    # A tab inside the list marker itself. `len(prefix)` scores `-\t` as two
+    # columns and puts the floor at six; the marker actually ends at column four,
+    # so the floor is eight and these six columns are the item's second paragraph.
+    ("-\titem\n\n      six columns is below the floor.\n",
+     "six columns is below the floor."),
+    # A line that looks like a list at the margin does not close the item above
+    # it — and this one is not handled by the list branch at all, because the
+    # table branch is tested first and claims it. Obscure, and the only shape
+    # that separates the two spellings of the closing rule.
+    ("- item\n\n- | a |\n| --- |\n| b |\n\n    still inside the item.\n",
+     "still inside the item."),
+    # Below the threshold at the left margin.
+    ("Text.\n\n   only three spaces.\n", "only three spaces."),
+    # Only a space and a tab indent. U+3000 is the zh-TW paragraph indent and
+    # U+00A0 is what a paste from a word processor leaves; `str.lstrip()` eats
+    # both and would score these four columns. The form feed separates chapters
+    # in an older .txt and is in `tests/corpus-text/` for that reason.
+    ("　　　　An ideographic indent is not four columns.\n",
+     "An ideographic indent is not four columns."),
+    ("\xa0\xa0\xa0\xa0A no-break space indent is not four columns.\n",
+     "A no-break space indent is not four columns."),
+    ("\x0c   A form feed is not indentation.\n", "A form feed is not indentation."),
+    # The four found by adversarial review on 2026-08-02, after a 37224-shape
+    # sweep had reported zero. Each is a line the *dispatch* misreads, so each
+    # was invisible to a sweep that varied the block above the chunk without
+    # varying that block's own shape. They are ordinary hand-written Markdown.
+    #
+    # A list item whose text wraps to the left margin: the continuation is at
+    # column 0 and does not close the item, so the second paragraph is still
+    # measured against the item's floor of six and not against four.
+    ("- item wraps and\ncontinues at the left margin.\n"
+     "\n    a second paragraph of the item.\n", "a second paragraph of the item."),
+    # A line that is blank to `str.strip()` and not to CommonMark. It is content,
+    # so it opens a paragraph rather than merely keeping one open — the heading
+    # row is the degenerate end that refuted the first spelling of this guard.
+    ("First paragraph.\n　\n    an indented continuation.\n",
+     "an indented continuation."),
+    ("First paragraph.\n\xa0\n    an indented continuation.\n",
+     "an indented continuation."),
+    ("# Heading\n　\n    an indented continuation.\n", "an indented continuation."),
+    # `=====` and `--` underline nothing when no paragraph is open, so CommonMark
+    # reads them as paragraph text and the indented line as their continuation.
+    ("=====\n    indented prose after it.\n", "indented prose after it."),
+    ("--\n    indented prose after it.\n", "indented prose after it."),
+    # A link definition with no destination is not a link definition.
+    ("[x]:\n    indented prose after it.\n", "indented prose after it."),
+    # A CR-only document — Classic Mac OS — is *one* line to `str.split("\n")`,
+    # because this parser treats a lone CR as text rather than as a terminator
+    # (`docs/decisions.md`, 2026-07-28). CommonMark calls it two lines, a code
+    # block and a paragraph. The parser cannot know where the chunk ends, so it
+    # declines to make any of it skeleton and the prose stays translatable.
+    ("    def x():\rprose after a bare carriage return\r",
+     "prose after a bare carriage return"),
+    # The same guard on a chunk's *continuation* line rather than its first. The
+    # chunk loop starts at `i + 1`, so the opening line's copy of this test can
+    # no longer stand in for this one.
+    ("Para.\n\n    def a():\n    b\rprose after a text CR\n",
+     "prose after a text CR"),
+    # The two that knowingly disagree with CommonMark, both conservative.
+    #
+    # A bare `>` closes the paragraph inside a blockquote, so CommonMark opens a
+    # code block here. This parser has no container stack and cannot measure an
+    # indent against a blockquote's content column: reading the bare `>` that way
+    # fixed 285 generated shapes and turned prose into skeleton in 57, because
+    # `> q\n>\n    > x` is still inside the quote where `> q\n>\n    y` is not.
+    ("> quoted line\n>\n    still not code here.\n", "still not code here."),
+    # And the floor is the whole list prefix, checkbox included, where
+    # CommonMark's content column stops after the marker.
+    ("- [ ] task\n\n      six spaces after a checkbox.\n",
+     "six spaces after a checkbox."),
+], ids=["lazy-continuation", "lazy-continuation-by-tab", "lazy-looks-like-a-list",
+        "lazy-looks-like-a-quote", "lazy-looks-like-an-ordered-item",
+        "lazy-continuation-of-a-quote", "second-paragraph-of-an-item",
+        "three-spaces-in-an-item", "ordered-item-content-column",
+        "indented-item-content-column", "deeply-indented-nested-item",
+        "a-tab-is-four-columns", "a-shallower-line-below-a-chunk",
+        "a-tab-inside-the-list-marker", "a-margin-list-the-table-branch-claims",
+        "three-spaces-at-the-margin", "ideographic-space", "no-break-space",
+        "form-feed",
+        "a-lazy-continuation-does-not-close-the-item",
+        "an-ideographic-space-line-is-not-blank",
+        "a-no-break-space-line-is-not-blank",
+        "a-content-line-opens-a-paragraph-after-a-heading",
+        "an-equals-run-that-underlines-nothing",
+        "a-dash-run-that-underlines-nothing",
+        "a-link-definition-with-no-destination",
+        "a-bare-carriage-return-inside-the-line",
+        "a-text-cr-on-a-continuation-line",
+        "bare-quote-marker", "task-list-checkbox"])
+def test_an_indented_chunk_that_is_prose_is_still_translated(text, prose):
+    assert prose in "\n".join(s["source"] for s in parse(text)[1])
+    assert identity_roundtrip(text) == text
+
+
+@pytest.mark.parametrize("name, count", [
+    ("list-continuation-indent.md", 3),          # four spaces, two, and an ordered three
+    ("list-continuation-two-space-indent.md", 2),
+    ("crlf-list-items.md", 3),
+    ("nested-lists.md", 14),                     # three levels, and `    - third`
+    ("blockquote-nested.md", 4),
+    ("html-block.md", 5),
+    ("mixed-blocks.md", 8),
+    # 112k characters of real documentation. A rule that is wrong anywhere in the
+    # permissive direction moves this number, and the round-trip property cannot
+    # see it: `tests/corpus/` substitutes each segment's *source* back into the
+    # skeleton, so a block that stopped being translated round-trips perfectly.
+    ("long-manual.md", 1572),
+])
+def test_the_indented_code_rule_moved_no_other_fixture_s_segment_count(name, count):
+    text = (CORPUS / name).read_bytes().decode("utf-8")
+    got = [s["source"] for s in parse(text)[1]]
+    assert len(got) == count, got[:5]
+
+
 def test_masking_is_reversible():
     text = "Run `go build` then see https://x.dev/a?b=1 for {{var}}."
     masked, slots = mask(text, [])
@@ -588,9 +833,15 @@ _INDENT_FIXTURES = [
     "list-continuation-indent.md",              # four spaces, two, and an ordered three
     "list-continuation-two-space-indent.md",    # dash and star markers
     "crlf-list-items.md",                       # the same over CRLF
-    "indented-code-block.md",                   # spaces and tabs, and at position 0
     "html-block.md",                            # interior indent between masked tags
 ]
+# `indented-code-block.md` was here until 2026-08-02 and is not any more: its
+# indented lines are in the skeleton now, so it has no segment with one in it and
+# the guard below fires. The guard is doing its job, not failing — this entry
+# came out rather than the fixture being edited, which is the red line in
+# AGENTS.md. Position 0 is still reachable and still covered: a list item's
+# second paragraph keeps its indent inside the segment, and the parametrization
+# further down carries that shape.
 
 
 def _opens_a_line_with_a_blank(text):
@@ -629,9 +880,12 @@ def test_normalize_keeps_a_continuation_indent_at_its_own_width(name):
     "\u98a8\u5439\u904e\n    \u96e8\u843d\u4e0b\n    \u5929\u4eae\u4e86",
     # Position 0. `translate.accept` strips a model's leading whitespace before
     # normalize sees it; `cli.do_apply` \u2014 a person's or an agent's own words \u2014
-    # does not, and `mdparse` puts an indented code block's four spaces here.
+    # does not. An indented code block stopped arriving here on 2026-08-02, when
+    # it became skeleton, but position 0 did not: a list item's second paragraph
+    # is `- item\n\n    text` and `mdparse` puts those four spaces at the front
+    # of the segment, where losing them takes the paragraph out of the item.
     "  \u300c\u958b\u5834\u300d\n\u7b2c\u4e8c\u884c",
-    "    def indented():\n        return 'four spaces, not a fence'",
+    "    \u9019\u662f\u6e05\u55ae\u9805\u76ee\u7684\u7b2c\u4e8c\u6bb5\u3002",
     # An indent need not be made of the characters the op matches. U+3000 is the
     # zh-TW paragraph indent \u2014 `textparse._blank` and `_indented` both know it \u2014
     # and a mixed \u3000+spaces indent is what a paste from a PDF, or a model padding
