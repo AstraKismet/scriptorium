@@ -127,6 +127,27 @@ not have, and do not flatten an image into a statement.""",
     ),
 }
 
+#: Appended only when at least one item actually carries a neighbour, so a
+#: project that set `batch.context` to 0 does not pay for an instruction about
+#: fields that will never appear.
+#:
+#: It goes *before* the language brief and not after it. D4's finding was that
+#: the last thing the model reads overrides the knobs above it, which is how an
+#: unconditional documentation-register sentence beat `Tone:` for months; the
+#: brief keeps that position and this takes the one below `_BASE_RULES`.
+_CONTEXT_RULES = """\
+Some items carry `before_id`, `before_text`, `after_id` or `after_text`: the
+segments that surround this one in the document, in document order, so that a
+pronoun, a speaker, a tense, or a level of formality has something to resolve
+against. They are context and nothing else.
+
+`before_id` and `after_id` name another item of this same request — read its
+`text` there. `before_text` and `after_text` carry a neighbour's source inline,
+because that neighbour is not in this request.
+
+Never translate a neighbour, never fold one into the segment you are
+translating, and never reply under an id that is not the `id` of an item."""
+
 _POLISH_RULES = """\
 You are revising an existing translation into {target_lang} for fluency.
 
@@ -160,11 +181,13 @@ def _brief(target_lang, tone):
     return "\n".join(p for p in (head, _LANG_TERMS.get(target_lang), rules) if p)
 
 
-def _system_prompt(source_lang, target_lang, tone, mode):
+def _system_prompt(source_lang, target_lang, tone, mode, context=False):
     if mode == "polish":
         base = _POLISH_RULES.format(target_lang=target_lang)
     else:
         base = _BASE_RULES.format(source_lang=source_lang, target_lang=target_lang, tone=tone)
+    if context:
+        base = f"{base}\n\n{_CONTEXT_RULES}"
     brief = _brief(target_lang, tone)
     return f"{base}\n\n{brief}" if brief else base
 
@@ -210,13 +233,97 @@ def _glossary_hints(text, glossary):
     return hints
 
 
-def _user_message(segments, glossary, mode):
+def _neighbour_context(doc, segments, window):
+    """``({id: (before_ids, after_ids)}, {id: source})`` in document order.
+
+    Adjacency comes from **the document**, never from the ``segments`` argument.
+    `lx repair` passes only the failing segments and `lx translate --ids` passes
+    whatever the user named, so reading the caller's list as document order
+    would tell the model that segment 5 and segment 40 are consecutive prose. A
+    confident lie about flow is worse than no context at all, which is the whole
+    reason this consults ``doc["segments"]`` — the authority `tone` and `eol`
+    already have for facts about the document rather than about one request.
+
+    The source text is the *masked* form, so invariant 3 holds for a neighbour
+    exactly as it does for the segment being translated.
+
+    A window of ``0`` needs no early return and does not get one: it slices
+    ``ids[i:i]`` on both sides, so every entry comes out empty, no item gains a
+    field and `_system_prompt` is not told to explain one. The guard that used
+    to sit here survived the mutation sweep — nothing could observe it — and an
+    inert branch a later reader would take for load-bearing is worse than the
+    dictionary it saved building.
+    """
+    order = [s for s in (doc.get("segments") or segments) if s.get("id")]
+    ids = [s["id"] for s in order]
+    at = {sid: i for i, sid in enumerate(ids)}
+    source = {s["id"]: s.get("masked") or "" for s in order}
+    adjacency = {}
+    for seg in segments:
+        i = at.get(seg.get("id"))
+        if i is None:
+            # Not a segment of this document. Unreachable from the CLI and the
+            # workbench, which both derive their list from the document they
+            # pass — but a stale list should cost the context, not the run.
+            continue
+        # `max(0, ...)` and not a bare `i - window`: at i=1 with a window of 2
+        # that slices `ids[-1:1]`, which is empty, so the second segment of a
+        # document would silently lose the first.
+        adjacency[seg["id"]] = (ids[max(0, i - window):i], ids[i + 1 : i + 1 + window])
+    return adjacency, source
+
+
+def _attach(item, side, nids, present, source):
+    """Give one side of ``item`` its neighbours: a reference, an inline source, or both.
+
+    Referencing is what keeps the cost bounded: inside a batch the neighbours of
+    an interior segment are other items of the same request, so sending their
+    text again would treble the payload for nothing. Only the two edges of a
+    batch — and, on the retry path, both sides — have nothing to point at.
+
+    **Two scalar fields, not one list of objects, and the reason is measured.**
+    `_user_message` serializes with ``indent=1``, so ``[{"id": "s0004"}]`` costs
+    about 48 characters where the id inside it costs 8 — the container, not the
+    reference. On a document of short blocks the nested form made the request
+    1.95x its no-context size against these fields' 1.50x, and on prose, which
+    is what this feature is for, 1.25x against 1.16x. `docs/decisions.md`,
+    2026-08-02.
+
+    A widened window joins rather than lists, for that same reason: its
+    neighbours on one side are consecutive segments of one document, so a blank
+    line between them is what the document itself says there.
+
+    An inlined neighbour has nowhere to carry an id, which is deliberate rather
+    than incidental. An id the model can see is an id it can answer under, and
+    an answer for a segment nobody asked about is exactly what must not come
+    back. `run_batch` and `retry_one` both read only the ids they requested, so
+    such an answer is already discarded; this removes the temptation one layer
+    earlier rather than relying on that alone.
+    """
+    refs = [n for n in nids if n in present]
+    texts = [source[n] for n in nids if n not in present and source.get(n)]
+    if refs:
+        item[f"{side}_id"] = " ".join(refs)
+    if texts:
+        item[f"{side}_text"] = "\n\n".join(texts)
+
+
+def _user_message(segments, glossary, mode, context=None):
     terms = []
     for seg in segments:
         terms.extend(_glossary_hints(seg["masked"], glossary))
+    adjacency, source = context or ({}, {})
+    present = {seg["id"] for seg in segments}
     payload = []
     for seg in segments:
-        item = {"id": seg["id"], "kind": seg["kind"], "text": seg["masked"]}
+        before, after = adjacency.get(seg["id"], ((), ()))
+        # Key order is reading order — what precedes the segment, the segment,
+        # what follows it. The payload reaches the model as text, and flow is
+        # the one thing these fields exist to carry.
+        item = {"id": seg["id"], "kind": seg["kind"]}
+        _attach(item, "before", before, present, source)
+        item["text"] = seg["masked"]
+        _attach(item, "after", after, present, source)
         if mode == "polish":
             item["draft"] = seg.get("target") or ""
         if seg.get("issues"):
@@ -314,7 +421,14 @@ def translate_segments(segments, doc, cfg, provider_name=None, mode="draft",
     workers = max(1, concurrency or batch_cfg.get("concurrency", 2))
 
     glossary = load_glossary(cfg)
-    system = _system_prompt(source_lang, lang, tone, mode)
+    # Built once, from the document, and closed over by both request paths — so
+    # `retry_one` gets its neighbours for free rather than needing the segment
+    # list threaded into it. A payload of one has nothing to point at, so both
+    # sides arrive inlined, which is precisely what the retry path needs: it is
+    # where a hard sentence ends up and where the context was worst.
+    context = _neighbour_context(doc, segments, batch_cfg.get("context", 1))
+    briefed = any(b or a for b, a in context[0].values())
+    system = _system_prompt(source_lang, lang, tone, mode, briefed)
 
     results, failures = {}, []
     lock = threading.Lock()
@@ -327,7 +441,8 @@ def translate_segments(segments, doc, cfg, provider_name=None, mode="draft",
             note = ("\nThis segment previously came back with the wrong placeholders. "
                     "Copy every ⟦n⟧ exactly as it appears.")
         try:
-            reply = provider.complete(system, _user_message([seg], glossary, mode) + note)
+            reply = provider.complete(
+                system, _user_message([seg], glossary, mode, context) + note)
             got = parse_reply(reply).get(seg["id"], "")
         except Exception as e:  # noqa: BLE001 - surfaced to the caller
             return None, str(e)
@@ -335,7 +450,7 @@ def translate_segments(segments, doc, cfg, provider_name=None, mode="draft",
 
     def run_batch(idx, batch):
         try:
-            reply = provider.complete(system, _user_message(batch, glossary, mode))
+            reply = provider.complete(system, _user_message(batch, glossary, mode, context))
             mapping = parse_reply(reply)
         except Exception as e:  # noqa: BLE001
             progress(f"batch {idx + 1}/{len(batches)} failed ({e}); retrying segment by segment")
