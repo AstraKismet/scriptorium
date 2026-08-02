@@ -340,7 +340,7 @@ Worth knowing before you adopt it, and all of them measured rather than guessed:
   and link-text brackets are not masked yet. The direction is to finish the
   masking, not to relax the rule.
 - **A wrapped block's interior line breaks are inside the segment**, along with
-  the indentation that follows them — 79 of 2394 segments across this project's
+  the indentation that follows them — 149 of 1467 segments across this project's
   own documentation. They cannot be masked without splitting one sentence into
   several segments.
 - **No fuzzy matching.** Reuse is exact: same text, same kind of block, same
@@ -398,7 +398,7 @@ that lost.
 ## Development
 
 ```bash
-python -m pytest -q                # 671 passed, no network
+python -m pytest -q                # 748 passed, no network
 python -m ruff check src tests
 ```
 

@@ -302,11 +302,342 @@ def test_an_indented_chunk_that_is_prose_is_still_translated(text, prose):
     # see it: `tests/corpus/` substitutes each segment's *source* back into the
     # skeleton, so a block that stopped being translated round-trips perfectly.
     ("long-manual.md", 1572),
+    # The two HANDOFF-020 added. Pinned here as well as in their own tests
+    # below, because this is the list a later change reads when it wants to know
+    # what it moved.
+    # 10 rather than 8: a quoted list item's deep chunk is deliberately still
+    # translatable, see `_QUOTED_PROSE`.
+    ("blockquote-indented-code.md", 10),
+    ("indented-fence-run.md", 8),
 ])
 def test_the_indented_code_rule_moved_no_other_fixture_s_segment_count(name, count):
     text = (CORPUS / name).read_bytes().decode("utf-8")
     got = [s["source"] for s in parse(text)[1]]
     assert len(got) == count, got[:5]
+
+
+# --- the two containers HANDOFF-018 left behind ------------------------------
+#
+# Both measured 2026-08-03 at `ade9fa9`, both fixed here, and neither is visible
+# to `tests/corpus/`: that harness substitutes each segment's *source* back into
+# the skeleton, so a block that stopped being translated round-trips perfectly
+# and a block handed to the model round-trips perfectly too. The measurement has
+# to be on the segment set and on the target side, which is what these do.
+#
+# *A blockquote's interior was not measured at all.* `> intro\n>\n>     def x():`
+# put `    def x():` in a segment and asked the model to translate Python.
+# `mdparse` emits one segment per quoted line and never descends into the quote,
+# so the fix is a content column read after the `>` marker plus the quote's own
+# paragraph state — the bare `>` between the two lines is the whole difference
+# between a code block and a lazy continuation.
+#
+# *An indented fence run swallowed prose to end of file.* `FENCE_RE` matched at
+# any indent, so `    ```` ` was claimed by the fence branch, and with nothing to
+# close it the branch consumed the rest of the document into the skeleton. A
+# fence's indentation is bounded at three columns past its container's content
+# column, which is `code_floor` minus one.
+#
+# Every row below was confirmed against a real CommonMark render (markdown-it-py,
+# 2026-08-03), and the three that knowingly disagree with it say so.
+
+
+#: The two halves of `blockquote-indented-code.md`, named rather than derived.
+#: Deriving them means re-implementing the rule under test inside the test, and
+#: this fixture holds prose indented exactly as far as its code — which is the
+#: point of it, and what no mechanical filter can separate without being the
+#: parser. Naming them costs a check that the fixture still contains each line,
+#: below, so a fixture edit fails loudly instead of quietly measuring nothing.
+_QUOTED_CODE = [
+    ">     def quoted():",
+    ">         return 'four columns past the marker'",
+    ">\t\tdef tabbed():",
+    ">\t\t\treturn 'two tabs past the marker'",
+]
+_QUOTED_PROSE = [
+    "    a lazy continuation of the sentence above it.",
+    "    Four columns is below this item's floor, so it is a second paragraph.",
+    # The repair this package deliberately does not make, kept in the fixture so
+    # the trade is visible rather than merely written down. Six columns clears
+    # CommonMark's floor for this item and *is* a code block there — but the
+    # quote's interior tracks an open list as a boolean rather than a column, so
+    # nothing inside a quoted list is code. Six of the eight regressions
+    # adversarial review found on 2026-08-03 lived in that column's arithmetic,
+    # and every one of them lost prose; this costs a visible translated code
+    # block instead. `docs/decisions.md` of that date has the reasoning.
+    "      def deep():",
+    "          return 'six columns clears the floor'",
+]
+
+
+def test_a_quoted_chunk_is_skeleton_and_never_reaches_the_model():
+    text = (CORPUS / "blockquote-indented-code.md").read_bytes().decode("utf-8")
+    lines = text.split("\n")
+    for line in _QUOTED_CODE:
+        assert line in lines, (line, "blockquote-indented-code.md no longer holds "
+                                     "this line — fix the test, not the fixture")
+    nodes, segs = parse(text)
+    joined = "\n".join(s["source"] for s in segs)
+    raw = "".join(n["v"] for n in nodes if n["t"] == "raw")
+    for line in _QUOTED_CODE:
+        assert line.split(">", 1)[1].lstrip(" \t") not in joined, line
+        assert line in raw, line                  # reproduced byte for byte
+    # …and the prose beside it, indented by exactly as much, is still translated.
+    # A "fix" that swallowed the whole quote into the skeleton passes every
+    # assertion above and nothing else.
+    for line in _QUOTED_PROSE:
+        assert line in joined, line
+
+
+def test_an_indented_fence_run_is_a_chunk_and_the_prose_below_it_survives():
+    """Derived from the fixture, never quoted from it."""
+    text = (CORPUS / "indented-fence-run.md").read_bytes().decode("utf-8")
+    nodes, segs = parse(text)
+    lines = text.split("\n")
+    runs = [ln for ln in lines if ln.strip()[:3] in ("```", "~~~")]
+    assert len(runs) >= 5, ("indented-fence-run.md no longer contains the runs "
+                            "this measures — fix the test, not the fixture")
+    joined = "\n".join(s["source"] for s in segs)
+    raw = "".join(n["v"] for n in nodes if n["t"] == "raw")
+    for line in runs:
+        assert line not in joined, line
+        assert line in raw, line
+    # The prose an unbounded `\s*` used to swallow, at both ends of the file.
+    assert "Ordinary prose that must stay translatable." in joined
+    assert "Prose after the list." in joined
+
+
+@pytest.mark.parametrize("text, body", [
+    # --- Defect B: an indented run of fence characters is a chunk, not a fence.
+    ("Para.\n\n    ```\n    body of the chunk\nProse after.\n", "body of the chunk"),
+    ("Para.\n\n    ~~~\n    body of the chunk\nProse after.\n", "body of the chunk"),
+    ("Para.\n\n    ````\n    body of the chunk\nProse after.\n", "body of the chunk"),
+    # …and the must-still-be-a-fence half, which is the longer risk. Three
+    # columns is CommonMark's bound at the margin, and inside a list item the
+    # bound moves with the item — a fence indented into one is still a fence, and
+    # a rule spelled `\s{0,3}` absolutely would put this code in front of the
+    # model.
+    ("Text.\n\n   ```\n   body of the chunk\n   ```\n\nProse.\n", "body of the chunk"),
+    ("- item\n\n  ```\n  body of the chunk\n  ```\n", "body of the chunk"),
+    ("1. item\n\n   ```\n   body of the chunk\n   ```\n", "body of the chunk"),
+    ("  - item\n\n    ```\n    body of the chunk\n    ```\n", "body of the chunk"),
+    # An unclosed fence at the margin still reaches end of file, which is both
+    # CommonMark's answer and what `tests/corpus/fences-and-unclosed.md` pins.
+    ("```\nbody of the chunk\n", "body of the chunk"),
+    (" ```\nbody of the chunk\n", "body of the chunk"),
+    # A margin fence under an open list item is not inside the item, so the
+    # container bound on an unclosed run must not apply to it.
+    ("- item\n```\n\nbody of the chunk\n", "body of the chunk"),
+    # --- Defect A: a chunk inside a blockquote.
+    ("> intro\n>\n>     def x():\n>         return 1\n", "def x():"),
+    ("> intro\n>\n>     def x():\n>         return 1\n", "return 1"),
+    (">     def x():\n", "def x():"),
+    ("> a\n\n>     def x():\n", "def x():"),
+    # A quote line that is blank closes the quote's paragraph in three spellings.
+    ("> intro\n>  \n>     def x():\n", "def x():"),
+    ("> intro\n>\t\n>     def x():\n", "def x():"),
+    # One tab after the marker is two columns, not four: the marker takes `>` and
+    # one space of it. Two tabs clear the floor.
+    (">\t\tdef x():\n", "def x():"),
+    # A block at the quote's own column closes a list open inside the quote, so
+    # the floor drops back to four. Without it, one `> - item` anywhere keeps
+    # every later quoted chunk in the document translatable — the document
+    # level's margin rule, one container down, and the same defect quietly
+    # coming back.
+    ("> - item\n>\n> margin text\n>\n>     def x():\n", "def x():"),
+    # U+3000 and U+00A0 are not indentation, so neither line opens a list item
+    # and the chunk below is measured against four columns rather than against a
+    # phantom item's floor of seven. `LIST_RE`'s leading `\s*` said otherwise:
+    # 706 markers of code across the sweep, and the reason its class is narrowed
+    # even though the quote defect it caused is now fixed a second way.
+    ("　- a paragraph, not a list item\n\n    def x():\n", "def x():"),
+    ("\xa0- a paragraph, not a list item\n\n    def x():\n", "def x():"),
+    # An unclosed run inside an item ends where the item does, so a line between
+    # the item's content column and the fence's own indent is still inside the
+    # run. Bounding by the opener instead stops there and hands its body to the
+    # model.
+    ("- item\n\n    ```\n   three columns\nprose.\n", "three columns"),
+    # A blank line inside an unclosed run does not end it: the run reaches the
+    # container's end, so the containment loop steps over blanks for the same
+    # reason the chunk loop does. Without that step the run stops at the blank
+    # and everything below it is handed to the model.
+    ("- an item\n\n  ```\n  code body\n\n  more code body\nprose after.\n",
+     "more code body"),
+], ids=["indented-backtick-run", "indented-tilde-run", "indented-longer-run",
+        "three-columns-is-still-a-fence", "a-fence-indented-into-an-item",
+        "a-fence-in-an-ordered-item", "a-fence-in-a-nested-item",
+        "an-unclosed-margin-fence", "an-unclosed-one-column-fence",
+        "a-margin-fence-under-an-item", "a-quoted-chunk",
+        "a-quoted-chunk-runs-on", "a-quoted-chunk-opens-the-file",
+        "a-blank-line-reopens-the-quote",
+        "a-quote-blank-with-a-space", "a-quote-blank-with-a-tab",
+        "two-tabs-after-the-marker", "a-quoted-margin-block-closes-the-item",
+        "an-ideographic-space-opens-no-item", "a-no-break-space-opens-no-item",
+        "an-unclosed-run-holds-a-shallower-line",
+        "an-unclosed-run-holds-a-blank-line"])
+def test_a_chunk_in_a_fence_run_or_a_quote_leaves_no_segment_behind(text, body):
+    assert body not in "\n".join(s["source"] for s in parse(text)[1])
+    assert identity_roundtrip(text) == text
+
+
+@pytest.mark.parametrize("text, prose", [
+    # --- Defect B: the prose an unclosed indented run used to swallow.
+    ("Para.\n\n    ```\n    code\nOrdinary prose.\n", "Ordinary prose."),
+    ("Para.\n\n    ~~~\n    code\nOrdinary prose.\n", "Ordinary prose."),
+    ("- item\n\n      ```\n    ```\n\nProse after the list.\n", "Prose after the list."),
+    # A run that cannot interrupt the paragraph above it is that paragraph's
+    # lazy continuation, and the prose below it comes back with it.
+    ("Para.\n    ```\n    code\nlazy prose\n", "lazy prose"),
+    # Only a space and a tab indent a fence. `\s` reaches both of these, and
+    # U+3000 is the zh-TW paragraph indent — a paragraph that begins with one
+    # was being read as a fence and swallowed with everything under it.
+    ("　```\nprose after an ideographic space\n```\n",
+     "prose after an ideographic space"),
+    ("\xa0```\nprose after a no-break space\n```\n", "prose after a no-break space"),
+    # --- Defect A: what a blockquote's interior must keep.
+    ("> intro\n>     a lazy continuation.\n", "a lazy continuation."),
+    ("> - item\n>\n>     a second paragraph of the quoted item.\n",
+     "a second paragraph of the quoted item."),
+    # …and its deeper sibling, which CommonMark *does* call code. The quote's
+    # interior tracks an open list as a boolean rather than a column, so nothing
+    # inside a quoted list is code: the column was six of the eight regressions
+    # adversarial review found, every one losing prose. This is what that costs.
+    ("> - item\n>\n>       def deep():\n", "def deep():"),
+    ("> -\titem\n>\n>         def x():\n", "def x():"),
+    # A bare `> -` opens an empty list item CommonMark still counts, and `LIST_RE`
+    # does not match it because it wants whitespace after the marker.
+    ("> -\n>     a\n>\n>     text\n", "text"),
+    ("> 1)\n>     a\n>\n>     text\n", "text"),
+    # A quote marker that is itself indented under an open paragraph is not a
+    # blockquote at all — it is that paragraph's lazy continuation.
+    ("prose paragraph\n    >     def x():\n", "def x():"),
+    # A quoted line the *table* loop consumes, the third branch that reads one
+    # without being the quote branch.
+    ("| a |\n|---|\n> q | p\n>     still prose\n", "still prose"),
+    ("> Note | caveat\n|---|---|\n>     still prose\n", "still prose"),
+    # A quoted line the *fence* loop consumes, the fourth.
+    ("- [ ] item\n      ```\n> intro\n      ```\n>     still prose\n",
+     "still prose"),
+    # A fence marker below the item's content column is not inside the item, so
+    # its own indentation is bounded at the document's floor and not the item's.
+    # Reading it as the item's calls a four-column marker a fence where
+    # CommonMark calls it an indented chunk, and the fence then runs away.
+    ("   - an item\n    ```\n\nprose after the run.\n", "prose after the run."),
+    # Where the fence *is* inside the item, the run stops at the item's end —
+    # bounded by the upper estimate of the content column, because a floor below
+    # the real one runs past that end.
+    ("- [ ] item\n      ```\n  > intro to the quote\n>     a lazy continuation.\n",
+     "intro to the quote"),
+    # …and the line that ends the container may be the fence's own closing
+    # marker, which is otherwise re-read as a fresh opener and reaches end of
+    # file from the margin.
+    ("-\titem\n\n  ```\n```\n\nprose after the fence.\n", "prose after the fence."),
+    # Two blank quote lines in a row: the second reaches the rule that closes a
+    # list open inside the quote, and a blank line closes no list.
+    ("> - a\n>\n>\n>     a second paragraph.\n", "a second paragraph."),
+    ("> intro\n>\n>    three columns only.\n", "three columns only."),
+    # A quote line that is blank to `str.strip()` and not to CommonMark is
+    # content, so it keeps the quote's paragraph open — the same distinction the
+    # document level draws, one container down, and the shape a sweep that varied
+    # only ASCII blanks could not see.
+    ("> intro\n>　\n>     still a lazy continuation.\n", "still a lazy continuation."),
+    ("> intro\n>\xa0\n>     still a lazy continuation.\n", "still a lazy continuation."),
+    # A U+3000 *before* the marker moves the quote's content column if `_columns`
+    # is allowed to score it, which put an ordinary paragraph four columns in.
+    ("　>     an ideographic space before the marker.\n",
+     "an ideographic space before the marker."),
+    (">\tdef x():\n", "def x():"),
+    # A tab stop is absolute in the line, so a tab after the marker's space
+    # starts at column 2 and advances to 4 — two columns of indent, not four.
+    # Measuring the content string on its own scores it as four and calls the
+    # line code, in 2276 generated shapes.
+    ("> \tdef x():\n", "def x():"),
+    # A U+3000 line *outside* the quote is a lazy continuation of it, so it
+    # neither closes the quote nor its paragraph. A real blank line does both,
+    # and reading these two the same way is what the character class is for.
+    ("> intro\n　\n>     a lazy continuation.\n", "a lazy continuation."),
+    # A code block opens no paragraph, so a shallower quoted line after one is
+    # prose again and everything below it is measured afresh.
+    ("> intro\n>\n>     def x():\n> shallow again\n>     a lazy continuation.\n",
+     "a lazy continuation."),
+    # The chunk loop's carriage-return guard, inside a quote. A lone CR is text
+    # here and a line ending to CommonMark, so the parser cannot know where the
+    # chunk ends and declines to make any of it skeleton.
+    ("> intro\n>\n>     def x():\rprose after a text CR\r", "prose after a text CR"),
+    ("> - item\n> continues at the quote's margin\n>\n>     second paragraph.\n",
+     "second paragraph."),
+    # The four adversarial review found on 2026-08-03 after a sweep of 83451
+    # documents had reported zero. Each lives on an axis that sweep held
+    # constant, and every one of them stopped prose being translated.
+    #
+    # A list marker inside a quote starts at the quote's content column, so a tab
+    # in the marker advances from there. Measuring the prefix from column 0
+    # scores `1.\t` as four columns instead of six and drops the floor by two.
+    ("> 1.\titem\n>\n>         a second paragraph of the quoted item.\n",
+     "a second paragraph of the quoted item."),
+    ("> 10.\titem\n>\n>         a second paragraph of the quoted item.\n",
+     "a second paragraph of the quoted item."),
+    # U+3000 is not indentation, so this opens no list item — but `LIST_RE`'s
+    # `\s*` said it did, the list branch swallowed the quote line below it, and
+    # the quote's paragraph state was therefore never set at all.
+    ("　- a paragraph, not a list item\n   > intro\n>     a lazy continuation.\n",
+     "a lazy continuation."),
+    ("\xa0- a paragraph, not a list item\n   > intro\n>     a lazy continuation.\n",
+     "a lazy continuation."),
+    # …and where there *is* a list item, the same loop still consumes the quoted
+    # line, so the state is recorded where the line is read instead.
+    ("-\titem\n   > intro\n>     a lazy continuation.\n", "a lazy continuation."),
+    ("- item\n  > intro\n>     a lazy continuation.\n", "a lazy continuation."),
+    # `list_col` is the item's whole prefix and overshoots CommonMark's content
+    # column, so reading it as "is the fence inside the item" judged a fence at
+    # two columns to be outside a `- [ ] ` item, took the margin's bound of zero,
+    # and swallowed the rest of the file.
+    ("- [ ] item\n\n          ```\n  ```\nprose after the item.\n",
+     "prose after the item."),
+    ("-    item\n\n         ```\n   ```\nprose after the item.\n",
+     "prose after the item."),
+    # The three that knowingly disagree with CommonMark, all conservative and all
+    # inherited rather than invented. The first two are the document level's own
+    # divergences arriving one container down: a list item's floor is its whole
+    # prefix, checkbox included, and a bare `>` does not close a paragraph. The
+    # third is this parser having no container stack — it strips one `>` and
+    # measures the rest, so a chunk inside a *nested* quote stays translatable.
+    ("> - [ ] task\n>\n>       six columns after a quoted checkbox.\n",
+     "six columns after a quoted checkbox."),
+    ("> > nested\n>\n> >     four columns after a nested marker\n",
+     "four columns after a nested marker"),
+    ("> quoted line\n>\n    still not code here.\n", "still not code here."),
+], ids=["prose-below-an-indented-run", "prose-below-an-indented-tilde-run",
+        "prose-below-a-contained-run", "a-run-that-cannot-interrupt-a-paragraph",
+        "an-ideographic-space-before-a-run", "a-no-break-space-before-a-run",
+        "a-lazy-continuation-inside-a-quote", "a-quoted-item-second-paragraph",
+        "a-quoted-item-deep-chunk", "a-tab-in-a-quoted-bullet-marker",
+        "a-bare-quoted-list-marker", "a-bare-quoted-ordered-marker",
+        "an-indented-quote-marker-under-a-paragraph",
+        "a-quoted-line-the-table-branch-consumes",
+        "a-quoted-table-row-that-opens-the-quote",
+        "a-quoted-line-the-fence-branch-consumes",
+        "a-fence-marker-below-the-item-s-content-column",
+        "a-contained-run-stops-at-the-item-s-end",
+        "the-container-s-end-is-the-fence-s-closer",
+        "two-blank-quote-lines-close-no-list",
+        "three-columns-inside-a-quote", "an-ideographic-space-quote-line",
+        "a-no-break-space-quote-line", "an-ideographic-space-before-the-marker",
+        "one-tab-after-the-marker", "a-tab-after-the-marker-s-space",
+        "an-ideographic-space-line-outside-the-quote",
+        "a-shallower-line-below-a-quoted-chunk",
+        "a-text-cr-inside-a-quote", "a-quoted-item-that-wraps",
+        "a-tab-in-a-quoted-list-marker", "a-tab-in-a-longer-quoted-marker",
+        "an-ideographic-space-is-not-a-list-item",
+        "a-no-break-space-is-not-a-list-item",
+        "a-quoted-line-the-list-branch-consumes",
+        "a-quoted-line-inside-a-plain-item",
+        "an-unclosed-fence-below-a-checkbox-item-s-prefix",
+        "an-unclosed-fence-below-a-padded-item-s-prefix",
+        "a-quoted-task-list-checkbox", "a-chunk-inside-a-nested-quote",
+        "a-bare-quote-marker-still-does-not-close"])
+def test_prose_in_a_fence_run_or_a_quote_is_still_translated(text, prose):
+    assert prose in "\n".join(s["source"] for s in parse(text)[1])
+    assert identity_roundtrip(text) == text
 
 
 def test_masking_is_reversible():
@@ -1147,7 +1478,14 @@ def test_accept_still_refuses_a_target_whose_placeholders_moved():
     ("- item one\n\n    A second paragraph.\n", "    A second paragraph."),
     ("1. item one\n\n   A second paragraph.\n", "   A second paragraph."),
     ("- outer\n  - inner\n\n    A second paragraph.\n", "    A second paragraph."),
-    (">     Indented inside a blockquote.\n", "    Indented inside a blockquote."),
+    # HANDOFF-019 wrote this row as a bare `>     Indented …`, which HANDOFF-020
+    # then made a code block inside the quote — CommonMark's reading, and the
+    # whole of that package's Defect A. The lazy-continuation spelling is the
+    # same measurement on a shape that is still prose: an indented chunk cannot
+    # interrupt the quote's open paragraph, so the four spaces stay inside the
+    # segment and `accept` still has to reseat them.
+    ("> intro\n>     Indented inside a blockquote.\n",
+     "    Indented inside a blockquote."),
     ("- [ ] a task\n\n  A second paragraph.\n", "  A second paragraph."),
     ("- item wraps and\ncontinues at the margin.\n\n    A second paragraph.\n",
      "    A second paragraph."),
@@ -1168,6 +1506,42 @@ def test_an_indent_a_segment_owns_survives_a_translation_to_itself(text, source)
         seg["target"], seg["status"] = target, "translated"
     out, missing = render({"nodes": nodes, "segments": segs, "lang": "zh-TW"}, CFG)
     assert (missing, out) == (0, text)
+
+
+@pytest.mark.parametrize("name, skeleton, replaced", [
+    ("indented-fence-run.md",
+     ["    ```", "    ~~~", "    still inside the indented chunk",
+      "   held in the skeleton", "  also held in the skeleton", "      ```"],
+     ["Ordinary prose that must stay translatable.", "Prose after the list."]),
+    ("blockquote-indented-code.md",
+     _QUOTED_CODE,
+     ["> Introducing a code block inside a blockquote."]),
+])
+def test_a_translated_document_keeps_the_fence_and_quote_skeletons_verbatim(
+        name, skeleton, replaced):
+    """The measurement neither `tests/corpus/` nor a segment count can make.
+
+    The round-trip harness substitutes each segment's *source* back, so a block
+    that stopped being translated round-trips perfectly and a block handed to the
+    model round-trips perfectly too — the two are indistinguishable until a
+    target differs from its source. So every segment here is translated to
+    something else and the file is rendered: what the parser called skeleton has
+    to come out byte for byte, and what it called a segment has to be gone.
+    """
+    text = (CORPUS / name).read_bytes().decode("utf-8")
+    nodes, segs = parse(text)
+    for seg in segs:
+        target, why = accept(seg, seg["masked"] + "（譯）", "zh-TW", CFG)
+        assert why is None, (seg["id"], why)
+        seg["target"], seg["status"] = target, "translated"
+    out, missing = render({"nodes": nodes, "segments": segs, "lang": "zh-TW"}, CFG)
+    assert missing == 0
+    assert out != text, "nothing was translated, so this test measured nothing"
+    lines = out.split("\n")
+    for line in skeleton:
+        assert line in lines, line
+    for line in replaced:
+        assert line not in lines, line
 
 
 def test_every_corpus_segment_reseated_by_accept_still_renders_the_file():

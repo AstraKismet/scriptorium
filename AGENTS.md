@@ -92,7 +92,7 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
 
    *Deliberate exception, not a gap:* a wrapped block's interior line breaks and
    the indentation that follows them are inside the segment, so the model does
-   see them — 79 of 2394 segments across the tracked documentation. They cannot
+   see them — 149 of 1467 segments across the tracked documentation. They cannot
    be masked or held in the skeleton without splitting one wrapped sentence into
    several segments. `docs/decisions.md`, 2026-07-28, "Where a line terminator
    lives", records why that alternative lost. Do not "fix" this by stripping
@@ -104,6 +104,9 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    used to arrive the same way and no longer does — it became skeleton on
    2026-08-02, which is what `mask.py` could not do for it. See
    `docs/decisions.md` of that date, "An indented code block is skeleton".
+   The two containers that rule left behind — a chunk inside a blockquote, and an
+   indented run of fence characters, which swallowed every paragraph after it —
+   closed on 2026-08-03, same file, "A quoted chunk is skeleton".
 
    Because that run is inside the segment and the model may not reproduce it, the
    **blanks a segment opens and closes with are re-imposed from the source** on
@@ -210,7 +213,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 671 passed; no network
+python -m pytest -q                 # 748 passed; no network
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
 
