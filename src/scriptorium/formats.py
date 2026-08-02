@@ -40,6 +40,18 @@ __all__ = ["EXTENSIONS", "Format", "UnknownFormat", "by_name", "encodings",
 #: The format a state file written before this registry existed was parsed with.
 #: There is only one candidate — nothing else could parse a document then — so an
 #: absent ``doc["format"]`` is not ambiguous and needs no ``STATE_VERSION`` bump.
+#:
+#: That argument is sound backwards and *not* forwards, which is deliberate and
+#: worth stating rather than leaving for someone to rediscover. A ``.txt`` state
+#: file written by this build carries the same ``STATE_VERSION`` as one written
+#: before the registry, so an older build does not refuse it — it reads it, finds
+#: no ``format``, defaults to Markdown here, and renders the document with the
+#: Markdown marker, emitting ``<!-- untranslated s0001 -->`` into a plain-text
+#: file. Bumping the version would close that, at the cost of invalidating every
+#: state file in existence to protect a case that only occurs when someone
+#: downgrades the build under a state directory. Running an older build against
+#: newer state is not part of this project's plan, so the version stays and the
+#: consequence is recorded instead of paid for.
 DEFAULT_FORMAT = "markdown"
 
 

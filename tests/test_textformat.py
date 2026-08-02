@@ -136,6 +136,139 @@ def test_plaintext_big5_roundtrip_keeps_every_byte_and_names_the_codec():
     assert _substituted(text).encode(encoding) == data
 
 
+#: The Big5 duplicate-encoding block: two source byte pairs for one character, so
+#: cp950's decode is not injective and `text.encode("cp950")` cannot return the
+#: bytes it came from. Measured 2026-08-02 by sweeping the whole double-byte
+#: range; `gbk`, `shift_jis` and `cp1252` have no such pair. Written out rather
+#: than re-swept at test time so that a change in Python's codec tables shows up
+#: here as a failure with a name, instead of silently reshaping the sweep.
+CP950_NOT_REVERSIBLE = {
+    b"\xa2\xcc": ("十", b"\xa4Q"),        # U+5341, as a numeric run writes it
+    b"\xa2\xce": ("卅", b"\xa4\xca"),     # U+5345
+    b"\xf9\xe9": ("╞", b"\xa2\xa5"),      # U+255E, and the nine below are rules
+    b"\xf9\xea": ("╪", b"\xa2\xa6"),      # U+256A
+    b"\xf9\xeb": ("╡", b"\xa2\xa7"),      # U+2561
+    b"\xf9\xf9": ("═", b"\xa2\xa4"),      # U+2550
+    b"\xf9\xfa": ("╭", b"\xa2~"),         # U+256D
+    b"\xf9\xfb": ("╮", b"\xa2\xa1"),      # U+256E
+    b"\xf9\xfc": ("╰", b"\xa2\xa2"),      # U+2570
+    b"\xf9\xfd": ("╯", b"\xa2\xa3"),      # U+256F
+}
+
+
+def test_cp950_decode_is_not_injective_and_the_characters_are_what_survives():
+    """Invariant 2a's byte claim does not hold for cp950. Pin what does hold.
+
+    `A2CC` is 十 as a numeric run writes it and `F9F9`-`F9FD` are the box-drawing
+    characters a BBS-era Traditional Chinese `.txt` rules its chapters with, so
+    this is the primary corpus, not a corner. What the reader gets is still
+    right, because rendering encodes UTF-8 and never goes back through cp950 —
+    the characters survive and the bytes would not. Byte-exactness here needs
+    raw skeleton nodes held as bytes rather than as JSON text, which is
+    scheduled, and this test is what will fail loudly when it lands.
+    """
+    for raw, (char, reencoded) in CP950_NOT_REVERSIBLE.items():
+        assert raw.decode("cp950") == char
+        assert char.encode("cp950") == reencoded != raw
+
+    for enc in ("gbk", "shift_jis", "cp1252"):
+        for raw in CP950_NOT_REVERSIBLE:
+            try:
+                text = raw.decode(enc)
+            except UnicodeDecodeError:
+                continue
+            assert text.encode(enc) == raw, f"{enc} is not injective either"
+
+
+def test_a_box_drawn_chapter_rule_reaches_the_reader_intact():
+    """End to end for the characters above: cp950 in, correct UTF-8 out.
+
+    Built from bytes, not from a Python string. Encoding `"╭═╮"` to cp950 emits
+    the A2 spellings and round-trips perfectly, so a test written that way
+    exercises everything except the case that matters — which is how a whole
+    corpus of tests missed this.
+    """
+    data = ("第一章\n\n".encode("cp950")
+            + b"\xf9\xfa" + b"\xf9\xf9" * 6 + b"\xf9\xfb"
+            + "\n\n屋裏很冷。\n".encode("cp950"))
+    text, encoding = decode_document(data, ENCODINGS, name="ruled.txt")
+    assert encoding == "cp950"
+    assert text == "第一章\n\n╭══════╮\n\n屋裏很冷。\n"
+
+    # The reader's copy is right; the bytes are not the ones we read. Both halves
+    # are asserted so that neither can drift without a failure.
+    assert _substituted(text).encode("utf-8") == text.encode("utf-8")
+    assert _substituted(text).encode("cp950") != data
+
+
+def test_source_encoding_write_would_break_invariant_2a(tmp_path):
+    """The guard on the one change that turns the above into real corruption.
+
+    Nothing writes a document back in its source encoding today; `write_document`
+    takes no encoding at all. If it ever grows one and honours a document's
+    recorded `encoding`, a Big5 novel's chapter rules become different bytes on
+    every save. Delete this test only together with the BLOB work that makes
+    byte-exactness real — not to make a new feature's tests pass.
+    """
+    out = tmp_path / "ruled.txt"
+    source = "╭══════╮\n"
+    write_document(str(out), source)
+    assert out.read_bytes() == source.encode("utf-8")
+
+    # And the loss this is guarding against, stated in the direction it happens:
+    # bytes -> text -> bytes, which is what reading a source file and writing it
+    # back would do. Starting from a *string* instead round-trips fine, which is
+    # why the defect hid: every test that begins with a Python literal misses it.
+    original = b"\xf9\xfa" + b"\xf9\xf9" * 6 + b"\xf9\xfb\n"
+    assert original.decode("cp950").encode("cp950") != original
+
+
+# ── plausibility: decoding successfully is not decoding correctly ────────────
+
+def test_a_short_traditional_chinese_file_is_not_eaten_by_shift_jis():
+    """The defect the veto exists for, in the shape it actually arrives in.
+
+    A per-chapter `.txt` or an epigraph is short enough that `shift_jis` accepts
+    it, and it accepts it *byte-reversibly* — so the round-trip fixtures stay
+    green while every segment's text and hash are wrong and get banked. Measured
+    2026-08-02: 175 of 300 five-character slices before the veto, 0 after.
+    """
+    source = "「你來了。」她說。"
+    data = source.encode("cp950")
+    assert data.decode("shift_jis").encode("shift_jis") == data, (
+        "the premise: shift_jis round-trips these bytes, so bytes cannot catch it")
+    text, encoding = decode_document(data, ENCODINGS, name="chapter-01.txt")
+    assert encoding == "cp950"
+    assert text == source
+
+
+def test_the_veto_costs_japanese_nothing():
+    """Real Japanese writes kana full-width, which the veto does not look at."""
+    for source in ("「来たのね。」", "第一章　風の音", "ラーメンを食べた"):
+        data = source.encode("shift_jis")
+        text, encoding = decode_document(data, ENCODINGS, name="ja.txt")
+        assert (text, encoding) == (source, "shift_jis"), source
+
+
+def test_a_quoted_halfwidth_katakana_string_does_not_veto_its_own_encoding():
+    # Why the rule is a majority and not any occurrence.
+    source = "彼は「ｱｲｳ」と書いた。"
+    data = source.encode("shift_jis")
+    assert decode_document(data, ENCODINGS, name="ja.txt") == (source, "shift_jis")
+
+
+def test_the_veto_never_turns_a_readable_file_into_a_refusal():
+    """A heuristic may reorder candidates; it may not become a gate.
+
+    When every candidate looks like mojibake the veto has no opinion left and
+    candidate order decides, exactly as it did before. Measured over 5000 random
+    byte strings: none became undecodable that was not undecodable before.
+    """
+    mojibake_only = b"\xa1\xb1\xa1\xb2"  # decodes somewhere, plausibly nowhere
+    text, encoding = decode_document(mojibake_only, ENCODINGS, name="junk.txt")
+    assert encoding in ENCODINGS and text
+
+
 @pytest.mark.parametrize("name,expected", [
     ("bom-utf8.txt", "utf-8"),
     ("bom-utf16-le.txt", "utf-16-le"),

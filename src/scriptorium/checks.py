@@ -298,15 +298,26 @@ def containment_problems(seg):
         # Reached now by a no-added-lines kind whose target did *not* grow, which
         # it was not before: the two branches used to key on the kind alone.
         #
-        # Measured rather than argued, 2026-08-02, by running the old branch
-        # beside this one over 1.59M (kind, source, target) combinations built
-        # from twelve line shapes. The two differ on 13122 of them, and every one
-        # is a `heading`, `quote` or `cell` whose *source* has more than one line
-        # — which `mdparse` cannot produce, since all three capture exactly one.
-        # Markdown is therefore unchanged in fact and not only in intent, and on
-        # that unreachable input the new answer is the better one. What the
-        # change buys is plain text: a paragraph whose target grew a blank line
-        # without growing past the source's line count.
+        # Measured against the old branch, and the first measurement was wrong in
+        # a way worth keeping written down. It swept twelve line shapes and found
+        # every difference to be a `heading`, `quote` or `cell` whose *source* has
+        # more than one line — which `mdparse` cannot produce, since all three
+        # capture exactly one — and concluded Markdown was unchanged. The shape
+        # set had no blank or whitespace-only *target* in it. Adding six (``""``,
+        # ``" "``, ``"\n"``, and so on) moves the count from 3 of 864 to 129 of
+        # 1944, and 126 of those 129 are exactly that case: a single-line-source
+        # heading with an empty target, which the old code answered `[]` and this
+        # one answers with the blank-line message. A large sweep across a shape
+        # set missing one dimension reads like proof and is not.
+        #
+        # Re-measured 2026-08-02: none of the 129 is reachable through
+        # `check_segment`, which returns at the `not tgt.strip()` guard below
+        # before containment runs. So Markdown is unchanged in fact — but by that
+        # guard, not by the reason first recorded here, and a direct caller of
+        # this public function does not inherit it.
+        #
+        # What the change buys is plain text: a paragraph whose target grew a
+        # blank line without growing past the source's line count.
         out.append("the target contains a blank line, which ends the block it sits in")
 
     if kind not in profile["inline_kinds"]:

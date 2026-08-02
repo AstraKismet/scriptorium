@@ -3,13 +3,97 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-08-02 · Decoding successfully is not decoding correctly, and cp950 is not reversible
+
+Three findings from the adversarial review of the plain-text branch, before it
+merged. All three are the same shape: a green suite standing behind a claim it
+does not actually test.
+
+**Encoding detection gains a plausibility veto.** First-success-wins over an
+ordered candidate list reads a short Traditional Chinese file as `shift_jis`,
+which decodes it into half-width katakana — and does so *byte-reversibly*, so the
+byte-level round-trip fixtures stay green while every segment's text and hash are
+wrong and get banked in the translation memory. This is not a corner: a
+per-chapter `.txt` and an epigraph are how a novel arrives. Measured over 300
+slices per length, misdetection ran 175/300 at five characters and 5/300 at
+thirty; a whole novel was never at risk, which is exactly why the fixtures could
+not see it.
+
+`docio._implausible` now vetoes a decode whose non-ASCII is mostly half-width
+katakana (U+FF61–FF9F) or C1 controls, and the first *plausible* candidate wins.
+Measured after: 0/300 at every length, Japanese unaffected at every length (real
+kana are full-width), and of 5000 random byte strings none became undecodable
+that was not undecodable before. When every candidate looks like mojibake the
+veto abstains and candidate order decides, as before — a heuristic may reorder
+candidates but may not become a gate.
+
+*The alternative that lost:* score every candidate by how much of it is CJK,
+kana, Hangul or Latin and take the best. That decides between two *plausible*
+readings, which this project already answers with candidate order and a printed
+winner — and it would silently overrule the ordering rationale recorded in
+`config.TEXT_DEFAULTS`. A veto only removes readings that are not plausible at
+all, so the two mechanisms stay separable. Also rejected: reordering
+`shift_jis` after the Chinese candidates, which just moves the misdetection onto
+Japanese files, since `gbk` swallows them.
+
+**cp950's decode is not injective, and invariant 2a's byte claim does not hold
+for it.** Ten two-byte sequences — `A2CC`, `A2CE`, `F9E9`–`F9EB`, `F9F9`–`F9FD`,
+the Big5 duplicate-encoding block — decode to a character that re-encodes to
+different bytes. `A2CC` is 十 as a numeric run writes it; `F9F9`–`F9FD` are the
+box-drawing characters a BBS-era Traditional Chinese `.txt` rules its chapters
+with. `gbk`, `shift_jis` and `cp1252` are injective; cp950 alone is not, and it
+is in the candidate list precisely because Python's `big5` codec is too narrow
+for real Windows-authored text.
+
+Nothing is corrupted today: `write_document` encodes UTF-8 and the pipeline never
+writes a document back in its source encoding, so the reader's characters are
+right and only the bytes would not survive. What was false is the `decode_document`
+docstring, which claimed re-encoding with the same concrete codec reproduces the
+original bytes — and that claim was the whole of invariant 2a's standing for this
+format.
+
+*What was chosen:* correct the claim, pin the ten sequences and the end-to-end
+character path in fixtures, and add
+`test_source_encoding_write_would_break_invariant_2a`, which fails the moment a
+caller writes a document back in its source encoding — the one change that turns
+this from latent into durable corruption of a Big5 novel.
+
+*The alternative that lost, and why it is not "more thorough":* fix it now by
+preserving bytes. Byte-exactness here is not a special case for ten sequences —
+the round-trip is text end to end, so it needs raw skeleton nodes held as bytes
+rather than as JSON text, which is the BLOB work invariant 2a already names as a
+known gap and `decode_document`'s refusal message already points at. Scoped
+properly it is a separate package; scoped narrowly it is a hack that generalizes
+to nothing. *Also rejected:* a reversibility guard in the candidate loop —
+measured, it sends a Big5 novel containing a chapter rule down to `gbk` and reads
+it as mojibake, which is worse than the defect and is the exact failure the
+`big5` → `cp950` repair existed to prevent.
+
+**A 1.59M-combination sweep proved less than it looked.** The comment at
+`checks.py` recorded that the host-profile rewrite left Markdown unchanged,
+measured over twelve line shapes. The shape set contained no blank or
+whitespace-only *target*. Adding six moves the difference count from 3 of 864 to
+129 of 1944, and 126 of those are one case: a single-line-source `heading` with
+an empty target, which the old code answered `[]` and the new one answers with
+the blank-line message.
+
+Markdown *is* unchanged in fact — none of the 129 is reachable, because
+`check_segment` returns at its `not tgt.strip()` guard before containment runs.
+But that is a different reason from the one recorded, it is a reason a direct
+caller of the public `containment_problems` does not inherit, and nothing in the
+suite stated it. The comment is corrected and
+`test_a_blank_target_stops_at_the_missing_rule_and_never_reaches_containment`
+now pins the guard. The general lesson is worth more than the fix: a large sweep
+across a shape set missing one dimension reads like proof and is not, and the
+number of combinations is not evidence of coverage.
+
 ## 2026-08-02 · Plain text lands, and the format registry lands with it
 
 Closing HANDOFF-017. A novel could not enter the pipeline at all before this: the
 only parser was Markdown's and every path reached it regardless of what the file
 was called. Plain text is the cheapest format that changes that, and being the
 first non-Markdown one it brings the registry that was deferred out of
-HANDOFF-007 to land with it. Suite 362 → 464.
+HANDOFF-007 to land with it. Suite 362 → 474.
 
 **The registry is keyed by extension and the format is frozen onto the
 document.** `formats.py` maps `.md`/`.markdown`/`.mdown`/`.mkd` to `markdown` and

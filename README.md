@@ -11,7 +11,9 @@ Translate documents without letting the model near the markup.
 Scriptorium is a command-line localization pipeline for Markdown and plain text.
 It splits a document into segments — a block for Markdown, a paragraph for prose
 — masks code, links, tags and protected terms behind `⟦n⟧` placeholders, and
-substitutes the translations back into the original file byte for byte. Block
+substitutes the translations back into the original file, leaving every byte it
+did not translate as it found it. Rendered output is UTF-8; a Big5 or Shift-JIS
+source keeps its characters, not its bytes. Block
 syntax is never sent at all. The model translates prose, which is the part of the
 job it is actually good at.
 
@@ -297,7 +299,11 @@ Worth knowing before you adopt it, and all of them measured rather than guessed:
   YAML, PO) are deliberately out of scope for good. A plain-text source is read
   in whatever encoding it turns out to be in — UTF-8, Big5, GBK, Shift-JIS,
   UTF-16 — and a file whose bytes are invalid in its own encoding is refused
-  rather than repaired with replacement characters.
+  rather than repaired with replacement characters. **Output is always UTF-8**,
+  so a Big5 source comes back as UTF-8 with its characters intact. Byte-exact
+  output in the source encoding is not offered, and for cp950 it is not
+  currently possible: ten Big5 sequences, including the box-drawing characters
+  that rule a chapter, have two spellings and only one survives decoding.
 - **The workbench only offers what `sources` matches**, and that default is
   `docs/**/*.md`. A novel project sets it to its own glob — `["book/**/*.txt"]` —
   because a blanket `**/*.txt` would sweep up `config/dnt.txt`.
@@ -337,8 +343,9 @@ community, a review workflow and a hundred formats. [OmegaT](https://omegat.org/
 is a real CAT environment, with fuzzy matching, concordance search and glossary
 panes.
 
-Scriptorium handles one format and substitutes translations back into the
-original bytes instead. If you need many formats or many translators, use those.
+Scriptorium handles two formats and substitutes translations back into the
+original file instead, leaving every byte it did not translate as it found it.
+If you need many formats or many translators, use those.
 If you need the file to come back unchanged except where you translated it, that
 is the whole point of this one.
 
