@@ -50,6 +50,34 @@ Note what these have in common: the coordinating worker re-reads the output and
 is capable of noticing when it is wrong. Delegation is safe in proportion to that
 capability, not in proportion to how well the task was described.
 
+### 2a. A worker that writes files is isolated, and the tree is clean first
+
+Every item above is read-only, which is why delegation here has been safe. The
+moment a delegated worker **writes** — mutation testing, a mechanical migration,
+a fan-out of edits — two things become mandatory:
+
+1. **It runs in its own git worktree**, not in the shared checkout.
+2. **The shared checkout is committed-clean before dispatch.** Uncommitted work
+   is what gets destroyed, and it leaves no trace in history to recover from.
+
+Both, not either. **Measured 2026-08-02**, and the mechanism is worth stating
+because it is invisible until it happens: reverting an injected mutation is
+`git checkout -- <file>`, whose semantics are "discard this file's unstaged
+changes". It cannot distinguish the agent's mutation from a human edit in
+progress, so it took both. A `git add -A` that raced an injection then committed
+a mutation into the branch. Three conditions had to coincide — the worker writes
+*and reverts*, it shares the working directory, and edits were uncommitted — and
+ordinary read-only delegation never meets the first, which is why this had not
+happened before and why nobody expects it.
+
+Forbid `git checkout --`, `git restore`, `git reset` and `git stash` in the brief
+even so: a worktree bounds the damage, it does not prevent a worker from
+destroying its own assigned work and reporting success. And clean the worktrees
+up afterwards — `git worktree remove`, then `git branch -D` — because they
+persist past the session that made them, and a `git worktree list` full of dead
+entries is where a live one hides. `.gitignore` carries `.claude/worktrees/` for
+the same reason.
+
 ## 3. The brief carries the context, or the worker invents one
 
 A delegated worker does not investigate before acting and does not know anything
@@ -145,11 +173,27 @@ observed; none is theoretical.
    reaching a log line (6).
 6. **Tracked documentation written in a language other than English**, or a
    process-tool name written into a tracked file.
+7. **A recorded measurement is accepted instead of re-derived.** Observed
+   2026-08-02: a comment justified a refactor with "1.59M combinations, all
+   differences unreachable". The twelve line shapes it swept contained no blank
+   or whitespace-only *target*; adding six moved the count from 3 of 864 to 129
+   of 1944. Three reviews had read that comment and agreed with it. A large
+   combination count across a shape set missing one dimension reads like proof
+   and is not — so when reviewing a measurement, check which *axes* it varied
+   and what each looks like at its degenerate end (empty, whitespace, one
+   element, absent), rather than checking the total. This is §5's rule applied
+   to evidence: re-review means re-deriving, not reading and agreeing.
+8. **A writing worker destroys work it was not given.** See §2a; the countermeasure
+   is isolation before dispatch rather than review afterwards, because the damage
+   is to uncommitted state that no review can see.
 
-The countermeasure is the same for all six: an adversarial review pass that is
-always run, plus the coordinating worker checking deliverables against the
-criteria and re-running `python -m pytest -q` and `python -m ruff check src tests`
-itself rather than trusting a report that they passed.
+The countermeasure is the same for the first seven: an adversarial review pass
+that is always run, plus the coordinating worker checking deliverables against
+the criteria and re-running `python -m pytest -q` and
+`python -m ruff check src tests` itself rather than trusting a report that they
+passed. The eighth is the exception that proves the shape of the rule — review
+runs after the work, and the damage there is already done before any review
+begins, so it is answered by §2a's isolation instead.
 
 ## 7. Downgrade ledger
 

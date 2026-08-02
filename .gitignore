@@ -54,6 +54,13 @@ research/
 .claude/settings.local.json
 .claude/orchestration.md
 
+# git worktrees an assistant creates to isolate a writing agent. Transient and
+# machine-local; without this every file in every worktree shows up untracked in
+# the main checkout, which is how a stale worktree hides among the live ones.
+# Listed per-entry rather than ignoring `.claude/` wholesale, so that a shared
+# `.claude/settings.json` can still be tracked if this project ever wants one.
+.claude/worktrees/
+
 # never commit credentials; providers read keys from the environment only
 .env
 .env.*

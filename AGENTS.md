@@ -281,6 +281,13 @@ decision that was not distilled into it; and **work produced below the capabilit
 tier its category requires is marked at the output and logged**, never absorbed
 silently. That file also holds the downgrade ledger.
 
+A fourth, added 2026-08-02 after it cost a session's uncommitted work: **a worker
+that writes files runs in its own git worktree, and the shared checkout is
+committed-clean before it is dispatched.** Reverting an edit is
+`git checkout -- <file>`, which discards a human's unstaged changes alongside the
+worker's own — it cannot tell them apart. Read-only delegation is exempt and is
+most of what happens here, which is exactly why the case surprises people.
+
 ## Git and commits
 
 - Remote is `github-astrakismet:AstraKismet/scriptorium.git`. **The alias is not
