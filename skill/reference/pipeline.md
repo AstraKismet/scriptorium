@@ -69,7 +69,8 @@ what keeps `Mr. Darcy` discoverable), and `stopwords`.
 
 A segment is identified by its content and the kind of block it sits in, never by
 its position: the memory key is `(content_hash, context, segmentation_version)`
-plus a nullable `variant`, where `context` is the block kind for Markdown. Edit
+plus a nullable `variant` and the document's register, where `context` is the
+block kind for Markdown and for plain text alike. Edit
 one paragraph in a 400-segment document and `extract` reports
 `reused 399 | pending 1`; move a whole section and nothing goes pending at all.
 This is what makes the pipeline usable on a document that goes through many
@@ -78,7 +79,9 @@ approved wording never silently drifts between versions.
 
 The block kind is in the key because a paragraph translation may wrap across
 lines and a blockquote's may not: reusing one as the other puts the second line
-outside the quote.
+outside the quote. It is the block kind and nothing finer — deliberately not the
+paragraph's position or its chapter, which would make exact reuse impossible and
+make inserting one paragraph invalidate every entry after it.
 
 A memory hit is a proposal, not a result. It is taken only if its placeholders
 still match the segment it matched — the same gate model output passes — so

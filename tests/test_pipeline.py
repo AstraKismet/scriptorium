@@ -230,6 +230,27 @@ def test_the_five_measured_structural_cases_fail_the_build(kind, source, damagin
     assert _structural(kind, source, damaging) == [("containment", "error")]
 
 
+def test_a_blank_target_stops_at_the_missing_rule_and_never_reaches_containment():
+    """What actually keeps the host-profile rewrite from changing Markdown.
+
+    The rewrite guarded the single-line branch with `len(tgt_lines) >
+    len(src_lines)`, so a single-line-source heading with an *empty* target now
+    falls through to the blank-line rule where the old code answered nothing.
+    Measured 2026-08-02: 129 such differences over an extended shape sweep, and
+    none of them reachable — `check_segment` returns at its `not tgt.strip()`
+    guard first, so every one of them is reported as `missing` and stops there.
+
+    This test is that guard's only statement in the suite. `containment_problems`
+    is public and a direct caller does not inherit the early return, so if the
+    guard is ever moved or removed, the divergence becomes real and this fails.
+    """
+    for kind in ("heading", "quote", "cell", "para"):
+        for target in ("", " ", "\n", "\t"):
+            issues = check_segment(_seg("Title", target, kind=kind),
+                                   "zh-TW", CFG, [], [])
+            assert [i["rule"] for i in issues] == ["missing"], (kind, repr(target))
+
+
 @pytest.mark.parametrize("kind, source, _damaging, clean",
                          MEASURED, ids=["cell", "para-1", "para-2", "heading", "quote"])
 def test_an_ordinary_translation_of_each_source_is_clean(kind, source, _damaging, clean):

@@ -24,6 +24,24 @@ PH_RE = re.compile(r"\u27e6(\d+)\u27e7")
 CJK = r"\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"
 CJK_RE = re.compile(f"[{CJK}]")
 
+#: What makes a block worth sending to a model: a letter somewhere in it. A rule
+#: of thumb rather than a definition \u2014 a line of `* * *`, a row of digits, a
+#: horizontal rule and a run of punctuation all have nothing to translate and
+#: belong in the skeleton, where they round-trip for free.
+#:
+#: The range is the one `mdparse` has always used, character for character,
+#: because this predicate was extracted from it and a "while we are here"
+#: widening would move segment boundaries in the corpus. It is therefore *not*
+#: `cli._LETTER`, which excludes \u00d7 and \u00f7 from the same block; that difference is
+#: recorded rather than reconciled. Kana and Hangul are outside it too, which is
+#: a real limitation for a Japanese or Korean source and one both formats share.
+_TRANSLATABLE_RE = re.compile(r"[A-Za-z\u00c0-\u024f" + CJK + r"]")
+
+
+def has_translatable_text(s):
+    """Whether a block has anything a model should see. One copy, two formats."""
+    return bool(s.strip()) and bool(_TRANSLATABLE_RE.search(s))
+
 #: Ordered — earlier patterns win, so a URL inside a code span stays one unit.
 INLINE_PATTERNS = [
     ("code", re.compile(r"``[^`]+``|`[^`\n]+`")),

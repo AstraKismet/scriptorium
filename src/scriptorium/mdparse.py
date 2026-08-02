@@ -3,12 +3,19 @@
 ``parse`` returns ``(nodes, segments)`` where nodes reproduce the file exactly
 once segment values are substituted. Structure therefore cannot regress: it is
 never reconstructed from a model's output, only refilled.
+
+``render`` is re-exported from :mod:`.skeleton` and is not Markdown's: it walks
+nodes and knows nothing about the syntax that produced them. It stays importable
+from here because that is where every caller has always found it.
 """
 
 import re
 
-from .mask import CJK, mask, strip_placeholders, unmask
+from .mask import has_translatable_text, mask, strip_placeholders
+from .skeleton import render
 from .store import seg_hash
+
+__all__ = ["parse", "render"]
 
 FENCE_RE = re.compile(r"^(\s*)(`{3,}|~{3,})")
 HEADING_RE = re.compile(r"^(\s{0,3}#{1,6}\s+)(.*?)(\s*#*\s*)$")
@@ -20,8 +27,15 @@ TABLE_SEP_RE = re.compile(r"^\s*\|?[\s:|-]+\|[\s:|-]*$")
 DEF_RE = re.compile(r"^(\s*\[[^\]]+\]:\s*)(.*)$")
 
 
-def parse(text, dnt=()):
-    """Split markdown into a render skeleton + translatable segments."""
+def parse(text, dnt=(), opts=None):
+    """Split markdown into a render skeleton + translatable segments.
+
+    ``opts`` is the format's config block, part of the registry's signature so
+    that every parser is called the same way. Markdown has no knobs — its
+    segmentation is decided by the syntax, not by a project — so it is ignored
+    here rather than absent, because a parser whose signature differs is a
+    parser the registry has to special-case.
+    """
     lines = text.split("\n")
     trailing_nl = text.endswith("\n")
     if trailing_nl and lines and lines[-1] == "":
@@ -54,7 +68,9 @@ def parse(text, dnt=()):
         stripped = source.rstrip("\r")
         cr = source[len(stripped):]
         source = stripped
-        if not source.strip() or not re.search(r"[A-Za-z\u00c0-\u024f" + CJK + r"]", source):
+        # The predicate moved to `mask.has_translatable_text` when plain text
+        # arrived, character range unchanged, so the two formats cannot drift.
+        if not has_translatable_text(source):
             emit_raw(source + cr)
             return
         counter[0] += 1
@@ -205,22 +221,3 @@ def parse(text, dnt=()):
             nodes.pop()
 
     return nodes, segs
-
-
-def render(doc, cfg, polish=None, fallback=False):
-    """Rebuild the target document from the skeleton."""
-    by_id = {s["id"]: s for s in doc["segments"]}
-    parts, missing = [], 0
-    for node in doc["nodes"]:
-        if node["t"] == "raw":
-            parts.append(node["v"])
-            continue
-        seg = by_id[node["id"]]
-        if seg.get("target"):
-            text = unmask(seg["target"], seg["slots"])
-            parts.append(polish(text) if polish else text)
-        else:
-            missing += 1
-            parts.append(unmask(seg["masked"], seg["slots"]) if fallback
-                         else f"<!-- untranslated {seg['id']} -->")
-    return "".join(parts), missing

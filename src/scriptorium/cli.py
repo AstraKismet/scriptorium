@@ -8,7 +8,7 @@ import re
 import sys
 from collections import Counter
 
-from . import __version__
+from . import __version__, formats
 from .checks import check_segment
 from .config import (
     DEFAULT_TONE,
@@ -21,14 +21,15 @@ from .config import (
     write_templates,
 )
 from .docio import (
+    UndecodableDocument,
     apply_terminator,
     read_document,
     split_terminator,
     write_document,
     write_document_to_stdout,
 )
+from .formats import UnknownFormat
 from .mask import repair_placeholders
-from .mdparse import parse, render
 from .normalize import normalize, polish_rendered
 from .store import (
     StateVersionError,
@@ -330,8 +331,14 @@ def do_extract(src, lang, cfg, tone=None, reset=False):
     # talk to a model and should not pull the provider stack in to do so.
     from .translate import accept
 
-    text, eol = split_terminator(read_document(src))
-    nodes, segments = parse(text, load_dnt(cfg))
+    # The format is chosen from the path here and frozen onto the document below,
+    # so every later command reads the skeleton with the parser that wrote it.
+    fmt = formats.for_path(src, cfg)
+    opts = formats.options(fmt, cfg)
+    text, encoding = read_document(src, formats.encodings(fmt, cfg))
+    text, eol = split_terminator(text)
+    facts = fmt.describe(text, opts)
+    nodes, segments = fmt.parse(text, load_dnt(cfg), opts)
 
     # `prior_doc` rather than `load_doc`: extract is what migrates a state file
     # the current build refuses to read, so it must be able to read the
@@ -382,6 +389,15 @@ def do_extract(src, lang, cfg, tone=None, reset=False):
     doc = {
         "version": __version__, "source": os.path.relpath(src), "lang": lang,
         "tone": tone,
+        # Which parser produced the skeleton, and which encoding the source was
+        # in. Both are document-level facts, held beside `eol` for the same
+        # reason: a segment must not carry them, and no later command should have
+        # to re-derive them from a path that may since have been renamed. A state
+        # file written before formats existed has neither key, and Markdown /
+        # UTF-8 are the right defaults for one, because nothing else could have
+        # written it.
+        "format": fmt.name,
+        "encoding": encoding,
         # The document's own line terminator, held here rather than in the
         # skeleton so the model and the reviewer never see it. A state file
         # written before this existed has no key, and "\n" is the right default
@@ -389,6 +405,11 @@ def do_extract(src, lang, cfg, tone=None, reset=False):
         "eol": eol,
         "nodes": nodes, "segments": segments,
     }
+    # Whatever the parser resolved by heuristic rather than by rule — for plain
+    # text, the paragraph shape. Merged rather than nested so `lx extract` and a
+    # future `lx status` can read one flat document; a format that adds a key
+    # colliding with one above is the format's bug, and there are two formats.
+    doc.update(facts)
     save_doc(src, lang, doc)
     return doc, reused, rejected
 
@@ -409,6 +430,21 @@ def cmd_extract(args, cfg):
     if canonical_tone(doc["tone"]) != DEFAULT_TONE:
         line += f" | tone {doc['tone']}"
     _out(line)
+    # Everything the parse decided rather than read. Printed only when it is not
+    # the ordinary answer, so a Markdown project's output does not change at all
+    # — but printed *always* for a document whose encoding or paragraph shape was
+    # guessed, because both are heuristics that can be wrong and both are
+    # cheapest to catch here. Measured: an ordinary Windows Big5 novel can be
+    # read as Latin-1 by a mis-ordered candidate list, and the mojibake is
+    # durable once `lx commit` banks it.
+    guessed = []
+    if doc.get("encoding") and doc["encoding"] != "utf-8":
+        guessed.append(f"encoding {doc['encoding']}")
+    if doc.get("paragraph_mode"):
+        guessed.append(f"paragraphs {doc['paragraph_mode']}")
+    if guessed:
+        _out(f"  read as {doc.get('format', 'markdown')} · " + " · ".join(guessed)
+             + " — set `formats` in lx.config.json if that is wrong")
 
 
 # ── todo ───────────────────────────────────────────────────────────────────
@@ -869,8 +905,12 @@ def cmd_check(args, cfg):
 
 def do_render(src, lang, cfg, fallback=False):
     doc = load_doc(src, lang)
-    text, missing = render(doc, cfg, polish=lambda t: polish_rendered(t, lang, cfg),
-                           fallback=fallback)
+    # From the document, never from the path: the skeleton is only readable by
+    # the parser that wrote it, and a file renamed after extract would otherwise
+    # be rebuilt by a different one.
+    fmt = formats.for_doc(doc)
+    text, missing = fmt.render(doc, cfg, polish=lambda t: polish_rendered(t, lang, cfg),
+                               fallback=fallback, marker=fmt.marker)
     # Here rather than in write_document so every caller gets it: the file path,
     # `--out -`, and the workbench's render endpoint are all downstream of this.
     return apply_terminator(text, doc.get("eol", "\n")), missing
@@ -1152,7 +1192,7 @@ def main(argv=None):
     try:
         args.fn(args, cfg)
     except (FileNotFoundError, StateVersionError, UnsupportedSource,
-            GlossaryWriteError) as e:
+            GlossaryWriteError, UnknownFormat, UndecodableDocument) as e:
         print(f"lx: {e}", file=sys.stderr)
         sys.exit(2)
     except BrokenPipeError:

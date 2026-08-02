@@ -165,9 +165,13 @@ Current:
 
 ```
 src/scriptorium/
-  docio.py       document read/write as bytes; text mode never touches a user document
+  docio.py       document read/write as bytes; encoding detection; text mode never
+                 touches a user document
+  formats.py     the format registry: extension -> parser, and each format's knobs
   mask.py        markup protection: ⟦n⟧ slot records, tag pairing, DNT terms, bracket repair
-  mdparse.py     markdown -> (skeleton nodes, segments); render() puts it back
+  mdparse.py     markdown -> (skeleton nodes, segments)
+  textparse.py   plain text -> the same pair; encoding, paragraph and chapter heuristics
+  skeleton.py    render(): nodes + targets -> document, for every format at once
   normalize.py   deterministic repair: punctuation width, CJK/Latin spacing
   checks.py      validators; error severity fails the build. Invariant 2b lives
                  here: block-start containment, host escaping, placeholder pairs
@@ -190,7 +194,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 362 passed; no network
+python -m pytest -q                 # 474 passed; no network
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
 
@@ -200,8 +204,13 @@ lx web                              # review workbench on 127.0.0.1:8787
 
 Run tests before proposing a change as finished. They are fast and cover the
 round-trip property, which is the thing most likely to break silently. That
-property is exercised by `tests/corpus/` — one input file per property, read as
-bytes and substituted back into the skeleton without going through `render()`.
+property is exercised by `tests/corpus/` for Markdown and `tests/corpus-text/`
+for plain text — one input file per property, read as bytes and substituted back
+into the skeleton without going through `render()`. The plain-text corpus is
+compared as bytes *through its detected encoding*, because for that format the
+encoding is part of the format. Each directory holds one syntax and a test
+asserts it: a `.txt` dropped into `tests/corpus/` would be read by the wrong
+parser and still pass.
 Every fixture passes; `KNOWN_BROKEN` in `tests/test_pipeline.py` is empty and
 should stay that way. An entry there marks a measured defect with a repair
 scheduled, is `xfail(strict=True)`, and turns the suite red once the defect is
@@ -313,8 +322,8 @@ silently. That file also holds the downgrade ledger.
   the register — never position. `variant=null` must hash identically to the
   field's absence, or the entire memory invalidates; it is a tuple of read fields
   for exactly that reason, so the property holds by construction rather than by a
-  canonicalizer. `context` is gettext's `msgctxt`; for Markdown it is the block
-  kind, and it is stored beside `kind` rather than derived from it, because a key
+  canonicalizer. `context` is gettext's `msgctxt`; for Markdown and for plain text
+  it is the block kind, and it is stored beside `kind` rather than derived from it, because a key
   path or a spine position has no `kind` to borrow. A record with no
   `segmentation_version` predates the field, matches on content alone, and is
   marked `tm:legacy`.
@@ -339,8 +348,15 @@ silently. That file also holds the downgrade ledger.
   `_LANG_TERMS` — one string shared, never a copy per register — plus a
   normalization profile in `config.py` and a reference file under
   `skill/reference/`.
-- New format support: implement parse/render producing the same
-  `(nodes, segments)` shape and register it. Do not fork the pipeline.
+- New format support: implement `parse(text, dnt, opts) -> (nodes, segments)` and
+  register it in `formats.py`. `render` is shared from `skeleton.py` and knows
+  nothing about syntax; a format supplies only its untranslated marker, its
+  encoding candidates and its config defaults. Do not fork the pipeline. Lookup is
+  by extension, overridden by `formats.map` in config and by nothing else — the
+  format is frozen onto the document as `doc["format"]` at extract, because a
+  skeleton is only readable by the parser that wrote it. An unknown extension is
+  refused rather than guessed. The registry serves formats whose document is one
+  decoded string; a container format — EPUB — widens it rather than squeezing in.
 - A slot is a record — `original` / `role` / `pair_id` / `can_reorder` — and the
   document state file carries `state_version`, which `store.py` refuses to read
   when it is older than the build. A format whose markup pairs must emit those
