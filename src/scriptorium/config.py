@@ -24,6 +24,87 @@ GLOSSARY_HEADER = (
     "# nothing until someone writes the rendering in\n"
 )
 
+#: The plain-text format's knobs, all three of them heuristics. They live here
+#: rather than in `textparse.py` for two reasons: `lx init` scaffolds
+#: `DEFAULT_CONFIG` verbatim, so a knob that is not here is a knob nobody
+#: discovers; and `textparse` reads these as its own fallbacks, so there is one
+#: literal rather than two that drift. `config.py` imports nothing from this
+#: package, which is what makes that direction of the dependency safe.
+#:
+#: Invariant 4 is why they are configuration at all: encoding detection, chapter
+#: detection and paragraph segmentation are heuristics, and a heuristic is a
+#: project's call rather than a rule `checks.py` may enforce.
+TEXT_DEFAULTS = {
+    # Ordered, and the order is the whole decision: tried with `errors="strict"`,
+    # first success wins, after a BOM sniff that decides on its own. Every name
+    # must be BOM-neutral — never `utf-16` or `utf-8-sig`, which write a mark of
+    # their own — because a mark that survives is what keeps the skeleton exact.
+    #
+    # Measured 2026-08-02, and every entry earns its place by a measurement:
+    #
+    # `cp950`, not `big5`. Python's `big5` codec rejects 裏, 碁, 恒 and 墻, which
+    # are ordinary characters in Windows-authored Traditional Chinese, so a real
+    # Big5 novel containing one of them failed every DBCS candidate and was read
+    # by `cp1252` as Latin-1 gibberish — the worst outcome available, because it
+    # is durable: the mojibake is hashed and banked in the translation memory.
+    # `cp950` is a superset and decodes all four.
+    #
+    # `shift_jis` before the Chinese candidates. It fails on the Big5 and GBK
+    # samples, so it costs them nothing, and without it `gbk` swallows Japanese.
+    #
+    # `gbk`, not `gb18030`. The superset argument that wins for cp950 loses here:
+    # gb18030 is a near-total catch-all for double-byte input and accepted the
+    # Big5, Shift-JIS and Latin-1 samples too.
+    #
+    # `cp1252` last and still present. A Windows-authored English novel with
+    # smart quotes is the commonest non-UTF-8 source there is, and dropping it
+    # refuses that file outright. It accepts every *standard* Big5 and GB2312
+    # byte stream — none of its five undefined bytes appears in either range — so
+    # it is a catch-all rather than a near one, and only its position and the
+    # cp950 repair above keep a Chinese novel from reaching it.
+    #
+    # What is left is the irreducible overlap: simplified Chinese reads as Big5,
+    # and a Latin-1 European source reads as Shift-JIS. Both are announced by
+    # `lx extract`, which prints the winning encoding, rather than fixed by a
+    # cleverer rule — refusing on ambiguity was the alternative and it refuses
+    # every ordinary Big5, GBK and Shift-JIS novel, since `cp1252` also accepts
+    # each of them. A project reorders this list; that is what it is for.
+    "encodings": ["utf-8", "shift_jis", "cp950", "gbk", "cp1252"],
+    # `auto`, `blank-line`, `line`, or `indent`. Plain text arrives in three
+    # shapes and only two of them can be told apart safely, so auto decides
+    # between those two and the third is named rather than guessed: if some blank
+    # line separates two runs of text, paragraphs are blank-line separated and a
+    # hard-wrapped paragraph is one segment; otherwise every line is a paragraph,
+    # which is how a great many .txt novels are written. `indent` is the third —
+    # hard-wrapped with an indent marking each new paragraph and no blank lines
+    # anywhere — and a project holding one says so, because the test that would
+    # detect it (some lines indented, some not) is also true of a per-line file
+    # with one indented line in it, where guessing wrong joins the whole book.
+    "paragraph_mode": "auto",
+    # Case-insensitive, matched against a block that is exactly one line, with
+    # its surrounding whitespace stripped. Two patterns rather than one because
+    # the keywords split into two groups with different false-positive risks.
+    #
+    # `chapter`, `part`, `book` and `volume` all open ordinary English sentences
+    # — "Part of her wanted to run." — so they require a number after them. The
+    # second group is words that essentially only ever stand as a title.
+    #
+    # Both directions are cheap, which is what makes a heuristic acceptable here:
+    # a miss leaves a chapter title as an ordinary paragraph, still translated,
+    # and a false positive costs the `heading` kind and its memory context. What
+    # is *not* cheap is editing these patterns later — see `docs/decisions.md`,
+    # 2026-08-02: `context` is the kind, so a block that changes kind orphans its
+    # banked wording while its text stays byte-identical.
+    "chapter_patterns": [
+        r"(?:chapter|part|book|volume)\b[\s.:—–-]*"
+        r"(?:\d{1,4}|[ivxlcdm]{1,8}|one|two|three|four|five|six|seven|eight|nine|ten|"
+        r"eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|"
+        r"twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|"
+        r"first|second|third|last|final)\b.{0,30}$",
+        r"(?:prologue|epilogue|interlude|prelude|foreword|preface|afterword|appendix)\b.{0,30}$",
+    ],
+}
+
 DEFAULT_CONFIG = {
     "source_lang": "en",
     "targets": ["zh-TW"],
@@ -36,6 +117,12 @@ DEFAULT_CONFIG = {
     "normalize": {"zh-TW": ["punct", "pangu", "collapse_space"]},
     "lexicon_extra": {},
     "checks_disabled": [],
+    # Which parser reads a document, and the per-format knobs. `map` is the
+    # explicit override on the built-in extension table in `formats.py` —
+    # `{".nfo": "text"}` — and is the only override there is, deliberately: a
+    # `--format` flag would let one invocation disagree with the next about what
+    # a file is, and the format is frozen onto the document at extract.
+    "formats": {"map": {}, "text": dict(TEXT_DEFAULTS)},
     # `lx terms` is a heuristic, so its knobs are configuration rather than a
     # fixed table — the same rule chapter detection follows. Invariant 4 keeps
     # judgement out of `checks.py`; this command proposes rather than decides,

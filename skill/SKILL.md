@@ -76,6 +76,8 @@ Structure splits in two, and only the second half can fail. The document *around
 
 In practice that means: do not begin a translation with `1. `, `- `, `#`, or `> ` unless the source line began that way; do not put a line break in a heading, a table cell or a blockquote; do not add a blank line; and do not add a `|` inside a table cell. If the target genuinely needs a list, the source is a list and the segmentation already reflects it.
 
+Those are the Markdown rules. In a **plain-text** document nothing opens a block, so a line of dialogue may begin with a dash and a paragraph may begin with a hash — the rules that remain are: never add a blank line, never add a line to a chapter title, and, in a document written one paragraph per line, never add a line at all. `check` applies the right set on its own; the document records which.
+
 ## Setting up a project
 
 `lx init` writes `lx.config.json`, `config/glossary.csv`, and `config/dnt.txt`. Before a first real run, fill in the glossary and the do-not-translate list — most quality complaints are terminology complaints. Do not skim for the terms by hand: `lx terms SRC --lang L --append` proposes them from the source and writes the rows, leaving the target column empty for you to fill. An unfilled row enforces nothing, so appending is safe on a project already in flight. Templates and field meanings are in `config/` alongside this skill.
@@ -93,7 +95,7 @@ Read these when the situation calls for them, not upfront:
 
 - `reference/zh-TW.md` — Traditional Chinese style: register, spacing, punctuation, term pairs, and the traps that make output read as character-converted rather than written for the locale. Read before any zh-TW work. Its register section covers technical documentation; prose is a different register, selected with `lx extract --tone literary` and reported in `lx todo`'s `tone` field.
 - `reference/pipeline.md` — full command reference, state layout, batching and model-routing guidance, resuming interrupted jobs.
-- `reference/formats.md` — extending past Markdown: JSON/YAML string catalogs, gettext PO, MDX, HTML. Read before translating anything that is not a `.md` file.
+- `reference/formats.md` — the format registry, plain text and its three heuristics, and what extending past the two built-in formats involves. Read before translating anything that is not a `.md` file.
 - `reference/critique.md` — the design rationale, and the failure modes of prompt-only translation rules. Read when someone asks why the pipeline is shaped this way, or wants to modify it.
 
 ## Letting a model do the drafting
