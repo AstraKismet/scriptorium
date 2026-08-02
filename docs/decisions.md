@@ -3,6 +3,151 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-08-02 · A continuation indent survives normalization verbatim, and the same op scoped out twice was guilty twice
+
+Closing HANDOFF-011, the other end of the line from HANDOFF-010. `collapse_space`
+rewrote every run of blanks that *begins* a line down to one space — the
+indentation invariant 3 records as living inside the segment, because a raw node
+can only sit before or after a whole one. Measured across the corpus with
+`DEFAULT_CONFIG` for zh-TW: eleven segments in six files, every indent whatever
+its width arriving as a single space.
+
+**It stayed invisible because the round-trip fixtures cannot see it.**
+`tests/corpus/` and `tests/corpus-text/` substitute each segment's *source* back
+into the skeleton and never call `normalize`, deliberately, so that a failure
+there is a skeleton defect and not a masking one. Everything this op does to a
+*target* was therefore unmeasured. The new tests are the target side of the same
+files.
+
+**Verbatim, not canonicalized.** *Lost:* the answer HANDOFF-010 gave one line
+earlier — two spaces and five before a line break mean the same `<br>`, so the
+surplus is editor noise and goes. That reasoning does not transfer, and the
+render says why: indent widths are not interchangeable. Four spaces are an
+indented code block where one space is a paragraph, and inside a list item the
+indent is the whole of what keeps a continuation inside the item.
+
+**Confirmed against a real CommonMark render** — markdown-it-py, as measurement
+tooling rather than a dependency — because the package asked for the severity to
+be established rather than assumed, and it is not uniform. For a prose
+continuation the damage is cosmetic: lazy continuation makes `- item\n    x` and
+`- item\n x` the same paragraph. For a continuation that could open a block it is
+structural: `- outer\n    - nested` renders as a nested list and `- outer\n -
+nested` as two siblings, and the same split happens for `#`, `>` and `1.`. For an
+indented code block it is total — `<pre><code>` becomes `<p>`, and the code is
+reflowed prose.
+
+**`punct` was scoped OUT on a true statement that does not imply what it was read
+to imply, for the second package running.** The OUT list says both of `punct`'s
+whitespace rules need fullwidth punctuation *adjacent* to the run, and they do.
+But `[ \t]+(?=[FULLWIDTH])` needs it adjacent on the **right**, so a continuation
+line that *opens* on 「, （, —— or …… matches — and `punct` runs first and deletes
+the run outright, where `collapse_space` only shortens it. That is not a corner:
+a zh-TW verse block, epigraph or quoted letter opens its lines on exactly those
+characters. Measured 2026-08-02. The package also told its executor to verify
+rather than trust the claim, which is the only reason this was caught; HANDOFF-010
+recorded the identical mis-scoping of the identical op at the other end of the
+line. The rule that follows: **an OUT clause resting on a factual claim is a
+scoping hypothesis, not a boundary.**
+
+**The other rule of `punct` is deliberately left unguarded.** Its lookbehind
+already demands fullwidth punctuation immediately before the run, and the
+character before a run that begins a line is a newline, so it cannot reach one.
+A guard there would be one no test could ever turn red — and the mutation pass
+confirms it: adding it is the one mutant of eleven that survives.
+
+**Position 0 of a segment is indentation too, and the case is measured rather
+than invented.** The package expected the opposite, having measured that no
+corpus segment starts with a run because `mdparse` holds the marker and the first
+line's indent in the skeleton. That is true of a list item and false of the
+corpus: `mdparse` has no indented-code-block branch at all, so
+`tests/corpus/indented-code-block.md` arrives as an ordinary paragraph whose
+source *starts* with the four spaces that make it code, and again with a tab.
+`translate.accept` strips a model's leading whitespace before normalize is
+reached, but `cli.do_apply` — a person's or an agent's own words — does not, and
+neither does the workbench behind it.
+
+*Left standing, and scheduled as HANDOFF-018:* that an indented code block is a
+translatable segment at all. The model is asked to translate Python, and
+`accept`'s strip removes the opening indent whatever `normalize` does. This
+package guards the ops; it does not fix the parser, and the two are separable.
+
+The reviewers measured the consequence further than the package had, and the
+extra distance is the part worth recording: because reuse also comes through
+`accept`, a target a *person* applied with its indent intact is banked with the
+indent and handed back without it. Reproduced end to end — `lx apply`, `lx
+commit`, drop `state.db`, `lx extract` — the reused target renders at column 0
+where the applied one rendered as a code block, the memory key is untouched so it
+never self-heals, and `lx check` exits 0 with no errors and no warnings. One
+wording normalizes two ways depending on which path delivered it, and a document
+can change its rendered structure merely by having its state rebuilt.
+
+**The guard's class is the whole design, and it took two measurements to settle
+at `[\S\r]`.** The first version was `(?<=[^\n])`, which is satisfied one
+character *into* the indent: the engine starts the match on the second space and
+a four-space indent came out as two. That bought `[^ \t\n]` — and adversarial
+review of *that* found the second half. The run these ops match is `[ \t]+`; the
+indent a translator writes need not be. A zh-TW paragraph indent is U+3000, which
+`textparse._blank` and `_indented` both already know, and a mixed `　` + spaces
+indent — what a paste from a PDF, or a model padding a Chinese line to its
+source's column, produces — kept its U+3000 and lost every ASCII space behind it.
+`\S` covers U+3000, U+00A0, the form feed `textparse` separates chapters on, and
+U+2028/U+2029.
+
+*The price, stated rather than left to be discovered:* `'a　  b'` — an ideographic
+space used *between words*, followed by ASCII blanks — no longer collapses. One
+character of context cannot distinguish that from an indent, and the two failures
+are not the same size: a surplus space is invisible where a deleted indent
+reflows a code block into prose. Pinned by a test so the trade is deliberate.
+
+**A lone CR does not start a line**, so `\r` is added back to the class. That is
+`docio.split_terminator`'s classification — a lone CR is a character in a
+sentence — and the same one `_LINE_END_BLANKS_RE` makes with its `\r?\n`
+lookahead. A CRLF continuation is covered either way, because the character
+before the indent is then the `\n`.
+
+*Residual, measured and left:* `_line_end_blanks`, the handler, does not share
+that classification — its `at_line_start` test is `m.string[m.start() - 1] in
+"\r\n"` — so `'甲\r  \r\n乙'` loses a hard break the new guard would call
+interior. Pre-existing, HANDOFF-010's, and a mixed-terminator document is the
+recorded exception either way (2026-07-28). Widening it here would be revisiting
+a settled behaviour to fix a case that has no reported instance; it is written
+down instead.
+
+**The trailing `[ \t]+\Z` strip stays unguarded.** A run that begins the
+segment's last line with nothing after it indents nothing, which is the same
+judgement `_line_end_blanks` makes about a line that is only blanks. Guarding it
+would make `'item\n  '` keep two invisible trailing spaces.
+
+**The two passes compose rather than overlap.** A run that both begins and ends a
+line is a blanks-only line, and `_line_end_blanks` empties it before the interior
+collapse runs; what reaches the guarded pass begins a line and has something
+after it that the indent is indenting.
+
+**`pangu` was checked again and needed nothing again.** Both rules are zero-width
+assertions between a CJK character and a Latin one; neither can match across a
+blank, from either direction.
+
+**Verified by mutation, and then attacked.** Twelve mutants — the two new guards,
+the guard's character class in three directions, the guard added where it is
+deliberately absent, and the four HANDOFF-010 guards it composes with. Eleven
+fail the suite. The survivor is the redundant guard named above, and it is
+commented as such at the point of output.
+
+The mutation pass also found a real gap in an older guard: `[ \t]+\Z` could be
+changed to `[ \t]+$` — which in Python also matches before a final newline,
+deleting a hard break — with the whole suite still green, because no test fed
+normalize a target ending in `'  \n'`. `lx apply` does not strip, so that target
+is reachable. Two rows close it.
+
+What mutation could not find, four independent reviewers attacking the finished
+change did. Between them they swept some 600,000 synthesized strings plus every
+segment of both corpora against the pre-change code: **zero behaviour differences
+that are not a run of blanks at a line start** — nothing that legitimately
+collapsed has stopped collapsing — and all eleven new parametrized rows fail on
+the parent commit, so none is vacuous. The U+3000 half of the class above is what
+they found that mutation structurally could not: a mutant can only weaken a guard
+that exists, and this was a case the guard never covered.
+
 ## 2026-08-02 · A project's voice is a sheet of prose, and a character's half of it rides only where their name does
 
 Closing HANDOFF-015, which is option C of the triaged HANDOFF-208 and decision D6
