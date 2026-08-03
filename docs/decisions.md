@@ -162,8 +162,12 @@ artifact — which is why the regression definition is coverage-based.
 On the corpus the change moves **nothing**: all 31 pre-existing fixtures,
 including the 1572 segments of the 112k manual, segment identically before and
 after. Independently, all 61 real Markdown documents in the repository were
-diffed and 3 moved — the two fixtures this package adds, and HANDOFF-021's own
-file, which contains the defect as a worked example and now has it translated.
+diffed and 4 moved, 0 of them losing a line: the two fixtures this package adds,
+HANDOFF-021's own file, and **this one**. Writing the defect down as a worked
+example is enough to trigger it — under the parent parser the ```` ```js` ````
+above opens a fence that closes nowhere, and 35 segments of this entry and the
+one below it stop being translatable. The repair demonstrating itself on the
+document that records it is the clearest evidence in the package.
 
 ### Verification, and the axes the sweep varied
 
