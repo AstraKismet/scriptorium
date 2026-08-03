@@ -281,6 +281,16 @@ executable handoff".
 - **Never put a convention, guide or ledger in `handoff/`** — the `HANDOFF-*`
   glob will mistake it for a package, and the directory is outside version
   control.
+- **A closing report ends with the handover, not with the result.** Two named
+  sections, always, even when both are empty: **what is left undone**, split into
+  what this package owed and what it uncovered, each with the package id or
+  `docs/` entry it now lives in and anything still waiting on the maintainer; and
+  **whether to continue in this session or a new one**, with the reason and — if
+  a new one — the exact opening line to paste. Without them the maintainer has to
+  ask both questions every time, and the answer they get is reconstructed after
+  the fact rather than recorded while the work was still in view. Reporting
+  "done" is not a handover; a queue this convention exists to keep moving needs
+  to say where it moved to.
 
 `blocked-by` kinds: `user:`, `package: HANDOFF-xxx` (clears automatically when
 that package is deleted), `data:`, `design:`, `external:`.
