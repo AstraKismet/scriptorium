@@ -59,6 +59,26 @@ a line into the skeleton — the whole heading is a segment either way. Narrowin
 it would only move `　#` out of the raw node and into the segment, which changes
 what the model is asked to translate rather than fixing a defect.
 
+### The neighbour a repair blinds, asked rather than assumed
+
+A line that stops being a heading becomes a **paragraph segment whose source
+begins with `#`**, where before its `　# ` sat in the skeleton and no translation
+could reach it. So the structure stopped being safe by construction, and the
+question is what replaced that. Two mechanisms, and which one applies depends on
+where the U+3000 is — measured, because this is the failure HANDOFF-020's
+adversarial pass found twice.
+
+At **position 0** the run is the segment's place in the document's structure, so
+`normalize.reseat_outer_blanks` re-imposes it from the source on every proposal;
+a target that half-widths or drops the `　` gets it back, and the rendered line is
+still a paragraph. That works here only because that function uses bare
+`str.strip()`, which covers U+3000 and U+00A0 without enumerating them — a
+property its docstring already claimed and this is the second caller to depend
+on. **Between the hashes and the text** there is nothing to re-impose, so the
+*check* has to catch it: `containment_problems` reports "the target opens a
+heading; the source does not" at error severity, because `checks.py` reads
+`mdparse`'s own patterns rather than a copy. Both halves are pinned by a test.
+
 *`DEF_RE`'s leading run stays unbounded,* `[ \t]*` and not ` {0,3}`. The column is
 already enforced one branch earlier: a line four columns past its container's
 floor has been taken by the chunk branch before this pattern is reached, and

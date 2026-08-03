@@ -515,6 +515,39 @@ def test_a_marker_s_indent_is_measured_in_columns_not_characters():
         assert prose in seg_lines, prose
 
 
+def test_a_marker_that_is_not_one_cannot_become_one_through_the_target():
+    """The risk the narrowing takes on, and the two mechanisms that cover it.
+
+    Before HANDOFF-021 a line like `　# 標題` was cut as a *heading* segment, so
+    its `　# ` sat in the skeleton and no translation could reach it — the
+    structure was safe by construction. Now the whole line is a paragraph segment
+    and the model sees the hash. What stops it inventing an `<h1>` is not one
+    thing but two, and which one applies depends on where the U+3000 is.
+
+    Measured 2026-08-03 rather than argued, because "the neighbour a repair
+    silently blinds" is the failure HANDOFF-020's adversarial pass found twice.
+    """
+    # (1) At position 0 the run is the segment's place in the structure, so it is
+    # re-imposed from the source on every proposal — `translate.accept` and
+    # `cli.do_apply` share this. `str.strip()` with no argument is what covers
+    # U+3000 without enumerating it, which is why the reseat reaches this case.
+    src = parse("　# 中文標題\n    後面的散文\n")[1][0]["source"]
+    assert src.startswith("　#"), src
+    for damaged in (" # 中文標題\n    後面的散文",     # full-width to half-width
+                    "# 中文標題\n    後面的散文"):     # dropped outright
+        assert reseat_outer_blanks(src, damaged).startswith("　#")
+
+    # (2) Between the hashes and the text there is nothing to re-impose — that
+    # run is interior — so the *check* has to catch it, and does. This is the
+    # assertion that fails if `checks.py` ever stops importing `mdparse`'s own
+    # patterns, or if `HEADING_RE` widens back.
+    seg = parse("#　中文標題\n    後面的散文\n")[1][0]
+    assert seg["kind"] == "para", seg["kind"]
+    seg["target"] = seg["masked"].replace("　", " ", 1)
+    assert containment_problems(seg) == [
+        "the target opens a heading; the source does not"]
+
+
 @pytest.mark.parametrize("text, body", [
     # --- Defect B: an indented run of fence characters is a chunk, not a fence.
     ("Para.\n\n    ```\n    body of the chunk\nProse after.\n", "body of the chunk"),
