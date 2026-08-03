@@ -263,10 +263,20 @@ def _block_start(line, table):
     markdown-it-py rendered an ``<h1>`` where the source had a ``<p>``.
 
     Safe in the must-not-fire direction because it is monotone: every pattern
-    here is anchored with ``^\\s*`` or ``^\\s{0,3}``, so removing leading blanks
-    can only make a match appear, never disappear — and both sides of every
-    comparison in :func:`containment_problems` come through this function, so a
-    source that legitimately opens a block keeps answering the same name it did.
+    here anchors its indent at ``^`` with a run that a leading blank could only
+    have satisfied — ``^[ \\t]*`` or ``^ {0,3}`` — so removing leading blanks can
+    only make a match appear, never disappear. Both sides of every comparison in
+    :func:`containment_problems` come through this function, so a source that
+    legitimately opens a block keeps answering the same name it did.
+
+    The character classes narrowed on 2026-08-03 (HANDOFF-021) and the
+    monotonicity survived it, but the reason is worth stating because it changed:
+    ``str.lstrip()`` eats U+3000, U+00A0, a form feed and a carriage return, and
+    the patterns no longer do. So this function now answers *heading* for a line
+    the parser would read as a paragraph — `` '\\u3000# x' `` lstrips to
+    `` '# x' ``. That is the must-fire direction and it is deliberate: a segment
+    sits at some indent inside its own block, and the rule is about what the
+    line's *content* would open once it lands there.
     """
     line = line.lstrip()
     for name, rx in table:

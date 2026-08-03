@@ -3,6 +3,190 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-08-03 · A backtick in an info string is not a fence, and an indent is measured in columns
+
+Closing HANDOFF-021, the two shapes HANDOFF-020's adversarial review measured and
+deliberately left out of it. Neither is a regression from that package — both
+fail identically at `c86363b` and at `e3399d8` — and each costs an **entire
+document**, silently: `lx check` exits 0 and nothing says the text was never
+translated.
+
+**Defect A, a backtick fence whose info string carries a backtick.** CommonMark
+forbids it — the run would otherwise be ambiguous with an inline code span — so
+```` ```js` ```` is an ordinary paragraph. `FENCE_RE` read it as a fence, found
+no closing marker, and with no list open the containment bound is vacuous, so the
+run reached end of file: `parse()` returned **zero segments** for a
+three-paragraph document. A **tilde** fence carries no such restriction and had
+to keep working; that asymmetry is the longer risk of the repair, because a rule
+applied to both spellings hands every tilde-fenced code block to the model.
+
+The rule is spelled *in* the pattern — `` `{3,}[^`]*|~{3,}.* `` — rather than as
+a helper beside it. *Lost:* a `_fence_open(line)` predicate, which reads better
+and is wrong here: `checks.py` imports `FENCE_RE` to ask the same question about
+a translated *target*, and a second spelling of one rule is the copy nobody
+re-reads when a flavour detail changes. That is already the stated reason
+`checks.py` imports these patterns instead of restating them.
+
+### Which of the four `\s` indent classes narrowed, and which did not
+
+HANDOFF-020 narrowed `FENCE_RE`, `QUOTE_RE` and `LIST_RE`. `HEADING_RE`,
+`SETEXT_RE`, `HR_RE` and `DEF_RE` still spelled their indent `\s`, and all four
+decide whether a paragraph stays open — which is what decides whether the
+four-column line below becomes an indented code block. Two separate mistakes
+lived in the one class, and the audit measured both against markdown-it-py:
+**74, 34, 147 and 36 loss shapes** across the four patterns, 0 after.
+
+*A tab is four columns, not one character.* `\s{0,3}` counted `\t# 標題` as a
+one-character indent and read a heading; at column 0 any tab already reaches four
+columns, so a character count is exact **only for spaces**. The leading run
+becomes ` {0,3}`. *Lost:* `[ \t]{0,3}`, which is the same bug spelled more
+carefully; and moving the bound into the loop the way `FENCE_RE`'s is, which
+would *widen* the patterns to match a heading indented into a list item — more
+skeleton, the wrong direction, and out of this package's scope.
+
+*`\s` is not "spaces or tabs".* It reaches U+3000, U+00A0, a form feed, a
+vertical tab, U+2028, U+2029, U+205F and U+2003. U+3000 is *the* zh-TW paragraph
+indent, so `　# 標題`, `#　標題`, `===　` and `***　` were block starts where
+CommonMark reads three paragraphs, and each one took the indented line below it
+out of translation. Every run that decides a block start becomes `[ \t]`,
+including the ones that measure no column: **whether the line is a marker at all
+is a block-start decision**, and every block start closes a paragraph. That is
+the reasoning HANDOFF-021 asked for and it cuts the other way once —
+
+*`HEADING_RE`'s closing `#` run is the class left alone.* It decides where the
+*segment* is cut and never whether a block starts, so no spelling of it can move
+a line into the skeleton — the whole heading is a segment either way. Narrowing
+it would only move `　#` out of the raw node and into the segment, which changes
+what the model is asked to translate rather than fixing a defect.
+
+*`DEF_RE`'s leading run stays unbounded,* `[ \t]*` and not ` {0,3}`. The column is
+already enforced one branch earlier: a line four columns past its container's
+floor has been taken by the chunk branch before this pattern is reached, and
+every indent that does reach it is inside a container where the definition is
+legitimate. *Lost:* ` {0,3}`, which is CommonMark's letter and makes
+`-    item\n\n     [x]: /url` a translatable segment — a link definition in front
+of the model, whose reference breaks if the label comes back translated.
+
+### A narrowed class dropped the carriage return, and the sweep's own metric hid it
+
+`parse` splits on `"\n"` alone, so in a CRLF document **every line still carries
+the CR of its own terminator** — the reason `emit_seg` moves a trailing CR run
+into the skeleton. `\s*$` swallowed that CR by accident; `[ \t]*$` cannot. So
+`Title\r\n=====\r\n` stopped being a setext heading and became a two-line
+paragraph handed to the model with its underline inside it, and every thematic
+break in such a document went the same way. `SETEXT_RE` and `HR_RE` end
+`[ \t]*\r*$`; no other pattern here needs it, because every other one ends in
+`.*` or `\s*` and absorbs the CR already.
+
+*Lost:* `[ \t\r]*$`, which also matches ` \r \r`. The CRs are the terminator and
+sit at the very end — a *run* rather than one, because `text\r\r\n` is what a
+twice-applied LF-to-CRLF conversion produces — and a CR anywhere else on the line
+is text in this project, where refusing the match keeps the text translatable.
+
+Two things about this are worth more than the fix. **`docio.split_terminator`
+normalizes a uniform CRLF document to LF before `parse` sees it**, so the
+reachable cases are mixed terminators, CR-only documents, and every direct
+`parse` caller — `tests/corpus/` among them. And **the sweep's regression metric
+reported 0 while this sat in a diagnostic count nobody was watching**, with 789
+green tests unable to see it. The number that matters is rarely the number being
+reported.
+
+### The differential reference must enable the table extension
+
+`mdparse` implements GFM tables — it emits `cell` segments for them —
+and `MarkdownIt("commonmark")` does not. A reference without the table rule reads
+a table as one long paragraph, so **every question about the line after a table
+gets the opposite answer.** The first sweep of this change used the table-less
+preset and reported **84 regressions**, all one shape: a table, a tab-led setext
+underline, an indented line. With `MarkdownIt("commonmark").enable("table")` the
+same 84 documents show the new parser agreeing with the reference and the parent
+accidentally disagreeing. All 84 evaporated.
+
+This is a methodology decision, not a detail of this package: a differential
+sweep compares two parsers, and if they do not implement the same block set the
+comparison is measuring the difference in block sets. Every future sweep enables
+the table rule, and any finding that depends on what follows a table is quoted
+with the preset it came from.
+
+The residual is recorded rather than fixed. After a table `mdparse` ends the
+block at the first line without a `|`, where GFM keeps absorbing rows; the
+narrowings make more lines reach that divergence — **612 segment instances**
+across the sweep now overlap a line the table-enabled reference calls code, plus
+17 with a list above, against **504** that stopped doing so from Defect A's
+repair. Net +125 on a diagnostic count of 1040. That is the permissive direction:
+text stays translatable, and it costs a visible translated code block rather than
+a silent loss.
+
+### Neither version number is bumped, re-derived rather than carried over
+
+Measured over **40284 generated documents** across the axes below: **36806**
+segments identical in text *and* kind, **17012** no longer emitted, **18472**
+newly emitted, and **0 with the same text under a different kind**. That last
+number is the whole argument, and it is the same one HANDOFF-020 turned on. The
+memory key is the content hash plus the context: identical text keeps its key and
+deserves its banked wording, changed text gets a new hash and misses by
+construction, and there is no third case where a stale record could answer with
+wording cut for a different sentence. Bumping `SEGMENTATION_VERSION` would
+discard every entry in every project's memory — a novel's whole accumulated
+wording — to detect a change that cannot produce a wrong answer. `STATE_VERSION`
+likewise stays at 3: an old row is stale, not unreadable, and `store.py` refuses
+only a newer one.
+
+The large `segments_vanished` number is the arithmetic of merging, not evidence
+of loss: a marker line that stops being a marker joins the paragraph above it, so
+that short source string never recurs while its bytes stay inside a larger
+segment. Counting source-string multisets instead of line *coverage* reported
+16608 apparent regressions on the first pass, essentially all of them this
+artifact — which is why the regression definition is coverage-based.
+
+On the corpus the change moves **nothing**: all 31 pre-existing fixtures,
+including the 1572 segments of the 112k manual, segment identically before and
+after. Independently, all 61 real Markdown documents in the repository were
+diffed and 3 moved — the two fixtures this package adds, and HANDOFF-021's own
+file, which contains the defect as a worked example and now has it translated.
+
+### Verification, and the axes the sweep varied
+
+`tests/corpus/` cannot see either defect — it substitutes each segment's *source*
+back into the skeleton, so a block that stopped being translated round-trips
+perfectly and a block handed to the model round-trips perfectly too. The evidence
+is on the segment set and on the target side.
+
+The sweep varied: 48 marker variants (fence character, run length and info-string
+shape; heading level and closing run; setext spelling; three thematic breaks;
+a definition with and without a destination); 18 leading-whitespace values; 6
+inner and trailing values; 11 blocks above; 6 blocks below; three terminators;
+and a trailing newline or none. **0 regressions, 0 round-trip failures.**
+
+It held constant, and this is written down because a sweep is blind to the axis
+it does not vary: no arm crossed the full marker detail against block-above and
+block-below; U+2028, U+2029, U+205F, U+2003, the vertical tab and every mixture
+appeared as *leading* whitespace only; `dnt` was empty throughout; no inline
+markup appeared in any body text; nesting stopped at two containers; and every
+document was 0–4 lines of the same canonical text. The claim, not the sweep, then
+went to an adversarial pass.
+
+**A verification trap worth more than this package.**
+`tests/test_pipeline.py` begins with `sys.path.insert(0, ".../src")`, so a run
+with `PYTHONPATH` pointed at another copy of the package still imports the parser
+from `src/`. "The new tests pass against the parent build" was measured that way
+and meant nothing. Checking that a rule turns the suite red is done by putting
+the other parser into `src/` **in its own git worktree**.
+
+### What is deferred, and why it was not half-fixed
+
+`DEF_RE` still calls `[x]: /url not a title`, `[x]: /u rl` and `[x]:\x0c/url`
+link reference definitions where CommonMark reads paragraphs, and each costs the
+line plus the indented line under it. A character class rejecting the ASCII
+control characters alone was written, measured and thrown away: it closes four of
+six measured rows and leaves the two a person actually types, while the comment
+at the line would read as though the rule were handled. **A rule that looks
+handled and is not is worse than one written down.** Deciding it properly means
+parsing a destination and an optional title, and a definition may span two lines
+— `handoff/00-inbox/HANDOFF-022` carries the whole rule. The comment in
+`mdparse.py` also corrects the claim that used to sit there, "every case it would
+catch fails in the safe direction", which this audit measured false.
+
 ## 2026-08-03 · A quoted chunk is skeleton, and a fence's indentation is bounded by its container
 
 Closing HANDOFF-020, the two containers HANDOFF-018 left behind. Both were
