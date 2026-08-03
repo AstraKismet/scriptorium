@@ -3,6 +3,104 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-08-03 · Which tools the naming rule governs, and an ignored directory that is not free to rebuild
+
+The 2026-07-28 entry below settled that a tracked file may not name a tool. An
+audit ran that rule against the working tree rather than against the entry, and
+found the rule true, the entry's evidence false, and the subject ambiguous enough
+that both readings are actionable — which is the state in which a rule is not
+enforced but merely remembered.
+
+**The evidence sentence was false about the file it cites.** That entry offers
+"`.gitignore` governs the artifacts … without naming the tools that emit them" as
+proof that no gap existed. The comment directly above the ignored path read
+"regenerate with" and then the tool's name, as a runnable command. It was added
+2026-07-27, one day *before* the rule; the commit that added the neighbouring
+scan-scope block on 2026-08-03 quotes the rule in its own message, paraphrases its
+new comment to "a local analysis tool" to comply, and leaves the literal violation
+three lines above untouched. Nothing mechanical checks this, so the rule reaches
+only text someone is currently writing.
+
+**The subject had two live referents.** Three lines earlier the same file carries
+the identical construction for this project's own CLI — "rendered output —
+regenerate with `lx render`". `AGENTS.md`, `CLAUDE.md`, `adapters/` and
+`docs/windows-setup.md` name four assistant tools by name, the last with a whole
+setup section. And the 2026-07-28 entry itself names two ceremonies in its own
+prose while stating that a tracked file may not. Read as "any tool", the rule
+condemns all of that; read as "process tooling", it condemns one comment. Both
+readings are actionable, so one of the two protections had quietly evaporated.
+
+### The boundary
+
+Three categories, and the rule governs one of them.
+
+1. **This project's own interface** — `lx`, `python -m scriptorium`, `make`. Must
+   be named, everywhere, in every tracked file. It is the product; a document that
+   cannot say `lx render` is not documentation.
+2. **Host integrations this project supports** — the assistants that load
+   `AGENTS.md`, and anything `adapters/` targets. Must be named, because being
+   loadable by a named host is the whole reason those files exist, and a reader
+   setting one up needs its name.
+3. **Process tooling on one developer's machine** — ceremonies, advisors, local
+   analysis tools. **This is what the rule governs.** None of the four readers of
+   `AGENTS.md` can act on it, it is not installed in CI or on anyone else's
+   checkout, and it rots: five of these were disabled as unused on 2026-07-27 and
+   a gitignored comment still named one of them the next day.
+
+The recorded exception: **this log may name a category-3 tool inside a dated
+entry**, because a decision about a specific tool cannot be recorded without
+identifying it, and an entry is a fact about one day rather than an instruction.
+A rule, a checklist, or a comment that tells the reader to run something may not —
+that is the form that goes stale while still being obeyed. This entry is written
+without naming one, to show the constraint is not onerous.
+
+*Alternative that lost:* a grep lint over tracked files for known tool names. It
+fails on its first run against every category-2 name, so it can only exist after
+the narrowing above — and once narrowed, deciding whether a name is category 2 or
+3 is judgement, which invariant 4 keeps out of mechanical checks. The honest
+enforcement is that the boundary is now written down and short enough to apply.
+
+### The ignored directory that is not free to rebuild
+
+Same audit, second finding, and it is why the `.gitignore` comment changed rather
+than merely losing a word. The analysis output directory is ignored, so git holds
+no copy of it — and it contains 62 already-paid extraction entries whose cache is
+deliberately unversioned by the tool precisely because re-extraction is billed.
+Regenerating it is not restoring it: two runs over the identical corpus with the
+identical prompt, two days apart, produced 86.6% and 4.1% coverage of the
+explanatory layer, the second costing 25% more input. The tool's own backup is
+written *inside* the directory it protects, is disabled by an environment
+variable, and is overwritten in place by a second run on the same day.
+
+"Regenerate with …" therefore stated a cost that does not exist. The comment now
+states the artifact and the property — not free to rebuild, copy it out before
+deleting — which is the same shape the rule asks for and happens also to be true.
+
+*Alternative that lost:* tracking the cache. It is 1.3 MB of machine-specific,
+content-hash-keyed JSON that no other checkout can use, and invariant 9 puts an
+analysis artifact on the rebuildable side of the line. What it needs is a copy,
+not a history, so the copy lives outside the working tree and the per-machine
+notes record where.
+
+### Why no commit-time automation was installed
+
+The obvious mechanism — the analysis tool's own hook installer — is refused, and
+the reason is worth recording so it is not proposed again. It takes no arguments
+and does three things unconditionally; the third appends a merge-driver line to
+this repository's **`.gitattributes`**, after the rule whose own comment reads
+"Last rule wins, which is why this sits at the end". That rule is the round-trip
+corpus protection invariant 2a depends on, and it is a tracked file. Separately,
+the rebuild it installs takes no file lock on Windows — the lock helper falls
+through when `fcntl` is unavailable — while this repo deliberately runs delegated
+writers in parallel worktrees, which is exactly the concurrent case.
+
+What replaced it is a **query-time check rather than a commit-time rebuild**: the
+graph stamps the commit it was built from, nothing in the tool ever compares that
+to `HEAD`, and a per-machine script now does, with an exit code. Mechanical,
+falsifiable after the fact, and it starts no background writer. Measured when it
+was written: the graph on this machine was 20 commits behind, missing 67 of 165
+module-level definitions in `src/`, with three modules carrying no node at all.
+
 ## 2026-08-03 · A link reference definition is decided by the whole line, and it may not interrupt a paragraph
 
 Closing HANDOFF-022, the rule HANDOFF-021 measured and deliberately left open.
