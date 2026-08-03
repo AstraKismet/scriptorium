@@ -321,6 +321,11 @@ def test_an_indented_chunk_that_is_prose_is_still_translated(text, prose):
     # and its body stops being translated. 3 before, and markdown-it-py agrees
     # with the 1.
     ("fences-and-unclosed.md", 1),
+    # And the one HANDOFF-022 added. 6 of its 15 segments are the near-miss
+    # lines and their lazy continuations, none of which the parent emitted at
+    # all: it read each candidate line as a definition and took the indented line
+    # under it as code.
+    ("link-definition-tails.md", 15),
 ])
 def test_the_indented_code_rule_moved_no_other_fixture_s_segment_count(name, count):
     text = (CORPUS / name).read_bytes().decode("utf-8")
@@ -398,6 +403,63 @@ def test_a_quoted_chunk_is_skeleton_and_never_reaches_the_model():
     # assertion above and nothing else.
     for line in _QUOTED_PROSE:
         assert line in joined, line
+
+
+#: The two halves of `link-definition-tails.md`, named rather than derived, for
+#: the reason `_QUOTED_CODE` is: deriving them means re-implementing the rule
+#: under test inside the test. The whole point of the fixture is that the two
+#: halves are indistinguishable by shape — every line in both is `[label]: …` —
+#: so a mechanical filter that could separate them would be the parser.
+_REAL_DEFINITIONS = [
+    "[plain]: https://example.invalid/a",
+    '[titled]: https://example.invalid/b "With a double-quoted title"',
+    "[single]: https://example.invalid/c 'and a single-quoted one'",
+    "[parend]: https://example.invalid/d (and a parenthesized one)",
+    '[angled]: </a destination with a space> "which only the angle form allows"',
+    "[balanced]: https://example.invalid/e(1)",
+    "[escaped]: https://example.invalid/f\\(1",
+    "[ideographic]:　https://example.invalid/g",
+    "[bare]: destination",
+]
+_NEAR_MISSES = [
+    "[x]: /url not a title",
+    "[Ana]: Hello there, she said.",
+    "[spaced]: /two words",
+    "[unclosed]: <a destination that never closes",
+    '[junk]: /url "a title" and then some junk',
+    "[nested]: /url (a (nested) title)",
+    "[unbalanced]: /url(1",
+    "[empty]:",
+    # Not a tail question at all: a definition may not interrupt a paragraph, so
+    # this one is well-formed and is still prose.
+    "[lazy]: /url",
+]
+
+
+def test_a_line_that_only_looks_like_a_link_definition_is_still_translated():
+    text = (CORPUS / "link-definition-tails.md").read_bytes().decode("utf-8")
+    lines = text.split("\n")
+    for line in _REAL_DEFINITIONS + _NEAR_MISSES:
+        assert line in lines, (line, "link-definition-tails.md no longer holds "
+                                     "this line — fix the test, not the fixture")
+    nodes, segs = parse(text)
+    joined = "\n".join(s["source"] for s in segs)
+    raw = "".join(n["v"] for n in nodes if n["t"] == "raw")
+    for line in _REAL_DEFINITIONS:
+        assert line not in joined, line
+        assert line in raw, line                  # reproduced byte for byte
+    # …and the half that only looks like one, which is what a repair aimed at
+    # the first half alone would swallow. Both the candidate line and the
+    # indented line under it, since a closed paragraph is what turns the second
+    # one into code.
+    for line in _NEAR_MISSES:
+        assert line in joined, line
+    assert "A bare word cannot be a title." in joined
+    assert "An empty destination is no destination at all." in joined
+    # The one indented line that *is* code, because the definition above it is a
+    # real one. Without this the test passes for a parser that gave up on the
+    # rule entirely.
+    assert "A definition closes the paragraph above it" not in joined
 
 
 def test_an_indented_fence_run_is_a_chunk_and_the_prose_below_it_survives():
@@ -643,6 +705,44 @@ def test_a_marker_that_is_not_one_cannot_become_one_through_the_target():
     # reference. The only row in this table that is skeleton because CommonMark
     # calls it a *definition* rather than because it calls it code.
     ("-    item\n\n     [x]: /url\n", "[x]: /url"),
+    # --- HANDOFF-022 narrowed which lines are definitions, so these rows are the
+    # must-not-overshoot half: every legitimate spelling of a destination and a
+    # title still has to close the paragraph. A rule that only kept `[x]: /url`
+    # working would hand a *titled* definition to the model, and a translated
+    # label breaks every reference to it. Each row confirmed against a
+    # markdown-it-py render before it was written down.
+    ('[x]: /url "a title"\n    code body\n', "code body"),
+    ("[x]: /url 'a title'\n    code body\n", "code body"),
+    ("[x]: /url (a title)\n    code body\n", "code body"),
+    ('[x]: </u rl> "a space, which only the angle form allows"\n    code body\n',
+     "code body"),
+    ("[x]: /u(r)l\n    code body\n", "code body"),
+    ("[x]: /u\\(rl\n    code body\n", "code body"),
+    # A backslash escapes the delimiter inside a title too. Without that the
+    # title ends at the escaped quote and the junk after it refuses the whole
+    # line, so a legitimate definition becomes a segment.
+    ('[x]: /url "a \\" b"\n    code body\n', "code body"),
+    # A parenthesis inside a *quoted* title is an ordinary character. Only a
+    # parenthesized title refuses one, and applying that rule to all three
+    # delimiters — which this parser did until it was read against the rule —
+    # turns an ordinary sentence in a title into a paragraph.
+    ('[x]: /url "a (b) c"\n    code body\n', "code body"),
+    ("[x]: /url 'a (b c'\n    code body\n", "code body"),
+    # A definition may end in spaces or tabs. Dropping the run after the title
+    # leaves the suite green on every other row, because no other row has one.
+    ('[x]: /url "a title"  \n    code body\n', "code body"),
+    # NUL is not in the refused class: markdown-it replaces U+0000 with U+FFFD
+    # before parsing, so this is a definition and refusing it would move a line
+    # *into* the skeleton that CommonMark keeps out of it.
+    ("[x]: /url\x00\n    code body\n", "code body"),
+    # The metric this package was told to watch and was not being scored on. In a
+    # CRLF document every line carries the CR of its own terminator, and a CR is
+    # in the destination's refused class — so without the `\r*$` run at the tail,
+    # every definition in a Windows-authored file stops being one at once, in
+    # silence, with a green suite. `SETEXT_RE` and `HR_RE` learned the same
+    # lesson one package earlier.
+    ("[x]: /url\r\n    code body\r\n", "code body"),
+    ('[x]: /url "a title"\r\n    code body\r\n', "code body"),
     # --- and the axis narrowing those two trailing runs broke, found by the
     # differential sweep and invisible to every test that existed: a CARRIAGE
     # RETURN. `parse` splits on "\n" alone, so in a CRLF document every line
@@ -692,6 +792,19 @@ def test_a_marker_that_is_not_one_cannot_become_one_through_the_target():
         "a-real-definition-still-closes-a-paragraph",
         "a-full-width-space-after-the-definition-colon",
         "a-definition-indented-past-three-columns",
+        "a-double-quoted-title-is-still-a-definition",
+        "a-single-quoted-title-is-still-a-definition",
+        "a-parenthesized-title-is-still-a-definition",
+        "an-angle-destination-holding-a-space",
+        "balanced-parentheses-in-a-destination",
+        "an-escaped-parenthesis-in-a-destination",
+        "an-escaped-delimiter-inside-a-title",
+        "a-parenthesis-inside-a-double-quoted-title",
+        "a-parenthesis-inside-a-single-quoted-title",
+        "a-definition-may-end-in-spaces",
+        "a-nul-in-a-destination-is-not-a-control-character",
+        "a-crlf-definition-still-closes-a-paragraph",
+        "a-crlf-definition-with-a-title",
         "a-crlf-setext-underline-still-underlines",
         "a-crlf-thematic-break-still-breaks",
         "a-crlf-underline-is-not-translated",
@@ -871,6 +984,73 @@ def test_a_chunk_in_a_fence_run_or_a_quote_leaves_no_segment_behind(text, body):
     # `{0,3}` — only its character class narrowed.
     ("　[x]: /url\n    lazy prose\n", "lazy prose"),
     ("\x0c[x]: /url\n    lazy prose\n", "lazy prose"),
+    # --- HANDOFF-022: the tail decides too, and until it did, `[label]:` alone
+    # put *two* blocks into the skeleton — the line itself, and the indented line
+    # under it that a closed paragraph turns into code. markdown-it-py renders a
+    # `<p>` for every candidate line below; the three that knowingly disagree
+    # with it say so at the row.
+    ("[x]: /url not a title\n    lazy prose\n", "lazy prose"),
+    ("[x]: /url not a title\n    lazy prose\n", "[x]: /url not a title"),
+    # The shape this matters for, in the use case this project is for: a line of
+    # dialogue in square brackets is a paragraph, and it was going untranslated.
+    ("[Ana]: Hello there, she said.\n", "[Ana]: Hello there, she said."),
+    ("[x]: /u rl\n    lazy prose\n", "lazy prose"),
+    # A control character may not sit between the colon and the destination, nor
+    # inside one. The first row is what makes `DEF_RE`'s post-colon `[ \t]*`
+    # load-bearing rather than the equivalent mutant it used to be.
+    ("[x]:\x0c/url\n    lazy prose\n", "lazy prose"),
+    ("[x]: /u\x0brl\n    lazy prose\n", "lazy prose"),
+    ("[x]: /u\x7frl\n    lazy prose\n", "lazy prose"),
+    # The angle form has no fallback to the bare one: CommonMark's bare
+    # destination "does not start with `<`".
+    ("[x]: <a destination that never closes\n    lazy prose\n", "lazy prose"),
+    ("[x]: <url>\"t\"\n    lazy prose\n", "lazy prose"),
+    ('[x]: /url "a title" and then junk\n    lazy prose\n', "lazy prose"),
+    ("[x]: /url (a (nested) title)\n    lazy prose\n", "lazy prose"),
+    ("[x]: /u(rl\n    lazy prose\n", "lazy prose"),
+    ("[x]: /u)rl\n    lazy prose\n", "lazy prose"),
+    # …and the one that balances *overall* while closing a parenthesis it never
+    # opened. Counting to zero at the end is not the rule; a negative depth
+    # refuses the destination where it happens. Added because the mutation pass
+    # found the guard untested — every earlier row leaves the final depth
+    # non-zero too, so removing it changed nothing they could see.
+    ("[x]: /u)r(l\n    lazy prose\n", "lazy prose"),
+    # The angle form's own three refusals, all three untested until the mutation
+    # pass said so. A line ending may not sit inside the brackets and a backslash
+    # cannot escape one; an unescaped `<` may not either.
+    ("[x]: <u\rrl>\n    lazy prose\n", "lazy prose"),
+    ("[x]: <u\\\rrl>\n    lazy prose\n", "lazy prose"),
+    ("[x]: <u<rl>\n    lazy prose\n", "lazy prose"),
+    # A `(` inside a parenthesized title refuses the title outright rather than
+    # nesting. `(a (b) c)` alone does not prove it — the title ends at the first
+    # `)` and the junk after it refuses the line anyway — so the row has to be
+    # one whose closer is the last character on the line.
+    ("[x]: /url (a (b)\n    lazy prose\n", "lazy prose"),
+    # Only a space and a tab separate a destination from its title. After the
+    # *angle* form that is visible, because U+3000 cannot be absorbed into the
+    # destination the way it is after a bare one.
+    ('[x]: <url>　"t"\n    lazy prose\n', "lazy prose"),
+    # A backslash escapes what follows it — except a space, which ends the
+    # destination at the backslash instead. markdown-it has the same exception.
+    ('[x]: a\\ "t"\n    lazy prose\n', "lazy prose"),
+    # An empty destination, which was the one half the old branch got right, and
+    # which now keeps the line itself translatable rather than only the line
+    # below it.
+    ("[x]:\n    lazy prose\n", "lazy prose"),
+    # A definition may not interrupt a paragraph, so this is the quote's lazy
+    # continuation and renders as its own literal text. Once the tail was
+    # decided this was 7228 lines of the sweep's remaining loss column.
+    ("> quoted above\n[x]: /url\n", "[x]: /url"),
+    ("- item above\n[x]: /url\n", "[x]: /url"),
+    # --- the three rows where the two references disagree with *each other*,
+    # because markdown-it trims the whole reference before parsing it and the
+    # spec does not. The first two are definitions to markdown-it and paragraphs
+    # to the spec; the third is the other way round. This parser refuses all
+    # three, which is the direction that keeps the text translatable rather than
+    # a compromise. See `_completes_a_definition`.
+    ('[x]: /url "t"　\n    lazy prose\n', "lazy prose"),
+    ("[x]: /url\x0c\n    lazy prose\n", "lazy prose"),
+    ("[x]:　\n    lazy prose\n", "lazy prose"),
     # --- what the info-string rule cost downstream, found by adversarial review
     # on the axis the 40284-document sweep never varied: the *sequence* of fence
     # markers in one document. Once a line stops being an opener, every later
@@ -952,6 +1132,32 @@ def test_a_chunk_in_a_fence_run_or_a_quote_leaves_no_segment_behind(text, body):
         "an-ideographic-space-after-a-setext-underline",
         "an-ideographic-space-before-a-link-definition",
         "a-form-feed-before-a-link-definition",
+        "an-unquoted-title-is-not-a-title",
+        "an-unquoted-title-keeps-its-own-line-translatable",
+        "a-line-of-dialogue-is-not-a-link-definition",
+        "a-space-in-a-bare-destination",
+        "a-form-feed-after-the-definition-colon",
+        "a-vertical-tab-inside-a-destination",
+        "a-del-inside-a-destination",
+        "an-unclosed-angle-destination",
+        "an-angle-destination-with-no-separator-before-the-title",
+        "junk-after-a-link-title",
+        "a-nested-parenthesis-in-a-title",
+        "an-unclosed-parenthesis-in-a-destination",
+        "an-unopened-parenthesis-in-a-destination",
+        "parentheses-that-balance-only-at-the-end",
+        "a-text-cr-inside-an-angle-destination",
+        "an-escaped-text-cr-inside-an-angle-destination",
+        "an-unescaped-bracket-inside-an-angle-destination",
+        "a-nested-parenthesis-that-closes-at-the-line-s-end",
+        "an-ideographic-space-after-an-angle-destination",
+        "a-backslash-does-not-escape-a-space",
+        "an-empty-destination-is-not-a-definition",
+        "a-definition-may-not-interrupt-a-quoted-paragraph",
+        "a-definition-may-not-interrupt-an-item-s-paragraph",
+        "an-ideographic-space-after-a-link-title",
+        "a-form-feed-after-a-destination",
+        "an-ideographic-space-is-no-destination",
         "a-closer-may-not-carry-an-info-string",
         "a-realistic-manual-page",
         "a-closer-is-at-least-as-long-as-its-opener",
@@ -1237,12 +1443,48 @@ def test_a_target_that_becomes_a_link_definition_does_not_merely_move_the_text()
     assert segs2 == [], "the fixture must actually demonstrate the segment vanishing"
 
 
-def test_a_source_link_definition_never_reaches_a_segment_in_the_first_place():
-    # The must-not-fire half, and the reason the row costs nothing: `mdparse`
-    # folds a link definition into a raw node, so no source segment line can be
-    # one. Only a model-invented definition can match the rule.
+def test_a_source_link_definition_is_folded_into_a_raw_node():
+    # The must-not-fire half for the ordinary case. It is *not* the reason the
+    # row costs nothing — the comment here used to say "no source segment line
+    # can ever be one, by construction", and 2026-08-03 measured that false:
+    # this rule is not one of the paragraph loop's stop conditions, and a
+    # definition that may not interrupt a paragraph is prose. What keeps the
+    # rule free of false positives is symmetry, which the two tests below pin.
     _nodes, segs = parse('[foo]: http://example.com "title"\n\nOrdinary prose.\n')
     assert [s["source"] for s in segs] == ["Ordinary prose."]
+
+
+def test_a_target_that_only_looks_like_a_link_definition_is_not_reported():
+    """The false positive `DEF_RE` used to raise at error severity.
+
+    A line is a definition when the whole line parses, so a target carrying a
+    space where a destination may not have one is an ordinary paragraph and
+    renders as its own text. Reporting it failed correct work — the direction
+    `docs/decisions.md` calls the more expensive one, because the model is fed
+    these messages back and asked to change a translation that was right.
+
+    Each row is confirmed by re-parsing the rendered document: a target that is
+    genuinely a definition leaves no segment behind, and these leave one.
+    """
+    for target in ("[安娜]: 你好 世界",
+                   "[x]: /url not a title",
+                   "[x]: <a destination that never closes"):
+        assert _structural("para", "One sentence.", target) == [], target
+        nodes, segs = parse("One sentence.\n")
+        segs[0]["target"] = target
+        out, _missing = render(
+            {"nodes": nodes, "segments": segs, "lang": "zh-TW"}, CFG)
+        assert parse(out)[1], (target, "the row must actually demonstrate the "
+                                       "segment surviving")
+
+
+def test_a_link_definition_the_source_also_opens_is_not_reported():
+    # The symmetry half, and the reason the rule is safe on a source line that
+    # *is* a definition: both sides come through `_block_start`, so a source
+    # answering "link reference definition" licenses a target answering the
+    # same. `[lazy]: /url` is such a source — well formed, and prose only
+    # because a definition may not interrupt the paragraph above it.
+    assert _structural("para", "[lazy]: /url", "[延遲]: /url") == []
 
 
 #: The three patterns that cap the indent they will match — CommonMark spells it

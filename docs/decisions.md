@@ -3,6 +3,264 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-08-03 · A link reference definition is decided by the whole line, and it may not interrupt a paragraph
+
+Closing HANDOFF-022, the rule HANDOFF-021 measured and deliberately left open.
+`DEF_RE` decided that a line was a definition on the strength of `[label]:`
+alone. CommonMark decides on the whole line — the destination and the optional
+title both have to parse — and when they do not, the line is an ordinary
+**paragraph**.
+
+Every disagreement cost text twice. The line itself went into the skeleton
+untranslated, and because the branch closed the paragraph, the indented line
+under it became an indented code block and went with it. Two blocks for one wrong
+answer, and `lx check` exits 0 through both.
+
+The shape that matters most is not a documentation edge case. `[Ana]: Hello
+there, she said.` is a link reference definition to `DEF_RE` and a paragraph to
+CommonMark — so a line of bracketed dialogue, in the use case this project exists
+for, was never translated and nothing said so.
+
+### The rule that decides a destination
+
+Written as a scanner rather than a class, because a class cannot do it — the
+alternative HANDOFF-021 threw away closed four of six measured rows and left the
+two a person actually types. After `[label]:` and its run of spaces or tabs:
+
+- a **destination**, in two forms and with no fallback between them. Angle:
+  `<…>`, which admits a space and admits control characters, and refuses a line
+  ending or an unescaped `<`. Bare: a run holding no ASCII space and no ASCII
+  control character, whose parentheses balance and whose backslash escapes what
+  follows it. CommonMark's bare form "does not start with `<`", so `[x]: <url`
+  is a paragraph rather than a definition whose destination is `<url`.
+- an optional **title**, `"…"`, `'…'` or `(…)`, separated from the destination by
+  spaces or tabs. A `(` inside a parenthesized title refuses the *title* rather
+  than nesting.
+- spaces or tabs, then end of line.
+
+Three characters in that rule are counter-intuitive and all three are measured
+against markdown-it-py rather than read off the spec. **NUL is a legal
+destination character** — markdown-it replaces U+0000 with U+FFFD before parsing,
+so refusing it would move a line into the skeleton that CommonMark keeps out.
+**U+3000 and U+00A0 are legal destination characters too**, so `[x]:　/url` is a
+definition whose destination begins with an ideographic space, and `[x]: /url　`
+is one whose destination ends with it. And **a backslash does not escape a
+space**: it ends the destination *at the backslash*, which is what makes
+`[x]: a\ "t"` a paragraph.
+
+*Lost:* implementing this against the CommonMark spec's prose. The spec and
+markdown-it disagree, and where they do the measurement is the reference this
+repository has actually used since 2026-08-02.
+
+The post-colon run in `DEF_RE` stops being an equivalent mutant here and becomes
+**load-bearing**. Its only consumer used to be `not m.group(2).strip()`; it is
+now the input to the destination parser, and `\s*` would consume the form feed in
+`[x]:\x0c/url` and read a definition where CommonMark reads a paragraph. The old
+"equivalent mutant" note is replaced rather than kept — an equivalence a later
+change invalidates is worse than no note.
+
+### Where the two references disagree, this parser refuses
+
+markdown-it trims the whole reference before parsing it; the spec does not. They
+therefore disagree in **both** directions about a trailing run of whitespace:
+
+- `[x]: /url "t"　` and `[x]: /url\x0c` are definitions to markdown-it and
+  paragraphs to the spec;
+- `[x]:　` is a paragraph to markdown-it and a definition to the spec, whose
+  destination is one ideographic space.
+
+This parser refuses all four, which lands on the spec's answer for the first pair
+and markdown-it's for the second. That is not a compromise: it is the one rule
+this area has, that where the references cannot agree what the line is, the text
+stays translatable. Measured exhaustively over 20096 candidate lines — 44
+destinations × 32 titles × 7 separators × 8 post-colon runs × 8 trailing runs —
+**0 lines this parser calls a definition and CommonMark calls a paragraph**, and
+every one of the 1657 in the other direction explained by that trim and nothing
+else. The classifier for "explained" applies markdown-it's own `.trim()` first
+and asks whether the two then agree, rather than pattern-matching the input,
+because a second cause hiding behind the first is exactly what a crude classifier
+misses.
+
+**One defect in the rule was found by reading it, not by measuring it**, and it
+is the reason the title axis is 32 spellings rather than 22. A `(` inside a
+parenthesized title refuses that title; the first spelling applied that to all
+three delimiters, so `[x]: /url "a (b) c"` — an ordinary sentence in an ordinary
+title — stopped being a definition. Every one of the 22 title spellings agreed
+with markdown-it, because not one of them put a parenthesis inside a quoted
+title. The sweep, the mutation pass and the corpus were all blind to it, and it
+took re-reading the function against the rule it implements.
+
+### A definition that spans two lines is not read as one
+
+Both the destination and the title may sit on the line below, and `mdparse` reads
+one line at a time. Deciding this was in scope precisely because leaving it
+implicit is how a gap survives a package.
+
+**Refusing to look wins, and the reason is the primary use case.** Reading the
+second line means `[Ana]:\nHello` takes *both* lines into the skeleton, because
+`Hello` is a valid bare destination — a one-word line of dialogue lost in
+silence. Refusing hands the second line of a genuine two-line definition to the
+model as prose, which is visible: it appears in the workbench, in `lx todo`, and
+in the rendered document. Measured 2026-08-03: markdown-it reads
+`[x]: /url\n"a title"` as one definition where this reads a definition plus a
+paragraph, and reads `[x]:\n/url` as one where this reads a two-line paragraph.
+864 lines of the sweep's permissive column are this decision and nothing else.
+
+*Lost:* the lookahead. It is not merely riskier, it inverts the rule this whole
+area is built on — it makes the parser more confident exactly where it has less
+information.
+
+### `checks.py` takes the rule, not the pattern
+
+One question, one answer, which is already why that module imports `mdparse`'s
+patterns instead of restating them. So the table entry becomes
+`opens_a_link_definition` and the table's entries become **callables** rather
+than patterns — six regexes and one function is a table whose reader has to check
+which.
+
+Narrowing **sharpens** the check rather than weakening it. The question it asks
+is "does this target line disappear from the render", and only a well-formed
+definition disappears; a target of `[安娜]: 你好 世界` is an ordinary paragraph and
+was being reported at error severity, which is the failing-correct-work direction
+this repository treats as the more expensive one. What it gives up is a
+definition the model spreads over two lines, which `_block_start` cannot see
+because it reads one line at a time — the same blind spot the parser has, and the
+same place it would have to be fixed.
+
+*Lost:* keeping the wide pattern in `checks.py` and the narrow rule in the
+parser. It buys the two-line case and pays with every near miss, and it splits
+one question into two answers that drift.
+
+**The corpus segment-line claim, re-measured.** Of 2251 segment lines, the rule
+names **2** where the pattern names 10, and the eight it drops are every near
+miss in this package's own fixture. The two are `　[not-a-ref]: /url`, which
+`_block_start` lstrips into a match though the parser reads a paragraph, and
+`[lazy]: /url`, which is well formed and is prose only because of the rule below
+— a rule `_block_start` has no line above to apply. `_block_start`'s
+monotonicity survives: lstripping can still only make a match appear, checked
+across 120 spellings.
+
+### `not lazy`, the half the tail parser exposed
+
+**A link reference definition cannot interrupt a paragraph.** With the tail
+decided, that was the whole of the remaining loss column: `> quoted\n[x]: /url`
+is the quote's lazy continuation and renders as the literal text `[x]: /url`, and
+this parser was putting it in the skeleton. **7228 lines** across the two sweep
+runs, present at the parent, and the fix is one clause on the branch —
+`_interrupts_a_paragraph` already says nothing about definitions, and this is
+that fact spelled at the branch that needed to hear it.
+
+It was taken during execution rather than deferred. The package's IN list says
+"where it is not a definition, the line stays translatable", and under CommonMark
+a line that would interrupt a paragraph is not one. It is not the same trade as
+the ` {0,3}` decision above, which is about a line CommonMark *does* call a
+definition: here CommonMark calls it prose, so no reference exists to be broken
+by a translated label.
+
+### Neither version number is bumped, re-derived a third time
+
+Across the sweep's 112896 generated documents: **159840** segments identical in
+text *and* kind, 11992 no longer emitted, 51120 newly emitted, and **0 with the
+same text under a different kind**. That last number is the whole argument, for
+the reason HANDOFF-018 and HANDOFF-021 both recorded — the memory key is the
+content hash plus the context, so identical text keeps its key and changed text
+misses by construction, and only the third class could answer with wording cut
+for a different sentence. Bumping `SEGMENTATION_VERSION` would discard a novel's
+whole accumulated wording to detect a change that cannot produce a wrong answer.
+`STATE_VERSION` stays at 3: an old row is stale, not unreadable.
+
+On the repository's own 63 Markdown documents the only one that moves is this
+package's own fixture, from 7 segments to 15 — 3754 identical in text and kind
+across the rest, and 0 with the same text under a different kind there either.
+
+### Verification, and the axes the sweep varied
+
+`tests/corpus/` cannot see any of this: it substitutes each segment's *source*
+back into the skeleton, so a block that stopped being translated round-trips
+perfectly. The evidence is a differential sweep against markdown-it-py over
+**112896 generated documents**, comparing three answers per document — what the
+parent segmented, what the new parser segments, and which lines markdown-it puts
+inside an inline token, which is its answer to "is this prose". **0 regressions,
+0 round-trip failures**, and the loss column down from 54444 lines to 1872.
+
+The axes, written down beside the number because a sweep is blind to the axis it
+does not vary: the tail after the colon in 28 spellings, definitions and near
+misses alike; the label in four; the block above in twelve, including that
+block's own line shapes; the block below in twelve, at every indent that changes
+the answer; the container in nine, from the margin to five columns to a tab to a
+quote to two depths of list item, with the block below carrying the container's
+own prefix; and the terminator in three, LF, CRLF and one CRLF line inside an LF
+document — the last because `docio.split_terminator` normalizes a uniform CRLF
+file before `parse` sees it, so mixed is the shape that actually reaches the
+branch.
+
+**The 1872 that remain are one shape and it is not this rule.** A definition
+directly under a table, with no blank line, is absorbed by markdown-it's GFM
+table body as another *row*, where this parser's table loop stops at the first
+line without a `|`. Both references call the line prose — CommonMark core, with
+no table extension at all, reads the whole thing as one paragraph — so it is a
+genuine loss, and it belongs to the question of where a table body ends. Pinned
+at the parent identically. It is `handoff/00-inbox/HANDOFF-023`.
+
+**The permissive column is two decisions and no defect.** At the margin it is
+1404 lines: 864 the two-line definition above, 540 the line below one of those
+table rows. In the container half it is 5060 and **identical at the parent**, so
+none of it is this change.
+
+### The mutation pass, and the one equivalent guard
+
+**26 of 27 killed**, each by a test that names the property. The harness runs a
+green baseline first and refuses to report without one, and it puts the mutated
+parser into a **git worktree's own `src/`** rather than on `PYTHONPATH` — the
+trap HANDOFF-021 recorded, where `tests/test_pipeline.py`'s own `sys.path.insert`
+makes a PYTHONPATH run measure the wrong build.
+
+Seven guards were **untested until it said so**, and each got a row that names
+what it is for: a destination that closes a parenthesis it never opened while
+balancing overall (`/u)r(l` — every earlier row left the final depth non-zero
+too, so the guard was invisible); all three of the angle form's refusals; a
+parenthesized title whose nested `(` closes at the line's end, since `(a (b) c)`
+alone is refused by the junk after it rather than by the rule; the escape inside
+a title; the run of spaces *between* a destination and its title after the angle
+form; and the run *after* a title, which no other row had.
+
+The pass is also where a mutation harness shows its limit, and the limit is the
+one this repository keeps re-learning: **a mutant cannot find the guard nobody
+wrote.** "Let a parenthesized title nest" was killed at the first run, while the
+same line refusing a parenthesis inside a *quoted* title went unnoticed by every
+mutant, because no test and no generated document held one. It is a mutant now.
+
+The survivor is an **equivalent guard**, not a hole, and it is labelled at the
+line: `j == 0` in the destination scanner cannot fire visibly, because `DEF_RE`'s
+group 1 is greedy over `[ \t]*`, so a tail that stops the scan at 0 always has a
+non-blank character at position 0 and the caller's separator test refuses the
+line anyway.
+
+### The adversarial pass, on the axes the sweep held constant
+
+Every document in the sweep had exactly **one** candidate line, always ended with
+a terminator, and never sat inside a container that swallows lines without
+reaching the branch. A second pass varied all three: the sequence of three
+candidate lines drawn from six kinds, two separators, six wrappers (a fence,
+front matter, a table, a list item, after a fence, none) and four endings
+including a CR-only terminator and no terminator at all. 10368 documents, **0
+regressions and 0 round-trip failures**. Every one of the 3032 remaining losses
+is front matter, which this project holds in the skeleton on purpose and which
+CommonMark has no notion of.
+
+### What is deferred, and where it is written
+
+Two packages, both written before this one was deleted, because a deferral that
+lives only in a deleted file's OUT list did not happen.
+
+- **`HANDOFF-023`** — a table body's last row. The shape above, plus the
+  measurement that only the definition spelling loses text today.
+- **`HANDOFF-024`** — the label half. `[ ]: /url` and `[　]: /url` are paragraphs
+  to CommonMark and definitions to `DEF_RE`, because the pattern asks only that
+  the label be non-empty; and `[a\]b]: /url` is a definition to CommonMark and a
+  paragraph here. HANDOFF-022 put labels out of scope and this measures what that
+  costs.
+
 ## 2026-08-03 · A backtick in an info string is not a fence, and an indent is measured in columns
 
 Closing HANDOFF-021, the two shapes HANDOFF-020's adversarial review measured and
@@ -312,6 +570,10 @@ and meant nothing. Checking that a rule turns the suite red is done by putting
 the other parser into `src/` **in its own git worktree**.
 
 ### What is deferred, and why it was not half-fixed
+
+> Closed by HANDOFF-022 on 2026-08-03, the same day; the entry at the top of this
+> file carries the rule. Kept as written because what it measured, and why it
+> refused to half-close, is the record.
 
 `DEF_RE` still calls `[x]: /url not a title`, `[x]: /u rl` and `[x]:\x0c/url`
 link reference definitions where CommonMark reads paragraphs, and each costs the
