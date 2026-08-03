@@ -127,6 +127,21 @@ TABLE_SEP_RE = re.compile(r"^\s*\|?[\s:|-]+\|[\s:|-]*$")
 #: narrows: `\s` reaching U+3000 made `　[x]: /url` a definition — CommonMark
 #: reads a paragraph — and the whole line went into the skeleton untranslated,
 #: taking the indented line below it as well. 36 loss shapes, same measurement.
+#:
+#: The run *after* the colon is narrowed for symmetry and for nothing else, and
+#: that is measured rather than assumed: it is an **equivalent mutant**. Its only
+#: consumer is `not m.group(2).strip()` in the branch, and `str.strip()` removes
+#: exactly the characters `\s*` would have eaten and two more, so wherever the
+#: group boundary falls the answer is the same — and the branch emits the whole
+#: line raw regardless. Widening it back to `\s*` changed nothing across 27648
+#: documents varying the leading run, sixteen spellings of the post-colon run,
+#: the destination, the block above and the block below. Recorded so the next
+#: reader does not go looking for the test that pins it; there is none, and one
+#: would be asserting a distinction the code cannot make. The *leading* run has
+#: its guard the other way round: bounding it to ` {0,3}` turns
+#: `tests/corpus/block-marker-whitespace.md` red, because that fixture holds a
+#: definition five columns into a list item — which is the case this whole
+#: paragraph is about.
 DEF_RE = re.compile(r"^([ \t]*\[[^\]]+\]:[ \t]*)(.*)$")
 
 #: CommonMark's tab stop, and its indented-code threshold. They are the same

@@ -205,6 +205,27 @@ markup appeared in any body text; nesting stopped at two containers; and every
 document was 0–4 lines of the same canonical text. The claim, not the sweep, then
 went to an adversarial pass.
 
+**Verified by mutation as well**, because a sweep only sees the code it was
+pointed at. Twelve guards were removed one at a time on a copy of the tree, with
+a green 795-passed baseline first and a timeout on each — a 2026-08-02 mutant
+made `parse` loop for 56 minutes. **Eleven of twelve are killed**, and by tests
+that name the property rather than by one catch-all: the two fixture segment
+counts kill the fence rule and three of the four indent classes, the two CRLF
+rows kill the `\r*` runs, and the marker fixture kills both trailing classes.
+
+The twelfth is an **equivalent mutant**, not an untested guard, and the
+difference matters. `DEF_RE`'s post-colon class has one consumer,
+`not m.group(2).strip()`, and `str.strip()` removes exactly what `\s*` would have
+eaten and two characters more — so wherever the group boundary falls the answer
+is identical, and the branch emits the whole line raw regardless. Widening it
+back changed nothing across 27648 documents varying the leading run, sixteen
+spellings of the post-colon run, the destination, and the blocks above and below.
+It stays narrowed for symmetry, with that written at the line so nobody hunts for
+the test. Two classes the change deliberately did *not* touch were mutated too:
+`HEADING_RE`'s closing hash run survives, as it should, and bounding `DEF_RE`'s
+leading run to ` {0,3}` is **killed** by the new fixture — the deliberate
+non-narrowing is pinned rather than merely argued.
+
 **A verification trap worth more than this package.**
 `tests/test_pipeline.py` begins with `sys.path.insert(0, ".../src")`, so a run
 with `PYTHONPATH` pointed at another copy of the package still imports the parser
