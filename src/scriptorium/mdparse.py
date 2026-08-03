@@ -128,21 +128,42 @@ TABLE_SEP_RE = re.compile(r"^\s*\|?[\s:|-]+\|[\s:|-]*$")
 #: reads a paragraph — and the whole line went into the skeleton untranslated,
 #: taking the indented line below it as well. 36 loss shapes, same measurement.
 #:
-#: The run *after* the colon is narrowed for symmetry and for nothing else, and
-#: that is measured rather than assumed: it is an **equivalent mutant**. Its only
-#: consumer is `not m.group(2).strip()` in the branch, and `str.strip()` removes
-#: exactly the characters `\s*` would have eaten and two more, so wherever the
-#: group boundary falls the answer is the same — and the branch emits the whole
-#: line raw regardless. Widening it back to `\s*` changed nothing across 27648
-#: documents varying the leading run, sixteen spellings of the post-colon run,
-#: the destination, the block above and the block below. Recorded so the next
-#: reader does not go looking for the test that pins it; there is none, and one
-#: would be asserting a distinction the code cannot make. The *leading* run has
-#: its guard the other way round: bounding it to ` {0,3}` turns
+#: The run *after* the colon is the same class, and since HANDOFF-022 it is
+#: **load-bearing rather than equivalent**. It used to be a measured equivalent
+#: mutant: its only consumer was `not m.group(2).strip()`, which eats whatever
+#: `\s*` would have eaten, so wherever the group boundary fell the answer was the
+#: same. That stopped being true the moment group 2 became the input to
+#: :func:`_completes_a_definition`. `\s` reaches a form feed, so `\s*` here hands
+#: the destination parser `/url` for `[x]:\x0c/url` and reads a definition where
+#: CommonMark reads a paragraph — a control character may not sit between the
+#: colon and the destination, and consuming it as whitespace is how the line goes
+#: into the skeleton with the indented line below it. The *leading* run has its
+#: guard the other way round: bounding it to ` {0,3}` turns
 #: `tests/corpus/block-marker-whitespace.md` red, because that fixture holds a
-#: definition five columns into a list item — which is the case this whole
-#: paragraph is about.
+#: definition five columns into a list item — which is the case the paragraph
+#: above is about.
+#:
+#: The pattern decides the *label* half and nothing else. Whether the rest of the
+#: line completes a definition is :func:`opens_a_link_definition`, because it
+#: needs a scanner and not a class: a destination may be angle-bracketed, may
+#: carry backslash escapes, and must balance its parentheses.
 DEF_RE = re.compile(r"^([ \t]*\[[^\]]+\]:[ \t]*)(.*)$")
+
+#: What a *bare* link destination may not contain: the ASCII space and the ASCII
+#: control characters. NUL is deliberately absent — markdown-it replaces U+0000
+#: with U+FFFD before parsing, so `[x]:\x00/url` is a definition and refusing it
+#: would take a line into the skeleton that CommonMark keeps out of it (measured
+#: 2026-08-03). U+3000 and U+00A0 are absent for the opposite reason and it is
+#: the same reason as everywhere else in this file: they are ordinary destination
+#: characters, so `[x]:　/url` is a definition whose destination begins with an
+#: ideographic space.
+#:
+#: A carriage return is *in* the class, and that is what makes a
+#: `_carries_a_text_cr` guard unnecessary at the definition branch: `[x]: /u\rrl`
+#: fails its destination and the line stays translatable, which is the direction
+#: this project takes wherever a lone CR makes CommonMark and this parser
+#: disagree about where a line ends.
+_DEST_REFUSES = frozenset(chr(c) for c in range(0x01, 0x20)) | {"\x7f", " "}
 
 #: CommonMark's tab stop, and its indented-code threshold. They are the same
 #: number in the spec and are written twice here because they answer different
@@ -216,6 +237,182 @@ def _carries_a_text_cr(line):
     cannot know a block's real boundaries, the text stays translatable.
     """
     return "\r" in line.rstrip("\r")
+
+
+def _link_destination_end(rest):
+    """Index just past the link destination at the start of ``rest``, or ``None``.
+
+    Two forms and no fallback between them. CommonMark's bare destination "does
+    not start with ``<``", so ``[x]: <url`` is not a definition whose destination
+    is ``<url`` — it is a paragraph, and markdown-it-py renders one.
+    """
+    if rest[:1] == "<":
+        j = 1
+        while j < len(rest):
+            ch = rest[j]
+            # A line ending refuses the whole form. Only a CR can appear here —
+            # ``parse`` splits on ``"\n"`` alone — and CommonMark calls it a line
+            # ending where this project calls it text, so refusing keeps the line
+            # translatable rather than guessing which. An unescaped ``<`` refuses
+            # it too; every other character, control characters included, is
+            # legal between the brackets.
+            if ch == "\r" or ch == "<":
+                return None
+            if ch == ">":
+                return j + 1
+            # A backslash may not escape a line ending, so the escape is declined
+            # there and the CR is refused on the next pass.
+            j += 2 if ch == "\\" and j + 1 < len(rest) and rest[j + 1] != "\r" else 1
+        return None
+    j, depth = 0, 0
+    while j < len(rest):
+        ch = rest[j]
+        if ch == "\\" and j + 1 < len(rest):
+            # A backslash escapes what follows it — except a space, which ends
+            # the destination *at the backslash* rather than being escaped into
+            # it. Consuming the pair instead reads `[x]: a\ "t"` as one
+            # destination followed by a title, so the line becomes skeleton where
+            # CommonMark reads a paragraph. Measured against markdown-it-py,
+            # whose `parseLinkDestination` has the same exception.
+            if rest[j + 1] == " ":
+                break
+            j += 2
+            continue
+        if ch in _DEST_REFUSES:
+            break
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth < 0:
+                return None
+        j += 1
+    # Unbalanced parentheses refuse the destination outright rather than ending
+    # it early — `[x]: /u(rl` and `[x]: /u)rl` are both paragraphs — and an empty
+    # one is no destination at all, which is what makes `[x]:` a paragraph whose
+    # indented line below is a lazy continuation rather than code.
+    #
+    # `j == 0` is an **equivalent guard**, kept because it is the rule and not
+    # because anything can see it, and labelled here so the next reader does not
+    # go looking for the test that pins it. `DEF_RE`'s group 1 is greedy over
+    # `[ \t]*`, so a `rest` that stops the scan at 0 always has a character at
+    # position 0 that is neither a space nor a tab — and the caller's separator
+    # test, `j == end`, then refuses the line anyway. The mutation pass on
+    # 2026-08-03 confirmed it survives every row; the reasoning above is why that
+    # is a property rather than a hole.
+    return None if j == 0 or depth else j
+
+
+def _link_title_end(rest, i):
+    """Index just past the link title at ``rest[i]``, or ``None``."""
+    opener = rest[i]
+    if opener not in "\"'(":
+        return None
+    closer = ")" if opener == "(" else opener
+    j = i + 1
+    while j < len(rest):
+        ch = rest[j]
+        if ch == "\\" and j + 1 < len(rest):
+            j += 2
+            continue
+        if ch == closer:
+            return j + 1
+        # A `(` inside a *parenthesized* title is not nesting. CommonMark admits
+        # one "only if it is backslash-escaped", and refuses the title rather
+        # than ending it, so `[x]: /url (a (b) c)` is a paragraph.
+        #
+        # `closer == ")"` is the whole of the condition and it is load-bearing:
+        # without it a parenthesis inside a *quoted* title refuses that title
+        # too, and `[x]: /url "a (b) c"` — an ordinary sentence in an ordinary
+        # title — stops being a definition. Found by reading this function
+        # against the rule rather than by the sweep, whose 22 title spellings
+        # never put a parenthesis inside a quoted one.
+        if ch == "(" and closer == ")":
+            return None
+        j += 1
+    return None
+
+
+def _completes_a_definition(rest):
+    """Does everything after ``[label]:`` finish a link reference definition?
+
+    A destination, an optional title separated from it by spaces or tabs, and
+    nothing else on the line.
+    """
+    # The terminator's own CR run, the way `SETEXT_RE` and `HR_RE` end `\r*$`: in
+    # a CRLF document every line carries it, and reading it as part of the
+    # destination would stop every definition in a Windows-authored file from
+    # being one.
+    rest = rest.rstrip("\r")
+    # The two references disagree about a trailing run of whitespace, in both
+    # directions, because markdown-it trims the whole reference before parsing it
+    # and the spec does not:
+    #
+    # * `[x]: /url "t"　` and `[x]: /url\x0c` are definitions to markdown-it and
+    #   paragraphs to the spec, where the run is a character after the title, or
+    #   a character a destination may not hold;
+    # * `[x]:　` is a paragraph to markdown-it and a definition to the spec,
+    #   whose destination is one ideographic space.
+    #
+    # This parser refuses both, which lands on the spec's answer for the first
+    # and markdown-it's for the second — not a compromise but the one rule this
+    # file has, that the text stays translatable where the references do not
+    # agree what the line is. The strict ` \t` runs below cover the first; a tail
+    # with nothing but whitespace in it covers the second, and covers it *whole*
+    # rather than per-destination, because `[x]:　 "t"` is a definition with an
+    # ideographic-space destination to both of them.
+    #
+    # `[x]: /url　` is *not* one of these: U+3000 is a legal destination
+    # character, so the trailing run is simply more destination and every
+    # reference agrees it is a definition, this one included.
+    if not rest.strip():
+        return False
+    end = _link_destination_end(rest)
+    if end is None:
+        return False
+    j = end
+    while j < len(rest) and rest[j] in " \t":
+        j += 1
+    if j == len(rest):
+        return True
+    # A title must be *separated* from the destination. Without whitespace there
+    # is nothing to separate, and `[x]: <url>"t"` is a paragraph — where
+    # `[x]: /url"t"` is a definition, because there the quotes are simply more
+    # destination.
+    if j == end:
+        return False
+    end = _link_title_end(rest, j)
+    if end is None:
+        return False
+    while end < len(rest) and rest[end] in " \t":
+        end += 1
+    return end == len(rest)
+
+
+def opens_a_link_definition(line):
+    """Is this whole line a CommonMark link reference definition?
+
+    `DEF_RE` alone decides on the strength of `[label]:`, which is the label half
+    of the rule and not the rule. CommonMark decides on the whole line, and when
+    the rest of it does not parse the line is an ordinary **paragraph** — so
+    `[x]: /url not a title` and `[Ana]: Hello there` are prose, where reading
+    them as definitions put the line into the skeleton untranslated *and*, by
+    closing the paragraph, turned the indented line below it into code. Two
+    blocks lost for one wrong answer.
+
+    Imported by :mod:`.checks`, which asks the same question about a model's
+    *target*: a target of `[foo]: http://example.com` does not land in the wrong
+    block, it renders to nothing at all. One rule for both sides, the way the
+    patterns above are shared, and the narrowing sharpens that check rather than
+    weakening it — only a well-formed definition disappears from the render, and
+    a target that merely looks like one now stops being reported.
+
+    Its one blind spot is the two-line definition, which `mdparse` reads one line
+    at a time and deliberately keeps reading that way: see the branch in
+    :func:`parse`.
+    """
+    m = DEF_RE.match(line)
+    return bool(m) and _completes_a_definition(m.group(2))
 
 
 def _quote_state(line, quote_para, quote_list):
@@ -617,28 +814,37 @@ def parse(text, dnt=(), opts=None):
             i += 1
             continue
 
-        m = DEF_RE.match(line)
-        if m:
+        # `not lazy` is CommonMark's other half of the rule and it is the half
+        # the tail parser exposed: **a link reference definition cannot interrupt
+        # a paragraph**, so `> quoted\n[x]: /url` is that paragraph's lazy
+        # continuation and renders as the literal text `[x]: /url`. Reading it as
+        # a definition put a whole line of prose into the skeleton, and the sweep
+        # for this package found it once the tail was decided: **7228 lines** of
+        # its remaining loss column, present at the parent too. It is
+        # `_interrupts_a_paragraph` saying nothing about definitions, spelled at
+        # the branch that needed to hear it.
+        if not lazy and opens_a_link_definition(line):
             emit_raw(line + "\n")
             i += 1
-            # A link definition with no destination is not one. `[x]:` is a
-            # paragraph to CommonMark, and the indented line under it is that
-            # paragraph's lazy continuation rather than code. Only the empty
-            # destination is answered here: deciding whether a *non*-empty one is
-            # well-formed means parsing a destination and an optional title, and
-            # this file has no such parser.
+            # A definition closes the paragraph above it, so the four-column line
+            # below it is an indented code block — which is what markdown-it
+            # renders and what the chunk branch produces once `lazy` is False.
+            # The old spelling was `para_open = not m.group(2).strip()`, the
+            # empty-destination half of the rule; an empty destination is no
+            # longer a definition at all, so it never reaches here and the
+            # question has one answer.
             #
-            # That gap does *not* fail in the safe direction, which is what the
-            # comment here used to claim and what 2026-08-03 measured to be
-            # false. `[x]: /url not a title` is a paragraph to CommonMark — a
-            # bare word cannot be a title — and this branch reads it as a
-            # definition, so the line becomes skeleton and the indented line
-            # below it becomes code. An ASCII control character anywhere after
-            # the colon does the same. Left open rather than half-closed: a class
-            # that rejected the control characters alone would leave the unquoted
-            # title, and a rule that looks handled and is not is worse than one
-            # written down. `handoff/00-inbox/HANDOFF-022` carries the whole rule.
-            para_open = not m.group(2).strip()
+            # **A definition that spans two lines is not read as one.** Both the
+            # destination and the title may sit on the line below, and this
+            # branch refuses to look — which hands the second line to the model
+            # as prose. The alternative reads it, and that is what makes it lose:
+            # `Hello` is a valid bare destination, so `[Ana]:\nHello` would take
+            # *both* lines into the skeleton and stop translating a line of
+            # dialogue, silently. Refusing errs the other way, visibly, and
+            # visible is the direction this parser takes everywhere. Measured
+            # 2026-08-03: markdown-it reads `[x]: /url\n"a title"` as one
+            # definition, and this reads a definition plus a paragraph.
+            para_open = False
             continue
 
         # table
