@@ -159,13 +159,53 @@ One entry per blocker, in `kind: detail` form.
    by moving folders or changing `priority`. Ids are never reused.
 3. **A session claims a package → set `status: in-progress (<date>)` before
    starting.** This is what stops two sessions from taking the same package.
-4. **Completion → every acceptance criterion passes → delete the file.** Every
-   `blocked-by` referencing it is thereby cleared. Then write the next package if
-   there is one.
+4. **Completion → every acceptance criterion passes → delete the file → report
+   the handover.** Every `blocked-by` referencing it is thereby cleared. Then
+   write the next package if there is one, and close the report with §6.1's two
+   sections.
 5. **Interrupted → keep the file and add or update a `## Progress` section**
    recording what is finished, how to resume (what the next session should read,
    in what order), and any instruction received during execution that still
    applies to this package.
+
+### 6.1 The closing report is a handover
+
+*[adapted]* Not in the source convention; added 2026-08-03 after HANDOFF-022,
+where a complete and accurate completion report still left the maintainer having
+to ask "so is anything outstanding, and do we carry on here or start fresh?"
+
+A report that ends at the result is a report about the past. The queue is the
+point of this convention, so the report ends at the queue. **Two named sections,
+always, and stated even when the answer is "nothing" and "stay"** — an omitted
+section is indistinguishable from a forgotten one.
+
+**What is left undone.** Split three ways, because they have different owners:
+
+- what *this package* owed and did not deliver, with why;
+- what it *uncovered* and deferred — each with the package id it now lives in, or
+  the `docs/decisions.md` entry, never a sentence that exists only in the report
+  (the deleted-OUT-list failure mode in §8, one step later in the lifecycle);
+- what is waiting on the **maintainer** — a `user:` blocker, a decision the
+  session took unilaterally and queued as `review-backlog`, or a taste call it
+  declined to make.
+
+**Whether to continue here or in a new session.** State the verdict and the
+reason, not a shrug. What decides it is whether the next package needs anything
+this session is holding:
+
+- **new session** when the next package is self-contained — which §4 says every
+  package in `00-inbox/` and `10-now/` must be. The finished package's measured
+  detail is dead weight to it, and a long session carries a real risk of losing
+  earlier work to a compaction or a quota interruption;
+- **this session** when the next work genuinely depends on state that is not
+  written down anywhere — a running measurement, an unreviewed diff, a decision
+  mid-flight — which is itself a sign that something should have been written
+  into a package;
+- **neither, ask first** when the pickup rule is ambiguous or the next package is
+  blocked on the maintainer.
+
+If it is a new session, give the **exact opening line to paste**, in the two
+phrasings §3 defines, so the handover costs one paste and not a reconstruction.
 
 ### Operational notes
 
