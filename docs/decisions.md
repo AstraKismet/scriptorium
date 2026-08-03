@@ -168,9 +168,11 @@ only a newer one.
 The large `segments_vanished` number is the arithmetic of merging, not evidence
 of loss: a marker line that stops being a marker joins the paragraph above it, so
 that short source string never recurs while its bytes stay inside a larger
-segment. Counting source-string multisets instead of line *coverage* reported
-16608 apparent regressions on the first pass, essentially all of them this
-artifact — which is why the regression definition is coverage-based.
+segment. **The regression definition is therefore line coverage, not source
+strings** — does the byte range the parent put in a segment still sit inside
+*some* segment? Re-derived here rather than taken on trust: a source-string
+multiset diff over the same sweep reports **16283** apparent losses, essentially
+all of them that artifact, against 0 by coverage.
 
 On the corpus the change moves **nothing**: all 31 pre-existing fixtures,
 including the 1572 segments of the 112k manual, segment identically before and
