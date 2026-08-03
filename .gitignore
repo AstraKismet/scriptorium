@@ -36,7 +36,12 @@ desktop.ini
 # directory is not. Never put the norm in here.
 handoff/
 
-# knowledge graph output — regenerate with `graphify`
+# knowledge graph output — a local analysis artifact, and the one ignored
+# directory here whose contents are NOT free to rebuild. It holds already-paid
+# extraction results that no two runs reproduce: measured 2026-08-03, two runs of
+# the identical corpus and prompt two days apart produced 86.6% and 4.1% coverage
+# of the explanatory layer, the second costing 25% more. Rebuilding is not
+# restoring. Copy it out of the working tree before deleting it.
 graphify-out/
 
 # the scan-scope file beside it: per-machine, for the same reason the graph is.
