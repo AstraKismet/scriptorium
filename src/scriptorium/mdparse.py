@@ -60,8 +60,22 @@ FENCE_RE = re.compile(r"^([ \t]*)(`{3,}[^`]*|~{3,}.*)$")
 #: segment either way. Narrowing it would only move `　#` from the raw node into
 #: the segment, which is a change to what the model is asked to translate and not
 #: a defect.
+#:
+#: `\r*` before the anchor is not decoration and not part of the class. `parse`
+#: splits on `"\n"` alone, so in a CRLF document *every* line still carries the
+#: CR of its own terminator — that is the whole reason `emit_seg` moves a
+#: trailing CR run into the skeleton. The old `\s*$` swallowed it by accident;
+#: `[ \t]*$` cannot, and without this every setext underline and every thematic
+#: break in a Windows-authored document silently stopped being one. Measured
+#: 2026-08-03: `Title\r\n=====\r\n` became a two-line paragraph handed to the
+#: model with its underline inside it. The run rather than one CR, for the reason
+#: `emit_seg` takes a run: `text\r\r\n` is what a twice-applied LF-to-CRLF
+#: conversion produces. A CR anywhere *else* on the line is text in this project
+#: and still refuses the match, which is the conservative direction — see
+#: `_carries_a_text_cr`. Only these two patterns need it: every other one here
+#: ends in `.*` or `\s*`, which absorb the CR already.
 HEADING_RE = re.compile(r"^( {0,3}#{1,6}[ \t]+)(.*?)(\s*#*\s*)$")
-SETEXT_RE = re.compile(r"^ {0,3}(=+|-{2,})[ \t]*$")
+SETEXT_RE = re.compile(r"^ {0,3}(=+|-{2,})[ \t]*\r*$")
 #: The third pattern whose whitespace class is load-bearing, and the one whose
 #: `\s` survived HANDOFF-020's first pass. Only the *leading* run is narrowed:
 #: it is the one measured as columns, and `\s` reaching U+3000 made `　- item` a
@@ -98,7 +112,7 @@ QUOTE_LIST_RE = re.compile(r"^[ \t]*(?:[-*+]|\d+[.)])(?:[ \t]|$)")
 LIST_MARKER_RE = re.compile(r"^([ \t]*(?:[-*+]|\d+[.)]))")
 #: The third of the trio above, and the loudest of the three: 147 loss shapes,
 #: because a thematic break is spelled three ways and both of its runs were `\s`.
-HR_RE = re.compile(r"^ {0,3}(?:\*{3,}|-{3,}|_{3,})[ \t]*$")
+HR_RE = re.compile(r"^ {0,3}(?:\*{3,}|-{3,}|_{3,})[ \t]*\r*$")
 TABLE_SEP_RE = re.compile(r"^\s*\|?[\s:|-]+\|[\s:|-]*$")
 #: The one of the four whose leading run stays *unbounded*, and deliberately.
 #: CommonMark bounds a link reference definition at three columns like the rest,

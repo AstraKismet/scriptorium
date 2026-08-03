@@ -604,6 +604,28 @@ def test_a_marker_s_indent_is_measured_in_columns_not_characters():
     # reference. The only row in this table that is skeleton because CommonMark
     # calls it a *definition* rather than because it calls it code.
     ("-    item\n\n     [x]: /url\n", "[x]: /url"),
+    # --- and the axis narrowing those two trailing runs broke, found by the
+    # differential sweep and invisible to every test that existed: a CARRIAGE
+    # RETURN. `parse` splits on "\n" alone, so in a CRLF document every line
+    # still carries the CR of its own terminator. `\s*$` swallowed it by
+    # accident; `[ \t]*$` cannot, so `Title\r\n=====\r\n` stopped being a setext
+    # heading and became a two-line paragraph handed to the model with its
+    # underline inside it, and the same for every thematic break.
+    #
+    # `docio.split_terminator` normalizes a *uniform* CRLF document to LF before
+    # `parse` sees it, which is why this is not every Windows document — but
+    # mixed and CR-only terminators are passed through verbatim by design
+    # (`docs/decisions.md`, 2026-07-28), and they are what these rows are.
+    ("Title\r\n===\r\n    code body\r\n", "code body"),
+    ("Para.\r\n\r\n***\r\n    code body\r\n", "code body"),
+    # …and the underline itself, which is the assertion that fails first: with
+    # the CR unmatched it is inside the paragraph segment above it. Skeleton here
+    # because it is an underline, not because CommonMark calls it code.
+    ("Title\r\n=====\r\n\r\nBody.\r\n", "====="),
+    ("Title\r\n=====\nBody.\r\n\r\n***\r\n    code body\n", "code body"),
+    # A run rather than one CR, for the reason `emit_seg` takes a run: `\r\r\n`
+    # is what a twice-applied LF-to-CRLF conversion leaves behind.
+    ("Title\r\r\n===\r\r\n    code body\r\r\n", "code body"),
 ], ids=["indented-backtick-run", "indented-tilde-run", "indented-longer-run",
         "three-columns-is-still-a-fence", "a-fence-indented-into-an-item",
         "a-fence-in-an-ordered-item", "a-fence-in-a-nested-item",
@@ -626,7 +648,12 @@ def test_a_marker_s_indent_is_measured_in_columns_not_characters():
         "a-real-underline-still-closes-a-paragraph",
         "a-real-definition-still-closes-a-paragraph",
         "a-full-width-space-after-the-definition-colon",
-        "a-definition-indented-past-three-columns"])
+        "a-definition-indented-past-three-columns",
+        "a-crlf-setext-underline-still-underlines",
+        "a-crlf-thematic-break-still-breaks",
+        "a-crlf-underline-is-not-translated",
+        "a-mixed-terminator-underline",
+        "a-doubled-cr-underline"])
 def test_a_chunk_in_a_fence_run_or_a_quote_leaves_no_segment_behind(text, body):
     assert body not in "\n".join(s["source"] for s in parse(text)[1])
     assert identity_roundtrip(text) == text
