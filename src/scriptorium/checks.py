@@ -15,13 +15,13 @@ from collections import Counter
 
 from .mask import CJK, CJK_RE, PH_RE, strip_placeholders, unmask
 from .mdparse import (
-    DEF_RE,
     FENCE_RE,
     HEADING_RE,
     HR_RE,
     LIST_RE,
     QUOTE_RE,
     SETEXT_RE,
+    opens_a_link_definition,
 )
 
 # Per-locale term preferences: each key is a form that zh-TW technical writing
@@ -154,38 +154,59 @@ def pair_problems(target, slots):
 # heading; a heading carrying a blank line split into two blocks; a blockquote
 # carrying a newline dropped its second half out of the quote.
 
-#: Read in :mod:`.mdparse`'s own order, with its own patterns. Whether a line
-#: opens a block is the parser's question; a second copy of these regexes here
-#: would be a second answer to it, and the copy is the one nobody re-reads when a
-#: flavour detail changes. A format that is not Markdown brings its own kinds and
-#: its own table — the shape of the rule does not change with it.
+#: Read in :mod:`.mdparse`'s own order, with its own rules. Whether a line opens
+#: a block is the parser's question; a second copy of these regexes here would be
+#: a second answer to it, and the copy is the one nobody re-reads when a flavour
+#: detail changes. A format that is not Markdown brings its own kinds and its own
+#: table — the shape of the rule does not change with it.
+#:
+#: Each entry is a *callable*, not a pattern, because one of the seven rules
+#: outgrew a pattern (see below) and a table where six entries are regexes and
+#: one is a function is a table whose reader has to check which.
 _MARKDOWN_BLOCK_STARTS = (
-    ("code fence", FENCE_RE),
-    ("thematic break", HR_RE),
-    ("setext heading", SETEXT_RE),
-    ("heading", HEADING_RE),
+    ("code fence", FENCE_RE.match),
+    ("thematic break", HR_RE.match),
+    ("setext heading", SETEXT_RE.match),
+    ("heading", HEADING_RE.match),
     # The worst of the family, and the one an adversarial pass found after the
     # other six were in: a target of `[foo]: http://example.com` does not merely
     # land in the wrong block, it renders to *nothing at all*, and the segment
     # disappears from the stream on the next parse.
     #
+    # `opens_a_link_definition` and not `DEF_RE`, since HANDOFF-022: the pattern
+    # answers on the strength of `[label]:` and the rule is the whole line, so
+    # the pattern reported a target of `[安娜]: 你好 世界` — an ordinary
+    # paragraph, a space in it where a destination may not have one — as a block
+    # the source did not open, at error severity. Narrowing *sharpens* this check
+    # rather than weakening it, because the question it asks is precisely "does
+    # this line disappear from the render", and only a well-formed definition
+    # does. Measured over the corpus's 2251 segment lines: the rule names **2**
+    # where the pattern names 10, and the eight it drops are every one of
+    # `link-definition-tails.md`'s near misses. What the narrowing gives up is a
+    # definition the model spreads over two lines, which this rule cannot see
+    # because `_block_start` reads one line at a time — the same blind spot the
+    # parser has, deliberately, and the same place it would have to be fixed.
+    #
     # It used to say here that no segment line can ever be one, "by construction —
     # `mdparse` folds a source link definition into a raw node", measured at 0 of
     # 2154 corpus segment lines. Re-derived 2026-08-03 and both halves are wrong.
-    # The construction never held: `DEF_RE` is not one of the paragraph loop's
+    # The construction never held: this rule is not one of the paragraph loop's
     # stop conditions, so `para\n[x]: /url` already put a definition line inside a
-    # paragraph segment. And the number has moved — 1 of 2222, `　[not-a-ref]:
+    # paragraph segment. And the number has moved — 2 of 2251, `　[not-a-ref]:
     # /url` in `block-marker-whitespace.md`, which `_block_start` lstrips into a
-    # match though the parser reads it as an ordinary paragraph.
+    # match though the parser reads it as an ordinary paragraph, and `[lazy]:
+    # /url` in `link-definition-tails.md`, which is well formed and is prose only
+    # because a definition may not interrupt the paragraph above it — a rule
+    # `_block_start` has no line above to apply.
     #
     # What keeps it free of false positives is not construction but symmetry:
     # both sides of every comparison in `containment_problems` come through
     # `_block_start`, so a source line that answers "link reference definition"
     # licenses a target line that answers the same, and only a target that invents
     # one where the source had none is reported.
-    ("link reference definition", DEF_RE),
-    ("blockquote", QUOTE_RE),
-    ("list", LIST_RE),
+    ("link reference definition", opens_a_link_definition),
+    ("blockquote", QUOTE_RE.match),
+    ("list", LIST_RE.match),
 )
 
 
@@ -274,10 +295,10 @@ def _block_start(line, table):
     caller at once: `'    # 標題'` matched nothing, `lx check` exited 0, and
     markdown-it-py rendered an ``<h1>`` where the source had a ``<p>``.
 
-    Safe in the must-not-fire direction because it is monotone: every pattern
-    here anchors its indent at ``^`` with a run that a leading blank could only
-    have satisfied — ``^[ \\t]*`` or ``^ {0,3}`` — so removing leading blanks can
-    only make a match appear, never disappear. Both sides of every comparison in
+    Safe in the must-not-fire direction because it is monotone: every rule here
+    anchors its indent at ``^`` with a run that a leading blank could only have
+    satisfied — ``^[ \\t]*`` or ``^ {0,3}`` — so removing leading blanks can only
+    make a match appear, never disappear. Both sides of every comparison in
     :func:`containment_problems` come through this function, so a source that
     legitimately opens a block keeps answering the same name it did.
 
@@ -291,8 +312,8 @@ def _block_start(line, table):
     line's *content* would open once it lands there.
     """
     line = line.lstrip()
-    for name, rx in table:
-        if rx.match(line):
+    for name, opens in table:
+        if opens(line):
             return name
     return None
 
