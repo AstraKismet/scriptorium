@@ -98,6 +98,19 @@ break in such a document went the same way. `SETEXT_RE` and `HR_RE` end
 `[ \t]*\r*$`; no other pattern here needs it, because every other one ends in
 `.*` or `\s*` and absorbs the CR already.
 
+One more claim in `checks.py` was re-derived and did not survive it. Above
+`DEF_RE` it said no segment line can ever be a link reference definition, "by
+construction — `mdparse` folds a source link definition into a raw node",
+measured at 0 of 2154 corpus segment lines. **Both halves are wrong.** The
+construction never held: `DEF_RE` is not one of the paragraph loop's stop
+conditions, so `para\n[x]: /url` already put a definition line inside a paragraph
+segment before any of this. And the number moved to 1 of 2222 — a line in this
+package's own fixture, which `_block_start` lstrips into a match though the
+parser reads it as a paragraph. The rule is free of false positives for a
+different reason, now written at the line: **symmetry**, not construction. Both
+sides of every comparison come through `_block_start`, so a source that answers
+"link reference definition" licenses a target that answers the same.
+
 *Lost:* `[ \t\r]*$`, which also matches ` \r \r`. The CRs are the terminator and
 sit at the very end — a *run* rather than one, because `text\r\r\n` is what a
 twice-applied LF-to-CRLF conversion produces — and a CR anywhere else on the line

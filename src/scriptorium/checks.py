@@ -167,10 +167,22 @@ _MARKDOWN_BLOCK_STARTS = (
     # The worst of the family, and the one an adversarial pass found after the
     # other six were in: a target of `[foo]: http://example.com` does not merely
     # land in the wrong block, it renders to *nothing at all*, and the segment
-    # disappears from the stream on the next parse. Free of false positives by
-    # construction — `mdparse` folds a source link definition into a raw node, so
-    # no segment line can ever be one (measured: 0 of 2154 corpus segment lines),
-    # and only a model-invented definition can match.
+    # disappears from the stream on the next parse.
+    #
+    # It used to say here that no segment line can ever be one, "by construction —
+    # `mdparse` folds a source link definition into a raw node", measured at 0 of
+    # 2154 corpus segment lines. Re-derived 2026-08-03 and both halves are wrong.
+    # The construction never held: `DEF_RE` is not one of the paragraph loop's
+    # stop conditions, so `para\n[x]: /url` already put a definition line inside a
+    # paragraph segment. And the number has moved — 1 of 2222, `　[not-a-ref]:
+    # /url` in `block-marker-whitespace.md`, which `_block_start` lstrips into a
+    # match though the parser reads it as an ordinary paragraph.
+    #
+    # What keeps it free of false positives is not construction but symmetry:
+    # both sides of every comparison in `containment_problems` come through
+    # `_block_start`, so a source line that answers "link reference definition"
+    # licenses a target line that answers the same, and only a target that invents
+    # one where the source had none is reported.
     ("link reference definition", DEF_RE),
     ("blockquote", QUOTE_RE),
     ("list", LIST_RE),
