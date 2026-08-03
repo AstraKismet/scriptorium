@@ -45,9 +45,10 @@ FENCE_RE = re.compile(r"^([ \t]*)(`{3,}[^`]*|~{3,}.*)$")
 #: four-column line below became an indented code block — which is how
 #: `　- 中文\n\t# 標題\n    文字` lost `文字` to the skeleton with nothing said.
 #:
-#: The **trailing** runs are not measured against a column, and are narrowed all
-#: the same, because they decide whether the line is a block start at all and
-#: every block start closes the paragraph above it. CommonMark spells all three
+#: The runs that are **not** the indent — after a heading's hashes, and at the
+#: end of an underline or a break — measure no column, and are narrowed all the
+#: same, because they decide whether the line is a block start at all and every
+#: block start closes the paragraph above it. CommonMark spells all three
 #: "spaces or tabs"; `\s` reaches U+3000, U+00A0, a form feed, a vertical tab and
 #: U+2028, so `#　標題`, `===　` and `***　` were read as a heading, an underline
 #: and a break where CommonMark reads three paragraphs — and each one took the
@@ -72,8 +73,9 @@ FENCE_RE = re.compile(r"^([ \t]*)(`{3,}[^`]*|~{3,}.*)$")
 #: `emit_seg` takes a run: `text\r\r\n` is what a twice-applied LF-to-CRLF
 #: conversion produces. A CR anywhere *else* on the line is text in this project
 #: and still refuses the match, which is the conservative direction — see
-#: `_carries_a_text_cr`. Only these two patterns need it: every other one here
-#: ends in `.*` or `\s*`, which absorb the CR already.
+#: `_carries_a_text_cr`. Only `SETEXT_RE` and `HR_RE` carry it, `HEADING_RE`
+#: below deliberately not: every other pattern here ends in `.*` or `\s*`, which
+#: absorb the CR already.
 HEADING_RE = re.compile(r"^( {0,3}#{1,6}[ \t]+)(.*?)(\s*#*\s*)$")
 SETEXT_RE = re.compile(r"^ {0,3}(=+|-{2,})[ \t]*\r*$")
 #: The third pattern whose whitespace class is load-bearing, and the one whose
