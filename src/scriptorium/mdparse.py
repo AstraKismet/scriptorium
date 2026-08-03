@@ -24,9 +24,60 @@ __all__ = ["parse", "render"]
 #: closed nowhere — became skeleton. CommonMark calls that line a paragraph.
 #: How far it may be indented is *not* in this pattern: the bound is three
 #: columns past the container's content column, which only the loop knows.
-FENCE_RE = re.compile(r"^([ \t]*)(`{3,}|~{3,})")
-HEADING_RE = re.compile(r"^(\s{0,3}#{1,6}\s+)(.*?)(\s*#*\s*)$")
-SETEXT_RE = re.compile(r"^\s{0,3}(=+|-{2,})\s*$")
+#:
+#: The info string is part of the pattern because CommonMark forbids a backtick
+#: inside a *backtick* fence's — the run would otherwise be ambiguous with an
+#: inline code span — and forbids nothing inside a tilde fence's. So ```` ```js` ````
+#: is an ordinary paragraph, and reading it as a fence opened a run that closed
+#: nowhere and took the rest of the file into the skeleton: zero segments out of a
+#: three-paragraph document. Spelled in the regex rather than beside it because
+#: `checks.py` imports this pattern to answer the same question about a *target*,
+#: and a second copy is a second answer.
+FENCE_RE = re.compile(r"^([ \t]*)(`{3,}[^`]*|~{3,}.*)$")
+#: Three patterns — this one, `SETEXT_RE` and `HR_RE` — share one character
+#: class, and the old `\s` spelling of it was wrong in two separate ways.
+#:
+#: The **leading** run is measured in columns, so it is ` {0,3}` and not
+#: `[ \t]{0,3}`: CommonMark bounds a heading, a thematic break and a setext
+#: underline at three columns, and at column 0 a single tab is already four.
+#: `\s{0,3}` counted that tab as one character, so `\t# 標題` was read as a
+#: heading; the heading branch then closed the paragraph above it and the
+#: four-column line below became an indented code block — which is how
+#: `　- 中文\n\t# 標題\n    文字` lost `文字` to the skeleton with nothing said.
+#:
+#: The runs that are **not** the indent — after a heading's hashes, and at the
+#: end of an underline or a break — measure no column, and are narrowed all the
+#: same, because they decide whether the line is a block start at all and every
+#: block start closes the paragraph above it. CommonMark spells all three
+#: "spaces or tabs"; `\s` reaches U+3000, U+00A0, a form feed, a vertical tab and
+#: U+2028, so `#　標題`, `===　` and `***　` were read as a heading, an underline
+#: and a break where CommonMark reads three paragraphs — and each one took the
+#: indented line below it out of translation. Measured 2026-08-03 against
+#: markdown-it-py: 74, 34 and 147 loss shapes across the three patterns.
+#:
+#: `HEADING_RE`'s third group is the one class left alone. A closing `#` run
+#: decides where the *segment* is cut and never whether a block starts, so no
+#: spelling of it can move a line into the skeleton — the whole heading is a
+#: segment either way. Narrowing it would only move `　#` from the raw node into
+#: the segment, which is a change to what the model is asked to translate and not
+#: a defect.
+#:
+#: `\r*` before the anchor is not decoration and not part of the class. `parse`
+#: splits on `"\n"` alone, so in a CRLF document *every* line still carries the
+#: CR of its own terminator — that is the whole reason `emit_seg` moves a
+#: trailing CR run into the skeleton. The old `\s*$` swallowed it by accident;
+#: `[ \t]*$` cannot, and without this every setext underline and every thematic
+#: break in a Windows-authored document silently stopped being one. Measured
+#: 2026-08-03: `Title\r\n=====\r\n` became a two-line paragraph handed to the
+#: model with its underline inside it. The run rather than one CR, for the reason
+#: `emit_seg` takes a run: `text\r\r\n` is what a twice-applied LF-to-CRLF
+#: conversion produces. A CR anywhere *else* on the line is text in this project
+#: and still refuses the match, which is the conservative direction — see
+#: `_carries_a_text_cr`. Only `SETEXT_RE` and `HR_RE` carry it, `HEADING_RE`
+#: below deliberately not: every other pattern here ends in `.*` or `\s*`, which
+#: absorb the CR already.
+HEADING_RE = re.compile(r"^( {0,3}#{1,6}[ \t]+)(.*?)(\s*#*\s*)$")
+SETEXT_RE = re.compile(r"^ {0,3}(=+|-{2,})[ \t]*\r*$")
 #: The third pattern whose whitespace class is load-bearing, and the one whose
 #: `\s` survived HANDOFF-020's first pass. Only the *leading* run is narrowed:
 #: it is the one measured as columns, and `\s` reaching U+3000 made `　- item` a
@@ -61,9 +112,37 @@ QUOTE_LIST_RE = re.compile(r"^[ \t]*(?:[-*+]|\d+[.)])(?:[ \t]|$)")
 #: column, where `_columns(prefix)` is an upper one — and the unclosed-fence
 #: containment needs both, pointing in opposite directions. See the fence branch.
 LIST_MARKER_RE = re.compile(r"^([ \t]*(?:[-*+]|\d+[.)]))")
-HR_RE = re.compile(r"^\s{0,3}(?:\*{3,}|-{3,}|_{3,})\s*$")
+#: The third of the trio above, and the loudest of the three: 147 loss shapes,
+#: because a thematic break is spelled three ways and both of its runs were `\s`.
+HR_RE = re.compile(r"^ {0,3}(?:\*{3,}|-{3,}|_{3,})[ \t]*\r*$")
 TABLE_SEP_RE = re.compile(r"^\s*\|?[\s:|-]+\|[\s:|-]*$")
-DEF_RE = re.compile(r"^(\s*\[[^\]]+\]:\s*)(.*)$")
+#: The one of the four whose leading run stays *unbounded*, and deliberately.
+#: CommonMark bounds a link reference definition at three columns like the rest,
+#: but here the column is already enforced one branch earlier: a line four
+#: columns past its container's floor has been taken by the chunk branch before
+#: this pattern is reached, and every indent that does reach it is inside a
+#: container where the definition is legitimate. Writing ` {0,3}` here would
+#: instead hand `-    item\n\n     [x]: /url` to the model, whose reference
+#: breaks if the label comes back translated. So only the character class
+#: narrows: `\s` reaching U+3000 made `　[x]: /url` a definition — CommonMark
+#: reads a paragraph — and the whole line went into the skeleton untranslated,
+#: taking the indented line below it as well. 36 loss shapes, same measurement.
+#:
+#: The run *after* the colon is narrowed for symmetry and for nothing else, and
+#: that is measured rather than assumed: it is an **equivalent mutant**. Its only
+#: consumer is `not m.group(2).strip()` in the branch, and `str.strip()` removes
+#: exactly the characters `\s*` would have eaten and two more, so wherever the
+#: group boundary falls the answer is the same — and the branch emits the whole
+#: line raw regardless. Widening it back to `\s*` changed nothing across 27648
+#: documents varying the leading run, sixteen spellings of the post-colon run,
+#: the destination, the block above and the block below. Recorded so the next
+#: reader does not go looking for the test that pins it; there is none, and one
+#: would be asserting a distinction the code cannot make. The *leading* run has
+#: its guard the other way round: bounding it to ` {0,3}` turns
+#: `tests/corpus/block-marker-whitespace.md` red, because that fixture holds a
+#: definition five columns into a list item — which is the case this whole
+#: paragraph is about.
+DEF_RE = re.compile(r"^([ \t]*\[[^\]]+\]:[ \t]*)(.*)$")
 
 #: CommonMark's tab stop, and its indented-code threshold. They are the same
 #: number in the spec and are written twice here because they answer different
@@ -170,6 +249,12 @@ def _quote_state(line, quote_para, quote_list):
     content = m.group(2)
     return (content.strip(" \t\r") != "",
             quote_list or bool(QUOTE_LIST_RE.match(content)))
+
+
+def _interrupts_a_paragraph(line):
+    """Does this line start a block CommonMark lets interrupt a paragraph?"""
+    return bool(QUOTE_RE.match(line) or FENCE_RE.match(line)
+                or HEADING_RE.match(line) or HR_RE.match(line))
 
 
 def parse(text, dnt=(), opts=None):
@@ -315,7 +400,8 @@ def parse(text, dnt=(), opts=None):
         #   is measured against four columns instead of six and becomes
         #   skeleton. Found by adversarial review 2026-08-02, after a 37224-shape
         #   sweep that varied the block *above* the chunk and never wrapped one.
-        if line.strip() and ind == 0 and not lazy and not LIST_RE.match(line):
+        if (line.strip() and ind == 0 and not LIST_RE.match(line)
+                and (not lazy or _interrupts_a_paragraph(line))):
             # Clearing `list_min_col` too is tidiness rather than a guard, and
             # measured so over 158855 documents: every reader of it is inside
             # `list_col is not None`, so its value is unread the moment that is
@@ -339,7 +425,43 @@ def parse(text, dnt=(), opts=None):
 
         m = FENCE_RE.match(line)
         if m and ind < fence_floor:
-            fence = m.group(2)[0] * 3
+            # What closes this fence, and it is *this* opener's run rather than a
+            # canonical three. CommonMark: a closer is the same character, at
+            # least as long as the opener, and carries no info string. All three
+            # halves were missing and each cost prose.
+            #
+            # `m.group(2)[0] * 3` with a prefix match let ```` ```` ```` be closed
+            # by the ` ``` ` that is its own content — the four-backtick fence
+            # wrapping a three-backtick example, which is *the* idiom for
+            # documenting Markdown. The real closer was then read as a fresh
+            # opener with nothing to close it and swallowed the rest of the file:
+            # 2770 of 75810 generated documents, and it predates this package.
+            #
+            # Accepting a closer that carries an info string is what turned that
+            # from a latent defect into a regression on 2026-08-03. Once
+            # ```` ```js` ```` stopped being an *opener*, the fence above it still
+            # closed on that line, every later marker re-paired one step over, and
+            # the last one ran to end of file. Found by adversarial review after a
+            # 40284-document sweep reported zero, on the axis it never varied: the
+            # *sequence* of markers in one document. 796 of 75810.
+            #
+            # The indent keeps its unbounded `\s*`, which is a different question
+            # and points the other way — bounding a closer's indent runs every
+            # fence further, and it cannot be done correctly here anyway, since
+            # that indent is measured after the container's prefix and this parser
+            # never strips one. The trailing `[ \t]*\r*$` is the same rule
+            # `SETEXT_RE` and `HR_RE` needed hours earlier: in a CRLF document
+            # every line carries the CR of its own terminator, and without it
+            # *every* fence in such a document would run to end of file.
+            # `` `+|~+ ``, never ``[`~]+``: a marker is a run of ONE character,
+            # and the class spelling reads ```` ```~~~ ```` as a six-character
+            # marker whose closer nothing can match — the fence then runs to end
+            # of file, which is the failure this whole repair is about. Caught by
+            # re-running the adversarial harness that found the defect rather
+            # than by the suite, in 1024 of 342528 generated documents.
+            run = re.match(r"`+|~+", m.group(2)).group(0)
+            closer = re.compile(
+                rf"^\s*{re.escape(run[0])}{{{len(run)},}}[ \t]*\r*$")
             # How far this fence may reach, asked before where it closes. It ends
             # with the container it opened in: a list item ends at the first
             # non-blank line below its content column, and a closing marker under
@@ -386,15 +508,8 @@ def parse(text, dnt=(), opts=None):
             while limit + 1 < n and (not lines[limit + 1].strip()
                                      or _indent_columns(lines[limit + 1]) >= floor):
                 limit += 1
-            # The closing search keeps its unbounded `\s*` for the marker's own
-            # indent, which is a different question from the bound above and
-            # points the other way: bounding a closing marker's indent would run
-            # every fence further and turn more of a document into skeleton, and
-            # it cannot be done correctly here anyway, since that indent is
-            # measured after the container's prefix and this parser never strips
-            # one.
             j = i + 1
-            while j <= limit and not re.match(rf"^\s*{re.escape(fence)}", lines[j]):
+            while j <= limit and not closer.match(lines[j]):
                 j += 1
             if j > limit:
                 # The line that ends the container may be this fence's own
@@ -406,8 +521,8 @@ def parse(text, dnt=(), opts=None):
                 # with nothing to close it reaches end of file — which is how
                 # bounding the search turned `-\titem\n\n  ```\n```\n\ntext` into
                 # a lost paragraph in 77 shapes: the same failure one step later.
-                j = (limit + 1 if limit + 1 < n
-                     and re.match(rf"^\s*{re.escape(fence)}", lines[limit + 1])
+                j = (limit + 1 if ind < floor and limit + 1 < n
+                     and closer.match(lines[limit + 1])
                      else limit)
             emit_raw("\n".join(lines[i : j + 1]) + "\n")
             i = j + 1
@@ -509,10 +624,20 @@ def parse(text, dnt=(), opts=None):
             # A link definition with no destination is not one. `[x]:` is a
             # paragraph to CommonMark, and the indented line under it is that
             # paragraph's lazy continuation rather than code. Only the empty
-            # destination is answered here: deciding whether a *non*-empty one
-            # is a well-formed link destination is a parser this file does not
-            # have, and every case it would catch fails in the safe direction —
-            # the text stays translatable.
+            # destination is answered here: deciding whether a *non*-empty one is
+            # well-formed means parsing a destination and an optional title, and
+            # this file has no such parser.
+            #
+            # That gap does *not* fail in the safe direction, which is what the
+            # comment here used to claim and what 2026-08-03 measured to be
+            # false. `[x]: /url not a title` is a paragraph to CommonMark — a
+            # bare word cannot be a title — and this branch reads it as a
+            # definition, so the line becomes skeleton and the indented line
+            # below it becomes code. An ASCII control character anywhere after
+            # the colon does the same. Left open rather than half-closed: a class
+            # that rejected the control characters alone would leave the unquoted
+            # title, and a rule that looks handled and is not is worse than one
+            # written down. `handoff/00-inbox/HANDOFF-022` carries the whole rule.
             para_open = not m.group(2).strip()
             continue
 
