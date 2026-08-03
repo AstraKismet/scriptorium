@@ -204,6 +204,22 @@ observed; none is theoretical.
    found six structural shapes. The second one is the more useful of the two,
    because knowing the failure mode did not prevent it — only enumerating the
    axes did.
+
+   **And the reference itself is a measurement.** A differential sweep compares
+   your code against another implementation, so if the two do not implement the
+   same feature set the sweep is measuring that difference and reporting it as
+   your defect. Measured 2026-08-03, HANDOFF-021: the reference was run without
+   its table extension while the code under test implements tables, and every
+   question about the line *after* a table got the opposite answer — 84 reported
+   regressions, all of them phantom, all of them gone the moment the extension
+   was enabled. State which configuration of the reference produced a number, the
+   way you state the axes.
+
+   **Watch a metric you are not being scored on.** The same sweep's regression
+   count was a true 0 while a real regression sat in a diagnostic count nobody
+   had asked about, and the suite was green through both. A number that moves in
+   the wrong direction is worth a paragraph even when it is not the number the
+   package is about; it is the cheapest place a missed axis shows up.
 8. **A writing worker destroys work it was not given.** See §2a; the countermeasure
    is isolation before dispatch rather than review afterwards, because the damage
    is to uncommitted state that no review can see.

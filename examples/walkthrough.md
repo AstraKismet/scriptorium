@@ -50,7 +50,7 @@ sample.md [zh-TW]  14/14 translated  6 error(s)  0 warning(s)
 Every planted defect caught, exit code 1. Fix only those three segments, re-apply,
 and `check` goes green. `render` then reproduces the document:
 
-```markdown
+````markdown
 ---
 title: Deployment Guide
 version: 2
@@ -76,7 +76,7 @@ def hello():
 ```
 
 公式 $E = mc^2$ 應保持原樣。
-```
+````
 
 Front matter, code block, table alignment row, math, URL, and template variable are
 byte-identical to the source — not because the model was careful, but because it
