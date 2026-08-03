@@ -251,6 +251,12 @@ def _quote_state(line, quote_para, quote_list):
             quote_list or bool(QUOTE_LIST_RE.match(content)))
 
 
+def _interrupts_a_paragraph(line):
+    """Does this line start a block CommonMark lets interrupt a paragraph?"""
+    return bool(QUOTE_RE.match(line) or FENCE_RE.match(line)
+                or HEADING_RE.match(line) or HR_RE.match(line))
+
+
 def parse(text, dnt=(), opts=None):
     """Split markdown into a render skeleton + translatable segments.
 
@@ -394,7 +400,8 @@ def parse(text, dnt=(), opts=None):
         #   is measured against four columns instead of six and becomes
         #   skeleton. Found by adversarial review 2026-08-02, after a 37224-shape
         #   sweep that varied the block *above* the chunk and never wrapped one.
-        if line.strip() and ind == 0 and not lazy and not LIST_RE.match(line):
+        if (line.strip() and ind == 0 and not LIST_RE.match(line)
+                and (not lazy or _interrupts_a_paragraph(line))):
             # Clearing `list_min_col` too is tidiness rather than a guard, and
             # measured so over 158855 documents: every reader of it is inside
             # `list_col is not None`, so its value is unread the moment that is
@@ -418,7 +425,43 @@ def parse(text, dnt=(), opts=None):
 
         m = FENCE_RE.match(line)
         if m and ind < fence_floor:
-            fence = m.group(2)[0] * 3
+            # What closes this fence, and it is *this* opener's run rather than a
+            # canonical three. CommonMark: a closer is the same character, at
+            # least as long as the opener, and carries no info string. All three
+            # halves were missing and each cost prose.
+            #
+            # `m.group(2)[0] * 3` with a prefix match let ```` ```` ```` be closed
+            # by the ` ``` ` that is its own content — the four-backtick fence
+            # wrapping a three-backtick example, which is *the* idiom for
+            # documenting Markdown. The real closer was then read as a fresh
+            # opener with nothing to close it and swallowed the rest of the file:
+            # 2770 of 75810 generated documents, and it predates this package.
+            #
+            # Accepting a closer that carries an info string is what turned that
+            # from a latent defect into a regression on 2026-08-03. Once
+            # ```` ```js` ```` stopped being an *opener*, the fence above it still
+            # closed on that line, every later marker re-paired one step over, and
+            # the last one ran to end of file. Found by adversarial review after a
+            # 40284-document sweep reported zero, on the axis it never varied: the
+            # *sequence* of markers in one document. 796 of 75810.
+            #
+            # The indent keeps its unbounded `\s*`, which is a different question
+            # and points the other way — bounding a closer's indent runs every
+            # fence further, and it cannot be done correctly here anyway, since
+            # that indent is measured after the container's prefix and this parser
+            # never strips one. The trailing `[ \t]*\r*$` is the same rule
+            # `SETEXT_RE` and `HR_RE` needed hours earlier: in a CRLF document
+            # every line carries the CR of its own terminator, and without it
+            # *every* fence in such a document would run to end of file.
+            # `` `+|~+ ``, never ``[`~]+``: a marker is a run of ONE character,
+            # and the class spelling reads ```` ```~~~ ```` as a six-character
+            # marker whose closer nothing can match — the fence then runs to end
+            # of file, which is the failure this whole repair is about. Caught by
+            # re-running the adversarial harness that found the defect rather
+            # than by the suite, in 1024 of 342528 generated documents.
+            run = re.match(r"`+|~+", m.group(2)).group(0)
+            closer = re.compile(
+                rf"^\s*{re.escape(run[0])}{{{len(run)},}}[ \t]*\r*$")
             # How far this fence may reach, asked before where it closes. It ends
             # with the container it opened in: a list item ends at the first
             # non-blank line below its content column, and a closing marker under
@@ -465,15 +508,8 @@ def parse(text, dnt=(), opts=None):
             while limit + 1 < n and (not lines[limit + 1].strip()
                                      or _indent_columns(lines[limit + 1]) >= floor):
                 limit += 1
-            # The closing search keeps its unbounded `\s*` for the marker's own
-            # indent, which is a different question from the bound above and
-            # points the other way: bounding a closing marker's indent would run
-            # every fence further and turn more of a document into skeleton, and
-            # it cannot be done correctly here anyway, since that indent is
-            # measured after the container's prefix and this parser never strips
-            # one.
             j = i + 1
-            while j <= limit and not re.match(rf"^\s*{re.escape(fence)}", lines[j]):
+            while j <= limit and not closer.match(lines[j]):
                 j += 1
             if j > limit:
                 # The line that ends the container may be this fence's own
@@ -485,8 +521,8 @@ def parse(text, dnt=(), opts=None):
                 # with nothing to close it reaches end of file — which is how
                 # bounding the search turned `-\titem\n\n  ```\n```\n\ntext` into
                 # a lost paragraph in 77 shapes: the same failure one step later.
-                j = (limit + 1 if limit + 1 < n
-                     and re.match(rf"^\s*{re.escape(fence)}", lines[limit + 1])
+                j = (limit + 1 if ind < floor and limit + 1 < n
+                     and closer.match(lines[limit + 1])
                      else limit)
             emit_raw("\n".join(lines[i : j + 1]) + "\n")
             i = j + 1

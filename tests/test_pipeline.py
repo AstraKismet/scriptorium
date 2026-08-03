@@ -315,6 +315,12 @@ def test_an_indented_chunk_that_is_prose_is_still_translated(text, prose):
     # in two and then closes it.
     ("fence-info-string-backtick.md", 9),
     ("block-marker-whitespace.md", 16),
+    # The one pre-existing fixture this package moves, and it moves because a
+    # defect older than the package was repaired: a closer must be at least as
+    # long as its opener, so `````\n```\n…\n`````  is one fence rather than two
+    # and its body stops being translated. 3 before, and markdown-it-py agrees
+    # with the 1.
+    ("fences-and-unclosed.md", 1),
 ])
 def test_the_indented_code_rule_moved_no_other_fixture_s_segment_count(name, count):
     text = (CORPUS / name).read_bytes().decode("utf-8")
@@ -659,6 +665,10 @@ def test_a_marker_that_is_not_one_cannot_become_one_through_the_target():
     # A run rather than one CR, for the reason `emit_seg` takes a run: `\r\r\n`
     # is what a twice-applied LF-to-CRLF conversion leaves behind.
     ("Title\r\r\n===\r\r\n    code body\r\r\n", "code body"),
+    # A closer shorter than its opener does not close, so the inner ` ``` ` is
+    # this fence's content and not its end. `m.group(2)[0] * 3` said otherwise,
+    # which is what broke the four-backtick-wrapping-three idiom.
+    ("````\n```\ncode body\n````\n", "code body"),
 ], ids=["indented-backtick-run", "indented-tilde-run", "indented-longer-run",
         "three-columns-is-still-a-fence", "a-fence-indented-into-an-item",
         "a-fence-in-an-ordered-item", "a-fence-in-a-nested-item",
@@ -686,7 +696,8 @@ def test_a_marker_that_is_not_one_cannot_become_one_through_the_target():
         "a-crlf-thematic-break-still-breaks",
         "a-crlf-underline-is-not-translated",
         "a-mixed-terminator-underline",
-        "a-doubled-cr-underline"])
+        "a-doubled-cr-underline",
+        "a-closer-shorter-than-its-opener-does-not-close"])
 def test_a_chunk_in_a_fence_run_or_a_quote_leaves_no_segment_behind(text, body):
     assert body not in "\n".join(s["source"] for s in parse(text)[1])
     assert identity_roundtrip(text) == text
@@ -860,6 +871,40 @@ def test_a_chunk_in_a_fence_run_or_a_quote_leaves_no_segment_behind(text, body):
     # `{0,3}` — only its character class narrowed.
     ("　[x]: /url\n    lazy prose\n", "lazy prose"),
     ("\x0c[x]: /url\n    lazy prose\n", "lazy prose"),
+    # --- what the info-string rule cost downstream, found by adversarial review
+    # on the axis the 40284-document sweep never varied: the *sequence* of fence
+    # markers in one document. Once a line stops being an opener, every later
+    # marker re-pairs one step over, and the last one runs to end of file. The
+    # closing search had all three of CommonMark's closer rules missing.
+    #
+    # A closer carries no info string.
+    ("```\n```js`\n```js`\n```\nprose after the fence\n", "prose after the fence"),
+    # …and the shape a person actually writes, which is what makes it serious.
+    ("# Configuring the widget\n\nSet the mode first:\n\n```js`\nwidget.mode = 1;\n"
+     "```\n\nThe mode cannot be changed.\n\n```js\nwidget.start();\n```\n\n"
+     "prose after the fence\n", "prose after the fence"),
+    # A closer is at least as long as its opener — the four-backtick fence
+    # wrapping a three-backtick example, which is *the* idiom for documenting
+    # Markdown and which `m.group(2)[0] * 3` broke. Pre-existing, and the root
+    # cause of the row above.
+    ("````markdown\n```\nan inner example\n````\n\nprose after the fence\n",
+     "prose after the fence"),
+    # A marker is a run of ONE character. ``[`~]+`` reads ```` ```~~~ ```` as a
+    # six-character marker nothing can close — caught by re-running the harness
+    # that found the defect, never by the suite.
+    ("```~~~\ncode body\n```\nprose after the fence\n", "prose after the fence"),
+    ("~~~`\ncode body\n~~~\nprose after the fence\n", "prose after the fence"),
+    # A marker at the margin cannot close a fence *inside* a list item, so the
+    # container's-end rule only applies where the fence sits below the item's
+    # content column — which is the case it was written for.
+    ("- an item\n    ```js`\nlazy line.\n    ```\n\n```\nx\n```\n\n"
+     "prose after the fence\n", "prose after the fence"),
+    # A blockquote interrupts a paragraph, so it closes a list item even when the
+    # line above it was that item's lazy continuation. Without that the item's
+    # content column outlives it and a four-column fence marker below is read as
+    # inside the item, which takes the prose under it into the skeleton.
+    ("- an item\n***　\n> quoted\n    ```js\n    still prose\n"
+     "    still prose too\nunindented.\n", "still prose"),
 ], ids=["prose-below-an-indented-run", "prose-below-an-indented-tilde-run",
         "prose-below-a-contained-run", "a-run-that-cannot-interrupt-a-paragraph",
         "an-ideographic-space-before-a-run", "a-no-break-space-before-a-run",
@@ -906,7 +951,14 @@ def test_a_chunk_in_a_fence_run_or_a_quote_leaves_no_segment_behind(text, body):
         "a-tab-before-a-setext-underline",
         "an-ideographic-space-after-a-setext-underline",
         "an-ideographic-space-before-a-link-definition",
-        "a-form-feed-before-a-link-definition"])
+        "a-form-feed-before-a-link-definition",
+        "a-closer-may-not-carry-an-info-string",
+        "a-realistic-manual-page",
+        "a-closer-is-at-least-as-long-as-its-opener",
+        "a-mixed-marker-run-is-not-one-marker",
+        "a-tilde-opener-with-a-backtick-info-string-closes",
+        "a-margin-marker-does-not-close-a-fence-inside-an-item",
+        "a-quote-at-the-margin-closes-the-item-above-it"])
 def test_prose_in_a_fence_run_or_a_quote_is_still_translated(text, prose):
     assert prose in "\n".join(s["source"] for s in parse(text)[1])
     assert identity_roundtrip(text) == text

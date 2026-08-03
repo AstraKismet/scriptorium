@@ -143,17 +143,69 @@ with the preset it came from.
 
 The residual is recorded rather than fixed. After a table `mdparse` ends the
 block at the first line without a `|`, where GFM keeps absorbing rows; the
-narrowings make more lines reach that divergence — **612 segment instances**
-across the sweep now overlap a line the table-enabled reference calls code, plus
-17 with a list above, against **504** that stopped doing so from Defect A's
-repair. Net +125 on a diagnostic count of 1040. That is the permissive direction:
-text stays translatable, and it costs a visible translated code block rather than
-a silent loss.
+narrowings make more lines reach that divergence, against the instances Defect
+A's repair removes. Net **+76** on a diagnostic count of 1040, and the closer
+rules took 49 off that figure on their own — the metric moved three times as the
+package was repaired, which is the argument for watching it at all. It is the
+permissive direction: text stays translatable, and it costs a visible translated
+code block rather than a silent loss.
+
+### The closing marker had all three of CommonMark's closer rules missing
+
+The adversarial pass found this on the axis the sweep never varied — the
+**sequence** of fence markers in one document — and it is the most expensive
+thing in the package. Narrowing the *opener* left the closing search untouched,
+and that search accepted as a closer any line whose start matched
+`^\s*` plus three of the opener's character. CommonMark requires three things of
+a closer and all three were absent: the same character, **at least as long as the
+opener**, and **no info string**.
+
+The length half predates this package and is the root cause. ```` ````markdown ````
+wrapping a ```` ``` ```` example — *the* idiom for documenting Markdown — was
+"closed" by the inner marker that is its own content, and the real closer was
+then read as a fresh opener with nothing to close it, swallowing the rest of the
+file. 2770 of 75810 generated documents, identical before and after.
+
+The info-string half is what turned that from latent into a regression. Once
+```` ```js` ```` stopped being an *opener*, the fence above it still closed on
+that line, every later marker re-paired one step over, and the last one ran to
+end of file. 796 of 75810, and the shape a person actually writes: a manual page
+with two code samples where the first carries a stray backtick. **The change was
+a large net win on the same corpus — 9304 documents fixed against 744 broken —
+and the 744 were silent losses, which is the direction this package exists to
+refuse.**
+
+Two more fell out of repairing it, and both are worth the ink because neither was
+reachable before. **A marker is a run of one character:** ``[`~]+`` reads
+```` ```~~~ ```` as a six-character marker nothing can close, which is the same
+run-to-end-of-file failure arriving through the repair — 1024 of 342528, caught
+by re-running the harness that found the original rather than by the suite, which
+stayed green. And **a marker at the margin cannot close a fence inside a list
+item:** the container's-end rule now applies only where the fence sits *below*
+the item's content column, `ind < floor`, which is the case HANDOFF-020 wrote it
+for. Without that guard a bare closer outside the item was claimed by a fence
+inside it, and the next marker ran away.
+
+### A block that interrupts a paragraph closes a list item, lazily or not
+
+The margin rule that clears `list_col` is guarded by `not lazy`, because a lazy
+continuation at the margin is still inside the item. Narrowing `HR_RE` made
+`***　` a lazy continuation instead of a break, so a blockquote below it no longer
+cleared the item's content column, and a four-column fence marker two lines later
+was read as *inside* an item CommonMark had closed — taking two lines of ordinary
+Chinese prose into the skeleton, with no code anywhere in the document.
+
+`not lazy` is now `not lazy or _interrupts_a_paragraph(line)`, and the helper
+names exactly the blocks CommonMark lets interrupt a paragraph: a blockquote, a
+fence, an ATX heading, a thematic break. *Lost:* adding a setext underline to
+that list, which is precisely the block that **cannot** interrupt a paragraph;
+and clearing unconditionally, which gives back the lazy-continuation case
+HANDOFF-018 measured at 2778 markers of prose.
 
 ### Neither version number is bumped, re-derived rather than carried over
 
-Measured over **40284 generated documents** across the axes below: **36806**
-segments identical in text *and* kind, **17012** no longer emitted, **18472**
+Measured over **40284 generated documents** across the axes below: **36757**
+segments identical in text *and* kind, **17061** no longer emitted, **18472**
 newly emitted, and **0 with the same text under a different kind**. That last
 number is the whole argument, and it is the same one HANDOFF-020 turned on. The
 memory key is the content hash plus the context: identical text keeps its key and
@@ -174,15 +226,27 @@ strings** — does the byte range the parent put in a segment still sit inside
 multiset diff over the same sweep reports **16283** apparent losses, essentially
 all of them that artifact, against 0 by coverage.
 
-On the corpus the change moves **nothing**: all 31 pre-existing fixtures,
-including the 1572 segments of the 112k manual, segment identically before and
-after. Independently, all 61 real Markdown documents in the repository were
-diffed and 4 moved, 0 of them losing a line: the two fixtures this package adds,
-HANDOFF-021's own file, and **this one**. Writing the defect down as a worked
-example is enough to trigger it — under the parent parser the ```` ```js` ````
-above opens a fence that closes nowhere, and 35 segments of this entry and the
-one below it stop being translatable. The repair demonstrating itself on the
-document that records it is the clearest evidence in the package.
+On the corpus the change moves **one** of the 31 pre-existing fixtures, and the
+first draft of this entry said none — which was true until the closer rules were
+repaired. `fences-and-unclosed.md` goes from 3 segments to 1, because it holds a
+fence inside a longer fence on purpose and that body stops being translated.
+markdown-it-py agrees with the 1. The 1572 segments of the 112k manual do not
+move, and neither does anything else.
+
+Independently, all 61 real Markdown documents in the repository were diffed and 6
+moved, **0 of them losing a line the reference calls prose**: the two fixtures
+this package adds, that corpus fixture, HANDOFF-021's own file, `walkthrough.md`,
+and **this one**. Writing the defect down as a worked example is enough to
+trigger it — under the parent parser the ```` ```js` ```` above opens a fence
+that closes nowhere, and 38 segments of this entry and the one below it stop
+being translatable. The repair demonstrating itself on the document that records
+it is the clearest evidence in the package.
+
+`examples/walkthrough.md` is the one that needed editing rather than measuring.
+It wraps a ```` ```markdown ```` sample around a ```` ```python ```` example with
+markers of equal length, so every CommonMark renderer — and now this parser —
+closes the outer fence on the inner one. The document was wrong and is now
+```` ````markdown ````; the repair is what made it visible.
 
 ### Verification, and the axes the sweep varied
 
@@ -202,8 +266,22 @@ it does not vary: no arm crossed the full marker detail against block-above and
 block-below; U+2028, U+2029, U+205F, U+2003, the vertical tab and every mixture
 appeared as *leading* whitespace only; `dnt` was empty throughout; no inline
 markup appeared in any body text; nesting stopped at two containers; and every
-document was 0–4 lines of the same canonical text. The claim, not the sweep, then
-went to an adversarial pass.
+document was 0–4 lines of the same canonical text.
+
+**The claim, not the sweep, then went to five adversarial passes, and they found
+four regressions the 0 could not see.** Every one lived on a held-constant axis,
+and the two that matter name it exactly: the *sequence* of fence markers in one
+document, which needs three markers and a reclassified line among them, and
+*distance* — a document of 0–4 lines cannot hold a construct far enough below the
+state it sets. Both are repaired above and pinned by rows that were each checked
+by removing the guard again. The corrected parser was then re-measured on all
+four adversarial harnesses — **449578 documents, 0 regressions** — and on the
+original sweep, which stayed at 0.
+
+That is the fourth consecutive package where a sweep reported zero and review
+found something, and this time the sweep was the author's own. The lesson has
+stopped being "run a wider sweep" and is now simply: **a number is evidence about
+the axes it varied, and the adversarial pass is not optional.**
 
 **Verified by mutation as well**, because a sweep only sees the code it was
 pointed at. Twelve guards were removed one at a time on a copy of the tree, with
