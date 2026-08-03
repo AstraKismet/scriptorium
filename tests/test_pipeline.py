@@ -309,6 +309,12 @@ def test_an_indented_chunk_that_is_prose_is_still_translated(text, prose):
     # translatable, see `_QUOTED_PROSE`.
     ("blockquote-indented-code.md", 10),
     ("indented-fence-run.md", 8),
+    # And the two HANDOFF-021 added. Both are almost entirely *recovered* prose:
+    # under the parent build the first segmented 5 blocks of 9 and the second 18
+    # of a different 16, because a marker that is not a marker cuts a paragraph
+    # in two and then closes it.
+    ("fence-info-string-backtick.md", 9),
+    ("block-marker-whitespace.md", 16),
 ])
 def test_the_indented_code_rule_moved_no_other_fixture_s_segment_count(name, count):
     text = (CORPUS / name).read_bytes().decode("utf-8")
@@ -406,6 +412,109 @@ def test_an_indented_fence_run_is_a_chunk_and_the_prose_below_it_survives():
     assert "Prose after the list." in joined
 
 
+# --- the two shapes HANDOFF-020 left behind, both measured 2026-08-03 ---------
+#
+# Neither is a regression from that package — both fail identically at `c86363b`
+# and at `e3399d8` — and neither is visible to `tests/corpus/`, for the reason
+# written above: that harness substitutes each segment's *source* back into the
+# skeleton, so a block that stopped being translated round-trips perfectly. Each
+# costs an entire document, silently: `lx check` exits 0 and nothing says the
+# text was never translated.
+
+
+#: The two halves of `fence-info-string-backtick.md`, named rather than derived.
+#: Separating them mechanically means re-implementing the rule under test inside
+#: the test — which of these runs opens a fence is the entire question. Naming
+#: them costs a check that the fixture still holds each line, below, so a fixture
+#: edit fails loudly instead of quietly measuring nothing.
+_INFO_STRING_PROSE = ["```js`", "``` text `"]
+_INFO_STRING_CODE = ["~~~js`", "````text"]
+
+
+def test_a_backtick_in_an_info_string_is_not_a_fence():
+    text = (CORPUS / "fence-info-string-backtick.md").read_bytes().decode("utf-8")
+    lines = text.split("\n")
+    for line in _INFO_STRING_PROSE + _INFO_STRING_CODE:
+        assert line in lines, (line, "fence-info-string-backtick.md no longer holds "
+                                     "this line — fix the test, not the fixture")
+    nodes, segs = parse(text)
+    seg_lines = {ln for s in segs for ln in s["source"].split("\n")}
+    raw = "".join(n["v"] for n in nodes if n["t"] == "raw")
+    # CommonMark forbids a backtick in a backtick fence's info string, so these
+    # are paragraph text and the model has to see them.
+    for line in _INFO_STRING_PROSE:
+        assert line in seg_lines, line
+    # …and the tilde spelling carries no such restriction, so this one is a real
+    # fence. That asymmetry is the whole risk of the repair: a rule applied to
+    # both spellings would hand every tilde-fenced code block to the model.
+    for line in _INFO_STRING_CODE:
+        assert line not in seg_lines, line
+        assert line in raw, line
+    # The prose the unclosed run used to swallow, at both ends of the file.
+    assert "The paragraph that used to vanish, and the rest of the file with it." in seg_lines
+    assert "Prose after every fence." in seg_lines
+    # …and the three fenced bodies that must stay out of the model's hands.
+    for body in ("held in the skeleton", "also held in the skeleton",
+                 "held in the skeleton too"):
+        assert body not in seg_lines, body
+        assert body in raw, body
+
+
+#: `block-marker-whitespace.md`, split the same way and for the same reason.
+#: Whether a line is a marker at all is what the fixture measures.
+_NOT_A_MARKER = [
+    "\t# Not a heading",
+    "　# Not a heading either",
+    "#　Not a heading, an ordinary paragraph",
+    "***　",
+    "\t***",
+    "===　",
+    "　[not-a-ref]: /url",
+]
+#: Lines that are wholly skeleton. A real heading is deliberately absent: its
+#: marker is raw and its text is a segment, so the *line* is neither, and the
+#: three of them are pinned by kind below instead.
+_STILL_A_MARKER = [
+    "***",
+    "=====================",
+    '[real]: /url "with a title"',
+    "     [kept]: /url",
+]
+
+
+def test_a_marker_s_indent_is_measured_in_columns_not_characters():
+    text = (CORPUS / "block-marker-whitespace.md").read_bytes().decode("utf-8")
+    lines = text.split("\n")
+    for line in _NOT_A_MARKER + _STILL_A_MARKER:
+        assert line in lines, (line, "block-marker-whitespace.md no longer holds "
+                                     "this line — fix the test, not the fixture")
+    nodes, segs = parse(text)
+    seg_lines = {ln for s in segs for ln in s["source"].split("\n")}
+    raw = "".join(n["v"] for n in nodes if n["t"] == "raw")
+    for line in _NOT_A_MARKER:
+        assert line in seg_lines, line
+    for line in _STILL_A_MARKER:
+        assert line not in seg_lines, line
+        assert line in raw, line
+    # Three real headings, and a heading is still cut the way it always was.
+    assert [s["source"] for s in segs if s["kind"] == "heading"] == [
+        "A real heading",
+        "A real heading three columns in",
+        "A real heading whose hashes are followed by a tab",
+    ]
+    # Every line the four markers used to take into the skeleton with them. The
+    # four spaces are part of the assertion: they are what made each of these an
+    # indented code block once the marker above had closed the paragraph.
+    for prose in ("    Prose that used to vanish beneath it.",
+                  "    Prose that used to vanish beneath this one.",
+                  "    And its own lazy continuation.",
+                  "    Prose below a break that is not a break.",
+                  "    Prose below a tab-indented break.",
+                  "    Prose below an underline that is not an underline.",
+                  "    Prose below a definition that is not one."):
+        assert prose in seg_lines, prose
+
+
 @pytest.mark.parametrize("text, body", [
     # --- Defect B: an indented run of fence characters is a chunk, not a fence.
     ("Para.\n\n    ```\n    body of the chunk\nProse after.\n", "body of the chunk"),
@@ -462,6 +571,39 @@ def test_an_indented_fence_run_is_a_chunk_and_the_prose_below_it_survives():
     # and everything below it is handed to the model.
     ("- an item\n\n  ```\n  code body\n\n  more code body\nprose after.\n",
      "more code body"),
+    # --- HANDOFF-021: the must-still-work half of both rules it repaired, which
+    # is the longer risk in each case. Every row below was confirmed against a
+    # markdown-it-py render before it was written down.
+    #
+    # CommonMark restricts an info string to the *backtick* spelling of a fence,
+    # so a tilde fence carrying a backtick is still a fence and its body must
+    # never reach the model.
+    ("~~~js`\ncode body\n~~~\n", "code body"),
+    ("````text\ncode body\n````\n", "code body"),
+    # `FENCE_RE` grew a `$` when it grew the info string, and every line of a
+    # CRLF document keeps its CR — `parse` splits on "\n" alone. A fence whose
+    # info string is clean has to survive that.
+    ("```js\r\ncode body\r\n```\r\n", "code body"),
+    # A real heading, break, underline and definition all still close the
+    # paragraph above them, and a closed paragraph is what makes the four-column
+    # line below an indented code block. Narrowing a class that decides a block
+    # start is only safe if the block starts that remain still decide it.
+    ("para\n# heading\n    code body\n", "code body"),
+    ("para\n   ### heading\n    code body\n", "code body"),
+    ("para\n#\theading\n    code body\n", "code body"),
+    ("para\n***\n    code body\n", "code body"),
+    ("para\n===\n    code body\n", "code body"),
+    ("[x]: /url\n    code body\n", "code body"),
+    # A full-width space after the colon lands in the *destination*, which
+    # CommonMark allows, so this is still a definition. Narrowing that run to
+    # `[ \t]` moved where the character is read and not what the line is.
+    ("[x]:　/url\n    lazy prose\n", "lazy prose"),
+    # `DEF_RE`'s leading run is the one deliberately left unbounded. The column
+    # is enforced one branch earlier by the chunk branch, and ` {0,3}` here would
+    # make a legitimate definition a segment and let a translated label break the
+    # reference. The only row in this table that is skeleton because CommonMark
+    # calls it a *definition* rather than because it calls it code.
+    ("-    item\n\n     [x]: /url\n", "[x]: /url"),
 ], ids=["indented-backtick-run", "indented-tilde-run", "indented-longer-run",
         "three-columns-is-still-a-fence", "a-fence-indented-into-an-item",
         "a-fence-in-an-ordered-item", "a-fence-in-a-nested-item",
@@ -473,7 +615,18 @@ def test_an_indented_fence_run_is_a_chunk_and_the_prose_below_it_survives():
         "two-tabs-after-the-marker", "a-quoted-margin-block-closes-the-item",
         "an-ideographic-space-opens-no-item", "a-no-break-space-opens-no-item",
         "an-unclosed-run-holds-a-shallower-line",
-        "an-unclosed-run-holds-a-blank-line"])
+        "an-unclosed-run-holds-a-blank-line",
+        "a-tilde-fence-keeps-its-backtick-info-string",
+        "a-longer-run-with-a-clean-info-string",
+        "a-clean-info-string-under-crlf",
+        "a-real-heading-still-closes-a-paragraph",
+        "three-columns-is-still-a-heading",
+        "a-tab-after-the-hashes-is-still-a-heading",
+        "a-real-break-still-interrupts-a-paragraph",
+        "a-real-underline-still-closes-a-paragraph",
+        "a-real-definition-still-closes-a-paragraph",
+        "a-full-width-space-after-the-definition-colon",
+        "a-definition-indented-past-three-columns"])
 def test_a_chunk_in_a_fence_run_or_a_quote_leaves_no_segment_behind(text, body):
     assert body not in "\n".join(s["source"] for s in parse(text)[1])
     assert identity_roundtrip(text) == text
@@ -606,6 +759,47 @@ def test_a_chunk_in_a_fence_run_or_a_quote_leaves_no_segment_behind(text, body):
     ("> > nested\n>\n> >     four columns after a nested marker\n",
      "four columns after a nested marker"),
     ("> quoted line\n>\n    still not code here.\n", "still not code here."),
+    # --- HANDOFF-021, defect A: a *backtick* fence's info string may not contain
+    # a backtick, so none of the runs below opens a fence. The old pattern said
+    # they did, no closing marker was found, and with no list open the
+    # containment bound is vacuous — the run reached end of file and `parse`
+    # returned zero segments for a three-paragraph document.
+    ("```js`\nprose that used to vanish\n\nand this too\n```\n",
+     "prose that used to vanish"),
+    ("```js`\nprose that used to vanish\n\nand this too\n```\n", "and this too"),
+    ("````js`\nprose that used to vanish\n", "prose that used to vanish"),
+    ("``` `\nprose that used to vanish\n", "prose that used to vanish"),
+    ("```js`\r\nprose that used to vanish\r\n", "prose that used to vanish"),
+    # `FENCE_RE` is also the paragraph loop's stop condition, so a run that stops
+    # being a fence stops cutting the paragraph it sits in.
+    ("Para.\n```js`\nlazy prose\n", "lazy prose"),
+    # --- HANDOFF-021, defect B: four markers whose indent was counted in
+    # characters where the column it stands for is what CommonMark bounds. Each
+    # of them closes the paragraph above it, and a closed paragraph is what turns
+    # the four-column line below into an indented code block — so every row here
+    # is a whole line of prose that stopped being translated, silently.
+    #
+    # One tab is four columns, which is one past the three a heading may carry.
+    ("para above\n\t# not a heading\n    lazy prose\n", "lazy prose"),
+    # …and U+3000, the zh-TW paragraph indent, is not indentation at all.
+    ("　# not a heading\n    lazy prose\n", "lazy prose"),
+    ("\xa0# not a heading\n    lazy prose\n", "lazy prose"),
+    # The run *after* the hashes is spaces or tabs too. It measures no column,
+    # and it is narrowed all the same because it decides whether the line is a
+    # heading, which is a block start, which closes a paragraph.
+    ("#　not a heading\n    lazy prose\n", "lazy prose"),
+    ("#\x0bnot a heading\n    lazy prose\n", "lazy prose"),
+    # A thematic break, in all three spellings and at both ends of the line.
+    ("para above\n\t***\n    lazy prose\n", "lazy prose"),
+    ("para above\n***　\n    lazy prose\n", "lazy prose"),
+    ("para above\n\x0c---\n    lazy prose\n", "lazy prose"),
+    # A setext underline, which is the same two classes again.
+    ("para above\n\t===\n    lazy prose\n", "lazy prose"),
+    ("para above\n===　\n    lazy prose\n", "lazy prose"),
+    # And a link reference definition, whose leading run keeps `*` rather than
+    # `{0,3}` — only its character class narrowed.
+    ("　[x]: /url\n    lazy prose\n", "lazy prose"),
+    ("\x0c[x]: /url\n    lazy prose\n", "lazy prose"),
 ], ids=["prose-below-an-indented-run", "prose-below-an-indented-tilde-run",
         "prose-below-a-contained-run", "a-run-that-cannot-interrupt-a-paragraph",
         "an-ideographic-space-before-a-run", "a-no-break-space-before-a-run",
@@ -634,7 +828,25 @@ def test_a_chunk_in_a_fence_run_or_a_quote_leaves_no_segment_behind(text, body):
         "an-unclosed-fence-below-a-checkbox-item-s-prefix",
         "an-unclosed-fence-below-a-padded-item-s-prefix",
         "a-quoted-task-list-checkbox", "a-chunk-inside-a-nested-quote",
-        "a-bare-quote-marker-still-does-not-close"])
+        "a-bare-quote-marker-still-does-not-close",
+        "a-backtick-in-a-backtick-info-string",
+        "a-backtick-info-string-runs-on",
+        "a-backtick-in-a-longer-info-string",
+        "an-info-string-that-is-one-backtick",
+        "a-backtick-info-string-under-crlf",
+        "a-backtick-run-that-cannot-interrupt-a-paragraph",
+        "a-tab-before-the-hashes-is-four-columns",
+        "an-ideographic-space-before-the-hashes",
+        "a-no-break-space-before-the-hashes",
+        "an-ideographic-space-after-the-hashes",
+        "a-vertical-tab-after-the-hashes",
+        "a-tab-before-a-thematic-break",
+        "an-ideographic-space-after-a-thematic-break",
+        "a-form-feed-before-a-thematic-break",
+        "a-tab-before-a-setext-underline",
+        "an-ideographic-space-after-a-setext-underline",
+        "an-ideographic-space-before-a-link-definition",
+        "a-form-feed-before-a-link-definition"])
 def test_prose_in_a_fence_run_or_a_quote_is_still_translated(text, prose):
     assert prose in "\n".join(s["source"] for s in parse(text)[1])
     assert identity_roundtrip(text) == text
