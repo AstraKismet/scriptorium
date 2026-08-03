@@ -39,6 +39,11 @@ handoff/
 # knowledge graph output — regenerate with `graphify`
 graphify-out/
 
+# the scan-scope file beside it: per-machine, for the same reason the graph is.
+# Which paths a local analysis tool reads is a property of this checkout, not of
+# the project, and 2026-07-28 settled that a tracked file may not name a tool.
+.graphifyignore
+
 # decision boards are a transient carrier; the decision's home is docs/
 decision-board*.html
 
