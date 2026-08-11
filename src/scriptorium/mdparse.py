@@ -128,26 +128,32 @@ TABLE_SEP_RE = re.compile(r"^\s*\|?[\s:|-]+\|[\s:|-]*$")
 #: reads a paragraph — and the whole line went into the skeleton untranslated,
 #: taking the indented line below it as well. 36 loss shapes, same measurement.
 #:
-#: The run *after* the colon is the same class, and since HANDOFF-022 it is
-#: **load-bearing rather than equivalent**. It used to be a measured equivalent
-#: mutant: its only consumer was `not m.group(2).strip()`, which eats whatever
-#: `\s*` would have eaten, so wherever the group boundary fell the answer was the
-#: same. That stopped being true the moment group 2 became the input to
-#: :func:`_completes_a_definition`. `\s` reaches a form feed, so `\s*` here hands
-#: the destination parser `/url` for `[x]:\x0c/url` and reads a definition where
-#: CommonMark reads a paragraph — a control character may not sit between the
-#: colon and the destination, and consuming it as whitespace is how the line goes
-#: into the skeleton with the indented line below it. The *leading* run has its
-#: guard the other way round: bounding it to ` {0,3}` turns
-#: `tests/corpus/block-marker-whitespace.md` red, because that fixture holds a
-#: definition five columns into a list item — which is the case the paragraph
-#: above is about.
+#: What pins the unbounded run is `tests/corpus/block-marker-whitespace.md`,
+#: which turns red the moment it is bounded to ` {0,3}`: that fixture holds a
+#: definition five columns into a list item, which is the case above.
 #:
-#: The pattern decides the *label* half and nothing else. Whether the rest of the
-#: line completes a definition is :func:`opens_a_link_definition`, because it
-#: needs a scanner and not a class: a destination may be angle-bracketed, may
-#: carry backslash escapes, and must balance its parentheses.
-DEF_RE = re.compile(r"^([ \t]*\[[^\]]+\]:[ \t]*)(.*)$")
+#: The pattern says where a label *opens* and nothing more. It used to spell the
+#: whole label as `\[[^\]]+\]:`, and a class cannot express either half of
+#: CommonMark's rule: a label must hold at least one non-whitespace character,
+#: and it may not hold an **unescaped** `[`. Both halves need to see a backslash,
+#: so the label half became :func:`_label_end` — the same shape the destination
+#: and the title already had. See `docs/decisions.md`, 2026-08-12.
+DEF_RE = re.compile(r"^[ \t]*\[")
+
+#: What closes the label and separates the tail from it, applied at the index
+#: :func:`_label_end` returns rather than at the start of the line.
+#:
+#: The run after the colon is the same class as the leading one, and since
+#: HANDOFF-022 it is **load-bearing rather than equivalent**. It used to be a
+#: measured equivalent mutant: its only consumer was `not m.group(2).strip()`,
+#: which eats whatever `\s*` would have eaten, so wherever the group boundary
+#: fell the answer was the same. That stopped being true the moment the group
+#: became the input to :func:`_completes_a_definition`. `\s` reaches a form feed,
+#: so `\s*` here hands the destination parser `/url` for `[x]:\x0c/url` and reads
+#: a definition where CommonMark reads a paragraph — a control character may not
+#: sit between the colon and the destination, and consuming it as whitespace is
+#: how the line goes into the skeleton with the indented line below it.
+DEF_SEP_RE = re.compile(r"\]:[ \t]*")
 
 #: What a *bare* link destination may not contain: the ASCII space and the ASCII
 #: control characters. NUL is deliberately absent — markdown-it replaces U+0000
@@ -239,6 +245,55 @@ def _carries_a_text_cr(line):
     return "\r" in line.rstrip("\r")
 
 
+def _label_end(line, i):
+    """Index of the ``]`` closing the link label whose ``[`` is at ``i``, or ``None``.
+
+    Three rules, and the third is what a character class could not reach. The
+    label ends at the first ``]`` that is not backslash-escaped; an **unescaped**
+    ``[`` refuses the label outright rather than ending it, so `[a[b]: /url` is a
+    paragraph; and a backslash consumes whatever follows it.
+
+    Consuming the pair unconditionally is markdown-it's own loop and it is right
+    for both kinds of backslash. Where the next character is a bracket the pair
+    is an escape and the bracket is label text; where it is anything else the
+    backslash is a literal character CommonMark does not treat as an escape — and
+    either way the pair is two characters of label that close nothing. The
+    emptiness test the caller applies runs on this *raw* text, backslashes
+    included, which is what makes `[\\ ]: /url` a definition: the label is a
+    literal backslash and a space, and a backslash is not whitespace.
+
+    *Lost:* keeping the class and refusing every `[`, escaped or not. It reads as
+    the conservative direction and is not one — escape-blindness cuts both ways.
+    A class cannot see that the `]` in `[a\\]: /url` is escaped either, so it
+    closes a label there that CommonMark never closes and takes the line, plus
+    the indented line under it, into the skeleton. Measured 2026-08-12 over 18
+    escape spellings: the class leaves that loss open and turns two rows that are
+    correct today into near misses; this scanner is 0 in both columns.
+
+    Both refusals are **equivalent guards** through the only caller there is, and
+    they are labelled here for the reason `_link_destination_end`'s `j == 0` is:
+    so the next reader does not go looking for the test that pins them.
+    `DEF_SEP_RE` is anchored on a literal ``]`` at the index this returns, and
+    neither refusal's index can hold one — the first is a ``[``, the second is
+    past the end of the line — so returning that index instead of ``None`` cannot
+    change an answer. The mutation pass on 2026-08-12 confirmed both survive, and
+    an exhaustive re-check over 2820 candidate lines found 0 differences. They
+    stay written as refusals because that is the rule, and because a second
+    caller would be able to tell.
+    """
+    j = i + 1
+    while j < len(line):
+        ch = line[j]
+        if ch == "[":
+            return None
+        if ch == "]":
+            return j
+        if ch == "\\":
+            j += 1
+        j += 1
+    return None
+
+
 def _link_destination_end(rest):
     """Index just past the link destination at the start of ``rest``, or ``None``.
 
@@ -294,12 +349,12 @@ def _link_destination_end(rest):
     #
     # `j == 0` is an **equivalent guard**, kept because it is the rule and not
     # because anything can see it, and labelled here so the next reader does not
-    # go looking for the test that pins it. `DEF_RE`'s group 1 is greedy over
-    # `[ \t]*`, so a `rest` that stops the scan at 0 always has a character at
-    # position 0 that is neither a space nor a tab — and the caller's separator
-    # test, `j == end`, then refuses the line anyway. The mutation pass on
-    # 2026-08-03 confirmed it survives every row; the reasoning above is why that
-    # is a property rather than a hole.
+    # go looking for the test that pins it. `DEF_SEP_RE` is greedy over `[ \t]*`,
+    # so a `rest` that stops the scan at 0 always has a character at position 0
+    # that is neither a space nor a tab — and the caller's separator test,
+    # `j == end`, then refuses the line anyway. The mutation pass on 2026-08-03
+    # confirmed it survives every row; the reasoning above is why that is a
+    # property rather than a hole.
     return None if j == 0 or depth else j
 
 
@@ -392,13 +447,25 @@ def _completes_a_definition(rest):
 def opens_a_link_definition(line):
     """Is this whole line a CommonMark link reference definition?
 
-    `DEF_RE` alone decides on the strength of `[label]:`, which is the label half
-    of the rule and not the rule. CommonMark decides on the whole line, and when
-    the rest of it does not parse the line is an ordinary **paragraph** — so
-    `[x]: /url not a title` and `[Ana]: Hello there` are prose, where reading
-    them as definitions put the line into the skeleton untranslated *and*, by
-    closing the paragraph, turned the indented line below it into code. Two
-    blocks lost for one wrong answer.
+    Three parts and each needs its own answer. `DEF_RE` says where a label opens,
+    :func:`_label_end` says where it closes and whether it may, and
+    :func:`_completes_a_definition` says whether the rest of the line finishes
+    the definition. A wrong answer from any of them puts the line into the
+    skeleton untranslated *and*, by closing the paragraph above, turns the
+    indented line below it into code — two blocks lost for one wrong answer. So
+    `[x]: /url not a title` and `[Ana]: Hello there` are prose because their
+    tails do not parse, and `[ ]: /url` and `[a[b]: /url` are prose because their
+    labels are not labels.
+
+    The **label may not be blank**, and blank is `str.strip()`'s notion of it
+    rather than a class written here. That is not tidiness: markdown-it-py
+    decides the same question with `normalizeReference`, which is
+    `re.sub(r"\\s+", " ", string.strip())` — so borrowing `strip` borrows its
+    exact answer, including the two characters a hand-written class gets wrong in
+    the losing direction. U+FEFF and U+200B are *not* whitespace to Python, and
+    `[\\ufeff]: /url` is a definition to markdown-it-py; U+1680, U+2028, U+202F,
+    U+0085 and U+001C are, and every one of them is a paragraph. All fourteen
+    spellings measured 2026-08-12.
 
     Imported by :mod:`.checks`, which asks the same question about a model's
     *target*: a target of `[foo]: http://example.com` does not land in the wrong
@@ -412,7 +479,13 @@ def opens_a_link_definition(line):
     :func:`parse`.
     """
     m = DEF_RE.match(line)
-    return bool(m) and _completes_a_definition(m.group(2))
+    if not m:
+        return False
+    end = _label_end(line, m.end() - 1)
+    if end is None or not line[m.end():end].strip():
+        return False
+    sep = DEF_SEP_RE.match(line, end)
+    return bool(sep) and _completes_a_definition(line[sep.end():])
 
 
 def _quote_state(line, quote_para, quote_list):

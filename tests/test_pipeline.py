@@ -321,11 +321,13 @@ def test_an_indented_chunk_that_is_prose_is_still_translated(text, prose):
     # and its body stops being translated. 3 before, and markdown-it-py agrees
     # with the 1.
     ("fences-and-unclosed.md", 1),
-    # And the one HANDOFF-022 added. 6 of its 15 segments are the near-miss
-    # lines and their lazy continuations, none of which the parent emitted at
-    # all: it read each candidate line as a definition and took the indented line
-    # under it as code.
-    ("link-definition-tails.md", 15),
+    # And the one HANDOFF-022 added, which HANDOFF-024 grew the label half of.
+    # 6 of the 15 it had were the tail's near misses and their lazy
+    # continuations, none of which the parent emitted at all: it read each
+    # candidate line as a definition and took the indented line under it as
+    # code. The 8 new ones are the label's near misses, recovered the same way —
+    # one segment each, the candidate line plus the line below it.
+    ("link-definition-tails.md", 23),
 ])
 def test_the_indented_code_rule_moved_no_other_fixture_s_segment_count(name, count):
     text = (CORPUS / name).read_bytes().decode("utf-8")
@@ -420,6 +422,18 @@ _REAL_DEFINITIONS = [
     "[escaped]: https://example.invalid/f\\(1",
     "[ideographic]:　https://example.invalid/g",
     "[bare]: destination",
+    # The label half, HANDOFF-024. A label may hold spaces and CJK, and a
+    # backslash in it consumes what follows — so the first of these two closes
+    # at its *second* `]`, and the second holds a `[` that would refuse the
+    # label were it not escaped.
+    "[a label with spaces]: https://example.invalid/h",
+    "[標籤]: https://example.invalid/i",
+    "[a\\]b]: https://example.invalid/j",
+    "[a\\[b]: https://example.invalid/k",
+    # A backslash before a space is not an escape — CommonMark escapes only
+    # ASCII punctuation — so the label is a literal backslash and a space, and a
+    # backslash is not whitespace. The label is therefore not blank.
+    "[\\ ]: https://example.invalid/l",
 ]
 _NEAR_MISSES = [
     "[x]: /url not a title",
@@ -430,6 +444,20 @@ _NEAR_MISSES = [
     "[nested]: /url (a (nested) title)",
     "[unbalanced]: /url(1",
     "[empty]:",
+    # The label half, HANDOFF-024: a line whose *tail* is a perfectly good
+    # destination and whose label is not a label. Each one cost the line and the
+    # indented line under it, because reading it as a definition closed the
+    # paragraph above.
+    "[ ]: /url",
+    "[　]: /url",
+    "[a[b]: /url",
+    "[[a]: /url",
+    "[a\\]: /url",
+    # The three that were already right, kept so a narrowing cannot overshoot
+    # them into definitions.
+    "[]: /url",
+    "[a]b: /url",
+    "[[a]]: /url",
     # Not a tail question at all: a definition may not interrupt a paragraph, so
     # this one is well-formed and is still prose.
     "[lazy]: /url",
@@ -456,6 +484,11 @@ def test_a_line_that_only_looks_like_a_link_definition_is_still_translated():
         assert line in joined, line
     assert "A bare word cannot be a title." in joined
     assert "An empty destination is no destination at all." in joined
+    # …and the same for the label half, whose near misses cost the line below
+    # them the same way.
+    assert "A label holding no non-whitespace character is not a label." in joined
+    assert ("A backslash consumes the bracket, so this label never closes at "
+            "all." in joined)
     # The one indented line that *is* code, because the definition above it is a
     # real one. Without this the test passes for a parser that gave up on the
     # rule entirely.
@@ -782,6 +815,40 @@ def test_a_marker_that_is_not_one_cannot_become_one_through_the_target():
     # see `docs/decisions.md`, 2026-08-11.
     ("| a | b |\n| --- | --- |\n| c | d |\n    indented\n===\n    code body\n",
      "code body"),
+    # --- HANDOFF-024 narrowed which *labels* are labels, so these rows are its
+    # must-not-overshoot half: a label may hold spaces, CJK and 1000 characters,
+    # and every one of these still has to close the paragraph above it. A label
+    # that stopped being one would be handed to the model, and a translated
+    # label breaks every reference to it. Each row confirmed against a
+    # markdown-it-py render before it was written down.
+    ("[a b]: /url\n    code body\n", "code body"),
+    ("[註]: /url\n    code body\n", "code body"),
+    ("[" + "L" * 1000 + "]: /url\n    code body\n", "code body"),
+    # The escaped-`]` row, and the direction this package took it. A backslash
+    # consumes what follows, so the label closes at the *second* `]` and the
+    # line is a definition — which is what CommonMark reads. The escape-blind
+    # class this replaced read a paragraph.
+    ("[a\\]b]: /url\n    code body\n", "code body"),
+    ("[\\]]: /url\n    code body\n", "code body"),
+    # …and the same backslash before the bracket that would otherwise refuse the
+    # label outright. Refusing an *escaped* `[` too is the mutant this kills.
+    ("[a\\[b]: /url\n    code body\n", "code body"),
+    # Blank is `str.strip()`'s notion of it, borrowed from markdown-it-py's own
+    # `normalizeReference` rather than written out here. These two rows are what
+    # a hand-written whitespace class gets wrong in the losing direction:
+    # neither U+FEFF nor U+200B is whitespace to Python, and markdown-it-py
+    # reads a definition for both.
+    ("[\ufeff]: /url\n    code body\n", "code body"),
+    ("[\u200b]: /url\n    code body\n", "code body"),
+    # A backslash before a space is not an escape, so the label is a literal
+    # backslash and a space — not blank, because a backslash is not whitespace.
+    ("[\\ ]: /url\n    code body\n", "code body"),
+    # The blank test runs over the *whole* label, not its first character.
+    # Found by the mutation pass and by nothing else: every other row here has a
+    # non-blank first character, so a rule that looked only there passed all of
+    # them, and `[ x]: /url` would have stopped being a definition in silence.
+    ("[ x]: /url\n    code body\n", "code body"),
+    ("[x ]: /url\n    code body\n", "code body"),
 ], ids=["indented-backtick-run", "indented-tilde-run", "indented-longer-run",
         "three-columns-is-still-a-fence", "a-fence-indented-into-an-item",
         "a-fence-in-an-ordered-item", "a-fence-in-a-nested-item",
@@ -825,7 +892,15 @@ def test_a_marker_that_is_not_one_cannot_become_one_through_the_target():
         "a-doubled-cr-underline",
         "a-closer-shorter-than-its-opener-does-not-close",
         "a-fence-below-the-last-table-row-is-still-a-fence",
-        "an-underline-below-a-four-column-line-below-a-table"])
+        "an-underline-below-a-four-column-line-below-a-table",
+        "a-label-may-hold-a-space", "a-cjk-label-is-still-a-label",
+        "a-thousand-character-label", "an-escaped-bracket-closes-no-label",
+        "a-label-that-is-one-escaped-bracket",
+        "an-escaped-opening-bracket-is-label-text",
+        "a-byte-order-mark-is-not-whitespace-to-python",
+        "a-zero-width-space-is-not-whitespace-to-python",
+        "a-backslash-before-a-space-is-not-blank",
+        "a-label-may-begin-with-a-blank", "a-label-may-end-with-a-blank"])
 def test_a_chunk_in_a_fence_run_or_a_quote_leaves_no_segment_behind(text, body):
     assert body not in "\n".join(s["source"] for s in parse(text)[1])
     assert identity_roundtrip(text) == text
@@ -1132,6 +1207,40 @@ def test_a_chunk_in_a_fence_run_or_a_quote_leaves_no_segment_behind(text, body):
      "    still inside the item.\n", "still inside the item."),
     ("- | a | b |\n  | --- | --- |\n  | c | d |\n"
      "    still inside the item.\n", "still inside the item."),
+    # --- HANDOFF-024: a link label is not any run of brackets. Every row below
+    # has a tail that parses perfectly well, so until the label decided too,
+    # each cost the line *and* the indented line under it — a closed paragraph
+    # is what turns four columns into a code block. markdown-it-py renders a
+    # `<p>` for every one of them.
+    #
+    # A label must hold at least one character that survives `str.strip()`.
+    ("[ ]: /url\n    lazy prose\n", "lazy prose"),
+    ("[ ]: /url\n    lazy prose\n", "[ ]: /url"),
+    ("[　]: /url\n    lazy prose\n", "lazy prose"),
+    ("[\xa0]: /url\n    lazy prose\n", "lazy prose"),
+    ("[\t]: /url\n    lazy prose\n", "lazy prose"),
+    ("[\x0c]: /url\n    lazy prose\n", "lazy prose"),
+    ("[\u2028]: /url\n    lazy prose\n", "lazy prose"),
+    # …and it is the *whole* label that must, not its first character.
+    ("[  　 ]: /url\n    lazy prose\n", "lazy prose"),
+    # An unescaped `[` refuses the label outright rather than ending it, so it
+    # costs the line wherever in the label it sits.
+    ("[a[b]: /url\n    lazy prose\n", "lazy prose"),
+    ("[[]: /url\n    lazy prose\n", "lazy prose"),
+    ("[[a]: /url\n    lazy prose\n", "lazy prose"),
+    ("[a[]: /url\n    lazy prose\n", "lazy prose"),
+    # The fifth loss shape, which the package did not name and which is the
+    # reason the label half became a scanner rather than a narrower class: a
+    # backslash consumes the `]`, so this label never closes at all. No class
+    # can see that, which is why refusing to parse escapes was never the
+    # conservative direction it looks like.
+    ("[a\\]: /url\n    lazy prose\n", "lazy prose"),
+    ("[a\\]: /url\n    lazy prose\n", "[a\\]: /url"),
+    # --- and the three the package measured as already right, which a
+    # narrowing must not overshoot into definitions.
+    ("[]: /url\n    lazy prose\n", "lazy prose"),
+    ("[a]b: /url\n    lazy prose\n", "lazy prose"),
+    ("[[a]]: /url\n    lazy prose\n", "lazy prose"),
 ], ids=["prose-below-an-indented-run", "prose-below-an-indented-tilde-run",
         "prose-below-a-contained-run", "a-run-that-cannot-interrupt-a-paragraph",
         "an-ideographic-space-before-a-run", "a-no-break-space-before-a-run",
@@ -1217,7 +1326,21 @@ def test_a_chunk_in_a_fence_run_or_a_quote_leaves_no_segment_behind(text, body):
         "a-crlf-definition-below-the-last-table-row",
         "a-four-column-line-below-the-last-table-row",
         "a-table-that-swallowed-a-list-marker-keeps-the-item-open",
-        "a-four-column-line-below-a-table-inside-an-item"])
+        "a-four-column-line-below-a-table-inside-an-item",
+        "a-space-is-not-a-label", "a-space-label-keeps-its-own-line",
+        "an-ideographic-space-is-not-a-label",
+        "a-no-break-space-is-not-a-label", "a-tab-is-not-a-label",
+        "a-form-feed-is-not-a-label", "a-line-separator-is-not-a-label",
+        "a-run-of-blanks-is-not-a-label",
+        "an-unescaped-bracket-inside-a-label",
+        "an-unescaped-bracket-opening-a-label",
+        "an-unescaped-bracket-after-the-opener",
+        "an-unescaped-bracket-ending-a-label",
+        "an-escaped-bracket-never-closes-the-label",
+        "a-label-that-never-closes-keeps-its-own-line",
+        "an-empty-label-is-not-a-label",
+        "a-colon-that-does-not-follow-the-bracket",
+        "a-doubled-bracket-label"])
 def test_prose_in_a_fence_run_or_a_quote_is_still_translated(text, prose):
     assert prose in "\n".join(s["source"] for s in parse(text)[1])
     assert identity_roundtrip(text) == text

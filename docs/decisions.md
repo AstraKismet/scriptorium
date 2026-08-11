@@ -3,6 +3,214 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-08-12 · A link label is not any run of brackets, and escape-blindness is not the conservative direction
+
+Closing HANDOFF-024. `DEF_RE` spelled the label as `\[[^\]]+\]:` — any non-empty
+run without a `]`. CommonMark is narrower in two ways a character class cannot
+see, and each disagreement cost the line itself *plus* the indented line under
+it, because reading a line as a definition closes the paragraph above and turns
+the four-column line below into an indented code block. Two blocks of prose lost
+for one wrong answer, silently, which is the failure this whole area exists to
+stop.
+
+**The rule that won: the label half becomes a scanner, `_label_end`.** It is
+markdown-it's own loop and it is three lines of rule. An unescaped `[` refuses
+the label outright rather than ending it; the first unescaped `]` closes it; a
+backslash consumes whatever follows. The caller then requires the raw label text
+to survive `str.strip()`, and `DEF_SEP_RE` — `\]:[ \t]*` — matched at the
+returned index carries the post-colon run that HANDOFF-022 made load-bearing.
+`DEF_RE` is left saying only where a label *opens*, and its leading run stays
+unbounded for the reason it always did: the column is enforced one branch
+earlier, and ` {0,3}` turns `tests/corpus/block-marker-whitespace.md` red.
+
+### The escaped-`]` row, and why the conservative-looking option lost
+
+This was the decision the package existed to take deliberately, and it was taken
+by measurement rather than by principle, because the principle pointed the wrong
+way.
+
+`[a\]b]: /url` is a definition to CommonMark — a label may hold an escaped `]` —
+and was a paragraph here. Leaving it that way is the direction this parser takes
+everywhere: a real definition handed to the model is *visible*, where prose
+turned into skeleton is not. On that reading, keeping the class and simply
+refusing every `[` is the conservative choice and the scanner is scope creep.
+
+It is not, and the reason is that **escape-blindness cuts both ways**. A class
+that cannot see the escape in `[a\]b]` cannot see it in `[a\]: /url` either — so
+it closes a label at a `]` that CommonMark never closes, reads a definition, and
+takes that line and the indented line under it into the skeleton. That is a
+**loss**, not a near miss, and no narrowing of the class can reach it. Measured
+2026-08-12 over 18 escape spellings, each against a markdown-it-py render:
+
+| rule | loss | permissive |
+|---|---|---|
+| the class as it was | 1 | 7 |
+| the class plus this package's two narrowings | 1 | 9 |
+| the class refusing any backslash in the label | 0 | 14 |
+| **the scanner** | **0** | **0** |
+
+The class with the narrowings is the option the package's own IN list described,
+and it is the worst of the four: it leaves the loss open *and* turns two rows
+that were already correct — `[a\[b]: /url` and `[\[]: /url`, right by accident,
+because `[^\]]` admitted a `[` — into near misses. The scanner is the only rule
+that is 0 in both columns, and it is also the smallest to state.
+
+*Lost:* the two class-shaped options above. The second of them, refusing any
+backslash, does close the loss and is genuinely conservative — it just pays 14
+near misses for what the scanner gets for nothing, and a scanner is the shape
+the destination and the title in this same function already have.
+
+### Blank is `str.strip()`, borrowed rather than written
+
+The other half of CommonMark's rule is that a label must hold at least one
+non-whitespace character. The spec says "space, tab, or line ending", which
+would make `[　]: /url` a definition; markdown-it-py decides it with
+`normalizeReference`, which is `re.sub(r"\s+", " ", string.strip())`, and calls
+it a paragraph. Where the two references disagree this parser refuses, which is
+the rule already recorded for the tail — and here refusing *is* markdown-it's
+answer, so the choice costs nothing.
+
+Borrowing `strip` rather than writing a class out is what makes it exact in the
+direction that matters. Fourteen spellings measured: ` `, U+3000, U+00A0, a tab,
+U+000B, U+000C, U+001C, U+0085, U+1680, U+2028, U+202F and a mixed run are all
+blank to Python and all paragraphs to markdown-it-py; **U+FEFF and U+200B are
+not blank to Python and are definitions to markdown-it-py**. A hand-written
+whitespace class that "obviously" included the zero-width characters would have
+taken two real definitions into the model's hands. The test rows for both are
+`a-byte-order-mark-is-not-whitespace-to-python` and its neighbour.
+
+The label text tested is the **raw** text, backslashes included, which is what
+makes `[\ ]: /url` a definition: a backslash before a space is not an escape —
+CommonMark escapes only ASCII punctuation — so the label is a literal backslash
+and a space, and a backslash is not whitespace.
+
+### Neither version number is bumped, re-derived a fourth time
+
+Across the sweep's 47376 generated documents: **113024** segments identical in
+text *and* kind, 1728 no longer emitted, 2880 newly emitted, and **0 with the
+same text under a different kind**. On the repository's own 54 tracked Markdown
+documents: 3441 identical, 1 vanished, 5 new, 0 in that last class, and the only
+document whose count moves is this package's own fixture, 19 to 23. That last
+number is the whole argument, for the reason HANDOFF-018, -021, -022 and -023
+each recorded — the memory key is the content hash plus the context, so
+identical text keeps its key and changed text misses by construction, and only
+the fourth class could answer with wording cut for a different sentence.
+`SEGMENTATION_VERSION` stays at 1 and `STATE_VERSION` stays at 3: an old row is
+stale, not unreadable.
+
+The label half is a Python loop where it was a C regex, and it costs nothing
+measurable: five parses of the largest tracked document, 252463 characters, run
+in 0.08 s on both builds. It only ever runs on a line that already starts with a
+`[`.
+
+### Verification, and the axes the sweep varied
+
+`tests/corpus/` cannot see any of this: it substitutes each segment's *source*
+back into the skeleton, so a block that stopped being translated round-trips
+perfectly. The evidence is a differential sweep against markdown-it-py built as
+`MarkdownIt("commonmark").enable("table")`, over **47376 generated documents**,
+comparing three answers each — what the parent segmented, what this parser
+segments, and which lines markdown-it puts inside an inline token. **0
+regressions and 0 round-trip failures**, with the loss column down from 4396
+lines to 1804 and the permissive column from 3624 to 2760.
+
+The axes, written down beside the number because a sweep is blind to the axis it
+does not vary: **the label in 47 spellings** — the axis HANDOFF-022 held to four
+and this package exists for, covering blanks, brackets in every position, the
+escape family, CJK, a 1000-character label and the empty one; the tail in 6,
+definitions and near misses alike; the block above in 7, which is what decides
+`lazy`; the block below in 3; the container in 4, from the margin to a
+blockquote to a list item to a plain indent, each carrying its own prefix on
+every line; and the terminator in 2, LF and a mixed CRLF, because
+`docio.split_terminator` normalizes a uniform CRLF file before `parse` sees it.
+
+**Every remaining line in both columns is accounted for, and none of it is this
+rule.** All 1804 losses are candidates holding no translatable text at all —
+`[ ]:` and its family — which `emit_seg` refuses whatever the branch decides;
+there is nothing there to translate, and the count is identical at the parent.
+The 2760 permissive lines are also identical at the parent: 1464 inside a
+blockquote and 600 inside a list item, where the line is consumed by those
+branches and never reaches the definition branch at all; 360 with no
+translatable text; and **336 the two-line definition**, which was proven rather
+than assumed — every one has an empty tail and markdown-it swallows the
+following line, which is the lookahead HANDOFF-022 decided this parser refuses.
+
+### The mutation pass, and two equivalent guards
+
+**15 of 17 killed**, each by a test that names the property. The harness runs a
+green baseline first and refuses to report without one, and it puts the mutated
+parser into a **git worktree's own `src/`** rather than on `PYTHONPATH` — the
+trap `tests/test_pipeline.py`'s own `sys.path.insert` sets.
+
+One guard was **untested until it said so**, and it is the one a reader would
+have called obvious: the blank test runs over the whole label, not its first
+character. Every row written before the mutation pass had a non-blank first
+character, so `line[m.end():end][:1].strip()` passed all of them — and would
+have stopped `[ x]: /url` being a definition in silence. It has two rows now,
+`a-label-may-begin-with-a-blank` and `a-label-may-end-with-a-blank`.
+
+The two survivors are **equivalent guards**, and they are labelled at the line
+the way `_link_destination_end`'s `j == 0` is. `_label_end` returns `None` both
+for an unescaped `[` and for a label that never closes; returning the index
+instead cannot change an answer, because `DEF_SEP_RE` is anchored on a literal
+`]` at that index and neither position can hold one — the first is a `[`, the
+second is past the end of the line. Argued is not measured, so it was also
+checked exhaustively: 2820 candidate lines × 3 variants, **0 differences**. They
+stay written as refusals because that is the rule, and because a second caller
+would be able to tell.
+
+### The adversarial pass, on the axes the sweep held constant
+
+The sweep gave every document exactly one candidate line, always let that line
+reach the definition branch, and always ended the document with a terminator. A
+second pass varied all three: three candidates per document drawn from twelve
+kinds, eight wrappers including a fence, front matter, a table, a list item, a
+blockquote and a quote nested in an item, and four endings including a bare one
+and a lone CR. **11648 documents, 0 regressions, 0 round-trip failures**, and
+both columns fall to **0** from the parent's 4728 and 960.
+
+That pass also caught a defect in its own instrument, which is worth recording
+because it flattered both builds equally and so hid nothing in the diff while
+hiding which rows were real: the sweep's substring oracle reports `[x]: /url` as
+prose whenever `[x]: /url not a title` is, and with three candidates per
+document that scored 156 phantom permissive rows. Exact per-line matching is
+what the count above uses.
+
+### The neighbour the repair could have blinded
+
+`checks.py` imports this rule to ask a different question about a different
+string — **does this model output disappear from the render?** — so a narrowing
+there changes which translations are reported, and a validator silently blinded
+by its own repair is the failure this repository keeps re-finding.
+
+Measured over 1872 target lines, crossing every label spelling with nine tails
+including zh-TW prose and bracketed dialogue, and four leading runs: **0
+blinded**. 432 false reports dropped — `[ ]: 你好` is an ordinary paragraph and
+was being reported at error severity, the failing-correct-work direction this
+repository treats as the more expensive one — and 144 reports added, **none of
+them wrong**. On the corpus itself the rule names the same **5 of 2316** segment
+lines the parent named, so nothing in the tracked fixtures moves.
+`_block_start`'s monotonicity was re-checked across 120 spellings, 0 violations.
+
+Measuring this needed the ground truth taken on the **lstripped** line, because
+that is the question `_block_start` asks. Taken on the raw line it scored 108
+phantom blindings and 36 phantom wrong reports, both from causes with nothing to
+do with labels: four spaces after a blank line make an indented code block, and
+a leading U+3000 is not indentation to CommonMark while `str.lstrip()` eats it.
+
+### What is deferred, and where it is written
+
+- **CommonMark's 999-character label limit** stays out, and stays out for the
+  reason the package gave: a 1000-character label is a definition in both
+  references today, so the limit can only cost text, never save it. There is no
+  package for it; if one is ever wanted it is a new id, not a note here.
+- **The two-line definition** is unchanged and remains the 336 lines above. It
+  is HANDOFF-022's decision, recorded on 2026-08-03, and nothing here reopens it.
+- **`HANDOFF-025`** — the setext underline under a block that is not a
+  paragraph — is untouched by this: all five of its measured families parse
+  byte-identically before and after, checked before this package was closed. Its
+  acceptance criterion was corrected from 873 to 901 in the package itself.
+
 ## 2026-08-11 · A table body does not end at the last line holding a pipe, and the branch leaves two things behind
 
 Closing HANDOFF-023. `mdparse`'s table branch consumed lines while `"|" in
