@@ -3,6 +3,126 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-08-11 · A table body does not end at the last line holding a pipe, and the branch leaves two things behind
+
+Closing HANDOFF-023. `mdparse`'s table branch consumed lines while `"|" in
+lines[i]` and then fell out of the loop saying nothing. A GFM table body does not
+end there: the line below the last row renders as a **cell**, and CommonMark with
+no table rule enabled reads the whole run as one paragraph and that line as its
+lazy continuation. Both readings therefore call the line prose, and this parser
+called it a block start — so the definition branch, one branch above the table
+branch, took `[x]: /url` into the skeleton and a whole line stopped being
+translated with nothing said.
+
+**The rule that won: the table branch leaves a paragraph open.** One line,
+`para_open = True`, at the branch's exit. The two readings disagree about nearly
+everything under a table and agree that the line below it is not a fresh block
+start, so an open paragraph is the state that is true under both — and every
+branch below the table branch still answers for its own syntax, which is why a
+heading below a table is still a heading, a blockquote still a quote and another
+row still cells.
+
+*Lost:* widening the continuation loop so the trailing line is read as a **row**,
+which is closer to GFM. It re-cuts `plain prose` below a table from one `para`
+segment into `cell` segments, and for Markdown `context` is `kind` while
+`context` is in the translation-memory key: **2754 segments changed kind against
+zero for the rule that won**, so that spelling costs a `SEGMENTATION_VERSION` bump
+and this one does not. It also loses far more than it saves — **3988 lines that
+CommonMark reads as prose stop being translated**, because a four-column line
+ends a GFM body and the paragraph branch is no longer underneath to catch them.
+And it needs a terminator set this parser cannot spell: an HTML block is one of
+GFM's seven and there is no pattern for it here.
+
+### The second behaviour change, which the package asked to be measured
+
+The chunk branch reads `lazy` too, so a four-column line directly below a table
+stops being skeleton and becomes a paragraph. GFM ends the body at four columns
+and calls that line code; CommonMark calls it a lazy continuation and calls it
+prose. Where the two disagree this parser keeps the text translatable, which is
+this area's governing rule and the direction that costs a reviewer's attention
+rather than a translation.
+
+### The other thing the branch was dropping: a list item's columns
+
+Found by this package's own sweep, on the axis it was not being scored on. The
+table branch is tested **above** the list branch, so `- | a | b |` is read as a
+table row and the item's content column is never recorded. Every floor below such
+a table is then measured from the margin, and
+`- | a | b |\n  |---|\n  | c |\n[x]: /url\n===\n    prose` loses its last line —
+which **both** readings call the item's prose.
+
+That loss is not pre-existing: it appears only once the paragraph state above
+creates a paragraph for `===` to underline. Shipping the first half alone would
+have introduced **260 newly lost lines**, so the branch now records
+`list_col` and `list_min_col` from its own first line, exactly as the list branch
+does. This is not scope creep — it is the same defect, one state at a time: a
+branch that consumes lines has to leave behind what it consumed.
+
+*Lost:* a `table_open` flag guarding the setext branch, so that `===` below a
+table does not close the paragraph — GFM reads that line as a cell. Measured
+against the list-column repair and it prevents **no** loss the repair does not
+already prevent: identical loss counts, 210 more lines translated that both
+readings call blocks. A guard that only adds permissiveness is a guard that is
+not carrying its rule, so it is not in the tree.
+
+### What this costs, exactly
+
+One shape family, and it is pinned in the suite so a future change has to
+re-derive it rather than notice it. `<table>\n    indented\n===\n    indented`
+now holds the last line in the skeleton: the indented line above it is a
+paragraph, so `===` underlines it and the four columns below are an indented code
+block. **CommonMark agrees that line is code.** Only GFM, having read the first
+indented line as a code block, reads the last one as prose. 90 lines of 20160
+generated documents, three shapes, and zero of them a shape CommonMark calls
+prose.
+
+### The measurement, and its axes
+
+20160 generated documents, three parsers (the parent at `76d367d`, each
+candidate), two oracles — `MarkdownIt("commonmark").enable("table")` and
+`MarkdownIt("commonmark")` — comparing which *lines* carry an `inline` token
+against which lines this parser puts inside a segment. Four axes, written down
+because a sweep is blind to the one it does not vary:
+
+| Axis | Varied |
+|---|---|
+| the table | leading pipe or not, one body row or several, alignment colons, a single column, header with no body, CRLF, inside a blockquote, and seven spellings of a list marker on its first line |
+| what sits above it | nothing, an open list item tight and loose, a paragraph, a blockquote, a heading |
+| the line below the last row | 24 shapes: seven definitions, prose, two setext runs, a thematic break, a heading, a quote, an item, a row, three indents, a fence, HTML, a blank line, CJK, a line carrying a stray pipe, and one that is only punctuation |
+| **what follows that line** | 10 shapes, including a second indented line and a setext run — the axis nobody is scored on, where the setext branch reads `lazy` |
+
+| | parent | chosen | widen-the-loop |
+|---|---|---|---|
+| lines lost, GFM reading | 3771 | 240 | 5264 |
+| lines lost, CommonMark reading | 7313 | 198 | 8068 |
+| newly lost vs parent, GFM | — | 90 | 3596 |
+| newly lost vs parent, CommonMark | — | **0** | 3988 |
+| segments changed kind | — | **0** | 2754 |
+
+Every one of the 65 Markdown files in the repository — the corpus, the tracked
+documentation, the queue — produces byte-identical segments before and after.
+
+### The version-number derivation
+
+Measured at segment granularity rather than line granularity, over the same
+20160 documents: **112510 kept** with the same text and the same kind, 6373
+appeared, 1047 vanished, and **0 carry the same text under a different kind**.
+The last number is the one that decides it, because a banked memory entry is
+keyed by `(content_hash, context, segmentation_version)` and for Markdown
+`context` is the kind. `SEGMENTATION_VERSION` therefore stays at 1. The 1047 that
+vanished are almost all a paragraph absorbing the line below it — `more prose`
+becoming `[x]: /url\nmore prose` — which is a memory *miss* on the old entry, not
+a mismatch, and the widen-the-loop spelling is the one that would have made it a
+mismatch.
+
+### One correction to the package's own table
+
+HANDOFF-023 recorded `===` below a table as "translated" by this parser. It is
+skeleton, and was before this change: `SETEXT_RE` claims the line and `emit_seg`
+would refuse it anyway, because a run of equals signs holds nothing translatable.
+No text moves either way, which is why the error survived being written down —
+and it is recorded here because the row is now a test.
+
 ## 2026-08-03 · Which tools the naming rule governs, and an ignored directory that is not free to rebuild
 
 The 2026-07-28 entry below settled that a tracked file may not name a tool. An

@@ -348,7 +348,7 @@ Markdown 與純文字目前都可以端到端跑完：抽取、翻譯、驗證�
 ## 開發
 
 ```bash
-python -m pytest -q                # 851 passed，不碰網路
+python -m pytest -q                # 873 passed，不碰網路
 python -m ruff check src tests
 ```
 

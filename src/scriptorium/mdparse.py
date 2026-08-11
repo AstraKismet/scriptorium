@@ -581,9 +581,9 @@ def parse(text, dnt=(), opts=None):
     while i < n:
         line = lines[i]
         ind = _indent_columns(line)
-        # Read for this line, then cleared. The three branches that leave a
-        # paragraph open — quote, list, paragraph — set it again on the way out,
-        # so every other block start closes one by saying nothing.
+        # Read for this line, then cleared. The four branches that leave a
+        # paragraph open — quote, list, table, paragraph — set it again on the
+        # way out, so every other block start closes one by saying nothing.
         lazy, para_open = para_open, False
 
         # A block starting at the left margin is one no open list item can
@@ -874,6 +874,58 @@ def parse(text, dnt=(), opts=None):
                             emit_raw(p)
                     emit_raw("\n")
                 i += 1
+            # The branch consumed a list item's marker: it sits above the list
+            # branch, so `- | a | b |` is read here and the item's two columns
+            # are never recorded. They are the same pair the list branch
+            # computes and are needed for the same reason — every floor below
+            # the table is otherwise measured from the margin. Without them
+            # `- | a | b |\n  |---|\n  | c |\n[x]: /url\n===\n    prose` loses
+            # its last line, which *both* readings call prose: 260 lines of
+            # this package's sweep, and they are lines the paragraph state
+            # below newly created rather than lines the parent lost.
+            lm = LIST_RE.match(line)
+            if lm:
+                list_col = _columns(lm.group(1))
+                list_min_col = _columns(
+                    LIST_MARKER_RE.match(lm.group(1)).group(1)) + 1
+            # A GFM table body does not end at the last line holding a `|`: the
+            # line below the last row renders as a *cell*, and CommonMark with
+            # no table rule reads the whole run as one paragraph and that line
+            # as its lazy continuation. The two readings disagree about nearly
+            # everything here and agree that the line is not a fresh block
+            # start, so an open paragraph is the state that is true under both.
+            #
+            # Without it the definition branch takes `[x]: /url` and a whole
+            # line of prose goes into the skeleton untranslated, silently:
+            # 3771 lines under the GFM reading and 7313 under CommonMark's,
+            # across 20160 generated documents.
+            #
+            # Widening the loop to read the trailing line as a *row* is closer
+            # to GFM and was measured and lost. It re-cuts `plain prose` below
+            # a table from one `para` into `cell` segments, and `context` is
+            # `kind` for Markdown while `context` is in the translation-memory
+            # key: 2754 segments changed kind against **zero** here, so that
+            # spelling costs a `SEGMENTATION_VERSION` bump and this one does
+            # not. It also loses far more than it saves — 3988 lines that
+            # CommonMark reads as prose stop being translated, because a
+            # four-column line ends a GFM body and the paragraph branch is no
+            # longer underneath to catch them.
+            #
+            # The second behaviour change, measured rather than assumed: the
+            # chunk branch reads `lazy` too, so a four-column line directly
+            # below a table stops being skeleton and becomes a paragraph. GFM
+            # ends the body at four columns and calls that line code;
+            # CommonMark calls it a lazy continuation and calls it prose. Where
+            # the two disagree this parser keeps the text translatable.
+            #
+            # And what that costs, which is the only text this repair stops
+            # translating: `<table>\n    indented\n===\n    indented` now holds
+            # the last line in the skeleton, because the line above it is a
+            # paragraph and `===` underlines it. CommonMark agrees that line is
+            # code; only GFM, having read the first indented line as a code
+            # block, reads the last one as prose. 90 lines of 20160 documents
+            # in three shapes — see `docs/decisions.md`, 2026-08-11.
+            para_open = True
             continue
 
         m = QUOTE_RE.match(line)

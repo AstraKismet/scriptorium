@@ -769,6 +769,19 @@ def test_a_marker_that_is_not_one_cannot_become_one_through_the_target():
     # this fence's content and not its end. `m.group(2)[0] * 3` said otherwise,
     # which is what broke the four-backtick-wrapping-three idiom.
     ("````\n```\ncode body\n````\n", "code body"),
+    # --- HANDOFF-023, the must-not-overshoot half. The line below a table is
+    # not a fresh block start, and a fence there is still a fence: the fence
+    # branch has no `lazy` clause and must keep not having one.
+    ("| a | b |\n| --- | --- |\n| c | d |\n```\ncode body\n```\n", "code body"),
+    # The one line this repair stops translating, pinned so that a future change
+    # to it has to be re-derived rather than noticed. The indented line below
+    # the table is now a paragraph, so `===` underlines it and the four columns
+    # under that are an indented code block — which is what CommonMark reads.
+    # Only GFM, having read the first indented line as a code block, reads the
+    # last one as prose. 90 lines of 20160 generated documents, three shapes;
+    # see `docs/decisions.md`, 2026-08-11.
+    ("| a | b |\n| --- | --- |\n| c | d |\n    indented\n===\n    code body\n",
+     "code body"),
 ], ids=["indented-backtick-run", "indented-tilde-run", "indented-longer-run",
         "three-columns-is-still-a-fence", "a-fence-indented-into-an-item",
         "a-fence-in-an-ordered-item", "a-fence-in-a-nested-item",
@@ -810,7 +823,9 @@ def test_a_marker_that_is_not_one_cannot_become_one_through_the_target():
         "a-crlf-underline-is-not-translated",
         "a-mixed-terminator-underline",
         "a-doubled-cr-underline",
-        "a-closer-shorter-than-its-opener-does-not-close"])
+        "a-closer-shorter-than-its-opener-does-not-close",
+        "a-fence-below-the-last-table-row-is-still-a-fence",
+        "an-underline-below-a-four-column-line-below-a-table"])
 def test_a_chunk_in_a_fence_run_or_a_quote_leaves_no_segment_behind(text, body):
     assert body not in "\n".join(s["source"] for s in parse(text)[1])
     assert identity_roundtrip(text) == text
@@ -1085,6 +1100,38 @@ def test_a_chunk_in_a_fence_run_or_a_quote_leaves_no_segment_behind(text, body):
     # inside the item, which takes the prose under it into the skeleton.
     ("- an item\n***　\n> quoted\n    ```js\n    still prose\n"
      "    still prose too\nunindented.\n", "still prose"),
+    # --- HANDOFF-023: a GFM table body does not end at the last line holding a
+    # `|`. The line below the last row renders as a *cell*, and CommonMark with
+    # no table rule reads the whole run as one paragraph and that line as its
+    # lazy continuation — prose under both readings, and skeleton here until the
+    # branch started leaving a paragraph open. 3771 lines of the sweep under the
+    # GFM reading and 7313 under CommonMark's. Every row below was confirmed
+    # against a markdown-it-py render with the table rule enabled *and* against
+    # `MarkdownIt("commonmark")` without it, on 2026-08-11.
+    ("| a | b |\n| --- | --- |\n| c | d |\n[x]: /url\n", "[x]: /url"),
+    ('| a | b |\n| --- | --- |\n| c | d |\n[x]: /url "a title"\n',
+     '[x]: /url "a title"'),
+    # A uniform CRLF document is normalized to LF by `docio` before `parse` sees
+    # it; a mixed one is passed through verbatim by design, and is this row.
+    ("| a | b |\r\n| --- | --- |\r\n| c | d |\r\n[x]: /url\r\n", "[x]: /url"),
+    # The second behaviour change, and the direction it takes. The chunk branch
+    # reads `lazy` too, so a four-column line below a table stops being
+    # skeleton. GFM ends the body at four columns and calls the line code;
+    # CommonMark calls it a lazy continuation and calls it prose; where the two
+    # disagree the text stays translatable.
+    ("| a | b |\n| --- | --- |\n| c | d |\n    indented prose\n",
+     "indented prose"),
+    # `- | a | b |` is claimed by the *table* branch, which is tested above the
+    # list branch, so the item's content column is recorded there or nowhere.
+    # Without it every floor below the table is measured from the margin, and
+    # this line — two columns past the item's content column, and the item's
+    # prose under both readings — becomes an indented code block. 260 lines of
+    # the sweep, and they are lines the open paragraph newly created rather than
+    # lines the parent had already lost.
+    ("- | a | b |\n  | --- | --- |\n  | c | d |\n[x]: /url\n===\n"
+     "    still inside the item.\n", "still inside the item."),
+    ("- | a | b |\n  | --- | --- |\n  | c | d |\n"
+     "    still inside the item.\n", "still inside the item."),
 ], ids=["prose-below-an-indented-run", "prose-below-an-indented-tilde-run",
         "prose-below-a-contained-run", "a-run-that-cannot-interrupt-a-paragraph",
         "an-ideographic-space-before-a-run", "a-no-break-space-before-a-run",
@@ -1164,9 +1211,50 @@ def test_a_chunk_in_a_fence_run_or_a_quote_leaves_no_segment_behind(text, body):
         "a-mixed-marker-run-is-not-one-marker",
         "a-tilde-opener-with-a-backtick-info-string-closes",
         "a-margin-marker-does-not-close-a-fence-inside-an-item",
-        "a-quote-at-the-margin-closes-the-item-above-it"])
+        "a-quote-at-the-margin-closes-the-item-above-it",
+        "a-definition-below-the-last-table-row",
+        "a-titled-definition-below-the-last-table-row",
+        "a-crlf-definition-below-the-last-table-row",
+        "a-four-column-line-below-the-last-table-row",
+        "a-table-that-swallowed-a-list-marker-keeps-the-item-open",
+        "a-four-column-line-below-a-table-inside-an-item"])
 def test_prose_in_a_fence_run_or_a_quote_is_still_translated(text, prose):
     assert prose in "\n".join(s["source"] for s in parse(text)[1])
+    assert identity_roundtrip(text) == text
+
+
+@pytest.mark.parametrize("line, payload, kind", [
+    ("[x]: /url", "[x]: /url", "para"),
+    ("[x]: /url not a title", "[x]: /url not a title", "para"),
+    ("plain prose", "plain prose", "para"),
+    ("# heading", "heading", "heading"),
+    ("> quoted", "quoted", "quote"),
+    ("- item", "item", "list"),
+    ("| e | f |", "e", "cell"),
+    ("    indented", "    indented", "para"),
+    # Neither of these holds anything translatable, so both are raw whatever the
+    # branch above decides: `emit_seg` refuses a source with no text in it. They
+    # are rows so that a spelling which starts emitting one has to say so — the
+    # underline in particular is a *cell* to GFM and an underline to CommonMark.
+    ("===", "===", None),
+    ("```", "```", None),
+], ids=["a-definition", "a-definition-whose-tail-is-prose", "prose",
+        "a-heading", "a-blockquote", "a-list-item", "another-row",
+        "a-four-column-line", "a-setext-underline", "a-fence"])
+def test_every_shape_below_the_last_table_row(line, payload, kind):
+    """HANDOFF-023's measured table, as a test.
+
+    The rule the table branch now carries is not "the line below a table is a
+    paragraph" — it is "the line below a table is not a fresh block start", and
+    every branch under the table branch still answers for its own syntax. That
+    is why the expected kinds here are all different, and why a repair spelled
+    as "read the trailing line as a row" would have collapsed six of them into
+    `cell`. Each row was confirmed against a markdown-it-py render, with the
+    table rule enabled and without it, on 2026-08-11.
+    """
+    text = "| a | b |\n| --- | --- |\n| c | d |\n" + line + "\n"
+    segs = [s for s in parse(text)[1] if payload in s["source"]]
+    assert [s["kind"] for s in segs] == ([] if kind is None else [kind])
     assert identity_roundtrip(text) == text
 
 
