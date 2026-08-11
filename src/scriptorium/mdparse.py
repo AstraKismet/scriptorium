@@ -637,6 +637,24 @@ def parse(text, dnt=(), opts=None):
     #: prose became skeleton and stopped being translated at all.
     para_open = False
 
+    #: …and *which* paragraph that is: True when the open one is at the
+    #: document's own margin, so that a setext underline at the margin closes
+    #: it. `para_open` cannot answer this, and the setext branch read it as
+    #: though it could. Four things leave a paragraph open that a margin `===`
+    #: does not underline — a blockquote's, a list item's, a table's inside an
+    #: item, and a paragraph this parser created out of any of their lazy
+    #: continuations — and in each case CommonMark reads the underline as
+    #: paragraph continuation *text* rather than as an underline, so the block
+    #: stays open and the four-column line below it is prose. Measured against
+    #: markdown-it-py over 77760 generated documents, 2026-08-12: without this,
+    #: 8544 lines that **both** readings call prose were skeleton.
+    #:
+    #: It is read at the top of the loop the way `para_open` is, so the quote
+    #: and list branches say nothing at all: leaving a paragraph open that is
+    #: not the margin's is the default, and only a branch that owns the margin
+    #: writes here.
+    doc_para = False
+
     #: The interior of the innermost blockquote, where `para_open` and `list_col`
     #: cannot answer for it. `mdparse` emits one segment per quoted line and never
     #: descends into the quote, so a quoted chunk's indent is measured after the
@@ -658,6 +676,10 @@ def parse(text, dnt=(), opts=None):
         # paragraph open — quote, list, table, paragraph — set it again on the
         # way out, so every other block start closes one by saying nothing.
         lazy, para_open = para_open, False
+        # The same shape for the same reason, and the pair is what stops the
+        # two questions being one: `lazy` is "was a paragraph open", `lazy_doc`
+        # is "was it the margin's".
+        lazy_doc, doc_para = doc_para, False
 
         # A block starting at the left margin is one no open list item can
         # contain, and closes it. Three things it is not:
@@ -815,6 +837,16 @@ def parse(text, dnt=(), opts=None):
             # everything before it. `lazy and ...` was the first spelling and the
             # widened sweep refuted it in 1482 documents.
             para_open = line.strip(" \t\r") != ""
+            # …and it opens the margin's paragraph only where there was no
+            # other one to continue. `> a\n　\n===\n    prose` is one quoted
+            # paragraph to both references — U+3000 is content, so the line is
+            # a lazy continuation of the quote and the underline is more of the
+            # same text — and reading the U+3000 line as the margin's own
+            # paragraph makes `===` underline it and takes the line below into
+            # the skeleton. 1564 lines of the 2026-08-12 sweep, in every
+            # spelling of a line that is blank to Python and content to
+            # CommonMark.
+            doc_para = para_open and (lazy_doc if lazy else True)
             # A real blank line closes the blockquote itself, so both interior
             # answers go back to their opening values. A line that is blank only
             # to `str.strip()` does not: it is content, so it is a lazy
@@ -829,12 +861,39 @@ def parse(text, dnt=(), opts=None):
         if HR_RE.match(line) or SETEXT_RE.match(line):
             emit_raw(line + "\n")
             i += 1
+            # Is the paragraph above this line one this line can underline? An
+            # underline reaches a paragraph in its own container and no other,
+            # and there are two ways to be in the same container as it: the
+            # paragraph is the margin's, or the underline is indented into the
+            # list item the paragraph belongs to.
+            #
+            # `list_col` and not `list_min_col`, and the two bounds point the
+            # opposite way here from the way the fence branch takes them. The
+            # item's content column is somewhere between them; judging "inside"
+            # wrongly closes a paragraph that is still open and takes the line
+            # below it out of translation, so the question is asked against the
+            # **upper** bound, where a wrong answer only leaves a visible line
+            # translated. The lower one was measured on 2026-08-12 and loses
+            # `-   padded item\n   ===\n        prose` — the underline is
+            # outside a four-column item and the lower bound calls it inside —
+            # in 408 lines that both references call prose.
+            in_item = list_col is not None and ind >= list_col
             # A `=====` or `--` with no paragraph above it underlines nothing,
             # so CommonMark reads it as ordinary paragraph text and the indented
             # line below it as that paragraph's lazy continuation. A thematic
             # break is a break either way, and a real underline has just turned
             # the paragraph above into a heading — both close.
-            para_open = not lazy and not HR_RE.match(line)
+            #
+            # And an underline that reaches no paragraph is not merely inert:
+            # it is paragraph continuation text, so it *joins* whatever was
+            # open rather than starting something of its own. That is what
+            # `not lazy` says below — `> quoted\n===\n===\n    prose` is one
+            # quoted paragraph to both references, and reading the first `===`
+            # as the margin's new paragraph lets the second one underline it
+            # and loses the last line.
+            para_open = (not (lazy and (lazy_doc or in_item))
+                         and not HR_RE.match(line))
+            doc_para = para_open and not lazy
             continue
 
         # An indented code block, held in the skeleton the way a fenced one
@@ -922,12 +981,33 @@ def parse(text, dnt=(), opts=None):
 
         # table
         if "|" in line and i + 1 < n and TABLE_SEP_RE.match(lines[i + 1]):
+            #: Did this run swallow a line that opens a blockquote at the
+            #: margin? Then the paragraph the branch leaves open is the
+            #: quote's, not the margin's, and a `===` below it underlines
+            #: nothing. Local to the run and deliberately not `quote_para` —
+            #: that state is the quote's *interior*, it survives across
+            #: branches, and reaching for it here is what the package that
+            #: found this shape was told not to do.
+            #:
+            #: No bound on the marker's indent, where the quote branch has
+            #: `ind == 0`, and the difference is not an oversight. That branch
+            #: refuses an indented `>` because it cannot tell a blockquote from
+            #: a lazy continuation and guessing wrong takes a sentence into the
+            #: skeleton. Here the answer to that question does not matter: a
+            #: line inside a table run is a cell either way, and every `>` that
+            #: might be a marker only ever makes this flag *more* permissive.
+            #: The mutation pass on 2026-08-12 is what found it — `ind == 0`
+            #: survived the suite, and enumerating 1120 indented spellings
+            #: against both references put 132 lines of prose behind it, since
+            #: CommonMark lets a blockquote marker sit three columns in.
+            quoted_row = False
             while i < n and "|" in lines[i]:
                 # Any consecutive line holding a `|` lands here, a blockquote
                 # line included, and it never reaches the quote branch — the same
                 # hole the list branch's continuation loop has. See
                 # `_quote_state`; `| a |\n|---|\n> q | p\n>     prose` lost
                 # `prose` without this.
+                quoted_row = quoted_row or bool(QUOTE_RE.match(lines[i]))
                 quote_para, quote_list = _quote_state(
                     lines[i], quote_para, quote_list)
                 if TABLE_SEP_RE.match(lines[i]):
@@ -999,6 +1079,26 @@ def parse(text, dnt=(), opts=None):
             # block, reads the last one as prose. 90 lines of 20160 documents
             # in three shapes — see `docs/decisions.md`, 2026-08-11.
             para_open = True
+            # …and it is the margin's paragraph only when the table is at the
+            # margin. Both references make the line below `<table>\n===` a
+            # block — CommonMark underlines the run it read as one paragraph,
+            # GFM reads the underline as a cell and ends the body at the next
+            # four-column line — so an underline there closes, exactly as it
+            # did before this flag existed. A table inside a list item is the
+            # other answer and both references agree on it too: the underline
+            # at the margin ends the item, so the paragraph it might have
+            # underlined is one container down and the line below stays prose.
+            #
+            # The first clause is the paragraph branch's, and it is here for the
+            # same reason: under CommonMark a table run *is* a paragraph, so a
+            # table that begins as some container's lazy continuation leaves
+            # that container's paragraph open rather than the margin's.
+            # `> intro\n| a |\n|---|\n===\n    prose` is one quoted paragraph to
+            # both references and lost its last line without it — 1296 lines of
+            # the 2026-08-12 sweep once the axis was in it, and a loss the
+            # parent had too.
+            doc_para = (((not lazy) or lazy_doc) and list_col is None
+                        and not quoted_row)
             continue
 
         m = QUOTE_RE.match(line)
@@ -1152,6 +1252,15 @@ def parse(text, dnt=(), opts=None):
         emit_raw("\n")
         i = j
         para_open = True
+        # Whose paragraph it is, and the two halves answer different questions.
+        # A paragraph this branch *started* is the margin's unless a list item
+        # is open, because the only lines that reach here with one open are
+        # indented into the item or lazily continuing it — `- item\nPara.\n\n
+        # in the item\n===\n        prose` loses its last line without the
+        # second half. A paragraph it merely *continued* keeps whatever the
+        # line above had, which is what carries a blockquote's answer across
+        # `> a\n　\ntext\n===`.
+        doc_para = ((not lazy) or lazy_doc) and list_col is None
 
     # every block emitter appends its own newline; drop the last one when the
     # source did not actually end with a line break

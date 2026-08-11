@@ -849,6 +849,33 @@ def test_a_marker_that_is_not_one_cannot_become_one_through_the_target():
     # them, and `[ x]: /url` would have stopped being a definition in silence.
     ("[ x]: /url\n    code body\n", "code body"),
     ("[x ]: /url\n    code body\n", "code body"),
+    # --- HANDOFF-025's must-not-overshoot half. A setext underline still
+    # closes every paragraph it really does underline, and each row below is
+    # one both references call a block. Confirmed against a markdown-it-py
+    # render with the table rule enabled and without it, 2026-08-12.
+    #
+    # A table at the margin leaves the margin's own paragraph open: CommonMark
+    # underlines the run it read as one paragraph, GFM reads the underline as a
+    # cell and ends the body at the four-column line. Neither makes this line
+    # prose, and a `doc_para` that said `False` for every table would.
+    ("| a | b |\n| --- | --- |\n| c | d |\n===\n    code body\n", "code body"),
+    # An underline indented into an open list item is in the item's own
+    # container, so it underlines the item's paragraph however that paragraph
+    # was opened. Without `in_item` this line stops being code.
+    ("- item\nlazy line\n   ===\n        code body\n", "code body"),
+    # A line that is blank to Python and content to CommonMark opens the
+    # margin's paragraph where there was nothing to continue — so the `===`
+    # below it is a real underline.
+    ("　\ntext\n===\n    code body\n", "code body"),
+    # An underline with nothing above it is the margin's new paragraph, which
+    # the *next* one underlines. `doc_para` has to be True there, not merely
+    # `para_open`.
+    ("===\n===\n    code body\n", "code body"),
+    # The must-not-overshoot side of the table clause: a table run that
+    # continues a *margin* paragraph is still the margin's, so the underline
+    # below it is a real one. Both references make this line a block.
+    ("Intro.\n| a | b |\n| --- | --- |\n| c | d |\n===\n    code body\n",
+     "code body"),
 ], ids=["indented-backtick-run", "indented-tilde-run", "indented-longer-run",
         "three-columns-is-still-a-fence", "a-fence-indented-into-an-item",
         "a-fence-in-an-ordered-item", "a-fence-in-a-nested-item",
@@ -900,7 +927,12 @@ def test_a_marker_that_is_not_one_cannot_become_one_through_the_target():
         "a-byte-order-mark-is-not-whitespace-to-python",
         "a-zero-width-space-is-not-whitespace-to-python",
         "a-backslash-before-a-space-is-not-blank",
-        "a-label-may-begin-with-a-blank", "a-label-may-end-with-a-blank"])
+        "a-label-may-begin-with-a-blank", "a-label-may-end-with-a-blank",
+        "an-underline-below-a-margin-table-still-underlines",
+        "an-underline-indented-into-an-item-underlines-it",
+        "an-underline-below-an-ideographic-space-paragraph",
+        "an-underline-below-an-underline-that-opened-a-paragraph",
+        "an-underline-below-a-table-that-continues-a-margin-paragraph"])
 def test_a_chunk_in_a_fence_run_or_a_quote_leaves_no_segment_behind(text, body):
     assert body not in "\n".join(s["source"] for s in parse(text)[1])
     assert identity_roundtrip(text) == text
@@ -1241,6 +1273,65 @@ def test_a_chunk_in_a_fence_run_or_a_quote_leaves_no_segment_behind(text, body):
     ("[]: /url\n    lazy prose\n", "lazy prose"),
     ("[a]b: /url\n    lazy prose\n", "lazy prose"),
     ("[[a]]: /url\n    lazy prose\n", "lazy prose"),
+    # --- HANDOFF-025: a setext underline under a block that is not the
+    # margin's paragraph underlines nothing, and the line below it is prose.
+    # Both references agree on every row here — the underline is paragraph
+    # continuation *text* of whatever container was open, so nothing closes and
+    # the four-column line under it is a lazy continuation. Each confirmed
+    # against a markdown-it-py render with the table rule and without it,
+    # 2026-08-12. Until this, every one cost the line below the underline.
+    ("> quoted\n===\n    tail prose\n", "tail prose"),
+    # The chunk branch is not the only reader of `para_open`: the definition
+    # branch reads it too, so a repair that taught only the chunk branch would
+    # still take this whole line into the skeleton. 3836 lines of the sweep.
+    ("> quoted\n===\n[y]: /url2\n", "[y]: /url2"),
+    ("- item\n===\n    tail prose\n", "tail prose"),
+    # The three families the package named, all of them present at the parent.
+    ("| a | b |\n| --- | --- |\n| c | d |\n> quoted\n===\n    tail prose\n",
+     "tail prose"),
+    ("> | a | b |\n> | --- | --- |\n> | c | d |\n===\n    tail prose\n",
+     "tail prose"),
+    ("> | a | b |\n> | --- | --- |\n> | c | d |\n[x]: /url\n===\n    tail prose\n",
+     "tail prose"),
+    # A table inside a list item: the margin underline ends the item, so the
+    # paragraph it might have underlined is one container down.
+    ("- | a | b |\n  | --- | --- |\n  | c | d |\n===\n        deep tail prose\n",
+     "deep tail prose"),
+    # A line blank to Python and content to CommonMark is a lazy continuation
+    # of the quote, so the underline below it still underlines nothing.
+    ("> quoted\n　\n===\n    tail prose\n", "tail prose"),
+    # An underline that underlines nothing does not start a paragraph of its
+    # own either — it is more text in the block that was already open, so the
+    # *second* underline has nothing to close.
+    ("> quoted\n===\n===\n    tail prose\n", "tail prose"),
+    # A paragraph inside an open list item is not the margin's, even though
+    # this parser started it fresh after a blank line.
+    ("- outer item\nPara.\n\n    in the item\n===\n        deep tail prose\n",
+     "deep tail prose"),
+    # Which bound on the item's content column decides "inside". The item's
+    # content begins at four columns and the underline sits at three, so it is
+    # outside the item — the lower bound calls it inside and loses this line.
+    ("-   padded item\n   ===\n        deep tail prose\n", "deep tail prose"),
+    # A table run is a paragraph to CommonMark, so a table that begins as some
+    # container's lazy continuation leaves *that* container's paragraph open
+    # and not the margin's. Found by the adversarial pass on the axis the
+    # sweep held constant — the sweep only ever started a table at the top of
+    # its own block.
+    ("> intro\n| a | b |\n| --- | --- |\n| c | d |\n===\n    tail prose\n",
+     "tail prose"),
+    ("- item\n| a | b |\n| --- | --- |\n| c | d |\n===\n    tail prose\n",
+     "tail prose"),
+    # …and the same thing reached from inside the run. The table loop takes
+    # every consecutive line holding a `|`, a blockquote marker included, so
+    # the quote branch never sees this one — the fourth swallowing loop, and
+    # the state it has to leave behind is `doc_para` as well as `quote_para`.
+    ("| a | b |\n| --- | --- |\n> q | p\n===\n    tail prose\n", "tail prose"),
+    # …and the marker may be indented up to three columns and still be one.
+    # The quote branch refuses an indented `>` because it cannot tell a
+    # blockquote from a lazy continuation; inside a table run that question has
+    # no cost, and copying the refusal here lost this line. Found by the
+    # mutation pass, not by the sweep.
+    ("| a | b |\n| --- | --- |\n   > q | p\n===\n    tail prose\n", "tail prose"),
 ], ids=["prose-below-an-indented-run", "prose-below-an-indented-tilde-run",
         "prose-below-a-contained-run", "a-run-that-cannot-interrupt-a-paragraph",
         "an-ideographic-space-before-a-run", "a-no-break-space-before-a-run",
@@ -1340,7 +1431,21 @@ def test_a_chunk_in_a_fence_run_or_a_quote_leaves_no_segment_behind(text, body):
         "a-label-that-never-closes-keeps-its-own-line",
         "an-empty-label-is-not-a-label",
         "a-colon-that-does-not-follow-the-bracket",
-        "a-doubled-bracket-label"])
+        "a-doubled-bracket-label",
+        "an-underline-below-a-quote", "a-definition-below-a-quoted-underline",
+        "an-underline-below-a-list-item",
+        "an-underline-below-a-quote-below-a-table",
+        "an-underline-below-a-quoted-table",
+        "an-underline-below-a-definition-below-a-quoted-table",
+        "an-underline-below-a-table-inside-an-item",
+        "an-underline-below-an-ideographic-space-inside-a-quote",
+        "an-underline-below-an-underline-that-underlined-nothing",
+        "an-underline-below-an-item-s-second-paragraph",
+        "an-underline-outside-a-padded-item",
+        "an-underline-below-a-table-that-continues-a-quote",
+        "an-underline-below-a-table-that-continues-an-item",
+        "an-underline-below-a-table-run-holding-a-quote-marker",
+        "an-underline-below-a-table-run-holding-an-indented-quote-marker"])
 def test_prose_in_a_fence_run_or_a_quote_is_still_translated(text, prose):
     assert prose in "\n".join(s["source"] for s in parse(text)[1])
     assert identity_roundtrip(text) == text

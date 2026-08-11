@@ -3,6 +3,203 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-08-12 · A setext underline reaches the paragraph in its own container, and `para_open` could not say which that was
+
+Closing HANDOFF-025. `mdparse`'s setext branch decided what a `===` or `--` line
+does from one bit of state — `para_open`, read as `lazy` — and asked it a
+question it does not answer. `lazy` says *a paragraph is open*; the branch needed
+*an underline applies here*. They come apart whenever the open paragraph belongs
+to a container the underline is not in, and CommonMark is unambiguous about what
+happens then: a setext heading underline may not be a lazy continuation line, so
+the line is not an underline at all — it is ordinary **paragraph continuation
+text**, the block above stays open, and the four-column line below it is prose.
+This parser closed the paragraph instead and made that line an indented code
+block: **13690 lines that both readings call prose**, held in the skeleton and
+never translated, with nothing said.
+
+**The rule that won: a companion flag, `doc_para`.** It is read at the top of the
+loop the way `para_open` is, as `lazy_doc`, and it means *the open paragraph is
+at the document's own margin*. The quote and list branches write nothing, so the
+top-of-loop reset says False for them — leaving a paragraph that is not the
+margin's is the default, and only a branch that owns the margin writes there. The
+setext branch then asks its real question:
+
+```python
+in_item = list_col is not None and ind >= list_col
+para_open = not (lazy and (lazy_doc or in_item)) and not HR_RE.match(line)
+doc_para = para_open and not lazy
+```
+
+Two ways to be in the same container as the underline, and `in_item` is the
+second: an underline indented into an open list item is inside that item, so it
+underlines the item's paragraph whatever opened it. `doc_para = para_open and not
+lazy` is the continuation-text half — an underline that reaches no paragraph does
+not start one of its own either, it joins whatever was already open, which is why
+`> quoted\n===\n===\n    prose` is one quoted paragraph to both references.
+
+### Which bound, and it is the opposite one from the fence branch
+
+`list_col` is an upper bound on a list item's content column and `list_min_col` a
+lower one. The fence branch asks "is this fence inside the item" against the
+lower bound, because judging *outside* wrongly there selects the margin's floor
+and swallows the document. Here the error is the other way round: judging
+*inside* wrongly closes a paragraph that is still open and takes the line below
+out of translation, where judging outside wrongly only leaves a visible line
+translated. So this question takes the **upper** bound. The lower one loses
+`-   padded item\n   ===\n        prose` — the underline sits three columns in
+and the item's content begins at four, so it is outside — in **2272** lines both
+references call prose.
+
+### The four spellings that lost, each with the shape that killed it
+
+- **The branch below the underline reads the state instead**, leaving `para_open`
+  untouched and teaching only the indented-code branch. It was the package's own
+  second candidate and it is the cheapest-looking one. `para_open` has four
+  readers, and the link reference definition branch is one of them: `> quoted\n
+  ===\n[y]: /url2` is prose under both readings and this spelling still puts the
+  whole line in the skeleton. **7332** lines left lost.
+- **The blank-ish line always opens the margin's paragraph.** A line that is
+  blank to `str.strip()` and content to CommonMark — U+3000, U+00A0 — is a lazy
+  continuation of whatever was open, so `> quoted\n　\n===\n    prose` is one
+  quoted paragraph. Not inheriting the flag there loses **3524** lines. It must
+  inherit when something was open and claim the margin when nothing was.
+- **A table's paragraph is never the margin's** (which is what would also close
+  the fourth family below). It reaches **16** hard losses like the rule that won
+  and **112** soft ones instead of 896 — and pays **2834** permissive lines
+  against 930, because `<table>\n===\n    tail` is a line *both* references call
+  a block: CommonMark underlines the run it read as one paragraph, GFM reads the
+  underline as a cell and ends the body at the four-column line. Closing 784 soft
+  lines by translating 1904 blocks is the wrong trade in a repository whose
+  reviewer attention is the scarce thing.
+- **The flag alone**, without `in_item` and without the open-item clause on the
+  paragraph branch: **1880** lines still lost, and 1610 permissive.
+
+`I` — putting the open-item clause on the blank-ish line as well as the paragraph
+branch — is **equivalent**, identical on every column of the measurement. It is
+not in the tree, and it is named here so the next reader does not re-derive it.
+
+### The families, including the ones the package did not name
+
+The package named four, all rooted in a table. Three are closed, one is not, and
+the sweep found that the table was never the point — the same defect costs far
+more without one.
+
+| shape | both readings | before | after |
+|---|---|---|---|
+| `> quoted\n===\n    tail` | prose | skeleton | **prose** |
+| `- item\n===\n    tail` | prose | skeleton | **prose** |
+| `> quoted\n===\n[y]: /url` | prose | skeleton | **prose** |
+| `<table>\n> quoted\n===\n    tail` | prose | skeleton | **prose** |
+| `> <table rows>\n===\n    tail` | prose | skeleton | **prose** |
+| `> <table rows>\n[x]: /url\n===\n    tail` | prose | skeleton | **prose** |
+| `- <table rows>\n===\n    tail` | prose | skeleton | **prose** |
+| `> quoted\n　\n===\n    tail` | prose | skeleton | **prose** |
+| `- outer\nPara.\n\n    in the item\n===\n        tail` | prose | skeleton | **prose** |
+| `<table>\n    indented\n===\n    tail` | GFM only | skeleton | skeleton |
+
+The last row is HANDOFF-023's recorded cost and it is **unchanged**. The
+2026-08-11 entry below says that family is a cost this project accepted; that
+paragraph still stands, and its test row —
+`an-underline-below-a-four-column-line-below-a-table` — is still red-on-fix, so a
+future change has to re-derive it rather than notice it.
+
+### What the adversarial pass found, which the sweep could not
+
+The sweep reported **zero** hard losses for the rule above, across 77760
+documents on five axes. An adversarial pass whose only job was to name an axis
+held constant found one in the first minute, and it was worth **1296** lines: the
+sweep only ever started a table at the top of its own block.
+
+A table run *is* a paragraph to CommonMark, so a table that begins as some
+container's lazy continuation leaves that container's paragraph open and not the
+margin's — `> intro\n| a |\n|---|\n===\n    prose` is one quoted paragraph to
+both references and lost its last line. The table branch therefore takes the
+paragraph branch's own spelling, `((not lazy) or lazy_doc) and list_col is None`.
+
+The same defect arrives a second way. The table loop consumes every consecutive
+line holding a `|`, a blockquote marker included — the fourth swallowing loop,
+and the one `_quote_state` already exists for — so `| a |\n|---|\n> q | p\n===\n
+    prose` walks into a quote the branch never notices. A run-local `quoted_row`
+records it. Deliberately not `quote_para`: that state is the quote's *interior*,
+it survives across branches, and the package's OUT list named reaching for it.
+
+`quoted_row` carries **no bound on the marker's indent**, where the quote branch
+has `ind == 0`, and copying that refusal was a real defect the sweep could not
+see and the mutation pass could. The quote branch refuses an indented `>` because
+it cannot tell a blockquote from a lazy continuation and guessing wrong takes a
+sentence into the skeleton; inside a table run the line is a cell either way, so
+the question has no cost and every `>` that might be a marker only makes the flag
+more permissive. CommonMark lets a blockquote marker sit three columns in:
+enumerating 1120 indented spellings against both references put **132** lines of
+prose behind `ind == 0`.
+
+### The measurement, and its axes
+
+114210 generated documents, fourteen parsers, two oracles —
+`MarkdownIt("commonmark").enable("table")` and `MarkdownIt("commonmark")` —
+comparing which *lines* carry an `inline` token against which lines this parser
+puts inside a segment. Six axes, written down because a sweep is blind to the one
+it does not vary, and the last two exist only because something else named them:
+
+| Axis | Varied |
+|---|---|
+| the block above the underline | 48 shapes: nothing, a paragraph, a wrapped paragraph, a heading, one and two quote lines, a nested quote, four item spellings (`- `, `-   `, `- [ ] `, `1. `, plus a tab marker), items with indented and with lazy margin continuations, tables with and without leading pipes, a quoted table, a table whose first line is a list marker, a table above a quote line / a definition / a four-column line / a four-column line and prose, an indented code block, a fence, a link definition, a closed quote, a closed item, `***`, item-then-quote, quote-then-item, five spellings of a line blank to Python and content to CommonMark, and **a table that continues a quote, an item or a paragraph, and a table run holding a quote marker** |
+| what sits above *that* | 7, including an item left **open** with no blank line, plain and padded — the axis that found the last defect the sweep itself caught |
+| the underline | 10: `===`, `=`, `--`, `---`, indents of one, two and three columns and a tab, a trailing run, and a CR |
+| what follows it | 15: four, eight and two columns, a link definition, margin prose, a quote, an item, a heading, a second underline, a blank then a chunk, a chunk then prose, a fence, a table, and margin prose then a blank then a chunk at two depths |
+| the trailing block | 2 |
+| nesting | an item inside an item, and a quoted item — the axis the adversarial pass named second |
+
+| | parent | chosen | table never | chunk branch only | blank never inherits | the lower bound |
+|---|---|---|---|---|---|---|
+| lines lost, GFM | 14586 | **912** | 128 | 8228 | 4420 | 3168 |
+| lines lost, CommonMark | 13906 | **16** | 16 | 7548 | 3524 | 2272 |
+| both readings call it prose | 13690 | **16** | 16 | 7332 | 3524 | 2272 |
+| one reading only | 1112 | **896** | 112 | 1112 | 896 | 896 |
+| translated where both call it a block | 550 | **930** | 2834 | 810 | 1478 | 706 |
+| segments, same text under another kind | — | **0** | 0 | 0 | 0 | 0 |
+
+Every one of the 62 Markdown files in the repository — the corpus, the tracked
+documentation, the queue — produces byte-identical segments before and after.
+
+### The version-number derivation
+
+Measured at segment granularity over the same documents: **487381 kept** with the
+same text and the same kind, 14270 appeared, 1808 vanished, and **0 carry the
+same text under a different kind**. That last number is the one that decides it,
+because a banked memory entry is keyed by `(content_hash, context,
+segmentation_version)` and for Markdown `context` is the kind.
+`SEGMENTATION_VERSION` therefore stays at **1**. The 1808 that vanished are a
+paragraph absorbing the line below it — `tail prose` becoming
+`===\ntail prose` — which is a memory *miss* on the old entry rather than a
+mismatch.
+
+### What it still costs
+
+**16 lines, and they need a container stack this parser does not have.**
+`- outer item\n| a |\n|---|\n> q | p\n   ===\n        prose`: the underline is
+indented into the outer item, so `in_item` fires, while the paragraph it would
+underline belongs to the quote one container deeper. Both bits of state are
+right and the conclusion is wrong, because two containers are open and
+`list_col` is one number. The quote branch gave up its own column for this exact
+reason on 2026-08-03 — six of eight measured regressions lived in that
+arithmetic — so this is recorded rather than chased. All 16 are losses the parent
+had too.
+
+**896 lines one reading calls prose**, unchanged in kind from before and now the
+whole remaining column: `<table>\n    indented\n===\n…` and
+`<table>\n===\n[y]: /url`, where GFM reads the underline as a cell and CommonMark
+reads a heading. Closing them means the table spelling that costs 1904 blocks.
+
+**380 newly translated lines both readings call blocks**, in three families and
+every one of them the safe direction. A checkbox item, because `list_col` is
+deliberately the whole prefix and `- [ ] ` over-estimates CommonMark's content
+column by four — the over-estimate the list branch already documents, in its
+documented direction. A nested item, because `list_col` holds the inner item's
+column after it closes. And a table run holding a quote marker, where a line that
+renders as nothing is now offered for translation rather than a line of prose
+being dropped.
+
 ## 2026-08-12 · A link label is not any run of brackets, and escape-blindness is not the conservative direction
 
 Closing HANDOFF-024. `DEF_RE` spelled the label as `\[[^\]]+\]:` — any non-empty
