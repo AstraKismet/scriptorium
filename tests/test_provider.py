@@ -182,6 +182,35 @@ def test_unknown_provider_names_are_explicit():
         build("nope", _cfg("http://x/v1"))
 
 
+def test_a_base_url_is_masked_everywhere_it_can_be_read():
+    """Invariant 6: every display surface shares one answer about a `base_url`.
+
+    Two surfaces were missing from that list until 2026-08-13, and both are
+    inside a run rather than inside a report, which is why nobody looked there.
+    `describe()` is the first line `lx translate` prints and the first entry of
+    `POST /api/job`'s `log`; the transport failure below reaches the same job's
+    `error`. Both interpolated the raw value, so a hand-edited
+    `https://user:SECRET@host/v1` was masked by `lx providers` and printed in
+    full by the run beside it. Found by the security-tier pass over the frozen
+    workbench contract; `docs/contracts/workbench-http.md` now states that a
+    `base_url` is in printable form wherever it appears on that surface.
+
+    The host survives on purpose — masking it would take the answer to "where is
+    my document going" with it, and the failure message's own advice ("check
+    that base_url ends in /v1") would stop being followable.
+    """
+    dirty = "https://user:SECRET@example.invalid/v1?key=abc"
+    line = build("local", _cfg(dirty)).describe()
+    assert "SECRET" not in line and "key=abc" not in line
+    assert "example.invalid" in line and "/v1" in line
+
+    p = build("local", _cfg("http://user:SECRET@127.0.0.1:1/v1", retries=0, timeout=0.2))
+    with pytest.raises(ProviderError) as caught:
+        p.complete("s", "u")
+    assert "SECRET" not in str(caught.value)
+    assert "127.0.0.1:1" in str(caught.value)
+
+
 def test_unreachable_server_gives_actionable_message():
     # timeout=0.2 rather than 1: port 1 is refused instantly on Linux but times
     # out on Windows, so a one-second timeout bought this message-shape check a

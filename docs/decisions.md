@@ -3,6 +3,169 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-08-13 · The workbench's HTTP surface is frozen, and writing it down is what found the defects
+
+Closing HANDOFF-207, which two of the queue's three largest packages named as
+their precondition. `docs/contracts/workbench-http.md` is the artifact:
+ten endpoints, their request and response shapes, the admission gate, the
+confinement rule, what the surface deliberately does not carry, and seventeen
+recorded divergences. `GET /api/state` reports `contract_version`, and
+`tests/test_contract.py` fails when the document and the server disagree.
+
+### A contract directory, not a file
+
+`docs/contracts/`, because HANDOFF-203 freezes a *second* contract —
+`lx status --json`, for the bookshelf-and-reader project — and the two were
+already misread as one during triage on 2026-07-29. Different consumers,
+different red lines; siblings in a directory say so, a flat pair of filenames
+does not.
+
+### `contract_version` is an integer in one endpoint's body
+
+*Lost:* an `X-Scriptorium-Contract` header on every response, which would reach a
+client polling `/api/job` without a second request. The set of headers this
+server sends is itself part of the frozen surface — the absence of
+`Access-Control-Allow-*` is load-bearing — so widening it to carry a version
+costs more than it buys, and `/api/state` is the first call any client must make
+in any case, since nothing else says which documents exist. *Also lost:*
+injecting the field from `_send`, which puts a contract concern in the transport
+layer and changes nine response shapes to express one fact.
+
+Additive changes do not bump it; a removal, a rename, a type change, a meaning
+change or a narrowed value set does. The package version is a separate field
+answering a separate question and must not be read as this one.
+
+### The tests are comparisons, not descriptions
+
+A contract document that has drifted is worse than none, because a consumer
+implements against it and finds out at runtime. So nothing in
+`tests/test_contract.py` reads the document for information:
+
+- the endpoint list is extracted from `web/server.py` with `ast` and compared
+  **both ways** against the document's `### GET|POST /api/…` headings, with a
+  floor assertion so a restructured dispatch fails loudly instead of matching an
+  empty set against an empty set;
+- **every endpoint's response keys are parsed out of its own table and compared
+  against a live reply.** This was the gap the adversarial pass found: the suite
+  exercised eight of the ten endpoints only through their refusals and never
+  looked at a successful body except `/api/state`'s, so the one class of change
+  the contract defines as breaking — renaming or removing a key — was invisible.
+  The run is network-free because `/api/translate` is given an `ids` list
+  matching no segment, so the worker returns before it builds a provider;
+- the confinement rule is **parametrized over the document's own endpoint list**,
+  which is the closest a test can come to invariant 11's "by presence of the
+  field, not by endpoint name": an endpoint added to both sides is covered
+  without anyone remembering to add a case;
+- the negatives are pinned as source-text and wire assertions, including the
+  `501`'s.
+
+Eighteen mutants — every guard removed one at a time, plus a renamed response
+key, an undocumented response key, and both halves of the credential masking
+below — all killed.
+
+### Freezing is a different act from reading, and that is why it was worth doing
+
+The package's own justification was that `/api/state`'s `routing` had already
+changed shape under nobody's nose. What the freeze actually produced was larger:
+seventeen divergences, of which two are live defects reproduced on the wire the
+same day.
+
+- **`candidates` never stops listing a tracked document on Windows.**
+  `_scan_sources` builds its "already seen" set from `docs[].source`, which is
+  `os.path.relpath` verbatim — `docs\guide.md` — and builds each candidate key
+  with `.replace(os.sep, "/")` — `docs/guide.md`. The subtraction is a no-op on
+  any platform whose separator is not `/`. Green on Linux, wrong on the
+  development machine, and it survived because one response carries two spellings
+  of one identity and nothing compared them.
+- **`{"reset": true}` with no `tone` silently refreezes the register to
+  `technical`.** `do_extract` reads `stored = {} if reset else prior_doc(...)`,
+  so the frozen register is discarded with the carryover. The register is a field
+  of the translation-memory key, so a `literary` novel re-extracted through a
+  "start over" button comes back as documentation prose and the next
+  `lx commit` banks the whole book under the wrong key.
+
+Neither is fixed here — behaviour changes were out of scope, deliberately, and
+both are recorded in the contract, which is tracked and outlives the package.
+What the record should carry is *why they were found now*: describing a surface
+key by key forces a claim about every cell, and a claim is falsifiable where code
+is merely present. Three reviews of `web/server.py` had not produced either.
+
+### One behaviour change was made anyway, and the reason it outranked the scope
+
+HANDOFF-207 put changing behaviour out of scope. The security-tier pass over the
+frozen trust boundary found that `Provider.describe()` and the transport failure
+message interpolate the **raw** `base_url` — so a hand-edited
+`https://user:SECRET@host/v1` was masked by `lx providers` and `lx config get`
+and printed in full by `lx translate`'s first line and by `POST /api/job`'s `log`
+and `error`. Both now go through `config.printable_url`.
+
+*Lost:* obeying the scope note, recording the leak as divergence eighteen, and
+filing a package. It loses because invariant 6 is a red line rather than a
+preference — "never write an API key to config, state, or logs" — and the
+alternative was to publish a frozen contract whose *documented* behaviour is a
+credential reaching a log line and an HTTP response. The fix is in
+`providers/base.py`, not in any endpoint, so it changes no shape this contract
+freezes.
+
+The invariant's own text was the second casualty and is corrected with it. It
+enumerated three display surfaces — `lx config get`, `lx providers`,
+`/api/state` — and a reader checked the list rather than the rule. **The list is
+a symptom of the rule and never its definition**: a display surface is any place
+a configured value can be read, and the two that were missing were both *inside a
+run* rather than inside a report, which is exactly where nobody looks.
+
+### What was decided, and what was deliberately left open
+
+HANDOFF-204 carried two open questions that change this contract, and the package
+required them decided or stated as reserved.
+
+- **A corpus outside the project root** is reserved, and the version question is
+  settled: a second root is a bump, because a client that read `cwd` as *the*
+  root would then be showing an incomplete picture. What the contract adds is the
+  constraint that comes before the interface — `src` is the document's identity,
+  that identity is `relpath` against the cwd flattened by `store.doc_id`, and a
+  path outside the root spells `../…`, which `confined_path` refuses today and
+  which `doc_id` would flatten into colliding names. The escape hatch has to
+  answer "what is this document's identity" first, whatever shape it takes.
+- **`--allow-origin`** is reserved, and **the first draft of this entry got it
+  wrong.** That draft said the flag "changes no request or response shape, so it
+  would not bump the contract version". The security-tier pass refused the
+  contract over that sentence, and it is withdrawn: it classified a
+  *trust-boundary* change as the versioning rule's additive "wider accepted value
+  set", and those are not the same axis. Two things now stated instead: widening
+  the accepted `Origin` set does not fix what the flag is for, because on a
+  non-loopback bind it is **rule 1**, the `Host` allowlist, that is skipped, and
+  rule 1 is the only one that closes DNS rebinding; and a cross-origin page
+  cannot read any response without an `Access-Control-Allow-Origin` header, so
+  the obvious next step for anyone who ships the flag and finds their page still
+  broken is precisely the step that reopens everything. If it is ever taken it
+  changes response shape, it bumps the version, and `do_OPTIONS` routes through
+  the same gate `do_POST` uses.
+
+  This is the entry's own instance of what 2026-07-29 warned about — an absence
+  is invisible to the next reader — arriving one layer up. The document written
+  to stop a future reader from reopening the hole had, in its Reserved section,
+  pre-authorized reopening it.
+
+### The security sections were a downgrade, and were cleared by re-derivation
+
+The contract's *Request admission*, *Path and language confinement* and the
+security half of *Deliberately not in the contract* are normative statements of a
+trust boundary, which `docs/conventions/delegated-work.md` §4 puts in the security
+row. They were written by the coordinating worker at the general top tier, logged
+as a downgrade in §7, and then cleared by a security-tier pass that derived the
+boundary from the code *before* reading the document — which is what §5 means by
+re-deriving rather than re-reading. It returned NOT CLEARED, on the
+`--allow-origin` sentence above plus the credential leak. Both are fixed; the
+ledger carries both rows.
+
+That is now three consecutive security-tier re-derivations that found a real
+defect the original pass had missed, and all three have the same shape: a
+correctly stated *rule* with an implementation or a spelling the rule did not
+reach. `{"lang": null}` skipping a whitelist, `providers.*.api_key_env` missing
+from a tuple, and now a display-surface rule whose enumerated list was read as
+the rule.
+
 ## 2026-08-12 · Configuration becomes writable, and the field that should hold a name is the field a key gets pasted into
 
 Closing HANDOFF-206. Two capabilities landed — `lx config get|set|unset` and

@@ -14,6 +14,8 @@ import time
 import urllib.error
 import urllib.request
 
+from ..config import printable_url
+
 # Transient by contract: a timeout, a conflict, "too early", a rate limit, and
 # the 5xx family a gateway emits while a local runtime is still loading weights.
 _RETRYABLE = (408, 409, 425, 429, 500, 502, 503, 504)
@@ -49,7 +51,16 @@ class Provider:
         return os.environ.get(env, "") if env else ""
 
     def describe(self):
-        return f"{self.name} ({self.kind}: {self.model} @ {self.spec.get('base_url','')})"
+        # `printable_url`, not the raw value. This line is a display surface —
+        # it is the first thing `lx translate` prints and the first entry of the
+        # workbench's job log, which `POST /api/job` hands back verbatim — and
+        # invariant 6 says every display surface shares one answer about what is
+        # printable over a `base_url`. It did not: `lx config get` and
+        # `lx providers` masked a hand-edited `https://user:SECRET@host/v1`
+        # while this printed it in full, into a log and into an HTTP response.
+        # Found by the security-tier re-derivation of the frozen workbench
+        # contract, 2026-08-13.
+        return f"{self.name} ({self.kind}: {self.model} @ {printable_url(self.spec.get('base_url', ''))})"
 
     def complete(self, system, user):  # pragma: no cover - interface
         raise NotImplementedError
@@ -100,7 +111,12 @@ class Provider:
                     time.sleep(self._backoff(attempt, e.headers.get("Retry-After")))
             except urllib.error.URLError as e:
                 last = ProviderError(
-                    f"{self.name}: cannot reach {url} — {e.reason}. "
+                    # Masked for the same reason `describe` is: this message
+                    # reaches `/api/job`'s `error` field, and a URL is the one
+                    # place a credential hides in something nobody thinks of as
+                    # a credential. `printable_url` keeps scheme, host and path,
+                    # so the "ends in /v1" advice still reads.
+                    f"{self.name}: cannot reach {printable_url(url)} — {e.reason}. "
                     "For a local server, check that it is running and that base_url "
                     "ends in /v1.")
                 if not final:

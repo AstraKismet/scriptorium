@@ -140,6 +140,17 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    `/api/state` — shares `config.printable_url`, or two commands disagree about
    what is printable over one value.
 
+   **A display surface is any place a value can be read, not the list of places
+   that look like a report.** Two were missing from the list above and were found
+   on 2026-08-13, by the security-tier pass over the frozen workbench contract:
+   `Provider.describe()`, whose line is the first thing `lx translate` prints and
+   the first entry of `POST /api/job`'s `log`; and the transport failure message,
+   which reaches the same job's `error`. Both interpolated the raw `base_url`, so
+   a hand-edited `https://user:SECRET@host/v1` was masked by `lx providers` and
+   printed in full by the run beside it. Both go through `printable_url` now. The
+   enumerated list is a symptom of the rule and never its definition — when a new
+   surface can show a configured value, it joins the list.
+
    A rule is enforced where a field **lands**. A key may not be addressed *inside*
    something that holds one value, whether the field table says so or the merged
    configuration's own type does: without that, `providers.new.api_key_env.x`
@@ -157,6 +168,20 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    talks plain JSON over HTTP and shares one type definition file; **typed RPC
    frameworks are excluded**, because their value comes from the same force that
    pulls logic into the server.
+
+   Since 2026-08-13 that HTTP surface is **frozen and versioned**:
+   `docs/contracts/workbench-http.md` is the contract, `/api/state` reports its
+   `contract_version`, and `tests/test_contract.py` fails when the document and
+   the server disagree about which endpoints exist, which `cli.do_*` each stands
+   in front of, or what the surface deliberately does not carry. Changing the
+   surface is now an edit to two files and a version decision. The freeze
+   describes what is true rather than what should be: seventeen measured
+   divergences are recorded in the contract's own *Known divergences* section
+   rather than fixed there, and four of them are this invariant's — two where the
+   server has behaviour the CLI lacks, two where the two surfaces answer the same
+   question differently. Two of the seventeen are live defects reproduced on the
+   wire while the contract was being written, which is the argument for having
+   written it: `docs/decisions.md`, 2026-08-13.
 
 9. **Nothing regenerable is a source of truth.** Working state (SQLite) and
    approved wording (`.lx/tm.*.jsonl`) are sources of truth. JSON over HTTP is a
@@ -221,7 +246,8 @@ src/scriptorium/
   web/           local review workbench, a shell over cli.py
 skill/           Claude Skill packaging (SKILL.md + reference/)
 adapters/        AGENTS.md fragment and OpenCode rule, both thin pointers
-docs/            decisions.md (the record), conventions/, windows-setup.md
+docs/            decisions.md (the record), conventions/, contracts/,
+                 windows-setup.md
 handoff/         work package queue — gitignored, see below
 ```
 
@@ -233,7 +259,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 972 tests; no network (one is POSIX-only)
+python -m pytest -q                 # 1009 tests; no network (one is POSIX-only)
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
 

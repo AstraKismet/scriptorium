@@ -38,6 +38,19 @@ from ..store import append_tm, load_doc, load_tm, save_targets, tm_records, trac
 
 STATIC = os.path.join(os.path.dirname(__file__), "static")
 
+#: The version of `docs/contracts/workbench-http.md`, reported by `/api/state`.
+#:
+#: An integer rather than a semantic version string, and separate from
+#: `__version__`, because it answers one question — "has anything a client reads
+#: changed meaning" — and the package version answers a different one on every
+#: release. It bumps on a removal or a meaning change and stays put for an
+#: addition; the document states the rule and a test asserts the two agree.
+#:
+#: Not a response header. The set of headers this server sends is itself part of
+#: the frozen surface, and `/api/state` is the endpoint a client must call first
+#: in any case, since nothing else tells it which documents exist.
+CONTRACT_VERSION = 1
+
 #: The three spellings of loopback. `serve()` binds one and the browser may be
 #: pointed at any of them, so the bound literal alone is not the answer.
 _LOOPBACK_BINDS = ("127.0.0.1", "::1", "localhost")
@@ -373,6 +386,11 @@ class _Handler(BaseHTTPRequestHandler):
         cfg = load_config()
         if path == "/api/state":
             return {
+                # First, and before `version`, because the two are read for
+                # different reasons and are confused when they sit apart: this
+                # one says whether the client still understands the reply, and
+                # `version` says which build produced it.
+                "contract_version": CONTRACT_VERSION,
                 "version": __version__,
                 "cwd": os.getcwd(),
                 "targets": cfg.get("targets", []),
