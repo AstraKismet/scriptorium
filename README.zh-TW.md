@@ -129,9 +129,12 @@ CI 上有一組語料庫在把關，裡面收了 28 份刻意刁難的輸入，L
 | `lx render SRC --lang L -o OUT` | 重建目標文件 |
 | `lx commit SRC --lang L` | 把核可的譯法存進翻譯記憶 |
 | `lx web` | 本機審校工作台 |
+| `lx config get\|set\|unset KEY [VALUE]` | 用點號路徑讀寫 `lx.config.json` |
+| `lx routing show\|set STAGE PROVIDER[:MODEL]` | 每個階段走哪個後端、用哪個模型 |
 | `lx providers` / `lx stats` | 後端 / 覆蓋率 |
 
-`translate`、`repair`、`run` 都吃 `--dry-run`，只回報會做哪些工作，不會真的呼叫模型。
+`translate`、`repair`、`run` 都吃 `--dry-run`，只回報會做哪些工作，不會真的呼叫模型；
+`--provider` 和 `--model` 則是只改這一次執行要用的後端和模型。
 
 詞彙表管得住一致性，卻沒辦法在你把書讀完以前，先告訴你一本書裡那兩百個專有名詞
 是哪些。`lx terms` 就是來開這張清單的：把原文裡首字母大寫、而且不只出現在句首的
@@ -223,6 +226,32 @@ lx terms novel.md --lang zh-TW --append     # 沒收錄過的直接補進詞彙�
 "routing": { "draft": "local", "polish": "claude", "repair": "claude" }
 ```
 
+一個 routing 值也可以順便指定模型。兩個階段想共用同一個端點、只換模型時，
+這樣就不必再開一份 provider——那份複本的 `base_url`、`api_key_env`、timeout
+都是抄來的，遲早會各走各的：
+
+```json
+"routing": {
+  "draft":  { "provider": "openai", "model": "gpt-4o-mini" },
+  "polish": { "provider": "openai", "model": "gpt-4o" },
+  "repair": "local"
+}
+```
+
+兩種寫法 `lx routing` 都寫得出來，而且寫進去的當下就會擋掉打錯的 provider 名字，
+不會拖到跑到一半才炸：
+
+```bash
+lx routing show                            # draft → openai (gpt-4o-mini)
+lx routing set polish openai:gpt-4o
+lx config set batch.size 10                # 點號路徑，寫入前先驗
+lx config get providers.openai.api_key_env # 只印變數名稱，以及它現在有沒有值
+```
+
+模型由細到粗決定：先看命令列的 `--model`，再看 routing 那一筆自己指定的，
+最後才回到 provider 本身的。如果 `--provider` 指到另一個後端，
+routing 那筆的模型就不算數了——模型 id 是屬於服務它的那個後端的。
+
 任何 OpenAI 相容端點都可以，包含完全跑在本機的：
 
 | 執行環境 | `base_url` |
@@ -239,6 +268,11 @@ lx terms novel.md --lang zh-TW --append     # 沒收錄過的直接補進詞彙�
 API 金鑰只從 `api_key_env` 指定的環境變數讀取，絕不寫進設定檔、狀態或記錄檔。
 本機伺服器通常不需要金鑰，把 `api_key_env` 留空就不會送出 `Authorization` 標頭。
 `lx providers` 會列出設定了哪些後端，以及每個金鑰在不在。
+
+`lx config set` 不會讓金鑰進到檔案裡：`api_key_env` 只收環境變數的**名字**，
+長得像金鑰的一律擋下；`base_url` 帶帳號密碼會被拒；`providers.*.headers`
+是原樣送上線的東西，命令列根本不給寫。另外沒有任何 `lx` 指令會在命令列上收金鑰——
+argv 在行程列表裡看得到，也會直接進 shell 記錄，那時候再拒絕已經來不及了。
 
 ## 翻譯記憶
 
@@ -348,7 +382,7 @@ Markdown 與純文字目前都可以端到端跑完：抽取、翻譯、驗證�
 ## 開發
 
 ```bash
-python -m pytest -q                # 921 passed，不碰網路
+python -m pytest -q                # 972 tests，不碰網路
 python -m ruff check src tests
 ```
 

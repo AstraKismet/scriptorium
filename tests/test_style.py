@@ -109,8 +109,8 @@ class _Recorder:
 
 def _args(**over):
     # Serial, because every test here asserts which request carried what.
-    return argparse.Namespace(**{"dry_run": False, "provider": None, "batch": 6,
-                                 "concurrency": 1, **over})
+    return argparse.Namespace(**{"dry_run": False, "provider": None, "model": None,
+                                 "batch": 6, "concurrency": 1, **over})
 
 
 def _project(tmp_path, monkeypatch, sheet=SHEET, text=BOOK, name="novel.md",
@@ -130,7 +130,7 @@ def _project(tmp_path, monkeypatch, sheet=SHEET, text=BOOK, name="novel.md",
 
 
 def _run(src, segments, stub, monkeypatch, batch=6, cfg=CFG):
-    monkeypatch.setattr(translate_mod, "build_provider", lambda name, _cfg: stub)
+    monkeypatch.setattr(translate_mod, "build_provider", lambda name, _cfg, model=None: stub)
     return _translate(src, "zh-TW", cfg, segments, "draft", _args(batch=batch))
 
 

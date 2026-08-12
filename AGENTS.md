@@ -129,6 +129,24 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    config, state, or logs. `providers/base.py` reads `api_key_env` and nothing
    else.
 
+   Since 2026-08-12 the invariant is also held from the writing side, because
+   `lx config set` exists: `api_key_env` takes the *name* of a variable and
+   refuses anything shaped like a key, a `base_url` carrying userinfo **or a
+   query string** is refused, and `providers.*.headers` — sent to the backend
+   verbatim — is not writable from the command line at all. **A refusal on any of
+   those never echoes the value**, and no `lx` command takes key material on a
+   command line, because argv is in a process listing and in shell history before
+   a refusal can run. Every display surface — `lx config get`, `lx providers`,
+   `/api/state` — shares `config.printable_url`, or two commands disagree about
+   what is printable over one value.
+
+   A rule is enforced where a field **lands**. A key may not be addressed *inside*
+   something that holds one value, whether the field table says so or the merged
+   configuration's own type does: without that, `providers.new.api_key_env.x`
+   wrote a raw credential with no rule consulted, and `batch.size.x` replaced a
+   number with a block. The rules, and the two shapes that shape alone does not
+   catch, are in `docs/decisions.md`, 2026-08-12.
+
 7. **The provider request stays minimal.** No `response_format`, tools, or
    streaming unless the project opts in per-provider. Self-hosted runtimes reject
    unknown fields rather than ignoring them, and local support is a requirement.
@@ -195,7 +213,9 @@ src/scriptorium/
                  here: block-start containment, host escaping, placeholder pairs
   store.py       .lx/state.db (document state, SQLite), the translation-memory
                  key, the memory itself (.lx/tm.*.jsonl, still JSONL and tracked)
-  config.py      layered config, glossary, do-not-translate list, style sheet
+  config.py      layered config, glossary, do-not-translate list, style sheet;
+                 dotted-key addressing, the atomic config writer, and
+                 `resolve_route` — the one answer to "which backend, which model"
   translate.py   batching, concurrency, JSON tolerance, per-segment retry
   providers/     openai_compat (primary), anthropic; base holds transport + retry
   web/           local review workbench, a shell over cli.py
@@ -213,7 +233,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 921 passed; no network
+python -m pytest -q                 # 972 tests; no network (one is POSIX-only)
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
 
@@ -440,6 +460,25 @@ own.
   records from its own masking step; entering a segment without them is what
   multiplies the "green but broken" rate with every format added. The model still
   sees a bare `⟦n⟧`: the type lives beside the slot map, never inside the token.
+- A `routing` value is a provider name or `{"provider", "model"}`, and the bare
+  string is never migrated to the object form — every configuration on disk uses
+  it. One function answers which backend and which model a stage uses,
+  `config.resolve_route`, and `translate.py`, `cli.py` and `web/server.py` all
+  call it rather than reading `cfg["routing"]`: three sites resolving this
+  independently is how the workbench and the CLI come to describe different runs.
+  Most specific first — `--model`, the entry's model, the provider's — and a
+  `--provider` naming a *different* backend drops the entry's model, because a
+  model id belongs to the backend that serves it. An absent stage still falls
+  back to `draft`; a present but malformed entry is refused rather than rerouted.
+  `config.ROUTING_STAGES` is the one list of stages, read by `--mode`'s choices
+  and by `lx routing set` alike. See `docs/decisions.md`, 2026-08-12.
+- `lx config set` validates before it writes, so a refusal leaves the file byte
+  for byte. It edits the *raw* file rather than the merged configuration, which
+  is what lets a key from a newer build survive an older build's write and keeps
+  the file holding only what somebody chose. A rule is applied where a field
+  **lands**, never where it was addressed — writing a JSON block must not walk
+  around the rule that owns a leaf inside it, the same guarded-by-presence rule
+  `web/server.py` follows for `src` and `lang`.
 - Fuzzy matches are advisory. **They are never applied automatically** — a fuzzy
   hit differs in its placeholder set by definition.
 - Tests use no network. Providers are exercised against a mock HTTP server in

@@ -193,7 +193,11 @@ async function loadState() {
     const bad = p.needs_key && !p.key_present;
     return `<option value="${p.name}"${bad?' disabled':''}>${p.name} · ${p.model}${bad?' (no key)':''}</option>`;
   }).join('');
-  const routed = s.routing.draft;
+  // `/api/state` reports routing resolved — {provider, model} per stage — because
+  // the configured value is two shapes and assigning the object form here would
+  // set the control to "[object Object]", leaving it blank and sending the run
+  // to whichever backend sorted first.
+  const routed = s.routing.draft && s.routing.draft.provider;
   if (routed) $('#provider').value = routed;
 
   $('#docs').innerHTML = s.docs.map(d => {

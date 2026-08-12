@@ -82,7 +82,8 @@ class _Recorder:
 
 
 def _args(**over):
-    return argparse.Namespace(**{"dry_run": False, "provider": None, "batch": 6,
+    return argparse.Namespace(**{"dry_run": False, "provider": None, "model": None,
+                                 "batch": 6,
                                  # Serial on purpose: two workers make the order
                                  # of `stub.payloads` a race, and every test here
                                  # asserts on which request carried what.
@@ -101,7 +102,7 @@ def _book(tmp_path, monkeypatch, text=BOOK, name="novel.md"):
 
 
 def _run(src, cfg, segments, stub, monkeypatch, batch=6, mode="draft"):
-    monkeypatch.setattr(translate_mod, "build_provider", lambda name, _cfg: stub)
+    monkeypatch.setattr(translate_mod, "build_provider", lambda name, _cfg, model=None: stub)
     return _translate(src, "zh-TW", cfg, segments, mode, _args(batch=batch))
 
 

@@ -31,7 +31,7 @@ from ..cli import (
     language_tag,
     pending_segments,
 )
-from ..config import load_config
+from ..config import ROUTING_STAGES, ConfigError, load_config, resolve_route
 from ..docio import write_document
 from ..providers import available
 from ..store import append_tm, load_doc, load_tm, save_targets, tm_records, tracked
@@ -42,6 +42,32 @@ STATIC = os.path.join(os.path.dirname(__file__), "static")
 #: pointed at any of them, so the bound literal alone is not the answer.
 _LOOPBACK_BINDS = ("127.0.0.1", "::1", "localhost")
 _LOOPBACK_NAMES = ("127.0.0.1", "localhost", "[::1]")
+
+
+def _routing_state(cfg):
+    """Every stage resolved to the backend and the model it will actually use.
+
+    Resolved rather than echoed. A routing value is two shapes now — a provider
+    name or `{provider, model}` — and a page that read one of them would silently
+    break on the other: assigning the object to a `<select>`'s value yields
+    `[object Object]`, the control shows nothing, and the run goes to whichever
+    backend happened to be first in the list. Projecting one shape also keeps the
+    workbench and `lx routing show` from disagreeing about which model is about
+    to spend an hour, which is what `resolve_route` exists for.
+
+    A malformed entry is reported in the projection rather than raised: this is
+    the endpoint that draws the whole page, and one bad stage must not take the
+    document list down with it.
+    """
+    state = {}
+    for stage in ROUTING_STAGES:
+        try:
+            provider, model = resolve_route(cfg, stage)
+        except ConfigError as e:
+            state[stage] = {"provider": "", "model": "", "error": str(e)}
+        else:
+            state[stage] = {"provider": provider, "model": model}
+    return state
 
 
 def _own_hosts(port):
@@ -351,7 +377,7 @@ class _Handler(BaseHTTPRequestHandler):
                 "cwd": os.getcwd(),
                 "targets": cfg.get("targets", []),
                 "providers": available(cfg),
-                "routing": cfg.get("routing", {}),
+                "routing": _routing_state(cfg),
                 "docs": [{
                     "source": d["source"], "lang": d["lang"],
                     "total": len(d["segments"]),

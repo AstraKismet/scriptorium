@@ -142,10 +142,12 @@ It does not mean the translation is good; that is what review is for.
 | `lx render SRC --lang L -o OUT` | rebuild the target document |
 | `lx commit SRC --lang L` | bank approved wording in the translation memory |
 | `lx web` | local review workbench |
+| `lx config get\|set\|unset KEY [VALUE]` | read and write `lx.config.json` with dotted keys |
+| `lx routing show\|set STAGE PROVIDER[:MODEL]` | which backend, and which model, serves each stage |
 | `lx providers` / `lx stats` | backends / coverage |
 
 `--dry-run` on `translate`, `repair` and `run` reports the work without calling a
-model.
+model; `--provider` and `--model` override the routing entry for one run.
 
 The glossary enforces consistency, but it cannot tell you what a book's two
 hundred proper nouns are before you have read it. `lx terms` proposes them:
@@ -247,6 +249,33 @@ small batches by construction.
 "routing": { "draft": "local", "polish": "claude", "repair": "claude" }
 ```
 
+A routing value may also name a model, which is how two stages share one endpoint
+without a duplicate provider entry whose `base_url`, `api_key_env` and timeout are
+copies that drift:
+
+```json
+"routing": {
+  "draft":  { "provider": "openai", "model": "gpt-4o-mini" },
+  "polish": { "provider": "openai", "model": "gpt-4o" },
+  "repair": "local"
+}
+```
+
+`lx routing` writes both shapes, and refuses an unknown provider at write time
+rather than mid-run:
+
+```bash
+lx routing show                            # draft → openai (gpt-4o-mini)
+lx routing set polish openai:gpt-4o
+lx config set batch.size 10                # dotted keys, validated before the write
+lx config get providers.openai.api_key_env # the variable's name, and whether it is set
+```
+
+The model resolves most-specific-first: `--model` on the command line, then the
+routing entry's, then the provider's own. A `--provider` naming a different
+backend drops the entry's model, because a model id belongs to the backend that
+serves it.
+
 Any OpenAI-compatible endpoint works, including fully local ones:
 
 | Runtime | `base_url` |
@@ -265,6 +294,13 @@ API keys are read from the environment variable named in `api_key_env` and are
 never written to config, state or logs. Local servers usually need no key — leave
 `api_key_env` empty and no `Authorization` header is sent. `lx providers` shows
 what is configured and whether each key is present.
+
+`lx config set` will not put a credential in the file: `api_key_env` takes the
+*name* of a variable and nothing that looks like a key, a `base_url` carrying a
+username or password is refused, and `providers.*.headers` — which goes onto the
+wire verbatim — is not writable from the command line at all. No `lx` command
+takes key material on a command line, because argv is visible in a process
+listing and lands in shell history before any refusal can run.
 
 ## Translation memory
 
@@ -398,7 +434,7 @@ that lost.
 ## Development
 
 ```bash
-python -m pytest -q                # 921 passed, no network
+python -m pytest -q                # 972 tests, no network
 python -m ruff check src tests
 ```
 

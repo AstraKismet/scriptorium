@@ -12,7 +12,14 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from .checks import check_segment
-from .config import DEFAULT_TONE, canonical_tone, load_dnt, load_glossary, load_style
+from .config import (
+    DEFAULT_TONE,
+    canonical_tone,
+    load_dnt,
+    load_glossary,
+    load_style,
+    resolve_route,
+)
 from .mask import placeholder_ids, repair_placeholders
 from .normalize import normalize, reseat_outer_blanks
 from .providers import build as build_provider
@@ -502,7 +509,8 @@ class Progress:
 
 
 def translate_segments(segments, doc, cfg, provider_name=None, mode="draft",
-                       batch_size=None, concurrency=None, progress=None, on_batch=None):
+                       batch_size=None, concurrency=None, progress=None, on_batch=None,
+                       model=None):
     """Translate ``segments`` in place-safe fashion; returns (results, failures).
 
     ``results`` maps segment id to text. ``failures`` is a list of
@@ -531,9 +539,13 @@ def translate_segments(segments, doc, cfg, provider_name=None, mode="draft",
     # exists to prevent, arriving through a divergent fallback.
     tone = doc.get("tone") or DEFAULT_TONE
 
-    routing = cfg.get("routing", {})
-    name = provider_name or routing.get(mode) or routing.get("draft") or "local"
-    provider = build_provider(name, cfg)
+    # Which backend and which model, decided in one place. `provider_name` and
+    # `model` are this run's overrides; the routing entry and then the provider
+    # spec answer for whatever they leave open. Resolving it here rather than
+    # reading `cfg["routing"]` directly is what keeps `lx routing show`, the
+    # dry-run line and `/api/state` describing the run that will actually happen.
+    name, model_id = resolve_route(cfg, mode, provider_name, model)
+    provider = build_provider(name, cfg, model_id)
 
     batch_cfg = cfg.get("batch", {})
     size = batch_size or batch_cfg.get("size", 25)

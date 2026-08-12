@@ -3,6 +3,8 @@
 import json
 import os
 import re
+import stat
+import urllib.parse
 
 STATE = ".lx"
 
@@ -74,6 +76,18 @@ STYLE_BLOCK_MAX = 800
 #: bracketed line indented by an editor is still a header — and so a bracket
 #: *inside* a sentence is not.
 _STYLE_BLOCK_RE = re.compile(r"^\[(.+)\]$")
+
+
+class ConfigError(ValueError):
+    """A configuration value this project will not write, or a key that addresses nothing.
+
+    Raised rather than warned, and caught in `cli.main` for exit 2 — the
+    treatment `StyleSheetError` already gets, for the same reason. Everything it
+    guards is checked *before* anything is written, so a refused value never
+    reaches the file and the configuration on disk is still the one that was
+    there: a half-written config is worse than an unwritten one, because the run
+    it breaks is the next one rather than this one.
+    """
 
 
 class StyleSheetError(ValueError):
@@ -168,6 +182,32 @@ TEXT_DEFAULTS = {
     ],
 }
 
+#: The pipeline stages a `routing` entry may name: the ones that dispatch to a
+#: backend. One tuple rather than four literals, because `translate`'s `mode`,
+#: the `--mode` choices, `DEFAULT_CONFIG["routing"]` and `lx routing set`'s
+#: validator all have to agree about what a stage is, and a fourth spelling is
+#: how a stage silently stops being routable.
+#:
+#: Review and audit are on the roadmap as *workflow* stages and are deliberately
+#: not here. A stage earns an entry by dispatching to a model; adding one that
+#: does not would make `lx routing set` write a key nothing reads.
+ROUTING_STAGES = ("draft", "polish", "repair")
+
+#: The configuration keys whose value is a path. Named in one place because
+#: invariant 11 binds all of them together the day anything writes configuration
+#: over HTTP: each is a path read out of a configuration file, and each is
+#: trusted today on that invariant's own stated exception — a person typing at a
+#: terminal, which `lx config set` still is. On the day an HTTP writer appears,
+#: either every key here is confined at *use* time or none of them is writable
+#: over HTTP; `output_pattern` is confined on the result of formatting it, never
+#: on the pattern, because `../../{path}` is only decidable after interpolation.
+#: A fifth path key added anywhere else is the one that confinement misses.
+PATH_VALUED_KEYS = ("glossary", "dnt", "style", "output_pattern")
+
+#: What `set_in` and `unset_in` return for a key the file did not have. A
+#: sentinel rather than `None`, because a stored `null` is a value somebody wrote.
+MISSING = object()
+
 DEFAULT_CONFIG = {
     "source_lang": "en",
     "targets": ["zh-TW"],
@@ -242,6 +282,12 @@ DEFAULT_CONFIG = {
             "temperature": 0.2,
         },
     },
+    # A value is a provider name, or `{"provider": …, "model": …}` when the stage
+    # wants a different model at the same endpoint — a draft pass on something
+    # cheap and a polish pass on something strong, without a duplicate provider
+    # entry whose `base_url`, `api_key_env` and timeout are copies that drift.
+    # The bare string is what ships, and stays valid: every configuration in
+    # existence is written that way. `lx routing set` writes both shapes.
     "routing": {"draft": "local", "polish": "local", "repair": "local"},
     # `context`: how many segments either side travel with each request item as
     # read-only source, so that a pronoun, a speaker or a tense has something to
@@ -282,7 +328,7 @@ def load_json(path, default=None):
         return json.load(f)
 
 
-def dump_json(path, obj):
+def dump_json(path, obj, create_mode=None):
     """Write JSON atomically, with LF whatever platform ran the command.
 
     The terminator is a *choice* here, not an invariant: `docio` exists because
@@ -293,15 +339,245 @@ def dump_json(path, obj):
     one command producing a different tree depending on the machine that ran it,
     and the whole diff showing up the first time two of them shared a project.
     One keyword per site is a cheap price for that, and it costs nothing to read.
+
+    ``create_mode`` is for the one file that sits next to a person's secrets:
+    `lx.config.json`, which holds no credential by construction but does hold
+    `base_url`, and which a writable configuration turns into something worth
+    ordinary care. With it, three things change.
+
+    *The temporary file is created with `O_EXCL` and that mode, in one call.* A
+    `chmod` after `open` leaves a window where the bytes exist under whatever
+    the umask decided, and the umask can only ever *remove* bits from `0o600`,
+    never widen them. `O_EXCL` — after removing a stale `.tmp` from a crashed
+    write — also refuses to write through a link planted at a name this
+    function's own predictability gives away.
+
+    *An existing file keeps the mode it already has.* `os.replace` gives the
+    destination the temporary file's mode, so without this a config a person
+    deliberately made group-readable would silently become owner-only on the
+    first `lx config set`. Owner-only is for *creation*; tightening a mode
+    somebody chose by hand is a rewrite nobody asked for.
+
+    *The temporary file never survives a failure.* Unguarded, an exception
+    between the write and the replace left the whole configuration in a
+    world-readable `lx.config.json.tmp` indefinitely. `cli.append_glossary_rows`
+    already pays this; `dump_json` did not.
+
+    **On Windows the mode reaches only the read-only attribute, and owner-only
+    is not achieved.** A file's protection there is the DACL it inherits from
+    its directory — private in practice under a user profile, not private at all
+    on a world-writable share. No ACL surgery is attempted: pywin32 is a
+    compiled extension and invariant 1 refuses it, and a hand-rolled `ctypes`
+    equivalent would be security code testable on one CI runner in four. What
+    Windows does get is the exclusive create and the atomic replace.
     """
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
+    if create_mode is not None and os.path.islink(path):
+        # `os.replace` would swap the link itself for a regular file and quietly
+        # detach a layout somebody built on purpose.
+        raise ConfigError(
+            f"{path} is a symbolic link. Edit the file it points at instead.")
     tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
-        f.write("\n")
-    os.replace(tmp, path)
+    try:
+        if create_mode is None:
+            handle = open(tmp, "w", encoding="utf-8", newline="\n")
+        else:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            handle = os.fdopen(
+                os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, create_mode),
+                "w", encoding="utf-8", newline="\n")
+        with handle as f:
+            json.dump(obj, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        if create_mode is not None and os.path.exists(path):
+            os.chmod(tmp, stat.S_IMODE(os.stat(path).st_mode))
+        os.replace(tmp, path)
+    except BaseException:
+        # Every failure, not only `OSError`. Measured: a lone surrogate escape in
+        # a hand-edited file raises `UnicodeEncodeError` out of `json.dump`, and
+        # a Ctrl-C between the write and the replace raises `KeyboardInterrupt`
+        # — neither is an `OSError`, and both left the whole configuration in a
+        # world-readable `.tmp`, which is the exact residue this guard exists to
+        # prevent. Re-raised unchanged; this only cleans up.
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def printable_url(url):
+    """A base URL as it is safe to print: no userinfo, no query.
+
+    Neither is writable through `lx config set` any more, but a hand-edited file
+    can hold both and a proxy that takes `?key=` is a real shape. The host is
+    what a person needs to see — it answers "where is my document going" — and
+    the rest is dropped rather than trusted.
+
+    It lives here rather than in `cli.py` because `providers.available` is the
+    other display surface and feeds both `lx providers` and `/api/state`. One
+    function, or the two commands disagree about what is printable — measured,
+    and the disagreement was `lx providers` showing in full what
+    `lx config get` had just masked.
+    """
+    if not isinstance(url, str):
+        return url
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        carries = bool(parsed.username or parsed.password or parsed.query)
+    except ValueError:
+        return url
+    if not carries:
+        return url
+    host = parsed.hostname or ""
+    if parsed.port:
+        host = f"{host}:{parsed.port}"
+    return urllib.parse.urlunsplit(
+        (parsed.scheme, host, parsed.path, "…" if parsed.query else "", ""))
+
+
+# ── addressing ─────────────────────────────────────────────────────────────
+
+def split_key(key):
+    """A dotted key as its segments, refusing the spellings that address nothing."""
+    if not isinstance(key, str) or not key.strip():
+        raise ConfigError(
+            "give a key, as in `batch.size` or `providers.local.model`. "
+            "`lx config get` with no key prints the whole merged configuration.")
+    parts = key.split(".")
+    if any(not part for part in parts):
+        raise ConfigError(
+            f"{key!r} has an empty segment. Keys are dotted names, as in "
+            f"`providers.local.model` — and a key whose own name contains a dot "
+            f"cannot be spelled that way at all, so write its block instead: "
+            f"""`lx config set formats.map '{{".nfo": "text"}}'`.""")
+    return parts
+
+
+def get_in(data, parts):
+    """The value at a dotted key, or `KeyError` naming the segment that ran out."""
+    cur = data
+    for i, part in enumerate(parts):
+        if not isinstance(cur, dict) or part not in cur:
+            raise KeyError(".".join(parts[:i + 1]))
+        cur = cur[part]
+    return cur
+
+
+def set_in(data, parts, value):
+    """Write `value` at a dotted key, opening the blocks above it. Returns the old value.
+
+    A block that is opened is created empty; a segment that already holds
+    something which is *not* a block is refused rather than replaced, because
+    replacing it is how `lx config set routing.draft.model X` would silently
+    throw away the provider name that `routing.draft` was.
+    """
+    cur = data
+    for i, part in enumerate(parts[:-1]):
+        below = cur.get(part)
+        if below is None:
+            below = cur[part] = {}
+        elif not isinstance(below, dict):
+            prefix = ".".join(parts[:i + 1])
+            raise ConfigError(
+                f"{prefix} holds a value, not a block, so {'.'.join(parts)} addresses "
+                f"nothing inside it. Write {prefix} itself, or use the command that "
+                f"owns it — a routing entry is "
+                f"`lx routing set <stage> <provider>[:<model>]`.")
+        cur = below
+    old = cur.get(parts[-1], MISSING)
+    cur[parts[-1]] = value
+    return old
+
+
+def unset_in(data, parts):
+    """Remove a dotted key and every block it emptied. Returns the old value or `MISSING`.
+
+    The blocks go because the file is read by people: unsetting the only key in
+    `batch` would otherwise leave `"batch": {}` behind, and an empty block reads
+    as a decision somebody made rather than as the absence of one.
+    """
+    chain, cur = [data], data
+    for part in parts[:-1]:
+        cur = cur.get(part) if isinstance(cur, dict) else None
+        if not isinstance(cur, dict):
+            return MISSING
+        chain.append(cur)
+    if not isinstance(cur, dict) or parts[-1] not in cur:
+        return MISSING
+    old = cur.pop(parts[-1])
+    for i in range(len(chain) - 1, 0, -1):
+        if chain[i]:
+            break
+        del chain[i - 1][parts[i - 1]]
+    return old
+
+
+# ── routing ────────────────────────────────────────────────────────────────
+
+def route_entry(cfg, stage):
+    """What a stage's `routing` entry *says*, as ``(provider, model)``.
+
+    The model is `""` when the entry names none, which is not the same as the
+    provider having none: this reports what was written, and `resolve_route` is
+    what fills the rest in. `lx routing show` needs both to tell an override
+    from a default.
+
+    A stage with no entry of its own falls back to `draft`'s and then to
+    `local`, which is what `translate_segments` did before this was a function
+    and what several hand-written configurations rely on. A stage that *has* an
+    entry and whose entry is malformed is an error instead of that same
+    fallback: an empty string used to route the document to whatever `draft`
+    named, and a document arriving at an endpoint nobody chose is the hazard the
+    `base_url` half of this command exists around.
+    """
+    routing = cfg.get("routing") or {}
+    if not isinstance(routing, dict):
+        raise ConfigError("`routing` is a block of stage → provider entries.")
+    source = stage if stage in routing else "draft"
+    value = routing.get(source, "local")
+    if isinstance(value, dict):
+        provider, model = value.get("provider"), value.get("model") or ""
+    else:
+        provider, model = value, ""
+    if not isinstance(provider, str) or not provider.strip():
+        raise ConfigError(
+            f"routing.{source} names no provider. An entry is a provider name, as in "
+            f'"local", or {{"provider": "local", "model": "…"}} — '
+            f"`lx routing set {source} <provider>[:<model>]` writes either.")
+    if not isinstance(model, str):
+        raise ConfigError(f"routing.{source}.model is a model id, as text.")
+    return provider.strip(), model.strip()
+
+
+def resolve_route(cfg, stage, provider=None, model=None):
+    """Which backend and which model a run of `stage` uses: ``(provider, model)``.
+
+    Most specific first — the caller's `model`, then the routing entry's, then
+    the provider's own. One function for the three callers: `translate.py`
+    builds a provider from it, `cli.py` prints it in `lx routing show` and in
+    the dry-run line, and `web/server.py` projects it into `/api/state`. A
+    second site resolving this on its own is how the workbench comes to disagree
+    with the CLI about which model just spent an hour on a chapter.
+
+    **A `provider` override drops the entry's model.** `--provider openai` on a
+    stage routed to `{"provider": "local", "model": "qwen2.5:14b-instruct"}`
+    must not ask OpenAI for a Qwen build — a model id belongs to the backend
+    that serves it. The caller's own `model` survives, because that one was
+    typed for this run and for this provider.
+    """
+    name, routed = route_entry(cfg, stage)
+    if provider and provider != name:
+        name, routed = provider, ""
+    spec = (cfg.get("providers") or {}).get(name)
+    if not isinstance(spec, dict):
+        spec = {}
+    return name, str(model or routed or spec.get("model") or "")
 
 
 def _merge(base, override):
@@ -443,7 +719,12 @@ def write_templates():
     """
     created = []
     if not os.path.exists("lx.config.json"):
-        dump_json("lx.config.json", DEFAULT_CONFIG)
+        # Owner-only from the moment it exists, so that `lx config set` is not the
+        # first command in the file's life to think about its mode. It holds no
+        # credential by construction (invariant 6) and it does hold `base_url`,
+        # which is where a document goes. See `dump_json` for what Windows does
+        # and does not get out of this.
+        dump_json("lx.config.json", DEFAULT_CONFIG, create_mode=0o600)
         created.append("lx.config.json")
     # No `.lx/docs` any more: document state is one SQLite database, created on
     # first write by `store._connect`. `.lx/reports` is still a directory of JSON

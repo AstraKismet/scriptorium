@@ -3,9 +3,11 @@ a caller of these functions, so behaviour cannot diverge between them."""
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
+import urllib.parse
 from collections import Counter
 
 from . import __version__, formats
@@ -13,13 +15,25 @@ from .checks import check_segment
 from .config import (
     DEFAULT_TONE,
     GLOSSARY_HEADER,
+    MISSING,
+    PATH_VALUED_KEYS,
+    ROUTING_STAGES,
+    ConfigError,
     StyleSheetError,
     canonical_tone,
     dump_json,
+    get_in,
     load_config,
     load_dnt,
     load_glossary,
+    load_json,
     load_style,
+    printable_url,
+    resolve_route,
+    route_entry,
+    set_in,
+    split_key,
+    unset_in,
     write_templates,
 )
 from .docio import (
@@ -1024,6 +1038,678 @@ def cmd_init(args, cfg):
     _out("initialized" + (f": {', '.join(created)}" if created else " (already set up)"))
 
 
+# ── configuration ──────────────────────────────────────────────────────────
+
+#: An environment variable's name: what `api_key_env` holds, and the only thing
+#: it may hold. `fullmatch`, and the length bounded inside the pattern rather
+#: than after it, because `$` matches *before* a trailing newline — a pasted
+#: `"OPENAI_API_KEY\n"` satisfies `^…$` and a trailing newline is exactly what a
+#: clipboard carries. `_LANG_RE` above avoids the same trap by ending in `\Z`.
+_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
+
+#: A credential of this length is essentially never upper-case, and an
+#: environment variable name of this length essentially always is. See
+#: `_field_api_key_env` for why shape alone does not decide it.
+_ENV_LONG = 20
+
+#: Below this, a value equal to some variable's content is a coincidence
+#: (`OS=Windows_NT`, `SessionName=Console`) rather than a pasted key.
+_ENV_CONTENT_FLOOR = 8
+
+_NOT_A_NAME = "<not an environment variable name — see `lx config set --help`>"
+_HIDDEN_HEADER = "<hidden — a header value is sent to the backend verbatim>"
+
+_ENV_SHAPE_ADVICE = (
+    "{path} takes the NAME of an environment variable, never a key — and the "
+    "value is not repeated here, in case it is one. Names are letters, digits "
+    "and underscores, not starting with a digit. Export the key under a name, "
+    "then give the name:\n"
+    "  export OPENAI_API_KEY=…    (PowerShell: $env:OPENAI_API_KEY = '…')\n"
+    "  lx config set {path} OPENAI_API_KEY"
+)
+
+_URL_ADVICE = (
+    "{path} is the base URL of an HTTP endpoint, and the value is not repeated "
+    "here — this field sits right above api_key_env and is one of the two a "
+    'mispasted key lands in. A local runtime looks like '
+    '"http://localhost:11434/v1"; a hosted one like "https://api.openai.com/v1".'
+)
+
+_ENV_LOOKS_LIKE_KEY_ADVICE = (
+    "{path} was given something long and lower-case, which is the shape of a key "
+    "rather than of a variable name — it is not repeated here in case that is "
+    "what it is. Export it under a name and give the name instead:\n"
+    "  lx config set {path} OPENAI_API_KEY\n"
+    "If that really is your variable's name, set it in this environment first: a "
+    "name that is already exported is always accepted."
+)
+
+
+def _as_text(path, value, what):
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f"{path} is {what}, as text — got {value!r}.")
+    return value.strip()
+
+
+def _as_number(path, value, what, low=None, high=None):
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise ConfigError(f"{path} is {what} — got {value!r}.")
+    try:
+        number = float(value)
+    except ValueError:
+        raise ConfigError(f"{path} is {what} — got {value!r}.") from None
+    # `nan` and `inf` are what `float()` accepts and no window rejects: every
+    # comparison against a `nan` is False, so it passes `low` and `high` both,
+    # and `int(nan)` then raises the interpreter's own ValueError — which is not
+    # a `ConfigError`, so it reached the user as a traceback and exit 1 where
+    # every other refused value gets one sentence and exit 2. `1e400` is `inf`
+    # by the same door.
+    if not math.isfinite(number):
+        raise ConfigError(f"{path} is {what} — got {value!r}.")
+    if (low is not None and number < low) or (high is not None and number > high):
+        window = f"between {low} and {high}" if high is not None else f"{low} or more"
+        raise ConfigError(f"{path} is {what}, {window} — got {value!r}.")
+    return int(number) if number == int(number) else number
+
+
+def _as_count(path, value, what, low=1):
+    number = _as_number(path, value, what, low=low)
+    if number != int(number):
+        raise ConfigError(f"{path} is {what}, a whole number — got {value!r}.")
+    return int(number)
+
+
+def _as_list(path, raw):
+    """A list from one command-line word: JSON, or the friendlier comma form."""
+    if isinstance(raw, list):
+        return raw
+    text = raw.strip()
+    if text.startswith("["):
+        try:
+            decoded = json.loads(text)
+        except ValueError as e:
+            raise ConfigError(f"{path} is a list, and that is not valid JSON ({e}).") from None
+        if not isinstance(decoded, list):
+            raise ConfigError(f"{path} is a list.")
+        return decoded
+    return [part.strip() for part in text.split(",") if part.strip()]
+
+
+def _as_block(path, raw):
+    if isinstance(raw, dict):
+        return raw
+    try:
+        decoded = json.loads(raw)
+    except ValueError as e:
+        raise ConfigError(
+            f"{path} is a block, so its value is a JSON object — "
+            f"""`lx config set {path} '{{"key": "value"}}'` ({e}).""") from None
+    if not isinstance(decoded, dict):
+        raise ConfigError(f"{path} is a block, so its value is a JSON object.")
+    return decoded
+
+
+def _field_kind(cfg, path, value):
+    from .providers import KINDS
+    kind = _as_text(path, value, "a backend kind")
+    if kind not in KINDS:
+        raise ConfigError(
+            f"{path} = {kind!r} is not a backend this build has. "
+            f"Accepted: {', '.join(sorted(KINDS))}.")
+    return kind
+
+
+def _field_base_url(cfg, path, value):
+    """Where the document under translation is sent. Refuses what cannot be that.
+
+    **No refusal here echoes the value.** This field sits directly above
+    `api_key_env` in every provider block, so it is one of the two a mispasted
+    key lands in — and a refusal that names the accepted shape must not also
+    repeat what was rejected. Measured: the not-a-URL branch interpolated it, so
+    `lx config set providers.openai.base_url sk-ant-…` printed the key to stderr,
+    into the scrollback, and into any CI log that captured it.
+
+    **A query string is refused as well as userinfo.** A credential reaches a URL
+    two ways — `https://u:p@host/v1` and `https://host/v1?key=…` — and both put
+    it into a file `lx init` scaffolds into a repository. Refusing *every* query
+    rather than a guessed-at list of parameter names is invariant 4: a query in a
+    `base_url` is unusual, the rule is decidable without judgement, and the
+    escape for a genuine one is hand-editing the file, exactly as it is for a
+    header.
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(_URL_ADVICE.format(path=path))
+    url = value.strip()
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        carries = bool(parsed.username or parsed.password or parsed.query)
+    except ValueError:
+        raise ConfigError(_URL_ADVICE.format(path=path)) from None
+    if carries:
+        raise ConfigError(
+            f"{path} carries a username, a password or a query string, and any of the "
+            f"three is how a key ends up in a file meant to be committed (invariant 6) "
+            f"— the value is not repeated here in case that is what it is. Give the "
+            f"endpoint on its own, and name an environment variable in "
+            f"{path.rsplit('.', 1)[0]}.api_key_env.")
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ConfigError(_URL_ADVICE.format(path=path))
+    return url
+
+
+def _field_api_key_env(cfg, path, value):
+    """The NAME of an environment variable, and never a key.
+
+    Four rules after the empty case, first decision wins, and **not one of them
+    ever echoes the value** — the single thing a field that should hold a name
+    is likely to hold instead is the credential itself, and a refusal that
+    quotes it has published it to the terminal, to the scrollback, and to
+    whatever the output was piped into.
+
+    *Shape alone is a sieve.* Refusing everything but `[A-Za-z_][A-Za-z0-9_]*`
+    turns away every hyphenated format — `sk-…`, `sk-ant-…`, `xai-…` — and
+    admits `hf_…`, `ghp_…`, `github_pat_…`, `gsk_…`, `r8_…` and every hex or
+    base62 token that happens to start with a letter. So shape is the first
+    rule, not the only one.
+
+    *What catches those is length and case.* An environment variable name is
+    either short or upper-case by universal convention — `ANTHROPIC_API_KEY` is
+    17, `AWS_SECRET_ACCESS_KEY` is 21 and upper-case, `HUGGING_FACE_HUB_TOKEN`
+    is 22 and upper-case — while a 20-character credential is upper-case with
+    probability near zero. Mechanically decidable, which is what invariant 4
+    asks of a rule that refuses input.
+
+    *A variable that is currently set is always accepted as a name*, before
+    either of those. That is both the intended usage and the documented way past
+    the other two: a legitimate long lower-case name only has to exist in the
+    environment first, and every refusal below says so. The residual — a machine
+    where the secret is itself the name of a variable, which `docker run -e
+    $TOKEN` produces — is accepted rather than closed, because closing it would
+    hard-block a legitimate name with no escape at all.
+
+    *The last rule compares against what is actually exported*, which is what
+    catches an upper-case or short token that the length rule lets by. It names
+    the matched variable by name only; a name is not a secret.
+    """
+    if value is None or value == "":
+        return ""      # the shipped default for a local runtime: no key needed
+    if not isinstance(value, str):
+        raise ConfigError(_ENV_SHAPE_ADVICE.format(path=path))
+    if not _ENV_NAME_RE.fullmatch(value):
+        raise ConfigError(_ENV_SHAPE_ADVICE.format(path=path))
+    if value in os.environ:
+        return value
+    if len(value) >= _ENV_LONG and any(c.islower() for c in value):
+        raise ConfigError(_ENV_LOOKS_LIKE_KEY_ADVICE.format(path=path))
+    if len(value) >= _ENV_CONTENT_FLOOR:
+        for name, held in os.environ.items():
+            if held and value in (held, held.strip()):
+                raise ConfigError(
+                    f"{path} was given the *content* of {name}, not a name — the value "
+                    f"is not repeated here. Write the name instead:\n"
+                    f"  lx config set {path} {name}")
+    return value
+
+
+def _field_headers(cfg, path, value):
+    """Refused: a header value goes onto the wire verbatim.
+
+    `providers.*.headers` is the field a gateway wants `Authorization: Bearer …`
+    in, and `lx.config.json` is a file this project's own scaffolder puts into a
+    repository — so a command that wrote it would be invariant 6 with one extra
+    step. The non-secret uses (an `HTTP-Referer`, an API version) stay reachable
+    by hand-editing the file, which is exactly where they are today; what this
+    refuses is a *command* that puts a credential there, and a fortiori the HTTP
+    endpoint that would one day call the same function.
+    """
+    # The provider, not the key that was typed: this rule owns the whole block, so
+    # `path` may be `providers.local.headers.Authorization` and the advice has to
+    # name `providers.local.api_key_env` either way.
+    provider = ".".join(path.split(".")[:2])
+    raise ConfigError(
+        f"{path} is not writable from the command line. A header value is sent to the "
+        f"backend verbatim, so this is where a key ends up inside a file meant to be "
+        f"committed — keys belong in the environment, named by {provider}.api_key_env. "
+        f"Edit lx.config.json by hand for a header that is not one.")
+
+
+def _field_route(cfg, path, value):
+    """A routing value: `local`, `local:qwen2.5:14b-instruct`, or the object form.
+
+    One parser for `lx routing set` and for `lx config set routing.<stage>`,
+    because `provider:model` has to mean the same thing in both. It splits on
+    the **first** colon only: a model id routinely carries one of its own, and
+    the shipped default is `qwen2.5:14b-instruct`.
+    """
+    stage = path.split(".", 1)[1] if "." in path else ""
+    if stage not in ROUTING_STAGES:
+        raise ConfigError(
+            f"{stage!r} is not a pipeline stage. Known stages: "
+            f"{', '.join(ROUTING_STAGES)}, and an entry is written whole — "
+            f"`lx routing set draft <provider>[:<model>]`.")
+    if isinstance(value, str) and value.strip().startswith("{"):
+        value = _as_block(path, value.strip())
+    if isinstance(value, dict):
+        provider, model = value.get("provider"), value.get("model") or ""
+    else:
+        provider, _, model = _as_text(
+            path, value, "a provider name, optionally `provider:model`").partition(":")
+    if not isinstance(provider, str) or not provider.strip():
+        raise ConfigError(
+            f"{path} names no provider. Write `<provider>` or `<provider>:<model>`.")
+    if not isinstance(model, str):
+        raise ConfigError(f"{path}: a model id is text.")
+    provider, model = provider.strip(), model.strip()
+    specs = cfg.get("providers") or {}
+    if provider not in specs:
+        # The whole value of checking here: today a typo surfaces as a run-time
+        # failure, after the extract and however long the person waited.
+        raise ConfigError(
+            f"unknown provider {provider!r}. Configured: "
+            f"{', '.join(sorted(specs)) or 'none'} — `lx providers` lists them with "
+            f"their models and their key status.")
+    # The bare string is kept when there is no model to add. Every configuration
+    # in existence is written that way and `DEFAULT_CONFIG` still ships it, so a
+    # writer that upgraded every entry to the object form would quietly make one
+    # shape unreachable and turn a compatibility promise into a migration.
+    return {"provider": provider, "model": model} if model else provider
+
+
+#: A field this command decides for itself rather than inferring from what is
+#: already there. A pattern is a dotted key with `*` standing for exactly one
+#: segment; each rule takes the value as typed *or* as decoded out of a JSON
+#: block, and returns what will be written.
+_CONFIG_FIELDS = {
+    "providers.*.kind": _field_kind,
+    "providers.*.base_url": _field_base_url,
+    "providers.*.api_key_env": _field_api_key_env,
+    "providers.*.headers": _field_headers,
+    "providers.*.model": lambda cfg, path, v: _as_text(path, v, "a model id"),
+    "providers.*.timeout":
+        lambda cfg, path, v: _as_number(path, v, "a number of seconds", low=1),
+    "providers.*.temperature":
+        lambda cfg, path, v: _as_number(path, v, "a sampling temperature", low=0, high=2),
+    "providers.*.max_tokens": lambda cfg, path, v: _as_count(path, v, "a token budget"),
+    "providers.*.retries": lambda cfg, path, v: _as_count(path, v, "a retry count", low=0),
+    "batch.size": lambda cfg, path, v: _as_count(path, v, "segments per request"),
+    "batch.concurrency": lambda cfg, path, v: _as_count(path, v, "parallel requests"),
+    "batch.max_repair_rounds":
+        lambda cfg, path, v: _as_count(path, v, "a number of repair rounds", low=0),
+    "batch.context":
+        lambda cfg, path, v: _as_count(path, v, "a number of neighbour segments", low=0),
+    "routing.*": _field_route,
+}
+
+#: The one pattern whose rule answers for everything below the key as well,
+#: because that key may legitimately hold a block. Its rule refuses the whole of
+#: it, so `providers.x.headers.Authorization` is refused too. Every *other*
+#: pattern decides a single value, and a path reaching inside one is refused by
+#: `_addressable` before any rule is asked.
+_WHOLE_BLOCK = frozenset(["providers.*.headers"])
+
+
+def _pattern_matches(pattern, parts):
+    names = pattern.split(".")
+    return len(names) == len(parts) and all(
+        name in ("*", part) for name, part in zip(names, parts))
+
+
+def _exact_rule(parts):
+    """`(pattern, rule)` for this key itself, or `(None, None)`."""
+    for pattern, rule in _CONFIG_FIELDS.items():
+        if _pattern_matches(pattern, parts):
+            return pattern, rule
+    return None, None
+
+
+def _field_rule(parts):
+    """The rule that decides this key, or `None`."""
+    pattern, rule = _exact_rule(parts)
+    if rule:
+        return rule
+    for length in range(len(parts) - 1, 0, -1):
+        pattern, rule = _exact_rule(parts[:length])
+        if rule and pattern in _WHOLE_BLOCK:
+            return rule
+    return None
+
+
+def _addressable(cfg, parts):
+    """Refuse a key that reaches inside something which cannot hold a block.
+
+    Two ways to know, and both are needed — this is one rule with two sources,
+    not two rules.
+
+    **The merged configuration types most keys.** `batch.size` is a number,
+    `targets` is a list, `length_ratio.zh-TW` is a pair. `set_in` cannot see any
+    of that, because it edits the *raw* file and the raw file usually does not
+    hold the key at all: on a fresh project `lx config set batch.size.x 1`
+    exited 0, wrote `{"batch": {"size": {"x": 1}}}`, and the next `lx translate`
+    died inside `_chunks` with a `TypeError`.
+
+    **The field table types the rest**, for a key the merged configuration has
+    never seen. Every rule in it decides one value, so a path reaching inside a
+    rule's key is a path no rule fires on — which is how
+    `lx config set providers.newbackend.api_key_env.x sk_live_…` wrote a raw
+    credential into the file with `_field_api_key_env` never consulted. The four
+    providers `lx init` scaffolds were incidentally safe, because their
+    `api_key_env` is already a string in the raw file and `set_in` refuses to
+    descend into one; a backend somebody adds is not, and adding one is the
+    normal reason to run this command.
+
+    The same check is what makes `lx config set routing.draft.model` say the true
+    thing — `routing.draft` holds one value — rather than the misleading
+    `'draft.model' is not a pipeline stage`.
+    """
+    for length in range(1, len(parts)):
+        head = parts[:length]
+        prefix = ".".join(head)
+        pattern, rule = _exact_rule(head)
+        if rule and pattern not in _WHOLE_BLOCK:
+            fix = (f"`lx routing set {head[-1]} <provider>[:<model>]`"
+                   if pattern == "routing.*" else f"`lx config set {prefix} <value>`")
+            raise ConfigError(
+                f"{prefix} holds one value, so {'.'.join(parts)} addresses nothing "
+                f"inside it. Write {prefix} itself — {fix}.")
+        try:
+            above = get_in(cfg, head)
+        except KeyError:
+            continue
+        if not isinstance(above, dict):
+            raise ConfigError(
+                f"{prefix} holds a value, not a block, so {'.'.join(parts)} addresses "
+                f"nothing inside it. Write {prefix} itself — "
+                f"`lx config set {prefix} <value>`.")
+
+
+def _decode(cfg, parts, raw):
+    """One command-line word as the type its key already holds.
+
+    Type-directed rather than JSON-first, because `lx config set
+    providers.openai.model 4` has to write the string `"4"` — a model id is text
+    whatever it looks like. JSON is tried only where the merged configuration
+    has nothing to take a type from, and a plain string is what is left when it
+    does not parse.
+    """
+    key = ".".join(parts)
+    try:
+        current = get_in(cfg, parts)
+    except KeyError:
+        current = MISSING
+    if isinstance(current, bool):
+        word = raw.strip().lower()
+        if word in ("true", "yes", "on", "1"):
+            return True
+        if word in ("false", "no", "off", "0"):
+            return False
+        raise ConfigError(f"{key} is true or false — got {raw!r}.")
+    if isinstance(current, (int, float)):
+        return _as_number(key, raw, "a number")
+    if isinstance(current, str):
+        return raw
+    if isinstance(current, list):
+        return _as_list(key, raw)
+    if isinstance(current, dict):
+        return _as_block(key, raw)
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return raw
+
+
+def _validated(cfg, parts, value):
+    """`value` with every field rule inside it applied, wherever the field sits.
+
+    A rule keyed on a dotted path has to fire whether the path was typed or
+    arrived inside a block: `lx config set providers.openai '{"api_key_env": …}'`
+    writes the same leaf as `lx config set providers.openai.api_key_env …`, and a
+    check that looked only at the key somebody typed would be decoration. Guarded
+    by where a field *lands*, not by how it was addressed — which is the rule
+    `web/server.py` already follows for `src` and `lang`.
+    """
+    rule = _field_rule(parts)
+    if rule:
+        return rule(cfg, ".".join(parts), value)
+    if isinstance(value, dict):
+        return {name: _validated(cfg, parts + [name], below)
+                for name, below in value.items()}
+    return value
+
+
+def config_value(cfg, key, raw):
+    """What `lx config set key raw` will write: `(parts, value)`, decoded then checked."""
+    parts = split_key(key)
+    _addressable(cfg, parts)
+    rule = _field_rule(parts)
+    if rule:
+        return parts, rule(cfg, key, raw)
+    return parts, _validated(cfg, parts, _decode(cfg, parts, raw))
+
+
+# -- what may be printed ---------------------------------------------------
+
+def _is_env_name(value):
+    return not value or (isinstance(value, str) and bool(_ENV_NAME_RE.fullmatch(value)))
+
+
+def _printable_spec(spec):
+    if not isinstance(spec, dict):
+        return spec
+    shown = dict(spec)
+    if not _is_env_name(shown.get("api_key_env")):
+        shown["api_key_env"] = _NOT_A_NAME
+    if isinstance(shown.get("headers"), dict):
+        shown["headers"] = {name: _HIDDEN_HEADER for name in shown["headers"]}
+    if isinstance(shown.get("base_url"), str):
+        shown["base_url"] = printable_url(shown["base_url"])
+    return shown
+
+
+def _printable(parts, value):
+    """`value` as it may be printed, decided by where it sits rather than by who asked.
+
+    `lx config get providers`, `lx config get providers.openai` and the old → new
+    line of `lx config set` all reach this, so they cannot disagree about what is
+    printable. A hand-edited file is the case it exists for: `lx config set` will
+    not write a key into `api_key_env` or a header at all, and this project has
+    no say over what somebody typed into the file directly.
+    """
+    if not parts or parts[0] != "providers":
+        return value
+    if len(parts) == 1:
+        return ({name: _printable_spec(spec) for name, spec in value.items()}
+                if isinstance(value, dict) else value)
+    if len(parts) == 2:
+        return _printable_spec(value)
+    field = parts[2]
+    if field == "headers":
+        if len(parts) > 3:
+            return _HIDDEN_HEADER
+        return ({name: _HIDDEN_HEADER for name in value}
+                if isinstance(value, dict) else value)
+    if field == "api_key_env":
+        return value if _is_env_name(value) else _NOT_A_NAME
+    if field == "base_url" and isinstance(value, str):
+        return printable_url(value)
+    return value
+
+
+def _rendered(parts, value):
+    """One printed value: a string bare, anything else as JSON."""
+    shown = _printable(parts, value)
+    return shown if isinstance(shown, str) else json.dumps(shown, ensure_ascii=False)
+
+
+# -- the commands ----------------------------------------------------------
+
+def do_config_get(cfg, key=None):
+    """The effective value at `key`, as the text `lx config get` prints.
+
+    An `api_key_env` gets the variable's name and whether it is set — never what
+    it holds. Reading the value out is the leak invariant 6 exists to prevent,
+    and whether a key is present is the whole of what anybody needs here.
+    """
+    if not key:
+        whole = {name: _printable([name], block) for name, block in cfg.items()}
+        return json.dumps(whole, ensure_ascii=False, indent=2)
+    parts = split_key(key)
+    try:
+        value = get_in(cfg, parts)
+    except KeyError as e:
+        raise ConfigError(
+            f"no such key: {e.args[0]}. `lx config get` with no key prints the whole "
+            f"merged configuration.") from None
+    if parts[0] == "providers" and len(parts) == 3 and parts[2] == "api_key_env":
+        if not value:
+            return "(no key needed for this backend)"
+        if not _is_env_name(value):
+            return _NOT_A_NAME
+        state = "set" if os.environ.get(value) else "not set"
+        return f"{value} ({state} in this environment)"
+    return _rendered(parts, value)
+
+
+def _write_config(path, data):
+    try:
+        dump_json(path, data, create_mode=0o600)
+    except ConfigError:
+        raise                       # the symlink refusal already says what to do
+    except OSError as e:
+        raise ConfigError(
+            f"could not write {path} ({e.strerror or e}) — it is unchanged. Check that "
+            f"it is not read-only and not open in another program.") from None
+    except ValueError as e:
+        # A file this build can read and cannot write back. `json.load` accepts a
+        # lone surrogate escape — `"\\ud800"` — and the write then dies at the
+        # encode. One sentence and exit 2, like every other refusal here, rather
+        # than the traceback and exit 1 that reached the user before.
+        raise ConfigError(
+            f"{path} holds something that cannot be written back as UTF-8 ({e}) — it "
+            f"is unchanged. Open it and remove the offending escape.") from None
+
+
+def do_config_set(cfg, key, raw, path="lx.config.json"):
+    """Write one dotted key into `path`; returns `(old, new)`, `old` is `MISSING` if absent.
+
+    `cfg` is the merged configuration and is what the value is checked against;
+    `path` is re-read *raw* and written back, so a key this build does not know —
+    one a newer version wrote — survives the round trip untouched, and the file
+    goes on holding only what somebody chose rather than a materialized copy of
+    every default.
+
+    **This is a terminal-trust writer, and that is the whole of its licence.**
+    Invariant 11's named exception is a person typing a command, which is what
+    this is; `config.PATH_VALUED_KEYS` lists the four keys that inherit the
+    exception through it. It is exactly one import away from being an HTTP
+    writer, and on that day either every one of those keys is confined at *use*
+    time — `output_pattern` on the result of formatting it, never on the pattern
+    — or none of them is writable over HTTP. `append_glossary_rows` below
+    carries the other half of the same rule.
+    """
+    parts, value = config_value(cfg, key, raw)
+    data = load_json(path, {})
+    old = set_in(data, parts, value)
+    _write_config(path, data)
+    return old, value
+
+
+def do_config_unset(key, path="lx.config.json"):
+    """Remove a dotted key from `path`; returns the old value, or `MISSING` if it had none."""
+    parts = split_key(key)
+    data = load_json(path, {})
+    old = unset_in(data, parts)
+    if old is not MISSING:
+        _write_config(path, data)
+    return old
+
+
+def do_routing_set(cfg, stage, target, path="lx.config.json"):
+    """Point one stage at a provider, optionally naming a model.
+
+    The stage is checked here as well as inside `_field_route`, because this
+    function can be called with a stage that is not one segment — and a
+    `routing.a.b` reaching the generic writer would put a key in the file that
+    nothing reads.
+    """
+    if stage not in ROUTING_STAGES:
+        raise ConfigError(
+            f"{stage!r} is not a pipeline stage. Known stages: "
+            f"{', '.join(ROUTING_STAGES)}.")
+    return do_config_set(cfg, f"routing.{stage}", target, path)
+
+
+def _escapes_project(value):
+    return isinstance(value, str) and (
+        os.path.isabs(value) or ".." in value.replace("\\", "/").split("/"))
+
+
+def cmd_config_get(args, cfg):
+    _out(do_config_get(cfg, args.key))
+
+
+def cmd_config_set(args, cfg):
+    old, new = do_config_set(cfg, args.key, args.value, args.config)
+    parts = split_key(args.key)
+    was = "unset" if old is MISSING else _rendered(parts, old)
+    _out(f"{args.key}: {was} → {_rendered(parts, new)}")
+    if parts[-1] == "base_url":
+        _out("that is where the document under translation is sent — "
+             "check it before the next run")
+    if parts[-1] == "api_key_env" and new and not os.environ.get(new):
+        _out(f"{new} is not set in this environment yet; export it before running")
+    if args.key in PATH_VALUED_KEYS and _escapes_project(new):
+        _out("that path leaves the project directory. `lx` opens it as typed, which is "
+             "what a path typed at a terminal gets (invariant 11) — the workbench does "
+             "not get the same licence")
+
+
+def cmd_config_unset(args, cfg):
+    old = do_config_unset(args.key, args.config)
+    if old is MISSING:
+        _out(f"{args.key} was not set in {args.config}; the default already applies")
+        return
+    try:
+        now = f"the default ({do_config_get(load_config(args.config), args.key)})"
+    except ConfigError:
+        # A key this build has no default for — one a newer version wrote, or a
+        # note somebody kept in the file. Reporting that is better than failing
+        # here, because by this line the removal has already happened.
+        now = "nothing; this build has no default for it"
+    _out(f"{args.key}: {_rendered(split_key(args.key), old)} → {now}")
+
+
+def _route_line(cfg, stage):
+    """One line of `lx routing show`: what the entry says, then what it resolves to."""
+    try:
+        provider, entry_model = route_entry(cfg, stage)
+        _, model = resolve_route(cfg, stage)
+    except ConfigError as e:
+        return f"{stage} → {e}"
+    if entry_model:
+        # The model the *entry* names is the override, and it is what this
+        # command exists to make visible.
+        line = f"{stage} → {provider} ({entry_model})"
+    elif model:
+        line = f"{stage} → {provider} ({model}, from the provider)"
+    else:
+        line = f"{stage} → {provider}"
+    if provider not in (cfg.get("providers") or {}):
+        line += "  ← not configured; `lx providers` lists what is"
+    return line
+
+
+def cmd_routing_show(args, cfg):
+    for stage in ROUTING_STAGES:
+        _out(_route_line(cfg, stage))
+
+
+def cmd_routing_set(args, cfg):
+    old, new = do_routing_set(cfg, args.stage, args.target, args.config)
+    was = "unset" if old is MISSING else json.dumps(old, ensure_ascii=False)
+    _out(f"routing.{args.stage}: {was} → {json.dumps(new, ensure_ascii=False)}")
+    _out(_route_line(load_config(args.config), args.stage))
+
+
 # ── translate / repair / run ───────────────────────────────────────────────
 
 def cmd_providers(args, cfg):
@@ -1032,8 +1718,16 @@ def cmd_providers(args, cfg):
         key = "no key needed" if not p["needs_key"] else (
             f"{p['key_env']} set" if p["key_present"] else f"{p['key_env']} MISSING")
         _out(f"{p['name']:12} {p['kind']:10} {p['model']:28} {p['base_url']:34} {key}")
-    routing = cfg.get("routing", {})
-    _out("\nrouting: " + "  ".join(f"{k}={v}" for k, v in routing.items()))
+    _out("\nrouting: " + "  ".join(_route_word(cfg, s) for s in ROUTING_STAGES))
+
+
+def _route_word(cfg, stage):
+    """`stage=provider[:model]` — the spelling `lx routing set` takes back."""
+    try:
+        provider, model = route_entry(cfg, stage)
+    except ConfigError:
+        return f"{stage}=(malformed; `lx routing show` says how)"
+    return f"{stage}={provider}" + (f":{model}" if model else "")
 
 
 def _translate(src, lang, cfg, segments, mode, args):
@@ -1044,8 +1738,9 @@ def _translate(src, lang, cfg, segments, mode, args):
         return 0, []
     if args.dry_run:
         chars = sum(len(s["masked"]) for s in segments)
+        provider, model = resolve_route(cfg, mode, args.provider, args.model)
         _out(f"dry run: {len(segments)} segment(s), {chars} source characters, "
-             f"mode={mode}, provider={args.provider or cfg.get('routing', {}).get(mode)}")
+             f"mode={mode}, provider={provider}, model={model or 'unset'}")
         return 0, []
     origin = f"llm:{mode}"
     # Each batch is committed as it lands. `do_apply` still runs at the end and
@@ -1057,7 +1752,8 @@ def _translate(src, lang, cfg, segments, mode, args):
         segments, doc, cfg, provider_name=args.provider, mode=mode,
         batch_size=args.batch, concurrency=args.concurrency,
         progress=Progress(_out),
-        on_batch=lambda ok: save_targets(src, lang, ok, origin))
+        on_batch=lambda ok: save_targets(src, lang, ok, origin),
+        model=args.model)
     applied, _ = do_apply(src, lang, cfg, results, origin=origin)
     for sid, why in failures:
         _out(f"  unresolved {sid}: {why}")
@@ -1146,6 +1842,10 @@ def cmd_web(args, cfg):
 
 def _add_llm_flags(p):
     p.add_argument("--provider", help="provider name from lx.config.json; overrides routing")
+    p.add_argument("--model", help="model id for this run; overrides the routing entry's "
+                                   "model and the provider's own. A --provider that names "
+                                   "a different backend drops the entry's model, since a "
+                                   "model id belongs to the backend that serves it")
     p.add_argument("--batch", type=int, help="segments per request")
     p.add_argument("--concurrency", type=int, help="parallel requests")
     p.add_argument("--dry-run", action="store_true", help="report the work without calling a model")
@@ -1159,6 +1859,39 @@ def build_parser():
 
     sub.add_parser("init", help="scaffold config and state").set_defaults(fn=cmd_init)
     sub.add_parser("providers", help="list configured backends").set_defaults(fn=cmd_providers)
+
+    cf = sub.add_parser("config", help="read and write lx.config.json")
+    cf_sub = cf.add_subparsers(dest="action", required=True)
+    cf_get = cf_sub.add_parser(
+        "get", help="print the effective value; with no key, the whole merged configuration")
+    cf_get.add_argument("key", nargs="?", help="dotted, as in providers.local.model")
+    cf_get.set_defaults(fn=cmd_config_get)
+    cf_set = cf_sub.add_parser(
+        "set", help="write one dotted key",
+        description="Write one dotted key into lx.config.json. Keys never carry a "
+                    "credential: api_key_env takes the NAME of an environment variable, "
+                    "and no `lx` command takes key material on a command line — argv is "
+                    "visible in a process listing and lands in shell history, which no "
+                    "later refusal can undo.")
+    cf_set.add_argument("key")
+    cf_set.add_argument("value")
+    cf_set.set_defaults(fn=cmd_config_set)
+    cf_unset = cf_sub.add_parser("unset", help="remove a key so the default applies again")
+    cf_unset.add_argument("key")
+    cf_unset.set_defaults(fn=cmd_config_unset)
+
+    ro = sub.add_parser("routing", help="which backend serves each pipeline stage")
+    ro_sub = ro.add_subparsers(dest="action", required=True)
+    ro_sub.add_parser(
+        "show", help="stage → provider, with the model when the entry names one"
+    ).set_defaults(fn=cmd_routing_show)
+    ro_set = ro_sub.add_parser("set", help="point a stage at a provider")
+    ro_set.add_argument("stage", choices=list(ROUTING_STAGES))
+    ro_set.add_argument("target", metavar="provider[:model]",
+                        help="a provider name, or provider:model to run that stage on a "
+                             "different model at the same endpoint. The model may contain "
+                             "colons of its own — only the first one splits")
+    ro_set.set_defaults(fn=cmd_routing_set)
 
     e = sub.add_parser("extract", help="parse a document into segments")
     e.add_argument("src")
@@ -1226,7 +1959,7 @@ def build_parser():
     tr = sub.add_parser("translate", help="translate segments with a configured model")
     tr.add_argument("src")
     tr.add_argument("--lang", required=True)
-    tr.add_argument("--mode", choices=["draft", "polish", "repair"], default="draft")
+    tr.add_argument("--mode", choices=list(ROUTING_STAGES), default="draft")
     tr.add_argument("--ids", help="comma-separated segment ids")
     tr.add_argument("--all", action="store_true", help="include already-translated segments")
     tr.add_argument("--limit", type=int, default=0)
@@ -1269,7 +2002,7 @@ def main(argv=None):
         args.fn(args, cfg)
     except (FileNotFoundError, StateVersionError, UnsupportedSource,
             GlossaryWriteError, UnknownFormat, UndecodableDocument,
-            StyleSheetError) as e:
+            StyleSheetError, ConfigError) as e:
         print(f"lx: {e}", file=sys.stderr)
         sys.exit(2)
     except BrokenPipeError:

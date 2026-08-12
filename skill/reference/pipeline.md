@@ -35,6 +35,17 @@ the second, third, and seventh translation of a document nearly free.
 | `lx render SRC --lang L --fallback` | untranslated segments fall back to source |
 | `lx commit SRC --lang L` | append approved segments to the TM |
 | `lx stats [--lang L]` | coverage across tracked documents |
+| `lx config get [KEY]` | the effective value; with no key, the whole merged configuration |
+| `lx config set KEY VALUE` | write one dotted key, validated before the write |
+| `lx config unset KEY` | remove a key so the default applies again |
+| `lx routing show` | stage → provider, with the model when the entry names one |
+| `lx routing set STAGE PROVIDER[:MODEL]` | point a stage at a backend, and optionally at a model |
+
+`lx config set` never writes a credential. `api_key_env` takes the *name* of an
+environment variable and refuses anything shaped like a key; `providers.*.headers`
+is not writable from the command line at all, because a header value reaches the
+backend verbatim. Do not put key material on any `lx` command line — argv is
+visible in a process listing and lands in shell history.
 
 `apply` accepts three shapes: `{"s0001": "..."}`, `[{"id": "s0001", "text": "..."}]`,
 or `{"segments": [...]}`. Unknown ids are reported and ignored rather than failing

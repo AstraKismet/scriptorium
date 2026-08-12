@@ -3,6 +3,265 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-08-12 · Configuration becomes writable, and the field that should hold a name is the field a key gets pasted into
+
+Closing HANDOFF-206. Two capabilities landed — `lx config get|set|unset` and
+`lx routing show|set` — and a routing value may now name a model. The
+capabilities were the easy half. The hard half is that a *writer* next to
+invariant 6 changes what that invariant is defended by: until now nothing in the
+tree could put a credential into `lx.config.json`, because nothing in the tree
+wrote it at all.
+
+### A routing value gains a model, and the bare string is not migrated
+
+`{"provider": "local", "model": "…"}` joins the provider name. The bare string
+stays valid and `DEFAULT_CONFIG` still ships it. *Lost:* upgrading every entry to
+the object form on first write, which reads tidier and would have made one shape
+unwritable — every configuration on disk uses the string, so a writer that only
+emitted objects turns a compatibility promise into a migration nobody asked for.
+`lx routing set draft local` therefore writes `"local"`, and only
+`draft local:qwen2.5:14b-instruct` writes the object.
+
+The colon splits **once**. The shipped default model is `qwen2.5:14b-instruct`,
+so a rule that split on every colon would refuse the value the project ships.
+
+### One resolver, and a `--provider` override drops the entry's model
+
+`config.resolve_route(cfg, stage, provider=None, model=None)` answers "which
+backend, which model" for `translate.py`, for `lx routing show` and the dry-run
+line, and for `/api/state`. Three sites had been reading `cfg["routing"]`
+independently; the failure that shape produces is not a crash but the workbench
+and the CLI describing different runs.
+
+Resolution is most-specific-first: the caller's `--model`, then the entry's, then
+the provider spec's. The one rule that is not obvious: **a `--provider` naming a
+different backend discards the entry's model.** A stage routed to
+`{"provider": "local", "model": "qwen2.5:14b-instruct"}` and then run with
+`--provider openai` must not ask OpenAI for a Qwen build — a model id belongs to
+the backend that serves it. The caller's own `--model` survives, because that one
+was typed for this run and for this provider.
+
+**A present but malformed entry is now an error rather than a fallback.** The old
+chain was `routing.get(mode) or routing.get("draft") or "local"`, so
+`"polish": ""` was falsy, fell through, and sent the polish pass to whatever
+`draft` named — silently. An *absent* key still falls back, because hand-written
+configurations name `draft` alone and depend on it; an empty string, a `{}`, or a
+dict with no `provider` names a stage and gets a refusal naming that stage. Text
+arriving at an endpoint nobody selected is the same hazard as a repointed
+`base_url`, reached through a side door.
+
+### `api_key_env`: shape is a sieve, and the refusal may not echo the value
+
+The field takes the *name* of an environment variable. The package asked for two
+rules — reject what is not a plausible name, reject what matches the content of a
+variable already set — and the security pass found the first one is a sieve.
+`^[A-Za-z_][A-Za-z0-9_]*$` turns away every hyphenated format (`sk-…`,
+`sk-ant-…`, `xai-…`) and **admits** `hf_…`, `ghp_…`, `github_pat_…`, `gsk_…`,
+`r8_…` and every hex or base62 token that happens to begin with a letter. Those
+are current, real credential formats.
+
+Five rules, first decision wins:
+
+1. the empty string is allowed — it is the shipped default for a local runtime
+   and means "no key needed";
+2. `re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}")`. **`fullmatch`, never
+   `^…$` with `re.match`**: `$` matches before a trailing newline, and a trailing
+   newline is exactly what a clipboard carries, so `"OPENAI_API_KEY\n"` would
+   have been accepted and every later lookup by that name would have failed for a
+   reason nobody could see. `_LANG_RE` avoids the same trap by ending in `\Z`;
+3. a value that is *itself the name of a currently-set variable* is always
+   accepted. This is the intended usage and the documented escape from the two
+   rules below;
+4. **long and containing a lower-case letter is refused** — twenty characters is
+   the threshold. This is the rule that catches everything rule 2 admits. An
+   environment variable name is either short or upper-case by universal
+   convention (`ANTHROPIC_API_KEY` is 17, `AWS_SECRET_ACCESS_KEY` is 21 and
+   upper-case, `HUGGING_FACE_HUB_TOKEN` is 22 and upper-case), while a
+   twenty-character credential is upper-case with probability near zero. It is
+   mechanically decidable, which is what invariant 4 asks of a rule that refuses
+   input, and it fires in exactly the state a confused person is in: they pasted
+   the key *because* the variable is not exported, so rule 3 has not already
+   accepted;
+5. a value equal to the content of any set variable is refused, with a floor of
+   eight characters so that `OS=Windows_NT` and `SessionName=Console` are not
+   false positives. The message names the variable — a name is not a secret — and
+   naming it is the whole of the fix.
+
+**No refusal path interpolates the value**, and the acceptance test checks
+stdout, stderr, `lx.config.json` and `lx.config.json.tmp`. A refusal that quotes
+the value has published it to the terminal, to the scrollback and to whatever the
+output was piped into, which is worse than the misconfiguration it was reporting.
+
+*Lost:* making rule 3 conditional on rules 4 and 5, which would close the
+residual case where the secret is itself the name of a variable — `docker run -e
+$TOKEN` produces one. It hard-blocks a legitimate long lower-case name with no
+escape at all, and the attacker who could arrange that condition already reads
+the environment directly.
+
+### `providers.*.headers` is not writable from the command line
+
+The package never mentioned it. `base.py` sends `spec["headers"]` verbatim on the
+wire, and its canonical content for a gateway is `Authorization: Bearer …` — so a
+writer that accepted it is invariant 6 with one extra step, into a file `lx init`
+scaffolds into somebody's repository. The whole block is refused, and so is
+anything inside it, so naming the header rather than the block does not walk
+around the rule. The non-secret uses — an `HTTP-Referer`, an API version — stay
+reachable by hand-editing, which is where they are today; what is refused is a
+*command* that puts a credential there, and a fortiori the HTTP endpoint that
+would one day call the same function.
+
+### A rule is applied where a field lands, not where it was addressed
+
+`lx config set providers.openai '{"api_key_env": "hf_…"}'` writes the same leaf as
+the dotted spelling. A check keyed on the typed key alone would be decoration, so
+the value is walked and every rule fires on the path a field will occupy. *Lost:*
+refusing non-scalar values outright, which closes the same hole in one line — but
+`targets`, `length_ratio.zh-TW` and `formats.map` are legitimately lists and
+blocks, and `formats.map`'s keys begin with a dot and are unreachable any other
+way. This is the rule `web/server.py` already follows for `src` and `lang`:
+guarded by presence of the field, never by the name of the entry point.
+
+**The first implementation of that sentence did not hold, and the adversarial
+pass reproduced it.** Walking the *value* covers the block spelling and leaves
+the deeper dotted spelling open: `_field_rule` matched `providers.*.api_key_env`
+at a three-segment prefix, the path
+`providers.newbackend.api_key_env.x` had four, and no rule fired —
+`lx config set providers.newbackend.api_key_env.x sk_live_…` exited 0 and wrote a
+raw credential into the file. The four providers `lx init` scaffolds were
+incidentally safe, because their `api_key_env` is already a string in the raw
+file and `set_in` refuses to descend into one; a backend somebody *adds* was not,
+and adding one is the ordinary reason to run this command.
+
+The same shape, from the other side: `set_in` guards on the raw file, and the raw
+file usually does not hold the key at all, so it could not see that `batch.size`
+is a number. `lx config set batch.size.x 1` wrote `{"batch": {"size": {"x": 1}}}`
+and the next `lx translate` died inside `_chunks`. Also reproduced for
+`providers.local.model.name`, `length_ratio.zh-TW.min`, `targets.0`,
+`source_lang.x` and `output_pattern.dir`.
+
+One rule closes both, with two sources of truth about what may hold a block —
+`cli._addressable`. **The merged configuration types most keys**, which is what
+`set_in` cannot see. **The field table types the rest**, because every rule in it
+decides a single value, so a path reaching inside one is a path no rule fires on.
+`providers.*.headers` stays the one pattern that owns its subtree, and its rule
+refuses the whole of it. A third thing fell out: `lx config set routing.draft.model`
+had been answering `'draft.model' is not a pipeline stage`, which is false on its
+face, and now says that `routing.draft` holds one value.
+
+### `base_url` refuses a query string, and one function decides what is printable
+
+Two more from the same pass, both on the field that sits directly above
+`api_key_env` in every provider block — which makes it the *other* field a
+mispasted key lands in.
+
+The not-a-URL branch interpolated the value it rejected, so
+`lx config set providers.openai.base_url sk-ant-…` printed the key to stderr and
+into any log that captured it. No refusal in that function echoes anything now.
+
+And only userinfo was refused. A credential reaches a URL two ways —
+`https://u:p@host/v1` and `https://host/v1?key=…` — and the second was written to
+the file, which made "`lx config set` will not put a credential in the file"
+simply false in three documents. Every query is refused rather than a guessed-at
+list of parameter names: a query in a `base_url` is unusual, the rule is
+decidable without judgement (invariant 4), and the escape for a genuine one is
+hand-editing, exactly as it is for a header.
+
+Display had the matching hole. `lx providers` printed a hand-edited `?key=…` in
+full while `lx config get` masked it, and `/api/state` served the unmasked string
+to the browser — two commands over one value disagreeing about what is printable,
+which is the failure the masking exists to prevent. `printable_url` moved into
+`config.py` and `providers.available` calls it, so the CLI listing, the keyed
+`get`, the whole dump and the workbench all get one answer.
+
+### Two refusals that were tracebacks
+
+`float("nan")` passes every window, because every comparison against a nan is
+False, and `int(nan)` then raises the interpreter's own `ValueError` — so
+`lx config set batch.size nan` produced a traceback and exit 1 where every other
+refused value gets one sentence and exit 2. `1e400` is `inf` through the same
+door. And a configuration holding a lone surrogate escape is one `json.load`
+accepts and the write back cannot encode, which is a `ValueError` rather than an
+`OSError`: it escaped `_write_config`'s guard the same way.
+
+### Writing the file: `O_EXCL`, a mode at creation, and what Windows does not get
+
+The temporary file is created with `os.open(..., O_WRONLY|O_CREAT|O_EXCL, 0o600)`
+after a stale `.tmp` is removed. *Lost:* `chmod` after `open`, which leaves a
+window in which the whole configuration exists under whatever the umask decided;
+the mode argument applies at creation and the umask can only ever remove bits
+from `0o600`, never widen them. `O_EXCL` additionally refuses to write through a
+link planted at a name this function's own predictability gives away.
+
+**An existing file keeps its own mode.** `os.replace` gives the destination the
+temporary file's mode, so without this a configuration somebody deliberately made
+group-readable would silently become private on the first `lx config set`.
+Owner-only is for creation; tightening a mode a person chose by hand is the kind
+of unasked-for rewrite this project refuses elsewhere.
+
+**The temporary file never survives a failure.** Unguarded, an exception between
+the write and the replace left the entire configuration in a world-readable
+`lx.config.json.tmp` indefinitely. `cli.append_glossary_rows` already paid this;
+`dump_json` did not.
+
+**On Windows owner-only is not achieved and the code does not pretend it is.**
+The mode reaches only the read-only attribute; the file's protection there is the
+DACL it inherits from its directory — private in practice under a user profile,
+not private at all on a world-writable share. No ACL surgery: pywin32 is a
+compiled extension and invariant 1 refuses it, and a hand-rolled `ctypes`
+equivalent would be security code testable on one CI runner in four. Windows does
+get the exclusive create and the atomic replace. The permission assertion is
+skipped there rather than weakened, and a separate test asserts the mode reaches
+`os.open` on every platform.
+
+### The invariant 11 boundary did not move, and the list it will need now exists
+
+`cfg["glossary"]`, `cfg["dnt"]`, `cfg["style"]` and `cfg["output_pattern"]` are
+paths read out of a configuration file, which invariant 11 names as untrusted,
+and all four are trusted today on that invariant's own stated exception. **A CLI
+writer does not remove the exception.** The ground was never "edited with a text
+editor"; it is "authored by the local person, who can already write anything this
+user can", which is the same argument `confined_path`'s TOCTOU note makes.
+`lx config set glossary ../shared/glossary.csv` is a path typed at a terminal,
+verbatim the named exception. Confining it would break a project that legitimately
+shares a glossary between two books, and would contradict `append_glossary_rows`
+while `load_glossary` reads the same path unconfined.
+
+What changed is that the day an HTTP writer appears is now one import away rather
+than hypothetical, so the condition is written down in code as
+`config.PATH_VALUED_KEYS` and in `do_config_set`'s docstring: **either every key
+in that tuple is confined at *use* time, or none of them is writable over HTTP.**
+`output_pattern` is confined on the *result* of formatting it, never on the
+pattern string — `../../{path}` is only decidable after interpolation — and use
+time is the only chokepoint that also covers hand edits, old state and defaults.
+A fifth path-valued key added anywhere but that tuple is the one the confinement
+will miss.
+
+### `/api/state` reports routing resolved
+
+The projection was the raw value. With two shapes, the page that assigned it to a
+`<select>` would have set the control to `[object Object]`, shown nothing, and
+sent the run to whichever backend sorted first. It now carries
+`{provider, model}` per stage, resolved through the same function the CLI prints
+from, with a malformed stage reported inside the projection rather than raised —
+this is the endpoint that draws the whole page, and one bad stage must not take
+the document list down with it.
+
+### Residual risks, accepted
+
+A mistaken paste is in the process listing and in shell history before any
+refusal runs, and nothing here can un-leak it; the countermeasure is that no `lx`
+command asks for key material on a command line, stated in `lx config set --help`
+and pinned by a test. The name-is-the-secret case above stays open. On Windows
+`os.environ` is case-insensitive, so a lower-case spelling accepted there fails on
+POSIX at run time. Windows directory-inherited ACLs stand in for owner-only
+permissions.
+
+### What this package still does not do
+
+No settings UI. The reasons from 2026-07-28 are unchanged and one of them is now
+sharper: a configuration-writing HTTP endpoint is not merely unbuilt, it is
+conditioned on the paragraph above. HANDOFF-204 carries the UI requirement.
+
 ## 2026-08-12 · A setext underline reaches the paragraph in its own container, and `para_open` could not say which that was
 
 Closing HANDOFF-025. `mdparse`'s setext branch decided what a `===` or `--` line

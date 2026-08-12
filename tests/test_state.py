@@ -83,8 +83,8 @@ class _Interrupting:
 
 
 def _args(**over):
-    return argparse.Namespace(**{"dry_run": False, "provider": None, "batch": 2,
-                                 "concurrency": 1, **over})
+    return argparse.Namespace(**{"dry_run": False, "provider": None, "model": None,
+                                 "batch": 2, "concurrency": 1, **over})
 
 
 def test_resume_after_interrupt_keeps_every_completed_batch(tmp_path, monkeypatch):
@@ -102,7 +102,7 @@ def test_resume_after_interrupt_keeps_every_completed_batch(tmp_path, monkeypatc
     assert len(doc["segments"]) == 10
 
     stub = _Interrupting(answer_batches=2)
-    monkeypatch.setattr(translate_mod, "build_provider", lambda name, cfg: stub)
+    monkeypatch.setattr(translate_mod, "build_provider", lambda name, cfg, model=None: stub)
     with pytest.raises(KeyboardInterrupt):
         _translate(src, "zh-TW", CFG, doc["segments"], "draft", _args())
 
@@ -114,7 +114,7 @@ def test_resume_after_interrupt_keeps_every_completed_batch(tmp_path, monkeypatc
 
     # And the resumed run asks for the rest and only the rest.
     resumed = _Interrupting(answer_batches=99)
-    monkeypatch.setattr(translate_mod, "build_provider", lambda name, cfg: resumed)
+    monkeypatch.setattr(translate_mod, "build_provider", lambda name, cfg, model=None: resumed)
     pending = pending_segments(load_doc(src, "zh-TW"))
     assert len(pending) == 6
     _translate(src, "zh-TW", CFG, pending, "draft", _args())
