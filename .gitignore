@@ -15,11 +15,25 @@ __pycache__/
 .venv/
 venv/
 build/
-dist/
+# Anchored. A bare `dist/` matches at ANY depth, so a frontend build directory
+# nested anywhere under the tree would be ignored silently — including one whose
+# output is meant to be committed. This entry is for the sdist and wheel that
+# `python -m build` writes at the repository root, and that is all it should ever
+# catch.
+/dist/
 *.egg-info/
 .pytest_cache/
 .ruff_cache/
 .coverage
+
+# frontend dependencies. Not ignored before 2026-08-14, which mattered more than
+# it looks: `docs/conventions/delegated-work.md` §2a requires the shared checkout
+# to be committed-clean before any writing worker is dispatched, and the first
+# `npm install` in `studio/web/` would have made that impossible to satisfy. The
+# *build output* is deliberately NOT here — it is committed into
+# `src/scriptorium/web/static/`, so that `lx web` works from a bare checkout with
+# no Node installed, which is invariant 1's four protected situations.
+node_modules/
 
 .mypy_cache/
 coverage.xml

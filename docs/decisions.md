@@ -3,6 +3,466 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-08-14 · The workbench rebuild is decided — twenty-two questions, five of which nobody had listed
+
+HANDOFF-204 is the largest item in the roadmap and the only one the stated core
+need names directly. Its precondition — a frozen HTTP contract — landed the day
+before. What remained was a pile of questions that had accumulated in the package
+across four months, and the discovery that the pile was incomplete.
+
+Twelve open questions were enumerated from the package and the contract's *Known
+divergences*. Option sets were generated for them and then handed to a
+completeness pass whose only job was to find what the enumeration had missed. It
+found **five more**, and they were not marginal: one was a cross-decision conflict
+that would have moved `contract_version` three times during the build it was
+frozen for, one was an axis every frontend option had silently held constant, one
+was a missing decision that another decision's recommendation already depended on,
+one was a missing option, and one was a whole class of deliverable with no
+backend. **The enumeration was the artifact under review, and reviewing it is what
+made it complete** — the same lesson `docs/conventions/delegated-work.md` §5
+states as "the gate for anything feeding a decision is before the decision", now
+measured a second time.
+
+### The premise that dissolved three option sets
+
+Asked how to slice a 25-to-40-person-day rebuild — capability slices with a
+strangler entry point, screen lanes on a long-lived branch, or a walking skeleton
+cut over early — the maintainer refused all three and stated a premise instead:
+**nothing ships until it is finished and tested, and there is no first release
+before then.** It applies to every decision from here until that release.
+
+That is not a fourth option; it removes the pillar the other three shared. Every
+one of them was priced against a cost that only exists once `main` makes a public
+promise — the recommended option's whole advantage was that "no state of `main`
+ever contradicts tracked documentation". With no release, a temporary divergence
+between `main` and its README costs nothing, and an early cutover risks nothing.
+So the decomposition is chosen for how it distributes work, and the cutover
+question is answered by not existing yet.
+
+*Lost:* all three slicing plans, on the ground that they answer a scheduling
+question the premise deletes. The component decomposition survives — it is what
+the worker briefs are generated from — but its cutover machinery does not.
+
+### Contract governance, and the transport nobody had looked at
+
+**`contract_version` moves exactly once during the build, at M0, and everything
+after it is gated.** Four settled decisions independently declared a bump; taken
+as written the sequence was 1 → 2 → 3 → 4, and the frontend is required to read
+the version at startup and refuse a number it does not know, so each move is a
+hard stop. A contract that moves three times during the build it was frozen for
+has spent the property it was frozen for.
+
+One amendment followed from the trust-boundary work below: the gate admits
+**further scheduled** bumps rather than forbidding them outright, because the
+second root and the admission flag travel in their own package. *Lost:* bumping on
+landing, which contradicts the contract's opening paragraph; and freezing at 1 for
+the whole package, which forfeits the cheapest bump this project will ever get —
+the only consumer of the surface today is the page HANDOFF-204 deletes.
+
+**The transport is accepted as frozen, and the refetch budget is made explicit.**
+Every frontend option had held one thing constant: `protocol_version` is HTTP/1.0,
+so every response closes the connection, and every response carries
+`Cache-Control: no-store` with no `ETag` and no `Last-Modified`. Content-hashed
+asset filenames — the entire point of a bundler's cache-busting, and the thing the
+packaging-glob hazard is about — buy nothing at all, because the browser is
+forbidden to store them. The same blindness ran through the API decisions: one
+removed a cap from the bootstrap endpoint without noticing that endpoint loads
+every segment of every document twice per request.
+
+So: bundle to a small fixed number of assets, and write the refetch rules into the
+worker briefs rather than leaving them to be discovered. Two pieces are taken
+whichever way anything else goes, because they are free — `_scan_sources` receives
+the `tracked()` result it currently re-fetches, and `POST /api/save` returns the
+stored text for each applied id, which removes the save-then-refetch-the-whole-book
+loop and simultaneously gives the conflict presentation an authority to diff
+against.
+
+*Lost:* amending the frozen *Transport* section to allow cacheable hashed assets
+and HTTP/1.1. It is the right answer if the workbench is ever opened over a LAN
+bind, and if taken it must be scoped to a path prefix that does not exist at
+version 1 so the change is genuinely additive rather than a reversal of "a client
+must not build conditional requests". *Lost:* dropping the bundler for native ES
+modules and an import map — a real option nobody had written down, and under this
+transport the one that pays most for least, since N modules is N connections and N
+transfers on every single load.
+
+### The frontend stack, and a premise that was right for a reason nobody had named
+
+The maintainer answered the framework question by asking one back: would React
+with Zustand, or Tauri, or Electron be better overall — **especially given that
+the GUI is a wrapper over the CLI's core functionality** — and to be told if that
+understanding was wrong.
+
+**The premise is correct.** It is close to a verbatim statement of invariant 8,
+and the contract freezes that seam by name. It is not a misreading to correct.
+
+**A desktop shell does not follow from it, and the browser stays.** What follows
+from "the GUI is a thin wrapper" is that the shell should be the *cheapest*
+replaceable thing that meets the need — and a desktop application is the layer
+with the most maintenance per unit of value: a per-OS build matrix, a signing
+story A8 already recorded as unwinnable, and a bundled or system webview. Choosing
+a shell *because* the GUI is thin inverts the premise's own conclusion.
+
+Two findings decided it rather than the general argument. First, under the only
+realistic process model — the Python engine frozen as a sidecar, the HTTP contract
+kept — **Tauri is refused by this server's own admission gate and Electron is
+not.** Tauri serves its assets from a custom protocol, so its requests arrive with
+`Sec-Fetch-Site: cross-site` and an `Origin` outside the loopback set: refused
+twice over, at `web/server.py:220-225` and again at `:233-255`. Two of the three
+escapes are exactly what the contract forbids in its strongest language — emitting
+`Access-Control-Allow-*` or adding a `do_OPTIONS` — and the third forks the API
+client through a Rust HTTP plugin and forfeits browser-runnability. Second, on the
+one criterion the package calls non-negotiable, CJK IME correctness, Tauri is
+*worse* than the browser because it multiplies webview engines from one to three.
+
+What the shell was actually wanted for is bought another way: **`lx web --app`
+plus a web app manifest** — one CLI flag and two static files — gives an own
+window, a Start-menu entry and OS notifications. The one thing it cannot give is a
+native folder picker, and the second root is a path typed once per corpus.
+
+*Lost:* Electron, which is the one to revisit if this is ever reopened — it passes
+the frozen gate unchanged and pins a single engine. *Lost:* Tauri, on the two
+findings above. **The deferral in `AGENTS.md` stays, and its recorded reason is
+corrected below.**
+
+**React 19 + Zustand + virtua, and the load-bearing reason is virtua.** The
+maintainer's instinct was right; the argument for it was not the one they gave.
+`virtua` — already settled as the virtualization library — declares peer
+dependencies on `react`/`react-dom` and exposes React at its root export, with
+subpaths for Vue, Solid, Svelte and Angular and no Preact adapter at all; and
+Zustand's own maintainer answers the Preact-compatibility question with "It's
+unknown". So two of the three libraries the settled decisions already name have no
+Preact story, which is precisely the trigger the Preact recommendation had written
+for itself: take React rather than aliasing `preact/compat` when a React-only
+library is needed.
+
+The React objection that would normally counterweight this does not survive
+contact with the editor decision. **The IME citation everyone was working from was
+wrong** — `facebook/react#8683` has been closed since 2018; the still-open defect
+is `#3926` — and more importantly the defect splits in two. Its destructive half
+is React writing `node.value` back mid-composition, which `ReactDOMTextarea.js`
+does only inside `if (value != null)`, and an uncontrolled `defaultValue` textarea
+makes that branch unreachable. The residual half — `input` events firing while
+`isComposing` is true — is a DOM fact every framework shares, and the current
+vanilla workbench has it today.
+
+*Lost:* Preact 10 + signals, the original recommendation, on the adapter evidence
+above. *Lost:* Svelte 5, a close second and the only option that carries the
+existing stylesheet across untouched, on training-data density for runes and on
+`bind:value` being both the idiomatic spelling and the IME-hostile one. *Lost:* a
+hand-written `useSyncExternalStore` store instead of Zustand — strictly better on
+dependency count, kept in the roster spec as a one-file reversal.
+
+**No editor component.** The target pane is a static rich row that swaps to a
+`<textarea>` on focus. Every requirement a reviewer needs to *see* — placeholder
+and terminology highlighting, live diff, memory hits, status filtering,
+sentence-level navigation — is free in a read-only element. The only thing a full
+editor adds is highlighting *while composing*, which is exactly the state where
+contenteditable editors are unreliable with CJK IME. The requirement written as
+non-negotiable and the requirement written as an enhancement point in opposite
+directions, and the non-negotiable one wins. This also preserves a property the
+current 374-line workbench already has by accident.
+
+*Lost:* CodeMirror 6, which the package had named as the mature answer. It remains
+the right answer for a code editor and this is not one.
+
+**Hash-fragment routes, so the static 404 rule is untouched.** The contract does
+not merely happen to answer an unknown static path with `404 not found`; it argues
+for it, and instructs this package to decide explicitly rather than reaching for
+the reflex SPA fallback. Hash routes buy deep links, reload safety and the back
+button at zero contract cost and with no new branch in the security-relevant
+static handler. *Lost:* path routes with an allowlisted prefix, which bumps the
+version for clean URLs; *lost:* no URL-addressable views, which costs a reviewer
+their place on every reload in a five-thousand-segment novel.
+
+**The frontend source lives in `studio/web/` and its build output is committed
+into `src/scriptorium/web/static/`.** This is the only arrangement where the
+product does not become conditional on a toolchain the project spent an invariant
+on not needing: a bare interpreter, CI, an agent sandbox and a locked-down machine
+all get a working workbench with no Node installed. *Lost:* building in CI and not
+tracking the output, whose failure mode lands squarely on those four situations
+and on the one workflow whose failure is a bad public release. *Lost:* putting the
+frontend source inside `src/scriptorium/`, which puts the studio's `node_modules`
+inside the core's source root — the separation HANDOFF-201 exists to create.
+
+Three toolchain facts are fixed before any worker is dispatched, because each is
+green everywhere except where it matters: `pyproject.toml`'s package-data glob is
+single-level and will not ship a hashed `assets/` subdirectory into a wheel;
+`.gitignore`'s bare `dist/` matches at any depth and would silently ignore a Vite
+`outDir`; and `node_modules` is not in `.gitignore` at all.
+
+### The divergences this package owed
+
+**`lx untracked`, and `/api/state`'s `candidates` is renamed to match.** The CLI's
+own rule, derived from the code rather than assumed, is that a noun reports, a
+verb mutates, and a noun command is named for what it *emits* rather than for the
+configuration key it reads — `lx terms` is not `lx glossary`, `lx todo` is not
+`lx segments`. By that rule `lx sources` is the one candidate that breaks it, and
+it collides live: `sources` is a configuration key that `lx config get sources`
+already prints, so two adjacent spellings would answer differently, and the
+command does not list the sources — it lists the untracked members of them. The
+wire rename rides M0's single bump, because that is the only moment at which the
+command, the response key and HANDOFF-203's forthcoming field can be made to
+agree.
+
+*Lost:* `lx sources` narrow, which is the incumbent and the shape the contract's
+own divergence (8) records as a defect; *lost:* `lx sources` widened until the name
+is true, which overlaps HANDOFF-203; *lost:* attaching it to `lx todo` or
+`lx extract`, the second of which mixes a read-only projection into the only
+command that writes state.
+
+**The separator is normalized on the identity label where it is read and written.**
+The measured root cause of the Windows defect is not that one comparison was
+wrong; it is that one response carries two spellings of one identity and nothing
+compares them. Fixing only the comparison repairs the instance and leaves the
+condition, and pushes a normalizer into the frontend being written right now.
+*Lost:* comparing normalized while emitting what is emitted today, which is the
+compatible fallback and stays available; *lost:* normalizing at the HTTP
+projection only, which buys the wire fix at the price of the CLI and the workbench
+disagreeing about one value.
+
+**No cap on the wire, and no windowing parameter.** The CLI truncates its human
+display and says so, following the precedent `lx check` already set. A window was
+examined on request and refused on three grounds: with an offset it is the
+pagination the contract bans, renamed; the list is one to sixty entries for the
+stated use case; and decisively, it cannot reduce any of the work `/api/state`
+actually does, because the glob and the full segment load both happen *before* a
+slice exists to take. A filter — not a window — is recorded as the thing to reach
+for if measurement ever shows a need.
+
+**`repair` means failing segments, on both surfaces.** The CLI is aligned to the
+endpoint and the selection rule moves into one function neither surface may
+branch around. *Lost:* the mirror settlement, making the wire mean pending
+segments, which bumps the version and makes a Repair button select the
+untranslated remainder of the book.
+
+**`POST /api/translate` takes an optional `model` and reports the resolved route
+back.** Without it a person must rewrite the project's routing to try a model on
+one chapter, which then silently changes every later run; without the readback the
+workbench cannot tell a reviewer which model produced the wording in front of them,
+because the only place it appears is a log the contract forbids parsing. The
+readback is one call to the same `config.resolve_route` the server already uses, so
+the rule stays in one function.
+
+### Concurrency, and a deadlock the combination created
+
+**A per-segment content token with conflicts reported in the 200 body, and the
+merge presentation layered on top of it.** The two are complements, not
+alternatives. Alongside it, the job's redundant final apply is deleted — the
+cheapest single improvement available, shrinking the clobber window from the whole
+run to one batch with no wire change — and `do_check`'s persist path stops
+rewriting every segment from a stale snapshot, a third writer none of the
+seventeen divergences names.
+
+**An `llm:*` write may not overwrite a segment whose stored origin is `human`,
+with an explicit opt-out.** This was the option missing from the set: all six
+treated the two writers symmetrically and none prevented the case the divergence
+actually describes without the client's cooperation. The data is already read
+inside the transaction that overwrites it, so the guard is a comparison between
+two values both in scope. It protects `lx run` as well as the workbench, which is
+what makes it invariant-8 shaped rather than a workbench feature.
+
+**`do_apply` derives status from the text**, and — the half the divergence text
+never mentioned — that field is the *draft queue's selection predicate*, not
+merely a progress display. Clearing a segment to an empty string marked it
+`translated` and removed it from the queue, so a reviewer's "this needs redoing"
+quietly meant the opposite.
+
+**And the combination deadlocks, which is a defect rather than a trade-off.**
+Deriving status from the text and refusing model writes over human ones together
+produce a segment that every run selects, no writer may write, and `lx check` can
+never pass: a human clears a segment, the target is empty and the origin is
+`human`, so the draft pass selects it on `status == "pending"`, the repair pass
+selects it on the `missing` error at error severity, both writes are refused by
+origin precedence, and the exit code is 1 forever.
+
+The resolution is to **refuse an empty target at `POST /api/save`** and make
+clearing the hold control's own act. An empty string stops being a storable result
+and becomes a rejected input that names what to use instead, so the deadlock is
+impossible by construction rather than guarded against. *Lost:* clearing `origin`
+when the text is empty, which lets the model silently undo a deliberate deletion —
+the precise thing origin precedence was just adopted to prevent. *Lost:* a "held
+but deliberately empty" value, which contradicts the hold design and forces a third
+`lx check` exit code from a nicety into a hard requirement.
+
+**Hold is a `review` field with a closed vocabulary, spelled `held` / `lx hold`.**
+There is no review state on a segment today: `status` has two values, `origin`
+records provenance only, and no note or flag field exists anywhere. A closed
+vocabulary costs exactly what a boolean costs and leaves room for `approved`,
+which the re-founding has promised since it made review a workflow stage — the
+same reasoning `variant` was added under. **Holding requires a non-empty target**,
+which is what makes it compose with status-derived-from-text; `checks.py` gains a
+`held` rule at *warn* severity, never error, disable-able like every other rule;
+and the exclusion is added once, in a shared helper, to every predicate that
+selects work — including `failing_segments`, which is status-blind and would
+otherwise feed a held segment back to the model on every repair round.
+
+*Lost:* a third `status` value, which collides head-on with status-derived-from-text
+and is erased by `save_targets`' hardcoded `status='translated'`. *Lost:* encoding
+it in `origin`, just as origin precedence makes that field load-bearing for write
+precedence. *Lost:* holding it in the frontend only, which does not answer the
+request, because the model is reached through the CLI.
+
+**A monotonic job id with a high-water mark**, so an expired id is a distinct
+answer from one that never existed, minted and inserted inside one lock
+acquisition, and never evicting a job that is not done. Persisted job records are
+*not* built, and the conditions that would force them are written down: an
+unattended run that must auto-resume, job history across a restart becoming a
+scoped feature, or more than one server process needing shared job visibility.
+None exists today, and a mid-run crash is already cheap — the batches are durable
+as they land, so a restart loses the progress log, not the work. When a trigger
+fires, the form is a gitignored `.lx/` artifact, never a `SCHEMA_VERSION` bump.
+
+### What novels need, and the surfaces that had no backend
+
+**The chapter-continuous reading view is built on the rendered document plus a
+block map produced in Python.** Judging whether prose flows means reading it as
+prose, and every other view presents segments. `/api/preview` is the right
+substrate — it is the only endpoint returning the document as it actually renders
+— but not sufficient as frozen: its text carries no segment mapping and its
+`missing` is a count rather than a list. Both close with one additive change,
+because `skeleton.render` already builds the parts list in document order. Blocks
+carry text rather than integer spans, deliberately: that removes both the CRLF
+offset shift and the Python-code-point versus JavaScript-UTF-16 mismatch, neither
+of which is visible in a test running on LF-only ASCII fixtures.
+
+*Lost:* concatenating `/api/doc` client-side, which drops every skeleton node and
+prints a bare `⟦3⟧` into the middle of the prose. *Lost:* deciding against the view
+— a legitimate answer the package demanded be considered, refused because long-form
+fiction is the primary use case and flow is what it is judged on.
+
+**Python owns the sentence-boundary rule; the frontend renders offsets it does not
+compute.** A boundary rule invented in the browser is a second rule that `lx`, an
+agent and CI cannot see, which makes the sentence *diff* impossible outside the
+frontend — and it would create new behaviour-living-only-in-the-server on the day
+this package was required to close exactly that divergence. The rule needs
+configuration that already exists in Python and has prior art there. The
+counter-argument is real and is built in rather than argued away: caret
+positioning, IME composition and rendering are unambiguously the frontend's, and a
+round trip per keystroke is not viable, so the boundary highlight is stale while
+typing and recomputed on debounce or blur.
+
+Masking has already removed the hard cases — `Dr.`, `example.com` and inline code
+are `⟦n⟧` before a splitter sees them — so the whole placeholder burden reduces to
+one rule: a `⟦\d+⟧` run is atomic. Nothing about sentences may enter
+`segmentation_version` or the translation-memory key, and nothing about sentences
+may enter `checks.py`.
+
+Positional source-to-target alignment is deferred **behind a measurement, not an
+argument**, with its decision rule fixed before the number is taken. The corpus
+question is itself a finding: this repository holds no real bilingual fiction
+corpus, only technical documentation, so a dry run happens now to de-risk the
+script and the decision-grade number waits for a genuine reviewed chapter.
+
+**All three missing surfaces are backfilled before the components that consume
+them, and the memory suggestion means the algorithm rather than the shape.** The
+package named three deliverables — the style-sheet margin, memory suggestions and
+register-setting — argued two of them at length, and none had an endpoint or a CLI
+function; the word `fuzzy` appears nowhere in `src/`.
+
+This went against the recommendation, which would have delivered the halves whose
+Python already exists and deferred the ones needing a new algorithm. The
+maintainer's premise removes the schedule objection — there is no release date to
+miss — and accepts the remaining one, that the fan-out starts later. Two
+consequences are recorded because they size the work: **the similarity algorithm
+must be pure Python**, since invariant 1 excludes compiled extensions and names
+`rapidfuzz`'s C++ specifically, so the industry-standard library is unavailable;
+and **computing a fuzzy suggestion is not applying one** — automatic application
+of fuzzy matches stays deferred, and remains advisory by the standing rule that a
+fuzzy hit differs in its placeholder set by definition.
+
+Also recorded, because a worker briefed on the margin will otherwise invent one:
+the style-block selection rule is the existing matcher and is not to be re-derived
+in the browser. Its neighbour already carries a docstring recording that three
+copies of a matching rule had happened before anyone noticed.
+
+### The trust boundary, which travels in its own package
+
+The second root and the admission flag are settled here but **implemented in a
+single gated security-tier package, carrying their own bump**, rather than inside
+M0. `docs/conventions/delegated-work.md` §4 puts boundary work at a tier of its
+own; folding it into the same bump as four presentation fixes makes one gate
+decision span two risk classes, which is the collapse that tier rule exists to
+prevent.
+
+**A corpus outside the project root is a durable named `roots` configuration key,
+never writable over HTTP.** It is the one shape where the identity question the
+contract requires answered *first* has a constructive, collision-proof answer, and
+where the confinement mechanics are the already-attacked helper reused rather than
+a second implementation. *Lost:* copying the corpus into the project, which refuses
+the judgement call and breaks update propagation; *lost:* a per-session launch
+flag, whose rebind hazard is only closed by persisting the binding, which collapses
+it into the chosen option; *lost:* per-file registration minting opaque identities,
+which pays the same version cost for a narrower grant.
+
+The security pass over the chosen design found one structural defect and several
+perimeter ones. The identity flattening destroys the separator and collides
+documents across roots, so the key becomes structural rather than a flattened
+string — the single scheduled bump is the only cheap moment to change its shape,
+and the no-release premise dissolves the migration cost that would otherwise argue
+for a refusal-shaped fix. `roots` must be treated as a whole block by the
+configuration writer, because the two bypass shapes already measured on
+`api_key_env` and `batch.size` defeat an endpoint-level allowlist alone. Root
+absolute paths do not cross the wire; names do. UNC roots are opt-in, with the
+widened precondition stated in the key's own documentation. File-level TOCTOU
+stays open exactly as already conceded.
+
+**`--allow-host`, an authority allowlist feeding admission rule 1**, with rule 1
+also derived from a concrete bind address, and a startup refusal exactly when that
+set would be empty. The reserved spelling is renamed because the name and the
+function must agree: an `Origin` allowlist leaves rebinding as open as it is now
+while looking like a fix, and name-versus-function disagreement is precisely the
+axis on which the last security pass caught this contract's own draft.
+
+The refusal is narrower than it sounds and was confirmed against the use case:
+`lx web` is unchanged; a concrete bind derives its own name and needs no flag; a
+wildcard bind with the flag serves normally. Only a wildcard bind with no flag
+refuses — which is exactly the case where the only rule that closes DNS rebinding
+would have nothing to enforce, and where today the server starts and degrades
+silently. *Lost:* the flag being mandatory on every non-loopback bind, which breaks
+the concrete-IP binds derivation already covers; *lost:* per-connection derivation,
+which never has an empty set but changes every non-loopback invocation silently at
+request time.
+
+What none of this fixes, stated because a maintainer composing three sub-rules may
+reasonably think the combination is more than it is: it closes the browser-vector
+rebinding hole only. An exposed bind remains unauthenticated plain HTTP to every
+network peer, and the warning must keep saying so with the flag present.
+
+**Configuration becomes writable over HTTP through one endpoint with a closed
+allowlist, and every path-valued key is denied where the write lands.** This was a
+missing decision, and not a screen-level one: `POST /api/render` given no `out`
+writes to a path formatted from `output_pattern` with confinement deliberately
+skipped, so the day a browser can write that key, a cross-site-reachable endpoint
+becomes an arbitrary file write outside the project root. Invariant 11 predicted
+this in writing. The deny is applied where the value *lands*, never where it was
+addressed. `sources` is denied too, even though it is not in the path-valued tuple,
+because it feeds a glob directly — it is the fifth path key that tuple's own
+comment predicted.
+
+*Lost:* a read-only settings screen, which drops a requirement decided on
+2026-07-28; *lost:* making `output_pattern` writable and confining the formatted
+result inside `/api/render`, which is the largest new trust surface of the three
+and buys one configuration key.
+
+### Corrections to the record
+
+**The desktop-shell deferral's stated reason is narrower than the deferral.** It
+reads that such shells "require a system web view and so destroy the
+download-and-run property that would be their only reason for existing". That is
+true of Tauri and **false of Electron**, which bundles Chromium rather than
+requiring a system webview and loses download-and-run to size instead. More
+importantly it is a *distribution* argument in a subordinate clause with no losing
+alternative recorded against it, unlike A1 through A8 around it — so it refutes
+"ship a desktop app so people can download and run it" and says nothing about "use
+a desktop app because my own daily reading is better", which is the question that
+was actually asked. The deferral stands on the reasoning above; the entry is
+annotated so the next person to ask is not misled into thinking the ergonomic case
+was already weighed and lost.
+
+**`facebook/react#8683` is closed and has been since 2018.** Anything written from
+it cites a fixed bug. The still-open defect is `#3926`.
+
 ## 2026-08-13 · The workbench's HTTP surface is frozen, and writing it down is what found the defects
 
 Closing HANDOFF-207, which two of the queue's three largest packages named as
@@ -4643,6 +5103,19 @@ ODT; XLIFF as an internal format; TMX as the memory format (frozen at 1.4b from
 application of fuzzy matches; and desktop shells such as Tauri, Wails or Electron
 — each of which requires a system web view and so destroys the download-and-run
 property that would be their only reason for existing.
+
+*Annotated 2026-08-14, the deferral unchanged.* That clause is narrower than the
+deferral it justifies, and a reader who takes it as the whole argument will
+over-read it. It is **false of Electron**, which bundles Chromium rather than
+requiring a system webview and loses download-and-run to size instead; and it is a
+*distribution* argument, so it refutes "ship a desktop app so people can download
+and run it" and says nothing about "use a desktop app because my own daily reading
+is better". That second question was asked on 2026-08-14 and answered on its own
+merits — see that date's entry, which keeps the deferral for different reasons:
+under the only realistic process model a shell is `lx web` plus a window, Tauri is
+refused by this server's own admission gate while Electron is not, and Tauri
+multiplies webview engines from one to three against a non-negotiable CJK IME
+requirement.
 
 ## 2026-07-28 · Per-stage backend selection is written by the CLI; its settings surface belongs to the rebuilt workbench
 

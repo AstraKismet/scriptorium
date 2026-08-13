@@ -34,7 +34,12 @@ Issues = "https://github.com/AstraKismet/scriptorium/issues"
 where = ["src"]
 
 [tool.setuptools.package-data]
-scriptorium = ["web/static/*"]
+# Recursive on purpose. A single-level `web/static/*` shipped index.html and
+# nothing under it, so a bundler emitting hashed assets into `static/assets/`
+# produced a wheel whose workbench is a blank page — while the checkout and the
+# dev server both looked fine, because the server serves any depth under the
+# static root. Green everywhere except in `pip install`.
+scriptorium = ["web/static/**/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
