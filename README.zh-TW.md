@@ -131,6 +131,7 @@ CI 上有一組語料庫在把關，裡面收了 28 份刻意刁難的輸入，L
 | `lx web` | 本機審校工作台 |
 | `lx config get\|set\|unset KEY [VALUE]` | 用點號路徑讀寫 `lx.config.json` |
 | `lx routing show\|set STAGE PROVIDER[:MODEL]` | 每個階段走哪個後端、用哪個模型 |
+| `lx untracked` | `sources` 掃得到卻還沒建立狀態的檔案；每個目標語言各一列 |
 | `lx providers` / `lx stats` | 後端 / 覆蓋率 |
 
 `translate`、`repair`、`run` 都吃 `--dry-run`，只回報會做哪些工作，不會真的呼叫模型；

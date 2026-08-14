@@ -35,6 +35,7 @@ the second, third, and seventh translation of a document nearly free.
 | `lx render SRC --lang L --fallback` | untranslated segments fall back to source |
 | `lx commit SRC --lang L` | append approved segments to the TM |
 | `lx stats [--lang L]` | coverage across tracked documents |
+| `lx untracked [--json] [--max N]` | files matching `sources` with no state yet, one row per target language; `--json` is never truncated |
 | `lx config get [KEY]` | the effective value; with no key, the whole merged configuration |
 | `lx config set KEY VALUE` | write one dotted key, validated before the write |
 | `lx config unset KEY` | remove a key so the default applies again |

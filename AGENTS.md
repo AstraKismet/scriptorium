@@ -176,12 +176,19 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    in front of, or what the surface deliberately does not carry. Changing the
    surface is now an edit to two files and a version decision. The freeze
    describes what is true rather than what should be: seventeen measured
-   divergences are recorded in the contract's own *Known divergences* section
-   rather than fixed there, and four of them are this invariant's — two where the
-   server has behaviour the CLI lacks, two where the two surfaces answer the same
-   question differently. Two of the seventeen are live defects reproduced on the
-   wire while the contract was being written, which is the argument for having
-   written it: `docs/decisions.md`, 2026-08-13.
+   divergences were recorded in the contract's own *Known divergences* section
+   rather than fixed there, and four of them were this invariant's — two where
+   the server had behaviour the CLI lacked, two where the two surfaces answer the
+   same question differently. Two of the seventeen were live defects reproduced
+   on the wire while the contract was being written, which is the argument for
+   having written it: `docs/decisions.md`, 2026-08-13.
+
+   Those numbers are a history and not an inventory. A divergence closed since is
+   marked `Closed` in place and keeps its number, and new ones are appended, so
+   the list only grows — read the section rather than this paragraph for what is
+   outstanding. (1) and (13) closed on 2026-08-14, which leaves one of the two
+   server-only behaviours: (4), the job endpoint, which the contract argues is a
+   structural CLI gap rather than leaked logic.
 
 9. **Nothing regenerable is a source of truth.** Working state (SQLite) and
    approved wording (`.lx/tm.*.jsonl`) are sources of truth. JSON over HTTP is a
@@ -259,7 +266,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 1009 tests; no network (one is POSIX-only)
+python -m pytest -q                 # 1030 tests; no network (one is POSIX-only)
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
 

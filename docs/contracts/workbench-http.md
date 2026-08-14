@@ -177,9 +177,19 @@ Common to all of them:
   normalized.** `docs[].source`, `/api/doc`'s `source` and `/api/check`'s `source`
   are `os.path.relpath` verbatim, which on Windows is `docs\guide.md`, while
   `candidates[].source` in the same `/api/state` body is `docs/guide.md`. A client
-  that compares those two strings is comparing two spellings of one file — see
-  *Known divergences* (13), where that mismatch is a live defect and not only a
-  presentation wrinkle.
+  that compares those two strings is comparing two spellings of one file, **so do
+  not compare them.** `candidates[].source` is a value to hand back to
+  `POST /api/extract`; `docs[].source` is how a tracked document names itself.
+
+  The server's own comparison between the two was the live half of this and is
+  fixed (*Known divergences* (13), closed). A client that genuinely must match one
+  to the other has to reproduce the server's document identity, and the rule is
+  stated here rather than by naming a Python function, because a consumer of this
+  contract may be written in another language and may not read inside `.lx/`:
+  **take the path relative to `cwd`, rewrite `\` to `/`, then replace every
+  character outside `A-Za-z0-9._-` with `_`.** Two paths that produce one string
+  are one document to this server — see (18). That a client should have to know
+  any of this is why the label itself is normalized at the next version bump.
 - `lang` is a language tag such as `zh-TW`.
 - Unless stated otherwise, success is `200`.
 
@@ -192,9 +202,11 @@ bootstrap endpoint** and the only one that needs no document.
 
 Backed by: no single `cli.do_*`. It composes `config.load_config`,
 `store.tracked` (the same read `lx stats` makes), `providers.available` (the
-function `lx providers` calls), and `config.resolve_route` per stage (what
-`lx routing show` prints). One piece has no CLI equivalent — see *Known
-divergences* (1).
+function `lx providers` calls), `config.resolve_route` per stage (what
+`lx routing show` prints), and `cli.do_untracked` (what `lx untracked` emits).
+Every piece now has a CLI equivalent — *Known divergences* (1), closed
+2026-08-14. The `store.tracked` result is read once and handed to
+`cli.do_untracked`, which is why that function takes it as a parameter.
 
 **Request** — no fields. `src` and `lang` are accepted and validated if sent, and
 then discarded.
@@ -210,7 +222,7 @@ then discarded.
 | `providers` | array of *provider* | See *Shared shapes*. |
 | `routing` | object | One key per `config.ROUTING_STAGES` — `draft`, `polish`, `repair` — each a *routing stage*. See *Shared shapes*. |
 | `docs` | array of object | `{source, lang, total, done}`. `total` is the segment count; `done` is the count with a **non-empty** target, which is not the same predicate as `status == "translated"` — see *Known divergences* (14). |
-| `candidates` | array of object | `{source, lang}` — one entry per configured target language for each file matching the configured `sources` globs that is not already tracked *in that language*. **Capped at 200 entries, silently**, and the not-already-tracked filter is broken on Windows — *Known divergences* (13). |
+| `candidates` | array of object | `{source, lang}` — one entry per configured target language for each **document identity** matching the configured `sources` globs that is not already tracked *in that language*. **Not capped.** The unit is the identity and not the file: an identity appears at most once however many globs match it **and however many distinct files map to it** — see (18), which is what that costs. The subtraction is on the same identity, so a separator spelling cannot make a tracked document reappear. `cli.do_untracked` decides all of it; `lx untracked` is the same list. The key is renamed to `untracked` at the next version bump. |
 
 `routing` is a **resolved projection**, not the configured value. The configured
 value has two legal spellings on purpose (a provider name, or
@@ -676,9 +688,14 @@ absence closes.
   no locking. See `POST /api/save`.
 - **No caching semantics.** `no-store` and nothing else. A client must not build
   conditional requests.
-- **No pagination, anywhere.** `/api/doc` returns every segment of the document in
-  one response, and it is expected to be large. `candidates` is the only capped
-  list and its cap is silent.
+- **No pagination, anywhere, and no list on this surface is capped.** `/api/doc`
+  returns every segment of the document in one response, and it is expected to be
+  large. `candidates` was silently capped at 200 until 2026-08-14; the cap is
+  gone, and a window over it was examined and refused — with an offset it is this
+  bullet's pagination under another name, and it could not reduce the work
+  `/api/state` does in any case, because the glob and the full segment load both
+  happen before a slice exists to take. A *filter* is the thing to reach for if
+  measurement ever shows a need.
 - **No streaming and no server-sent events.** `/api/job` is polled.
 - **No redirects.** No `3xx` is ever emitted.
 - **No request body size limit.** The only cap in the file is on the *refused*
@@ -753,21 +770,29 @@ lands nobody has to re-derive whether it was a break.
      `output_pattern` on the *result* of formatting it, never on the pattern —
      **or** not be writable over HTTP at all.
 
-## Known divergences, recorded and not fixed
+## Known divergences
 
-Measured while freezing this contract, at `contract_version = 1`. None is fixed
-here: this package writes down what is true and versions it, and each fix is a
-change that needs its own decision. They are recorded in this tracked file rather
-than in a work package because packages are deleted.
+(1) to (17) were measured while freezing this contract, at
+`contract_version = 1`, and none was fixed by the package that wrote them down:
+that one wrote what is true and versioned it, and each fix is a change that needs
+its own decision. Later entries carry their own date. They are recorded in this
+tracked file rather than in a work package because packages are deleted.
 
-Numbers (1), (2) and (3) are the ones HANDOFF-204 must **decide**, not merely
-inherit. Number (13) is a live defect with a reproduction.
+**This list only grows.** A divergence closed later is marked `Closed` in place
+and keeps its number; a new one is appended. The numbers are referenced from
+`AGENTS.md`, from work packages and from the decision record, so renumbering
+would silently repoint every one of them — which means the section is a history
+and its length is not a count of what is outstanding. Read the entries.
 
-1. **`/api/state`'s `candidates` has no CLI equivalent.** `_scan_sources` globs
-   the configured `sources` patterns and subtracts what is tracked; nothing in
-   `cli.py` does this — it does not import `glob` at all. Under invariant 8 that
-   is behaviour living only in the server, and the fix is a CLI command it can
-   stand in front of. The 200-entry cap is silent, which is its own small defect.
+Numbers (2) and (3) are the ones HANDOFF-204 must still **decide**, not merely
+inherit.
+
+1. **Closed 2026-08-14.** *`/api/state`'s `candidates` had no CLI equivalent.*
+   `_scan_sources` globbed the configured `sources` patterns and subtracted what
+   was tracked; nothing in `cli.py` did this — it did not import `glob` at all.
+   Under invariant 8 that was behaviour living only in the server. `lx untracked`
+   is the command it now stands in front of, `cli.do_untracked` decides the list
+   for both surfaces, and the silent 200-entry cap went with it.
 2. **`/api/translate`'s `mode: "repair"` means `lx repair`, not
    `lx translate --mode repair`.** The endpoint selects failing segments;
    `lx translate --mode repair` selects pending ones, because `cmd_translate` has
@@ -811,15 +836,20 @@ inherit. Number (13) is a live defect with a reproduction.
 12. **A POST body is read with no size cap.** `Content-Length` bytes are read
     whole. The cap that exists — 1 MiB — is only on the *refused*-request drain
     path, and exists to keep the socket clean rather than to bound a request.
-13. **`candidates` never stops listing a tracked document, on Windows.**
-    Reproduced 2026-08-13: extract `docs/guide.md`, then `GET /api/state` still
-    returns it under `candidates`. `_scan_sources` builds its "already seen" set
-    from `docs[].source`, which is `os.path.relpath` verbatim — `docs\guide.md` —
-    and builds each candidate key with `.replace(os.sep, "/")` — `docs/guide.md`.
-    The two never match, so the subtraction is a no-op on any platform whose
-    separator is not `/`. Green on Linux, wrong on the development machine. The
-    fix is one normalization, and it is a behaviour change, so it is recorded here
-    rather than made.
+13. **Closed 2026-08-14, on the separator axis only — see (19) for the other
+    one.** *`candidates` never stopped listing a tracked document, on Windows.*
+    Reproduced 2026-08-13: extract `docs/guide.md`, then
+    `GET /api/state` still returned it under `candidates`. `_scan_sources` built
+    its "already seen" set from `docs[].source`, which is `os.path.relpath`
+    verbatim — `docs\guide.md` — and built each candidate key with
+    `.replace(os.sep, "/")` — `docs/guide.md`. The two never matched, so the
+    subtraction was a no-op on any platform whose separator is not `/`: green on
+    Linux, wrong on the development machine. Both sides now go through
+    `store.doc_id`, which is what the state database keys a document on, so the
+    comparison is the project's own identity rather than a rule this list
+    invented. **The wire still carries two spellings** — see *Common to all of
+    them* — because normalizing the label a client reads changes what a value
+    means, and that waits for the next version bump.
 14. **`status: "translated"` does not mean the segment has text.** `do_apply` sets
     it for every id in the payload without testing the text, so saving an empty
     string produces `{status: "translated", target: "", origin: "human"}`, while
@@ -841,6 +871,55 @@ inherit. Number (13) is a live defect with a reproduction.
     translation job, write the same segment with no version token and no conflict
     status. On the surface whose entire purpose is human review, a background job
     can overwrite a reviewer's sentence and report `200` to both.
+
+Measured 2026-08-14, by the adversarial pass over the change that closed (1) and
+(13). The first is that change's own cost and the other three are older; all four
+are on `candidates`, which is what a pass aimed at one list finds.
+
+18. **A `candidates` entry is an identity, so a distinct file can be permanently
+    invisible.** The identity flattens every character outside `A-Za-z0-9._-`, so
+    `docs/guide.md` and a root-level `docs_guide.md` are one string — and
+    `books/第一章.md` and `books/第二章.md` are both `books____.md`. Reproduced with
+    nothing tracked at all: two real files matching one glob, one entry in
+    `candidates` and in `lx untracked`, no diagnostic. The suppression is faithful
+    to storage — `.lx/state.db` keys a document row on that identity, so extracting
+    the second would overwrite the first — but the file is then absent from the one
+    list whose job is to say what there is. The old code listed both and lost the
+    state instead. **Neither surface says which path it collapsed**, and that is
+    the part worth fixing: it needs a response field, so it belongs to a version
+    that is already changing this key.
+19. **`candidates` still lists a tracked document when the two spellings differ in
+    case.** The other half of (13), on the axis that fix held constant, and older
+    than it. The identity is case-sensitive; NTFS is not. Reproduced on the
+    development machine: one file `docs/Guide.md`, then
+    `lx extract docs/guide.md --lang zh-TW` succeeds and `lx stats` shows it, and
+    `lx untracked` still offers `docs/Guide.md`. Two identities,
+    `docs_Guide.md` and `docs_guide.md`; one file. Case-folding the identity is not
+    the fix — it would merge two genuinely distinct documents on a case-sensitive
+    filesystem — so this waits for the identity to be structural rather than a
+    flattened string, which the *Reserved* section already schedules.
+20. **`candidates` can carry an entry no endpoint will accept.** The list is a
+    glob over `sources` and nothing else: it is not filtered to files, to
+    extensions the format registry knows, or to paths inside the confinement root.
+    Measured: `sources: ["book/**/*"]` listed a directory and a `.jpg`, and
+    `POST /api/extract` answered `400` for both — "has no format this project knows
+    how to read"; `sources: ["../shelf/*.md"]` listed a path outside the project
+    and `POST /api/extract` answered `403`. Filtering the list narrows what the key
+    means, so it is a version decision rather than a patch. The CLI has the same
+    list and the same closing line offering `lx extract`, which is where a person
+    meets it first.
+21. **`candidates[].source` reaches the shipped page's DOM through an unescaped
+    HTML attribute.** `static/index.html` builds `data-src="${c.source}"` by string
+    concatenation; its `esc()` handles `&`, `<` and `>` and not the quote, and it
+    is applied to the visible text only. `docs[].source` is built the same way. No
+    `Content-Security-Policy` is sent — see *Transport*, which lists every header
+    this server emits. A filename is not always the user's own on a surface whose
+    corpus is downloaded novels, and a POSIX filename may contain `"`. The page has
+    unauthenticated access to every endpoint here, including one that spends money.
+    The static assets are *What is not frozen*'s last bullet and HANDOFF-204
+    replaces them wholesale, so this is recorded rather than patched — a rebuild
+    that escapes attributes by construction closes it, and one that string-builds
+    markup inherits it.
 
 ## What is not frozen
 

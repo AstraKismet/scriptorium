@@ -14,6 +14,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+import scriptorium.cli as cli  # noqa: E402
 import statedb  # noqa: E402
 from scriptorium.cli import UnsafePath, confined_path  # noqa: E402
 from scriptorium.web import server as web_server  # noqa: E402
@@ -106,6 +107,85 @@ def test_state_lists_providers(base, tmp_path, monkeypatch):
     state = json.loads(body)
     assert code == 200
     assert {"local", "openai", "claude"} <= {p["name"] for p in state["providers"]}
+
+
+def _sources_project(tmp_path, monkeypatch, name="docs/guide.md"):
+    """A project whose one document sits where the default `sources` glob looks.
+
+    `_project` above puts its document at the root, which `docs/**/*.md` does not
+    match — so a candidate test written on it would pass with the subtraction
+    removed entirely. No `lx.config.json`: `load_config` with no file is the
+    scaffolded default, `sources` and `targets` included.
+    """
+    root = tmp_path / "nest" / "proj"
+    (root / name).parent.mkdir(parents=True)
+    (root / name).write_bytes(b"# Title\n\nA sentence.\n")
+    monkeypatch.chdir(root)
+    return root
+
+
+def test_state_stops_offering_a_document_it_has_already_extracted(base, tmp_path, monkeypatch):
+    """Reproduced on the wire 2026-08-13, closed 2026-08-14.
+
+    Extract `docs/guide.md`, ask for the page again, and the file was still in
+    `candidates` with an Extract button on it: the already-seen set held
+    `docs\\guide.md` from `os.path.relpath` and the candidate key held
+    `docs/guide.md` from `.replace(os.sep, "/")`, so the subtraction never fired
+    on any platform whose separator is not `/`. Both sides are `store.doc_id`
+    now. Over HTTP rather than through the helper, because the defect was
+    platform-dependent and this has to be the run that happens on this machine.
+    """
+    _sources_project(tmp_path, monkeypatch)
+
+    code, body = _get(base, "/api/state")
+    assert code == 200
+    assert json.loads(body)["candidates"] == [{"source": "docs/guide.md", "lang": "zh-TW"}]
+
+    code, _ = _post(base, "/api/extract", {"src": "docs/guide.md", "lang": "zh-TW"})
+    assert code == 200
+
+    state = json.loads(_get(base, "/api/state")[1])
+    assert state["candidates"] == []
+    # And the half that is deliberately still here: one body, two spellings of
+    # one identity. `docs[].source` is `os.path.relpath` verbatim, so on Windows
+    # it is `docs\guide.md` while the candidate above said `docs/guide.md`.
+    # Normalizing the label changes what a client reads, so it waits for the
+    # contract's next version bump — see the contract, *Common to all of them*.
+    assert [(d["source"], d["lang"]) for d in state["docs"]] == [
+        (os.path.join("docs", "guide.md"), "zh-TW")]
+
+
+def test_state_reads_every_document_once_to_draw_one_page(base, tmp_path, monkeypatch):
+    """`tracked()` loads every segment of every document in the project.
+
+    The candidate scan used to make the same call again to subtract what it
+    found, so the bootstrap endpoint paid for the whole project twice before a
+    client could draw anything. The fix is that the result is passed on, and the
+    property that proves it is a count — a second read is invisible in a
+    response.
+    """
+    _sources_project(tmp_path, monkeypatch)
+    code, _ = _post(base, "/api/extract", {"src": "docs/guide.md", "lang": "zh-TW"})
+    assert code == 200
+
+    seen = {"server": 0, "cli": 0}
+    real = web_server.tracked
+
+    def counting(where):
+        def counted(*args, **kwargs):
+            seen[where] += 1
+            return real(*args, **kwargs)
+        return counted
+
+    monkeypatch.setattr(web_server, "tracked", counting("server"))
+    monkeypatch.setattr(cli, "tracked", counting("cli"))
+    code, body = _get(base, "/api/state")
+    assert code == 200 and json.loads(body)["docs"]
+    # The total, not which module's global was reached: reading the project once
+    # is the property, and routing the call through `cli` instead of `..store` is
+    # the direction invariant 8 points. Counted on both sides so a failure says
+    # where the reads went.
+    assert seen["server"] + seen["cli"] == 1, seen
 
 
 @pytest.mark.parametrize("path", [

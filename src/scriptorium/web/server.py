@@ -28,6 +28,7 @@ from ..cli import (
     do_check,
     do_extract,
     do_render,
+    do_untracked,
     language_tag,
     pending_segments,
 )
@@ -385,6 +386,12 @@ class _Handler(BaseHTTPRequestHandler):
             lang = language_tag(lang)
         cfg = load_config()
         if path == "/api/state":
+            # Read once and handed on. `tracked()` loads every segment of every
+            # document in the project, and the candidate scan used to make the
+            # same call again to subtract what it found — two full reads to draw
+            # one page, on the endpoint a client must call before it can do
+            # anything at all.
+            docs = tracked()
             return {
                 # First, and before `version`, because the two are read for
                 # different reasons and are confused when they sit apart: this
@@ -400,8 +407,13 @@ class _Handler(BaseHTTPRequestHandler):
                     "source": d["source"], "lang": d["lang"],
                     "total": len(d["segments"]),
                     "done": sum(1 for s in d["segments"] if s.get("target")),
-                } for d in tracked()],
-                "candidates": _scan_sources(cfg),
+                } for d in docs],
+                # The key is still `candidates` and the rename to `untracked`
+                # rides the contract's next version bump with the rest of it. The
+                # value is `lx untracked`'s, so the two surfaces cannot answer
+                # this differently — which is what closed the divergence: the
+                # glob-and-subtract lived only here.
+                "candidates": do_untracked(cfg, docs),
             }
         if path == "/api/doc":
             # `q["src"]` used to raise KeyError here and 400. Both parameters are
@@ -549,20 +561,6 @@ def _job_status(job_id):
     with _JOB_LOCK:
         state = _JOBS.get(job_id)
         return dict(state) if state else {"error": "no such job"}
-
-
-def _scan_sources(cfg):
-    """Files matching config `sources` that are not yet tracked."""
-    import glob
-    seen = {(d["source"], d["lang"]) for d in tracked()}
-    out = []
-    for pattern in cfg.get("sources", []):
-        for path in sorted(glob.glob(pattern, recursive=True)):
-            rel = os.path.relpath(path).replace(os.sep, "/")
-            for lang in cfg.get("targets", []):
-                if (rel, lang) not in seen:
-                    out.append({"source": rel, "lang": lang})
-    return out[:200]
 
 
 def serve(host="127.0.0.1", port=8787, open_browser=True):

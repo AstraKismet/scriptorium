@@ -3,6 +3,226 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-08-14 · `lx untracked`, and the identity the candidate list should have been comparing all along
+
+The first unit of HANDOFF-204's M0 floor, and deliberately the non-bumping one:
+it can land on its own because it renames nothing a client reads. The decisions
+behind it were settled the same day, in the entry below; this records what
+landed, the four things that were decided while building it — the two dedupes,
+the `--json` shape and the two named empty-configuration cases — the two halves
+deliberately left for the version bump, and what the adversarial pass over it
+found.
+
+`_scan_sources` globbed the configured `sources` patterns inside `web/server.py`
+and subtracted what was tracked. Nothing in `cli.py` did this — it did not import
+`glob` at all — so under invariant 8 it was pipeline behaviour living only in the
+server, and the contract recorded it as divergence (1). It is `cli.do_untracked`
+now, `lx untracked` prints it, and `/api/state` calls the same function.
+
+### The comparison is `store.doc_id`, and that is two fixes rather than one
+
+The measured defect was a separator: a state row holds `os.path.relpath`, which
+is `docs\guide.md` here, and the candidate key was built with
+`.replace(os.sep, "/")`, which is `docs/guide.md`. Compared as strings the
+subtraction never fired at all on any platform whose separator is not `/`, so the
+workbench went on offering to extract a document it was already showing in the
+list above — green on Linux, wrong on the development machine, and the reason
+`docs/contracts/workbench-http.md` recorded it as a live defect with a
+reproduction rather than a wrinkle.
+
+`doc_id` fixes it by flattening every non-alphanumeric, so both spellings collapse
+to `docs_guide.md` **on both platforms** — which is also what lets the regression
+test mean something on a Linux runner, where a backslash is an ordinary character.
+*Lost:* a normalization rule of this function's own, which is how one matcher in
+this repository became three copies before anyone noticed.
+
+The second half is the one worth writing down, because it turns a plausible
+objection into the argument for the choice. `doc_id` is lossy — it replaces every
+character outside `A-Za-z0-9._-`, not only the separator — so `docs/guide.md` and
+a root-level file named `docs_guide.md` are one identity, both `docs_guide.md`,
+and so are `books/第一章.md` and `books/第二章.md`, both `books____.md`. One of each
+pair is never offered. **Unconditionally**, not only when its twin is tracked: the
+first spelling reached wins, and the second is dropped by the same set. That is
+not a cost this comparison pays: `doc_id` is `.lx/state.db`'s own primary key, so
+those two files genuinely *are* one document to everything downstream, and
+extracting the second overwrites the first's state — measured, one row survives.
+A listing that separated them would be offering a destructive extract as new work,
+which is what the old code did.
+
+What the suppression costs is that a file on disk is absent from the one list
+whose job is to say what there is, **and neither surface says which path it
+collapsed.** Saying so needs a response field, so it belongs to a version that is
+already changing this key; it is recorded as contract divergence (18) rather than
+carried in this entry alone. The collision itself is `doc_id`'s and is answered by
+the structural identity the contract's *Reserved* section already schedules.
+
+### Two things beyond what the package listed, recorded rather than absorbed
+
+**Overlapping globs now propose a file once.** `sources` of
+`["**/*.md", "docs/**/*.md"]` emitted two entries for one file, and the identity
+set that removes a tracked document removes a repeat with one `seen.add`. Leaving
+it would have meant writing "the identity is compared" beside a list that emits
+one identity twice.
+
+**A duplicate entry in `targets` collapses too**, for the same reason and by the
+same line. Neither was in the package's list for this unit; both are the same
+subtraction applied to the call's own output, and reporting a list a client cannot
+act on twice is not a behaviour worth preserving for symmetry.
+
+### `tracked()` is a parameter, not a second read
+
+`tracked()` loads every segment of every document in the project. `/api/state`
+called it for the document list and the candidate scan called it again, so the
+one endpoint a client must call before it can draw anything paid for the whole
+project twice. The result is passed in. The property is a count and a second read
+is invisible in a response, so the test counts calls rather than comparing bodies.
+
+### What the command prints, and the two numbers behind it
+
+`--json` emits an object carrying the array plus the values that decided it —
+`sources` and `targets` — which is the shape `lx todo`, `lx terms` and
+`lx check --json` all have, and what lets an empty list explain itself to a
+machine consumer rather than only to a person. The array's own name is
+`untracked`, following `lx terms`, whose array is `terms`. That is the one of the
+three that names its array for the command: `lx todo`'s is `segments` and
+`lx check`'s is `issues`, because those name the payload. It is the right
+precedent to take here for a reason the others do not have — the command,
+`/api/state`'s key after the rename and HANDOFF-203's forthcoming field have to
+spell one word, and that word is the command's.
+
+The human display truncates at `--max`, default **25**, which is `lx check`'s flag
+and `lx check`'s number. *Lost:* a larger default derived from a guess at how many
+files a project has — it buys one keystroke in the ordinary case and costs a
+second number to remember in every case, and the sentence that names the escape
+is `lx check`'s verbatim.
+
+Both empty-configuration cases are named rather than reported as done. An empty
+`targets` or an empty `sources` produces an empty list, and "nothing untracked" is
+what the one command whose job is to say what there is would otherwise tell
+someone who has not finished configuring it.
+
+### What waits for the bump, and how the contract records a closed divergence
+
+Two halves are deliberately not done here. The wire key stays `candidates`, and
+`docs[].source` keeps its `os.path.relpath` spelling — so one `/api/state` body
+still carries two spellings of one identity. Normalizing the label a client reads
+changes what a value means, which is the versioning rule's own bumping row, and
+M0 moves the version exactly once with all four of its items together.
+
+The contract's divergence list **only grows**: a closed entry is marked `Closed`
+in place and keeps its number, and a new one is appended. The numbers are
+referenced from `AGENTS.md`, from work packages and from this file, so
+renumbering would silently repoint every one of them — the section is a history
+and its length is not a count of what is outstanding. (1) and (13) are the first
+two closed, and (13) only on its separator axis.
+
+### Verification, and the axes
+
+`1029 passed, 1 skipped` from `1008 passed, 1 skipped`; ruff clean. Nineteen
+mutants across two rounds, all killed. The first five: the raw-string comparison
+on each side of the subtraction (four tests each, including the end-to-end one
+through a real state database on this machine), the 200-entry cap restored,
+`seen.add` removed, and the server reading `tracked()` a second time. The
+adversarial pass ran fourteen more of its own — including a behaviour-preserving
+refactor, which a mutation run is supposed to leave green and which found the
+over-fitted assertion in *Test quality* below.
+
+Axes varied: separator spelling, target-language count, glob overlap, list size
+across the old cap, caller-supplied against self-fetched `tracked()`, both empty
+configuration keys, and the display against `--json`. Held constant: a source tree
+whose files all sit inside the project root, ASCII paths, one filesystem, and
+`doc_id`'s own case sensitivity.
+
+### What the adversarial pass found, which the sweep could not
+
+The claim was handed to six read-only lenses — behaviour, the contract, fidelity
+to the package's instructions, test quality, the truth of the prose, and one whose
+only job was to name what the other five were not looking at. Five returned on the
+first run and the sixth — test quality — died on a transport error and was re-run
+alone. Every finding below was reproduced by the lens that reported it, and the
+sweep above found none of them, because **each sits on an axis the sweep held
+constant and listed as held constant.** That list was the map to the defects, not
+a disclaimer.
+
+Two were false statements in tracked documents, which is the class this project
+treats as blocking:
+
+- **The `--json` precedent was wrong about two of the three commands it cited.**
+  Only `lx terms` names its array for the command; `lx todo`'s is `segments` and
+  `lx check`'s is `issues`. Corrected above and in the code comment. The choice of
+  `untracked` survives — the noun rule decides it — but a rule asserted from
+  precedents that contradict it is what the next session would have reused.
+- **The suppression was documented as conditional** — "while the other is
+  tracked" — and it is unconditional. Reproduced with nothing tracked at all.
+  Corrected above, and widened in the contract, where the `candidates` row now
+  states the identity rather than the file as its unit.
+
+Three more became contract divergences (19), (20) and (21) rather than code here,
+each with a reproduction: a tracked document still listed when the two spellings
+differ only in **case**, which is (13)'s other axis and older than it; a list
+carrying entries `POST /api/extract` refuses — a directory, an unreadable
+extension, a path outside the root — where filtering would narrow what the key
+means and is therefore a version decision; and `candidates[].source` reaching the
+shipped page through an **unescaped HTML attribute**, on a page with no CSP and
+unauthenticated access to an endpoint that spends money. The last is pre-existing
+and the frontend it lives in is being replaced wholesale, which is exactly why it
+had to be written down rather than left for the rebuild to rediscover.
+
+### Test quality, and the assertion that could not fail
+
+The test lens rebuilt the tree in a temporary directory and ran fourteen mutants
+against it. Thirteen died. What it found instead is the shape worth recording:
+
+**One half of a parametrized test was vacuous, and the parametrization is what
+hid it.** `lx untracked` names an empty `sources` and an empty `targets` rather
+than reporting nothing to do, and the test asserted that the output contains the
+key's name. With both guards deleted the `targets` half died and the `sources`
+half stayed green — because the sentence it must not reach, "nothing new matches
+sources (…)", contains the word `sources` itself. The `targets` half only worked
+by the accident that the same sentence does not contain `targets`. Two cases that
+look identical in the source, one of which asserts nothing. It asserts a phrase
+only the intended branch can produce now, and both mutants die.
+
+**A behaviour-preserving mutant is worth as much as a breaking one.** Routing
+`/api/state`'s document read through `cli` rather than through the server's own
+`store` import leaves the property intact — the project is still read once, and it
+is the direction invariant 8 points — and the test failed, because it asserted
+*which module's global* was called rather than how many reads happened. It counts
+the total now and keeps the split as the message. A mutation run is usually read
+for what turns the suite red; this one is the case where green was the correct
+answer and red was the finding.
+
+**And two of the three separator regressions cannot fail on a Linux runner**, by
+construction: they write the tracked row through the real `do_extract`, so both
+sides are spelled by the same `os.path.relpath` and the old code already passes
+there. That is disclosed in both docstrings and is not worth trading away — the
+end-to-end property is why they exist — because the third one, which hands in a
+literal `docs\guide.md`, is the cross-platform guard and dies against every
+raw-string mutant on both runners.
+
+Two became code here, both on the new command's own surface rather than on the
+wire:
+
+- **A `sources` pattern on another volume ended the command in a traceback.**
+  `os.path.relpath` raises across drives and UNC shares on this platform, and
+  `ValueError` is not in `main`'s handled list — so a book library on a second
+  drive, which is an ordinary thing for this project, got exit 1 and a stack
+  trace where every other configuration mistake gets one sentence and exit 2. It
+  is a `ConfigError` naming the pattern now; over HTTP the same change turns a
+  400 quoting a CPython internal into a 400 a person can act on. Pre-existing in
+  `_scan_sources` and newly reachable from a command somebody types.
+- **`--max 0` claimed rows it had not printed** — a negative slice counts from
+  the tail while the "N more" arithmetic counts from the head, so `--max -1`
+  printed 29 of 30 and announced 31 more. Floored. `cmd_check` has the identical
+  defect and is deliberately left alone: it is a different command's line, and
+  changing it is not this unit's licence.
+
+The rest were repairs to this entry and its neighbours: `AGENTS.md`'s test count
+and its stale claim about which divergences are outstanding, and the contract
+telling a non-Python client to compare identities "through `store.doc_id`" — a
+function it cannot call and which the same document forbids it to read. That
+bullet now states the algorithm in words and tells the client not to need it.
+
 ## 2026-08-14 · The workbench rebuild is decided — twenty-two questions, five of which nobody had listed
 
 HANDOFF-204 is the largest item in the roadmap and the only one the stated core

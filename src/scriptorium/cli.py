@@ -2,6 +2,7 @@
 a caller of these functions, so behaviour cannot diverge between them."""
 
 import argparse
+import glob
 import json
 import math
 import os
@@ -51,6 +52,7 @@ from .store import (
     StateVersionError,
     append_tm,
     db_path,
+    doc_id,
     load_doc,
     load_tm,
     prior_doc,
@@ -1038,6 +1040,125 @@ def cmd_init(args, cfg):
     _out("initialized" + (f": {', '.join(created)}" if created else " (already set up)"))
 
 
+# ── untracked ──────────────────────────────────────────────────────────────
+
+def do_untracked(cfg, docs=None):
+    """``[{source, lang}]`` — files matching the `sources` globs that have no state.
+
+    One entry per configured target language, because a file extracted into
+    zh-TW and not into ja-JP is untracked in ja-JP and tracked in zh-TW.
+
+    ``docs`` is :func:`store.tracked`'s result, a parameter so that a caller
+    already holding it does not pay for a second one. It is the whole of
+    `/api/state`'s document list, and that endpoint used to load every segment
+    of every document in the project twice per request to draw one page.
+
+    **The comparison is** :func:`store.doc_id`, **this project's identity
+    function, rather than a normalization of this function's own.** Two things
+    follow, and both are the reason to reuse it. It flattens the separator, which
+    is what the comparison needed: a state row written `docs\\guide.md` and a glob
+    hit spelled `docs/guide.md` are one file, and comparing the two strings meant
+    the subtraction never fired at all on a platform whose separator is not `/`
+    — measured 2026-08-13, and the workbench went on offering to extract a
+    document it was already showing. And it is what `.lx/state.db` keys a
+    document row on, so two paths it maps together really are one document here:
+    a listing that separated them would be offering an extract that overwrites
+    the other one's state. *Lost:* a second normalization rule owned by this
+    function, which is how one matcher in this repository became three copies
+    before anyone noticed.
+
+    Nothing here is confined and nothing here opens a file (invariant 11): these
+    paths are emitted for a person or a client to choose from, and the endpoint
+    that acts on one — `/api/extract`, through :func:`confined_path` — is where a
+    path out of a hand-edited `sources` is refused. Recorded rather than assumed,
+    because `sources` feeds a glob directly and is not in
+    `config.PATH_VALUED_KEYS`.
+    """
+    if docs is None:
+        docs = tracked()
+    seen = {(doc_id(d["source"]), d["lang"]) for d in docs}
+    out = []
+    for pattern in cfg.get("sources") or []:
+        for path in sorted(glob.glob(pattern, recursive=True)):
+            try:
+                identity, rel = doc_id(path), os.path.relpath(path).replace(os.sep, "/")
+            except ValueError as e:
+                # `os.path.relpath` raises across volumes on Windows, and both
+                # calls above make one. A pattern naming another drive or a UNC
+                # share is an ordinary thing to write on a machine whose library
+                # is not on C:, and it used to end this command in a traceback
+                # and exit 1 — where every other refusal in this CLI is one
+                # sentence and exit 2, and where the workbench turns this into a
+                # 400 quoting a CPython internal.
+                raise ConfigError(
+                    f"the sources pattern {pattern!r} matched {path!r}, which is not on the "
+                    f"same volume as the project directory ({e}). Every document's identity "
+                    f"here is its path relative to that directory, so a pattern has to stay "
+                    f"under it — move the files in, or start `lx` where they already are."
+                ) from None
+            for lang in cfg.get("targets") or []:
+                key = (identity, lang)
+                if key in seen:
+                    continue
+                # Recorded as it is emitted, so two overlapping patterns propose
+                # one file once. The identity is the one the state row uses, so a
+                # repeat here would be two offers of a row the database can only
+                # hold once — the same subtraction, applied to this call's own
+                # output.
+                seen.add(key)
+                out.append({"source": rel, "lang": lang})
+    return out
+
+
+def cmd_untracked(args, cfg):
+    rows = do_untracked(cfg)
+    if args.json:
+        # An object carrying the array plus the two configuration values that
+        # decided it, which is the shape `lx todo`, `lx terms` and `lx check
+        # --json` all emit — so an empty list explains itself to a machine
+        # consumer as well as to a person. The array's own name follows
+        # `lx terms`, the one of the three that names its array for the command
+        # (`lx todo`'s is `segments` and `lx check`'s is `issues`, which name the
+        # payload): here the command, `/api/state`'s key after the rename and
+        # HANDOFF-203's field have to spell one word, and that word is this
+        # command's.
+        _out(json.dumps({"sources": list(cfg.get("sources") or []),
+                         "targets": list(cfg.get("targets") or []),
+                         "untracked": rows}, ensure_ascii=False, indent=2))
+        return
+    patterns, targets = cfg.get("sources") or [], cfg.get("targets") or []
+    # Both emptiness cases produce an empty list and neither is "everything is
+    # tracked", so each says which key is empty rather than reporting nothing to
+    # do. `targets` first: with no target language there is no pair to be
+    # untracked in, whatever the globs match.
+    if not targets:
+        _out("no target language is configured, so nothing can be untracked in one — "
+             "`lx config set targets zh-TW`")
+        return
+    if not patterns:
+        _out("`sources` is empty, so nothing is looked for — "
+             '`lx config set sources "docs/**/*.md"`')
+        return
+    if not rows:
+        _out(f"nothing new matches sources ({', '.join(patterns)}) "
+             f"for {', '.join(targets)}")
+        return
+    _out(f"{len(rows)} untracked (source, language) pair(s)")
+    # Floored, because a negative slice counts from the tail while the
+    # arithmetic below counts from the head: `--max -1` printed 29 rows and then
+    # claimed 31 more. `cmd_check`'s block, which this one follows, has the same
+    # defect and is left alone here — it is a different command's line to change.
+    shown = max(0, args.max)
+    for row in rows[:shown]:
+        _out(f"  {row['source']} [{row['lang']}]")
+    if len(rows) > shown:
+        # `lx check`'s sentence verbatim, because this is the same promise: the
+        # human display is truncated and the whole list is one flag away. The
+        # wire is not capped and neither is `--json`.
+        _out(f"  ... {len(rows) - shown} more (use --max or --json)")
+    _out("`lx extract <src> --lang <lang>` to track one")
+
+
 # ── configuration ──────────────────────────────────────────────────────────
 
 #: An environment variable's name: what `api_key_env` holds, and the only thing
@@ -1955,6 +2076,16 @@ def build_parser():
     s_ = sub.add_parser("stats", help="coverage across tracked documents")
     s_.add_argument("--lang")
     s_.set_defaults(fn=cmd_stats)
+
+    un = sub.add_parser("untracked", help="files matching `sources` with no state yet")
+    un.add_argument("--json", action="store_true")
+    # The same flag and the same default as `lx check`, deliberately: one number
+    # to remember across the two commands that truncate. *Lost:* a larger default
+    # chosen from a guess at how many files a project has, which buys one
+    # keystroke and costs a second number.
+    un.add_argument("--max", type=int, default=25,
+                    help="rows to print; the rest are counted. --json is never truncated")
+    un.set_defaults(fn=cmd_untracked)
 
     tr = sub.add_parser("translate", help="translate segments with a configured model")
     tr.add_argument("src")

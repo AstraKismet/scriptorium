@@ -144,6 +144,7 @@ It does not mean the translation is good; that is what review is for.
 | `lx web` | local review workbench |
 | `lx config get\|set\|unset KEY [VALUE]` | read and write `lx.config.json` with dotted keys |
 | `lx routing show\|set STAGE PROVIDER[:MODEL]` | which backend, and which model, serves each stage |
+| `lx untracked` | files matching `sources` with no state yet, one row per target language |
 | `lx providers` / `lx stats` | backends / coverage |
 
 `--dry-run` on `translate`, `repair` and `run` reports the work without calling a
