@@ -78,6 +78,45 @@ persist past the session that made them, and a `git worktree list` full of dead
 entries is where a live one hides. `.gitignore` carries `.claude/worktrees/` for
 the same reason.
 
+### 2b. A fan-out's lanes are priced before its topology is chosen
+
+Cutting work into lanes and choosing how those lanes are joined are two decisions,
+and getting the second one wrong spends the whole saving the first one bought.
+
+**Measured 2026-08-14**, on HANDOFF-204's M0 reconnaissance. Five read-only lanes
+went out behind one barrier: four inventories over the source tree, and one
+measurement lane that reproduced three recorded defects and probed the path
+primitives behind them. The four inventories returned between **2.3 and 5.6
+minutes**. The measurement lane returned at **103.5 minutes**. Because the join
+waited for all five, four finished reports were unreadable for ninety-six minutes.
+Nothing had failed — zero tool errors, zero retries, and the slow lane wrote to its
+transcript continuously the whole time.
+
+Two errors, and they are separable:
+
+1. **The lanes were cut on the wrong axis.** The split was "which lane runs code"
+   — one — against "which lanes read files" — four. That is not what prices a lane.
+   What prices it is **how many independent proof procedures its brief mandates**:
+   the slow lane carried six, each needing its own scratch project, its own
+   configuration and its own inspection, and tool round-trips are as serial inside
+   one worker as token generation is. This is the batching error of 2026-08-13 on a
+   different cost axis, so the rule is stated once for both: **cut a lane by the
+   unit of output it must produce — one object, one reproduction, one file — never
+   by which capability it happens to use.**
+
+2. **Lanes of different cost classes shared a barrier.** Estimate each lane's cost
+   *before* choosing the join, and write the estimate down. When one lane's
+   estimate is several times its neighbours', it does not share a barrier with
+   them: dispatch it separately, or join with a form that releases each lane as it
+   finishes. A barrier is only right when a later stage genuinely needs every prior
+   result at once, and reading five reports one after another is not that.
+
+**And a finished lane is readable before the run is.** However the lanes are
+joined, a completed worker's return value is recorded the moment it lands — so a
+coordinating worker that finds itself waiting should read what has finished rather
+than wait for what has not. Check that before concluding a slow run is a stuck one.
+The mechanism is tool-specific and lives in the per-machine binding.
+
 ## 3. The brief carries the context, or the worker invents one
 
 A delegated worker does not investigate before acting and does not know anything
