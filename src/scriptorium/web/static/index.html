@@ -170,7 +170,18 @@ const api = async (path, body) => {
   if (d.error) throw new Error(d.error);
   return d;
 };
-const esc = s => s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+// The quote and the apostrophe are in the set because most of what this file
+// interpolates lands in an *attribute*, where `&<>` alone does not close one.
+// `data-src="${c.source}"` was the measured case: a filename is not always the
+// user's own on a surface whose corpus is downloaded novels, a POSIX filename may
+// contain `"`, and this page has unauthenticated access to every endpoint here
+// including one that spends money. No CSP is sent — the server's header set is
+// itself part of the frozen contract. See `docs/contracts/workbench-http.md` (21),
+// and note that the divergence's own list of unescaped sites was short by one:
+// `data-lang` went through nothing at all. That is why every interpolation below
+// goes through this now rather than the ones an audit happened to name.
+const esc = s => String(s).replace(/[&<>"']/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const marks = s => esc(s).replace(/⟦(\d+)⟧/g, '<ph>⟦$1⟧</ph>');
 const phs = s => (s.match(/⟦\d+⟧/g) || []).sort().join(',');
 
@@ -191,7 +202,7 @@ async function loadState() {
   $('#cwd').textContent = s.cwd;
   $('#provider').innerHTML = s.providers.map(p => {
     const bad = p.needs_key && !p.key_present;
-    return `<option value="${p.name}"${bad?' disabled':''}>${p.name} · ${p.model}${bad?' (no key)':''}</option>`;
+    return `<option value="${esc(p.name)}"${bad?' disabled':''}>${esc(p.name)} · ${esc(p.model)}${bad?' (no key)':''}</option>`;
   }).join('');
   // `/api/state` reports routing resolved — {provider, model} per stage — because
   // the configured value is two shapes and assigning the object form here would
@@ -202,15 +213,21 @@ async function loadState() {
 
   $('#docs').innerHTML = s.docs.map(d => {
     const pct = Math.round(100 * d.done / Math.max(d.total,1));
-    return `<button class="doc" data-src="${d.source}" data-lang="${d.lang}">
-      <b>${esc(d.source)}</b><small>${d.lang} · ${d.done}/${d.total}</small>
+    return `<button class="doc" data-src="${esc(d.source)}" data-lang="${esc(d.lang)}">
+      <b>${esc(d.source)}</b><small>${esc(d.lang)} · ${d.done}/${d.total}</small>
       <span class="meter"><i style="width:${pct}%"></i></span></button>`;
   }).join('') || '<p style="color:var(--faint);padding:0 18px;font-size:12px">None yet.</p>';
 
-  $('#cands').innerHTML = s.candidates.map(c =>
-    `<button class="doc cand" data-src="${c.source}" data-lang="${c.lang}">
-      <b>${esc(c.source)}</b><small>${c.lang} · extract</small></button>`).join('')
+  $('#cands').innerHTML = s.untracked.map(c =>
+    `<button class="doc cand" data-src="${esc(c.source)}" data-lang="${esc(c.lang)}">
+      <b>${esc(c.source)}</b><small>${esc(c.lang)} · extract</small></button>`).join('')
     || '<p style="color:var(--faint);padding:0 18px;font-size:12px">Nothing new matches <code>sources</code>.</p>';
+  // Said rather than swallowed: `doc_id` flattens every character outside
+  // A-Za-z0-9._- , so a Chinese-titled library collapses to one entry and the
+  // rest of it is simply absent from the list whose job is to say what there is.
+  s.collisions.forEach(c => say(
+    `${c.paths.join(' = ')} share one identity — `
+    + (c.offered ? `offering ${c.offered}` : 'a tracked document holds it'), 'warn'));
 
   document.querySelectorAll('.doc').forEach(b => b.onclick = async () => {
     if (b.classList.contains('cand')) {
@@ -254,9 +271,9 @@ function paint() {
     const mark = s.target ? (bad ? '<span class="mark bad">✗</span>'
                                  : '<span class="mark ok">✓</span>') : '';
     const notes = s.issues.map(i =>
-      `<div class="note ${i.severity==='warn'?'warn':''}"><b>${i.rule}</b>${esc(i.message)}</div>`).join('');
-    return `<div class="row ${bad?'failing':''}" data-id="${s.id}">
-      <div class="gutter">${s.id}<span class="kind">${s.kind}</span>${mark}</div>
+      `<div class="note ${i.severity==='warn'?'warn':''}"><b>${esc(i.rule)}</b>${esc(i.message)}</div>`).join('');
+    return `<div class="row ${bad?'failing':''}" data-id="${esc(s.id)}">
+      <div class="gutter">${esc(s.id)}<span class="kind">${esc(s.kind)}</span>${mark}</div>
       <div class="src">${marks(s.source)}</div>
       <div class="tgt"><textarea rows="1" spellcheck="false"
         placeholder="untranslated">${esc(s.target)}</textarea></div>
@@ -290,9 +307,40 @@ function next(ta) {
 
 async function save() {
   if (!dirty.size) return;
-  const targets = Object.fromEntries(dirty);
-  dirty.clear();
-  await api('/api/save', {...cur, targets});
+  // Blank edits are held back rather than sent. The server refuses an empty
+  // target for the WHOLE request, and `dirty` is one map for the whole ledger —
+  // so one cleared segment would refuse every later edit in the same session,
+  // over and over, because the poisoned batch keeps being resent. Held back, the
+  // good edits go through and the blank one is named once. The refusal itself
+  // stays the server's; this only declines to send a request that cannot succeed.
+  const held = [...dirty].filter(([, text]) => !text.trim()).map(([id]) => id);
+  held.forEach(id => say(`  ${id} is empty — an empty target is not storable; `
+    + `restore the wording, or use Draft on this segment to have it done again`, 'bad'));
+  const targets = Object.fromEntries([...dirty].filter(([, text]) => text.trim()));
+  if (!Object.keys(targets).length) return;
+  // The token each edit was based on, so a translation batch that landed
+  // mid-review — or a second window — cannot overwrite a sentence silently.
+  // Per id and optional: a segment this page holds no token for is written the
+  // way it always was.
+  const base = {};
+  for (const id of Object.keys(targets)) {
+    const seg = doc.segments.find(s => s.id === id);
+    if (seg && seg.token) base[id] = seg.token;
+  }
+  let r;
+  try {
+    r = await api('/api/save', {...cur, targets, base});
+  } catch (e) {
+    // Cleared only on success, now that a save can be refused: an empty target
+    // is a 400, and clearing first threw away every other edit in the batch
+    // along with the one the server would not take.
+    say('  ' + e.message, 'bad');
+    return;
+  }
+  // Only what was sent. A held-back blank stays dirty and stays visible.
+  Object.keys(targets).forEach(id => dirty.delete(id));
+  const lost = Object.keys(r.conflicts || {});
+  if (lost.length) say(`  ${lost.join(', ')} changed underneath this edit and were not written`, 'bad');
   await refresh();
 }
 

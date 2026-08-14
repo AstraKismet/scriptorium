@@ -188,7 +188,12 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    the list only grows — read the section rather than this paragraph for what is
    outstanding. (1) and (13) closed on 2026-08-14, which leaves one of the two
    server-only behaviours: (4), the job endpoint, which the contract argues is a
-   structural CLI gap rather than leaked logic.
+   structural CLI gap rather than leaked logic. `contract_version` moved to **2**
+   the same day, once, carrying five items: the `candidates` → `untracked` rename,
+   the identity label normalized, `status` derived from the target text, an empty
+   target refused, and a lost-update token. It closed (13)'s wire half, (14), (17)
+   for a client that opts in, (19) and (21), and decided (18) and (20). Every
+   further bump is gated behind a work package rather than a commit.
 
 9. **Nothing regenerable is a source of truth.** Working state (SQLite) and
    approved wording (`.lx/tm.*.jsonl`) are sources of truth. JSON over HTTP is a
@@ -266,7 +271,8 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 1030 tests; no network (one is POSIX-only)
+python -m pytest -q                 # 1062 tests; no network (one is POSIX-only,
+                                    #   one runs only where the filesystem folds case)
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
 
@@ -447,7 +453,15 @@ own.
   makes the blindness safe. Carryover from a document's own prior state is a
   proposal on the same terms, and the memory is tried when it is refused.
   `lx apply` is the deliberate exception, and only for *refusal*: a person's words
-  are reported at `lx check`, not rejected at the door. It shares
+  are reported at `lx check`, not rejected at the door. **An empty target is not
+  words.** Since 2026-08-14 `do_apply` refuses one, for the whole request, and
+  names `lx translate --ids` instead — the exception protects *content* from a
+  mechanical rule, and an empty string is the absence of content. Left storable it
+  combines with status-derived-from-text and origin precedence into a segment
+  every run selects, no writer may write and `lx check` can never pass; refusing
+  at the door makes that unreachable rather than guarded against in three
+  predicates. The refusal lives in `do_apply` rather than at the endpoint so that
+  the CLI cannot walk around it. It shares
   `reseat_outer_blanks` all the same, because a run of blanks at a segment's edge
   belongs to the host syntax rather than to whichever of the three sources wrote
   the target — closing that half on 2026-08-03 was what stopped one document

@@ -53,6 +53,7 @@ from .store import (
     append_tm,
     db_path,
     doc_id,
+    doc_label,
     load_doc,
     load_tm,
     prior_doc,
@@ -62,6 +63,7 @@ from .store import (
     save_segments,
     save_targets,
     segment_key,
+    target_token,
     tm_lookup,
     tm_records,
     tracked,
@@ -135,6 +137,23 @@ class UnsupportedSource(ValueError):
     the alternative for `lx terms` on a non-English document is a list of quiet
     nonsense — Chinese and Japanese have no capitalization for the rule to read,
     so it would propose nothing and report success.
+    """
+
+
+class UnusableTarget(ValueError):
+    """A save payload this build will not store, and why.
+
+    One class for three refusals — a target that is empty or all blanks, a target
+    that is not text at all, and a `base` that is not a map of tokens — because
+    they share what the caller does about them: fix the payload and send it again.
+
+    Named rather than a bare `ValueError` so `main` answers each with one sentence
+    and exit 2, the way every other refusal in this CLI does, instead of a
+    traceback — and so `web/server.py` turns each into the 400 the contract states
+    rather than into whatever exception happened to escape first. The measured one
+    was `AttributeError: 'int' object has no attribute 'strip'`, from a numeric
+    target reaching the blank check: exit 1 and a stack trace on the CLI, and a
+    400 quoting a CPython internal on the wire.
     """
 
 
@@ -413,7 +432,9 @@ def do_extract(src, lang, cfg, tone=None, reset=False):
                 rejected += 1
 
     doc = {
-        "version": __version__, "source": os.path.relpath(src), "lang": lang,
+        # `doc_label`, not `os.path.relpath`: one spelling of one identity, on
+        # every platform and on every surface that shows it. See its docstring.
+        "version": __version__, "source": doc_label(src), "lang": lang,
         "tone": tone,
         # Which parser produced the skeleton, and which encoding the source was
         # in. Both are document-level facts, held beside `eol` for the same
@@ -883,15 +904,98 @@ def cmd_terms(args, cfg):
 
 # ── apply ──────────────────────────────────────────────────────────────────
 
-def do_apply(src, lang, cfg, incoming, origin="agent"):
+def do_apply(src, lang, cfg, incoming, origin="agent", base=None):
+    """Write reviewed targets. ``(applied, unknown, stored, conflicts)``.
+
+    ``stored`` is ``{id: {"text", "token"}}`` for what was written and
+    ``conflicts`` the same shape for what was refused, so a caller never has to
+    re-read the document to find out what it now holds. That readback is what
+    removes the save-then-refetch-the-whole-book loop on a five-thousand-segment
+    novel, and it is what gives a conflict presentation something authoritative
+    to diff against.
+
+    **An empty target is refused, and the refusal is here rather than at the
+    endpoint.** `AGENTS.md` records `lx apply` as the deliberate exception to
+    refusal — a person's words are reported at `lx check`, not rejected at the
+    door — and that exception protects *content* from a mechanical rule. An empty
+    string is not content; it is the absence of it. Left storable, it combines
+    with status-derived-from-text and the origin precedence scheduled next into a
+    segment every run selects, no writer may write and `lx check` can never pass:
+    a human clears a segment, the draft pass selects it on `pending`, the repair
+    pass selects it on the `missing` error, and both writes are refused for being
+    `llm:*` over `human`. Refusing at the door makes that state unreachable by
+    construction rather than guarded against in three predicates. To have a
+    segment translated again, run it: `lx translate --ids <id>`. See
+    ``docs/decisions.md``, 2026-08-14.
+
+    Whole-request, before anything is written, so a save carrying one blank has
+    not half-happened — and only for ids that name a segment, because an id that
+    names none is ignored rather than refused, which is what `unknown` already
+    means here.
+
+    **``base`` is the lost-update check**, ``{id: token}`` from
+    :func:`store.target_token`. An id present in it is written only if the stored
+    target still hashes to the token the caller was shown; otherwise nothing is
+    written for that id and the current text and token come back in
+    ``conflicts``. An id absent from ``base`` is written unconditionally, which
+    is what keeps `lx apply` and any client that has not opted in behaving
+    exactly as before. Reported in the body rather than as a status, because one
+    request can carry a hundred segments and a status code cannot say which of
+    them lost.
+
+    **The check that counts is inside the write**, not here. The comparison below
+    runs against the snapshot this call loaded, which is a good cheap filter and
+    is not a guarantee: two writers whose reads both land before either write both
+    pass it. So the previous target travels to :func:`store.save_segments` as
+    ``expect`` and the write is a compare-and-swap in one statement. Measured
+    2026-08-14 with two threads — before the swap, both were told
+    ``applied: 1, conflicts: {}`` and one text was gone.
+    """
     doc = load_doc(src, lang)
     by_id = {s["id"]: s for s in doc["segments"]}
-    applied, unknown, changed = 0, [], []
+    # Shape first, and refused rather than ignored. `sid in base` on a string is a
+    # substring test, so a client that sent `base` in the wrong JSON shape had its
+    # lost-update protection silently switched off while believing it had asked
+    # for it — the one guarantee this field exists to give.
+    if base is not None and not isinstance(base, dict):
+        raise UnusableTarget(
+            f"`base` is a map of segment id to the token that segment was shown with, and "
+            f"this request sent {type(base).__name__}. Send that map, or omit `base` "
+            f"entirely to write without the lost-update check.")
+    bad = sorted(sid for sid, text in incoming.items()
+                 if sid in by_id and not isinstance(text, str))
+    if bad:
+        raise UnusableTarget(
+            f"{', '.join(bad)}: a target is text, and this request sent "
+            f"{', '.join(sorted({type(incoming[s]).__name__ for s in bad}))}. Nothing was "
+            f"written. A number or a list here is a client building the payload wrongly, "
+            f"not a translation this build should try to store.")
+    blank = sorted(sid for sid, text in incoming.items()
+                   if sid in by_id and not text.strip())
+    if blank:
+        raise UnusableTarget(
+            f"{', '.join(blank)}: an empty target is a rejected input here, not a stored "
+            f"result — it would leave nothing to review while taking the segment out of "
+            f"the queue that would have it retranslated. Write the wording you want, or "
+            f"have the model do this one again: "
+            f"`lx translate {src} --lang {lang} --ids {','.join(blank)}`.")
+    unknown, changed = [], []
+    stored, conflicts, expect = {}, {}, {}
     for sid, text in incoming.items():
         seg = by_id.get(sid)
         if not seg:
             unknown.append(sid)
             continue
+        if base and sid in base:
+            current = target_token(seg.get("target"))
+            if base[sid] != current:
+                conflicts[sid] = {"text": seg.get("target") or "", "token": current}
+                continue
+            # Captured before the line below overwrites it. This is what makes the
+            # check real: the comparison above is against a snapshot read in an
+            # earlier transaction, and `save_segments` re-checks this value inside
+            # the write itself.
+            expect[sid] = seg.get("target")
         # Half of `accept`, and only that half. A person's or an agent's words
         # are still never refused here — that asymmetry is deliberate and
         # `docs/decisions.md`, 2026-07-29, records why — but the blanks a segment
@@ -915,16 +1019,35 @@ def do_apply(src, lang, cfg, incoming, origin="agent"):
         seg["target"] = reseat_outer_blanks(
             seg["masked"], normalize(repair_placeholders(text), lang, cfg),
             keep_added_indent=True)
-        seg["status"], seg["origin"] = "translated", origin
+        # Derived from the text, never asserted by the act of writing. `status`
+        # is the draft queue's selection predicate and not a progress display, so
+        # marking an empty segment `translated` did not merely miscount it — it
+        # removed it from the queue, and a reviewer's "this needs redoing" quietly
+        # meant the opposite. Unreachable now that the refusal above runs first,
+        # and written this way so the class of defect is closed rather than the
+        # instance: it is also what makes `status == "translated"` and the two
+        # non-empty-target counters agree by construction rather than by
+        # coincidence. `docs/contracts/workbench-http.md` (14).
+        seg["status"] = "translated" if seg["target"].strip() else "pending"
+        seg["origin"] = origin
         seg.pop("issues", None)
         changed.append(seg)
-        applied += 1
+        stored[sid] = {"text": seg["target"], "token": target_token(seg["target"])}
     # The segments this call touched, not the whole document: apply is what the
     # workbench calls on every keystroke-sized save, and rewriting a novel's
     # skeleton to record one edited paragraph is the amplification the state
     # layer moved to SQLite to remove.
-    save_segments(src, lang, changed)
-    return applied, unknown
+    _written, stale = save_segments(src, lang, changed, expect=expect)
+    if stale:
+        # The row moved between this call's read and its write. One extra read,
+        # and only when that actually happened, so the conflict carries the text
+        # the winner left behind rather than the one this call was shown.
+        fresh = {s["id"]: s for s in load_doc(src, lang)["segments"]}
+        for sid in stale:
+            text = (fresh[sid].get("target") or "") if sid in fresh else ""
+            conflicts[sid] = {"text": text, "token": target_token(text)}
+            stored.pop(sid, None)
+    return len(stored), unknown, stored, conflicts
 
 
 def cmd_apply(args, cfg):
@@ -934,7 +1057,11 @@ def cmd_apply(args, cfg):
         data = data["segments"]
     incoming = ({d["id"]: d.get("text", d.get("target", "")) for d in data}
                 if isinstance(data, list) else dict(data))
-    applied, unknown = do_apply(args.src, args.lang, cfg, incoming, args.origin)
+    # No `base`: a file on disk carries no token, so `lx apply` writes
+    # unconditionally, exactly as it did. The lost-update check is opt-in per id
+    # and the workbench is what opts in.
+    applied, unknown, _stored, _conflicts = do_apply(
+        args.src, args.lang, cfg, incoming, args.origin)
     _out(f"applied {applied} segment(s)" + (f"; unknown ids ignored: {unknown}" if unknown else ""))
 
 
@@ -1003,7 +1130,7 @@ def do_render(src, lang, cfg, fallback=False):
 
 def default_output(src, lang, cfg):
     pattern = cfg.get("output_pattern", "i18n/{lang}/{path}")
-    return pattern.format(lang=lang, path=os.path.relpath(src).replace(os.sep, "/"),
+    return pattern.format(lang=lang, path=doc_label(src),
                           name=os.path.basename(src))
 
 
@@ -1042,8 +1169,80 @@ def cmd_init(args, cfg):
 
 # ── untracked ──────────────────────────────────────────────────────────────
 
+def _fold(identity):
+    """A document identity as the filesystem would compare it.
+
+    ``os.path.normcase`` lowercases on Windows and is the **identity function on
+    POSIX**, so this is the platform's own answer to "are these the same name"
+    rather than a rule of ours — which is exactly what stops it merging two
+    genuinely distinct documents where the filesystem keeps them apart, the
+    objection that ruled out case-folding :func:`store.doc_id` itself. Contract
+    divergence (19): the identity is case-sensitive, NTFS is not, so
+    `lx extract docs/guide.md` against an on-disk `docs/Guide.md` tracked the file
+    and the listing went on offering it.
+
+    *Lost:* ``os.path.normcase(os.path.realpath(p))``, which additionally folds
+    8.3 short names, junctions and symlinks. It was written first and measured
+    out: `realpath` is a syscall per path, and building the tracked side of the
+    comparison cost **463 ms on 2000 documents — 4.7x the `tracked()` read it
+    rides beside** — on the endpoint a client must call before it can draw
+    anything, for a library scale this project treats as small. The same sweep
+    here is **27 ms**, most of it the `doc_id` that was already being computed,
+    and `do_untracked` on that shape went from **672 ms to 212 ms**. It also needs
+    no filesystem at all, so a tracked document whose file is gone still compares
+    rather than resolving to a literal that folds differently. What it does not
+    fold is a symlink or an 8.3 spelling reaching one file two ways; that is the
+    identity's own defect and waits with the structural identity the contract's
+    *Reserved* section schedules.
+
+    The measurement is the point and not the number: the first version bought
+    coverage nobody had asked for, on the axis that had not been decided, at four
+    times the cost of the read beside it.
+
+    Folded on the **subtraction only**, never on `labels`: two spellings that the
+    filesystem calls one file are one document, not a collision, and reporting
+    them as one would be inventing a defect.
+    """
+    return os.path.normcase(identity)
+
+
+def _extractable(path, cfg):
+    """Could `lx extract` read this path at all?
+
+    Two axes, and deliberately only the two both surfaces agree on: it has to be
+    a file, and the format registry has to know its extension. A `sources` value
+    is a glob and nothing else — `book/**/*` matches the cover image and the
+    chapter subdirectory alongside the chapters — and offering those as work to
+    start is offering a refusal. Measured 2026-08-14: `formats.name_for_path`
+    raises for both, so `lx extract` exits 2 and `POST /api/extract` answers 400,
+    with "has no format this project knows how to read".
+
+    The third axis contract divergence (20) names — a path outside the project
+    root — is **not** filtered. `confined_path` refuses it at the endpoint, but a
+    CLI argument is invariant 11's named exception and
+    `lx extract ../shelf/book.md` succeeds, measured the same day. Filtering it
+    would take a row out of the list that the product's own primary surface can
+    act on (invariant 8). It stays until `roots` makes an outside path a
+    first-class thing rather than a colliding identity.
+    """
+    if not os.path.isfile(path):
+        return False
+    try:
+        formats.name_for_path(path, cfg)
+    except UnknownFormat:
+        return False
+    return True
+
+
+def _add_label(labels, identity, label):
+    """Record a spelling this identity was reached through, once."""
+    seen = labels.setdefault(identity, [])
+    if label not in seen:
+        seen.append(label)
+
+
 def do_untracked(cfg, docs=None):
-    """``[{source, lang}]`` — files matching the `sources` globs that have no state.
+    """``([{source, lang}], [{paths, offered}])`` — what is untracked, and what collided.
 
     One entry per configured target language, because a file extracted into
     zh-TW and not into ja-JP is untracked in ja-JP and tracked in zh-TW.
@@ -1073,15 +1272,37 @@ def do_untracked(cfg, docs=None):
     path out of a hand-edited `sources` is refused. Recorded rather than assumed,
     because `sources` feeds a glob directly and is not in
     `config.PATH_VALUED_KEYS`.
+
+    **The second return value is what a suppressed file costs.** `doc_id`
+    flattens every character outside ``A-Za-z0-9._-``, so `docs/guide.md` and a
+    root-level `docs_guide.md` are one identity — and so are `books/第一章.md`
+    and `books/第二章.md`, which is a whole Chinese-titled library collapsing to
+    one row in the use case this project exists for. The suppression is faithful
+    to storage and must stay: extracting the second overwrites the first's state.
+    What was wrong is that neither surface said which path it had collapsed. Each
+    entry is ``{"paths": [...], "offered": <path or null>}`` — every spelling that
+    maps to one identity, and which of them the list carries. ``offered`` is null
+    when a tracked document already holds the identity, which is the case that
+    produced no entry at all and was therefore completely invisible. See
+    ``docs/contracts/workbench-http.md`` (18).
     """
     if docs is None:
         docs = tracked()
-    seen = {(doc_id(d["source"]), d["lang"]) for d in docs}
-    out = []
+    # Folded, so a candidate reached under another case is subtracted by the
+    # document that already covers it — and so two spellings of one file inside
+    # one call are offered once. See `_fold`.
+    seen = {(_fold(doc_id(d["source"])), d["lang"]) for d in docs}
+    # Every distinct spelling an identity was reached through, tracked documents
+    # included — one document tracked in two languages is one spelling, which is
+    # why this is not a plain append. Unfolded on purpose: see `_fold`.
+    labels = {}
+    for d in docs:
+        _add_label(labels, doc_id(d["source"]), d["source"])
+    out, offered = [], {}
     for pattern in cfg.get("sources") or []:
         for path in sorted(glob.glob(pattern, recursive=True)):
             try:
-                identity, rel = doc_id(path), os.path.relpath(path).replace(os.sep, "/")
+                identity, rel = doc_id(path), doc_label(path)
             except ValueError as e:
                 # `os.path.relpath` raises across volumes on Windows, and both
                 # calls above make one. A pattern naming another drive or a UNC
@@ -1096,8 +1317,15 @@ def do_untracked(cfg, docs=None):
                     f"here is its path relative to that directory, so a pattern has to stay "
                     f"under it — move the files in, or start `lx` where they already are."
                 ) from None
+            # Before the identity is recorded: a directory or a cover image is
+            # not a document this project could read under any spelling, so it is
+            # neither work nor a collision worth reporting.
+            if not _extractable(path, cfg):
+                continue
+            _add_label(labels, identity, rel)
+            folded = _fold(identity)
             for lang in cfg.get("targets") or []:
-                key = (identity, lang)
+                key = (folded, lang)
                 if key in seen:
                     continue
                 # Recorded as it is emitted, so two overlapping patterns propose
@@ -1107,11 +1335,36 @@ def do_untracked(cfg, docs=None):
                 # output.
                 seen.add(key)
                 out.append({"source": rel, "lang": lang})
-    return out
+                offered.setdefault(identity, rel)
+    collisions = sorted(
+        ({"paths": sorted(paths), "offered": offered.get(identity)}
+         for identity, paths in labels.items() if len(paths) > 1),
+        key=lambda c: c["paths"])
+    return out, collisions
+
+
+def _report_collisions(collisions):
+    """Name the files one identity swallowed, or print nothing at all.
+
+    Printed after the list rather than inside it, and printed even when the list
+    is empty: "nothing new matches sources" is exactly the wrong answer to give
+    someone whose library is entirely Chinese-titled and has collapsed to one row.
+    """
+    if not collisions:
+        return
+    _out(f"{len(collisions)} identity(ies) are shared by more than one path, and this "
+         f"project can track one document per identity:")
+    for c in collisions:
+        offered = (f"offering {c['offered']}" if c["offered"]
+                   else "none offered; a tracked document holds this identity")
+        _out(f"  {' = '.join(c['paths'])} — {offered}")
+    _out("  rename one of each set if both are meant to be translated — `.lx/state.db` "
+         "keys a document on that identity, so extracting the second would overwrite "
+         "the first's state")
 
 
 def cmd_untracked(args, cfg):
-    rows = do_untracked(cfg)
+    rows, collisions = do_untracked(cfg)
     if args.json:
         # An object carrying the array plus the two configuration values that
         # decided it, which is the shape `lx todo`, `lx terms` and `lx check
@@ -1124,7 +1377,8 @@ def cmd_untracked(args, cfg):
         # command's.
         _out(json.dumps({"sources": list(cfg.get("sources") or []),
                          "targets": list(cfg.get("targets") or []),
-                         "untracked": rows}, ensure_ascii=False, indent=2))
+                         "untracked": rows, "collisions": collisions},
+                        ensure_ascii=False, indent=2))
         return
     patterns, targets = cfg.get("sources") or [], cfg.get("targets") or []
     # Both emptiness cases produce an empty list and neither is "everything is
@@ -1142,6 +1396,9 @@ def cmd_untracked(args, cfg):
     if not rows:
         _out(f"nothing new matches sources ({', '.join(patterns)}) "
              f"for {', '.join(targets)}")
+        # After the sentence, not instead of it: an identity collision is the one
+        # way that sentence can be true and misleading at the same time.
+        _report_collisions(collisions)
         return
     _out(f"{len(rows)} untracked (source, language) pair(s)")
     # Floored, because a negative slice counts from the tail while the
@@ -1156,6 +1413,7 @@ def cmd_untracked(args, cfg):
         # human display is truncated and the whole list is one flag away. The
         # wire is not capped and neither is `--json`.
         _out(f"  ... {len(rows) - shown} more (use --max or --json)")
+    _report_collisions(collisions)
     _out("`lx extract <src> --lang <lang>` to track one")
 
 
@@ -1864,18 +2122,34 @@ def _translate(src, lang, cfg, segments, mode, args):
              f"mode={mode}, provider={provider}, model={model or 'unset'}")
         return 0, []
     origin = f"llm:{mode}"
-    # Each batch is committed as it lands. `do_apply` still runs at the end and
-    # is still the authority on what was applied — it normalizes and reports
-    # unknown ids — but it is no longer the *first* time anything reaches disk,
-    # which is what an interrupted novel depends on. The two writes agree:
-    # `accept` has already normalized the text this one stores.
-    results, failures = translate_segments(
+    applied = 0
+
+    def commit(ok):
+        """One batch, durable the moment it lands, and counted as it lands.
+
+        The `do_apply` that used to run over every result *again* at the end is
+        gone, here and in `web/server.py`'s job. It wrote nothing `save_targets`
+        had not already written — `accept` normalizes, repairs and reseats before
+        either of them sees the text, and both set the same `status` and `origin`
+        and clear the same issues — so its only effect was to rewrite every
+        segment of the run at the end, over whatever a reviewer had edited in the
+        meantime. Deleting it shrinks that window from the whole run to one batch.
+
+        Deleted on **both** surfaces in one move, deliberately. The first version
+        of this change removed it from the job only, which left `lx translate` —
+        the surface invariant 8 calls the product — carrying the wider exposure
+        the change claimed to have closed. Adversarial review, 2026-08-14.
+
+        No lock: `translate_segments` calls `on_batch` under the same lock that
+        guards its own results, so these calls are already serialized.
+        """
+        nonlocal applied
+        applied += save_targets(src, lang, ok, origin)
+
+    _results, failures = translate_segments(
         segments, doc, cfg, provider_name=args.provider, mode=mode,
         batch_size=args.batch, concurrency=args.concurrency,
-        progress=Progress(_out),
-        on_batch=lambda ok: save_targets(src, lang, ok, origin),
-        model=args.model)
-    applied, _ = do_apply(src, lang, cfg, results, origin=origin)
+        progress=Progress(_out), on_batch=commit, model=args.model)
     for sid, why in failures:
         _out(f"  unresolved {sid}: {why}")
     return applied, failures
@@ -2133,7 +2407,7 @@ def main(argv=None):
         args.fn(args, cfg)
     except (FileNotFoundError, StateVersionError, UnsupportedSource,
             GlossaryWriteError, UnknownFormat, UndecodableDocument,
-            StyleSheetError, ConfigError) as e:
+            StyleSheetError, ConfigError, UnusableTarget) as e:
         print(f"lx: {e}", file=sys.stderr)
         sys.exit(2)
     except BrokenPipeError:

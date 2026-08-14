@@ -1,7 +1,7 @@
 # The workbench HTTP contract
 
 ```text
-contract_version = 1
+contract_version = 2
 ```
 
 The request and response surface `lx web` speaks. It is frozen here so that a
@@ -18,10 +18,20 @@ were conflated once during triage; this paragraph exists so it does not happen
 again.
 
 **Frozen means written down, not finished.** Everything below describes the
-server as it actually behaves at `contract_version = 1`, warts included. Where
-the behaviour is wrong, it is recorded under *Known divergences* rather than
-quietly improved, because a contract that describes an intention is a contract
-nobody can implement against.
+server as it actually behaves, warts included. Where the behaviour is wrong, it
+is recorded under *Known divergences* rather than quietly improved, because a
+contract that describes an intention is a contract nobody can implement against.
+
+**Version 2** is the workbench rebuild's M0 floor, and it moves the version
+**once** for five items rather than five times: `candidates` renamed to
+`untracked`, the identity label normalized, `status` derived from the target
+text, an empty target refused, and a lost-update token. Each had been settled as
+its own bump; taken as written the sequence was 1 → 2 → 3 → 4 → 5, and a client
+is required to read this number at startup and refuse one it does not know, so
+every move is a hard stop. A contract that moves five times during the build it
+was frozen for has spent the property it was frozen for. Everything after this
+that would bump is gated: it becomes a work package, not a commit. See
+`docs/decisions.md`, 2026-08-14.
 
 > **Provenance.** *Request admission*, *Path and language confinement* and the
 > security half of *Deliberately not in the contract* state a trust boundary,
@@ -173,23 +183,29 @@ Common to all of them:
 
 - `src` names the document. It is a path relative to the project root and the
   server accepts either separator, because `store.doc_id` normalizes `\` to `/`
-  before it derives an identity. **The spelling the server hands back is not
-  normalized.** `docs[].source`, `/api/doc`'s `source` and `/api/check`'s `source`
-  are `os.path.relpath` verbatim, which on Windows is `docs\guide.md`, while
-  `candidates[].source` in the same `/api/state` body is `docs/guide.md`. A client
-  that compares those two strings is comparing two spellings of one file, **so do
-  not compare them.** `candidates[].source` is a value to hand back to
-  `POST /api/extract`; `docs[].source` is how a tracked document names itself.
+  before it derives an identity.
 
-  The server's own comparison between the two was the live half of this and is
-  fixed (*Known divergences* (13), closed). A client that genuinely must match one
-  to the other has to reproduce the server's document identity, and the rule is
-  stated here rather than by naming a Python function, because a consumer of this
-  contract may be written in another language and may not read inside `.lx/`:
-  **take the path relative to `cwd`, rewrite `\` to `/`, then replace every
-  character outside `A-Za-z0-9._-` with `_`.** Two paths that produce one string
-  are one document to this server — see (18). That a client should have to know
-  any of this is why the label itself is normalized at the next version bump.
+  **Every `source` this surface hands back carries one spelling**, since version
+  2: relative to `cwd`, with `/` as the separator on every platform. That is
+  `docs[].source`, `untracked[].source`, `/api/doc`'s `source` and `/api/check`'s
+  `source` alike, and they are comparable to each other as strings. Before
+  version 2 the first three were `os.path.relpath` verbatim — `docs\guide.md` on
+  Windows — beside `docs/guide.md` from the candidate scan, so one body carried
+  two spellings of one identity and a client was told not to compare them. Fixing
+  only the comparison would have left the condition in place and pushed a
+  normalizer into every client; the label is normalized where it is read and
+  where it is written instead. *Known divergences* (13), closed on its remaining
+  axis.
+
+  **One spelling is not one identity.** Two different paths can still be one
+  document to this server, because `.lx/state.db` keys a row on a *flattened*
+  form of the label. The rule is stated here rather than by naming a Python
+  function, because a consumer may be written in another language and may not
+  read inside `.lx/`: **take the path relative to `cwd`, rewrite `\` to `/`, then
+  replace every character outside `A-Za-z0-9._-` with `_`.** A client does not
+  have to compute it — `/api/state`'s `collisions` reports every set of paths
+  that collapses to one — but a client that offers to open an arbitrary path
+  needs to know the collapse exists. See (18).
 - `lang` is a language tag such as `zh-TW`.
 - Unless stated otherwise, success is `200`.
 
@@ -215,14 +231,15 @@ then discarded.
 
 | Key | Type | Meaning |
 |---|---|---|
-| `contract_version` | integer | The version of *this document*. `1`. |
+| `contract_version` | integer | The version of *this document*. `2`. |
 | `version` | string | Package version. Not the contract version. |
 | `cwd` | string | `os.getcwd()`. The confinement root is `os.path.realpath` of it, which is **not always the same string** — under a junction or an 8.3 short name they differ. Treat `cwd` as a label to show a person, never as an input to a path comparison. |
 | `targets` | array of string | Configured target language tags. |
 | `providers` | array of *provider* | See *Shared shapes*. |
 | `routing` | object | One key per `config.ROUTING_STAGES` — `draft`, `polish`, `repair` — each a *routing stage*. See *Shared shapes*. |
-| `docs` | array of object | `{source, lang, total, done}`. `total` is the segment count; `done` is the count with a **non-empty** target, which is not the same predicate as `status == "translated"` — see *Known divergences* (14). |
-| `candidates` | array of object | `{source, lang}` — one entry per configured target language for each **document identity** matching the configured `sources` globs that is not already tracked *in that language*. **Not capped.** The unit is the identity and not the file: an identity appears at most once however many globs match it **and however many distinct files map to it** — see (18), which is what that costs. The subtraction is on the same identity, so a separator spelling cannot make a tracked document reappear. `cli.do_untracked` decides all of it; `lx untracked` is the same list. The key is renamed to `untracked` at the next version bump. |
+| `docs` | array of object | `{source, lang, total, done}`. `total` is the segment count; `done` is the count with a **non-empty** target, which since version 2 is the same set as `status == "translated"` — see *Known divergences* (14), closed. |
+| `untracked` | array of object | `{source, lang}` — one entry per configured target language for each **document identity** matching the configured `sources` globs that is not already tracked *in that language*. **Not capped.** Named `candidates` before version 2, and renamed so this key, `lx untracked` and HANDOFF-203's forthcoming field spell one word. The unit is the identity and not the file: an identity appears at most once however many globs match it **and however many distinct files map to it** — `collisions` below is what that costs, said out loud. An entry no surface could act on is filtered out: the path has to be a file and its extension has to be one the format registry knows. A path *outside* the project root is not filtered, because `lx extract` can act on one and the endpoint cannot — see (20). `cli.do_untracked` decides all of it; `lx untracked` is the same list. |
+| `collisions` | array of object | `{paths, offered}` — one entry per document identity that more than one path maps to. `paths` is every such path, sorted; `offered` is the one carried in `untracked`, or **`null` when no entry was offered for that identity at all** — because a tracked document already holds it, or because no target language is configured to offer anything under. Two paths the filesystem itself calls one file are **not** a collision and do not appear here. **Present and empty** on a project whose paths do not collide, which is most of them, so a client never has to tell "none" from "an older server". Purely diagnostic: a client cannot resolve a collision, a person renames a file. See (18). |
 
 `routing` is a **resolved projection**, not the configured value. The configured
 value has two legal spellings on purpose (a provider name, or
@@ -263,7 +280,7 @@ missing one is `400` with a sentence naming it.
 
 | Key | Type | Meaning |
 |---|---|---|
-| `source` | string | The document's own `source`, unnormalized — see *Common to all of them*. |
+| `source` | string | The document's own `source`, in the one spelling — see *Common to all of them*. |
 | `lang` | string | |
 | `tone` | string | The register frozen onto the document at extract. |
 | `report` | object | `{segments, translated, errors, warnings, by_rule}` — **a narrowed subset** of `do_check`'s report. It does not carry `issues`; those are attached per segment instead. |
@@ -355,29 +372,60 @@ Backed by: `cli.do_apply`, with `origin` hardcoded to `"human"`. Equivalent to
 | `src` | yes | string | confined |
 | `lang` | yes | string | whitelisted |
 | `targets` | yes | object | `{segment_id: text}`. |
+| `base` | no | object | `{segment_id: token}` — the `token` this client was shown for that segment. Optional, and **per id**: an id present here is written only if the stored target still hashes to this value, an id absent from it is written unconditionally. Omitting it entirely is exactly the pre-version-2 behaviour. |
 
 **Response**
 
 | Key | Type | Meaning |
 |---|---|---|
-| `applied` | integer | Ids that matched a segment and were written. |
+| `applied` | integer | Ids that matched a segment and were written. Always equal to the size of `stored`. |
 | `unknown` | array of string | Ids with no matching segment. They are ignored rather than refused. |
+| `stored` | object | `{segment_id: {text, token}}` for every id that was written — the text **as stored**, after normalization and reseating, and its new token. A client does not have to re-read the document to find out what it now holds, which on a five-thousand-segment novel is the difference between a save and a refetch of the whole book. |
+| `conflicts` | object | `{segment_id: {text, token}}` for every id refused because its `base` token did not match. The text and token are the **current stored** ones, so a client has something authoritative to present a merge against. Empty when nothing conflicted. |
 
 A target is normalized, has its placeholders repaired, and has the blank run at
 each end **re-imposed from the source** before it is stored — with one asymmetry:
 an indent the reviewer *added* is kept, so a zh-TW paragraph can begin with the
 U+3000 pair the language wants even though the English source has no leading run.
-It is never *refused* — a person's words are reported at `lx check`, not rejected
-at the door. An empty string is a legal target and produces
-`status: "translated"` with an empty `target`; see *Known divergences* (14).
+Wording is never *refused* — a person's words are reported at `lx check`, not
+rejected at the door.
 
-**There is no concurrency control of any kind.** No version token, no `If-Match`,
-no conflict status. Two clients saving the same segment is last-write-wins, and a
-`/api/translate` job running against the same document writes the segments it
-finishes — per batch, and again at the end — over whatever a reviewer typed in the
-meantime, with `200` on both requests. *Known divergences* (17).
+⚠️ **An empty or all-blank target is refused**, for the whole request, with `400`
+and a sentence naming `lx translate --ids`. Nothing in the payload is written,
+including the ids that were fine: a workbench save carries every dirty segment at
+once, so a partial write would leave a reviewer's other edits half-applied with
+no way for the page to say which. The predicate is `str.strip()`, the same one
+`checks.py`'s `missing` rule uses. This was a legal target before version 2 and
+produced `status: "translated"` with an empty `target` — a segment marked done
+with nothing in it, removed from the draft queue by the act of being cleared.
+*Known divergences* (14), closed. Only ids that name a segment are tested; an id
+that names none is ignored, which is what `unknown` already means here.
 
-Side effects: updates the touched segment rows in `.lx/state.db`, and nothing else.
+**Lost updates are detected, and only when the client opts in.** `base` is the
+mechanism and the token is `sha1(target)[:12]` — derived from the text rather
+than kept as a revision counter, so two writes producing the same wording are not
+reported as a conflict, and so it costs no column and no state version. A
+conflict is a `200` with the id in `conflicts`, never a status code: one request
+carries a hundred segments and a status cannot say which of them lost. A client
+that sends no `base` is last-write-wins exactly as before. *Known divergences*
+(17), closed for a client that opts in.
+
+The comparison happens **inside the write**, as a conditional update in one
+statement, and that is normative rather than an implementation note: a check
+against a snapshot read earlier, followed by an unconditional write, passes for
+both of two writers whose reads land before either write, and tells the loser it
+succeeded. This surface runs one thread per request, so that is an ordinary
+interleaving and not a rare one. It was the first version of this feature and was
+measured, not argued.
+
+**A malformed payload is refused, not interpreted.** A target that is not a
+string, and a `base` that is not an object, are each a `400` naming what was
+wrong, and nothing in the request is written. `base` matters most: sent as a
+string it would otherwise be *silently ignored*, so a client that asked for the
+check would not get it and would not be told.
+
+Side effects: updates the touched segment rows in `.lx/state.db`, and nothing
+else. A refused request writes nothing at all.
 
 ---
 
@@ -393,7 +441,7 @@ Backed by: `cli.do_check`. Equivalent to `lx check --json`, minus the exit code.
 
 | Key | Type | Meaning |
 |---|---|---|
-| `source` | string | Unnormalized — see *Common to all of them*. |
+| `source` | string | In the one spelling — see *Common to all of them*. |
 | `lang` | string | The `lang` that was sent, not one re-read from the document. |
 | `segments` | integer | |
 | `translated` | integer | Segments with a **non-empty** target. |
@@ -414,10 +462,18 @@ Start a translation run. Returns immediately; the run happens on a background
 thread and is polled through `/api/job`.
 
 Backed by: no `cli.do_*` — there is none. The server composes
-`translate.translate_segments`, `store.save_targets` per batch, and `cli.do_apply`
-at the end, which is structurally what `cli._translate` does. Segment selection
-uses `cli.pending_segments` and `translate.failing_segments`. One selection
-decision lives only here; see *Known divergences* (2).
+`translate.translate_segments` with `store.save_targets` per batch. Segment
+selection uses `cli.pending_segments` and `translate.failing_segments`. One
+selection decision lives only here; see *Known divergences* (2).
+
+Before version 2 it also ran `cli.do_apply` over every result once more at the
+end. That wrote nothing `save_targets` had not already written — `translate.accept`
+normalizes, repairs and reseats before either sees the text, and both set the same
+`status` and `origin` and clear the same issues — so its only effect was to rewrite
+every segment of the run over whatever a reviewer had edited meanwhile. It is
+gone, which shrinks that window from the whole run to one batch. `lx translate`
+lost the same sweep in the same change: leaving it on the CLI would have made the
+surface invariant 8 calls the product the riskier of the two.
 
 **Request**
 
@@ -477,7 +533,7 @@ This is a real gap in the CLI, and it is structural rather than an oversight —
 | `id` | string | |
 | `done` | boolean | The thread has finished, successfully or not. |
 | `total` | integer | Segments selected at creation. |
-| `applied` | integer | Segments applied by the **final** apply. It stays `0` on the failure path even though completed batches were already written — read the warning below. |
+| `applied` | integer | Segments **written**, accumulated per batch as they land. It moves during the run and it is right on the failure path. Before version 2 it counted what a final apply touched and therefore stayed `0` whenever the run raised, while completed batches had already changed the document. |
 | `log` | array of string | Progress lines. Free text, not stable, and not to be parsed. The first line names the provider, its model and its `base_url` — in `config.printable_url` form, like every other surface that shows one. |
 | `failures` | array | Each entry is a **two-element array** `[segment_id, reason]`. Empty on the failure path. |
 | `error` | string \| null | `str(exception)` if the run raised. |
@@ -486,11 +542,11 @@ This is a real gap in the CLI, and it is structural rather than an oversight —
 one key and none of the seven above, not `404` and not `400`. A *failed* job is
 also `200`; failure is visible only in the body. *Known divergences* (5).
 
-⚠️ **`applied: 0` with a non-null `error` does not mean nothing was written.**
-Accepted batches are committed as they land, so a run that dies partway has
-already changed the document while reporting `applied: 0` and `failures: []`. A
-client must re-fetch `/api/doc` after *any* terminal state, not only a successful
-one.
+⚠️ **A non-null `error` does not mean nothing was written.** Accepted batches are
+committed as they land, so a run that dies partway has already changed the
+document — `applied` now says how much of it, and `failures` is still `[]` on that
+path. A client must re-fetch `/api/doc` after *any* terminal state, not only a
+successful one.
 
 Job state does not survive a server restart, and there is no way to cancel a
 running job.
@@ -557,10 +613,11 @@ Side effects: appends to `.lx/tm.<lang>.jsonl`. Never overwrites.
 |---|---|---|
 | `id` | string | `s0001`, per document, sequential. |
 | `kind` | string | `para`, `heading`, `list`, `quote`, `cell`. Plain text emits only `para` and `heading`. |
-| `status` | string | `pending` or `translated`. **It means "a target was written", not "a target exists"** — saving an empty string sets it. Every count in this contract (`report.translated`, `docs[].done`) uses the other predicate, a non-empty target. Do not compute progress from `status`. |
+| `status` | string | `pending` or `translated`, **derived from the target text** since version 2 — on the way in *and* on the way out, so a row an older build left inconsistent reads back repaired rather than staying wrong forever. It agrees with every count in this contract (`report.translated`, `docs[].done`), which all test a non-empty target. Before version 2 it meant "a target was written", so saving an empty string set it and a progress bar computed from it disagreed with the two counters in the same response. It is also the draft queue's selection predicate, not only a display. |
 | `origin` | string \| null | Where the target came from: `human`, `agent`, `llm:<mode>` (where `<mode>` is whatever the request sent), `carryover`, `tm`, `tm:legacy`, or `null` when there is none. |
 | `source` | string | **The masked text** — placeholders as `⟦n⟧`, not the raw source. Note the name: `lx todo --json` calls the same thing `text`. |
 | `target` | string | `""` when absent, never `null`. |
+| `token` | string | What `POST /api/save`'s `base` takes for this segment: `sha1(target)[:12]`, where an absent target hashes as `""`. Opaque — a client stores it and hands it back, and must not compute or compare it beyond equality. |
 | `issues` | array of *issue* | Only this segment's. |
 
 **issue**
@@ -684,18 +741,25 @@ absence closes.
   in something nobody thinks of as a credential.
 - **No authentication of any kind.** No cookie, no `Authorization`, no token, no
   session. Loopback plus the admission gate is the entire model.
-- **No concurrency control.** No version token, no `If-Match`, no conflict status,
-  no locking. See `POST /api/save`.
+- **No locking, and no server-side merge.** Version 2 added a per-segment token
+  and a conflict report, and stopped there deliberately: nothing is locked,
+  nothing is queued behind anything, and the server never merges two versions of
+  a sentence. A conflict is handed back with the current text for the client to
+  present, and it is the client that decides what to do with it. Of two writers
+  sending the same token, exactly one write lands and the other is told; neither
+  waits for the other. A writer that sends no `base` — including every
+  `/api/translate` job — is still last-write-wins, silently.
 - **No caching semantics.** `no-store` and nothing else. A client must not build
   conditional requests.
 - **No pagination, anywhere, and no list on this surface is capped.** `/api/doc`
   returns every segment of the document in one response, and it is expected to be
-  large. `candidates` was silently capped at 200 until 2026-08-14; the cap is
+  large. `untracked` was silently capped at 200 until 2026-08-14; the cap is
   gone, and a window over it was examined and refused — with an offset it is this
   bullet's pagination under another name, and it could not reduce the work
   `/api/state` does in any case, because the glob and the full segment load both
   happen before a slice exists to take. A *filter* is the thing to reach for if
-  measurement ever shows a need.
+  measurement ever shows a need, and version 2 applied the one filter that is not
+  a cap: an entry no surface could act on is not offered as work. See (20).
 - **No streaming and no server-sent events.** `/api/job` is polled.
 - **No redirects.** No `3xx` is ever emitted.
 - **No request body size limit.** The only cap in the file is on the *refused*
@@ -785,7 +849,7 @@ would silently repoint every one of them — which means the section is a histor
 and its length is not a count of what is outstanding. Read the entries.
 
 Numbers (2) and (3) are the ones HANDOFF-204 must still **decide**, not merely
-inherit.
+inherit. (18) to (21) were decided at version 2 and each entry says how.
 
 1. **Closed 2026-08-14.** *`/api/state`'s `candidates` had no CLI equivalent.*
    `_scan_sources` globbed the configured `sources` patterns and subtracted what
@@ -836,8 +900,9 @@ inherit.
 12. **A POST body is read with no size cap.** `Content-Length` bytes are read
     whole. The cap that exists — 1 MiB — is only on the *refused*-request drain
     path, and exists to keep the socket clean rather than to bound a request.
-13. **Closed 2026-08-14, on the separator axis only — see (19) for the other
-    one.** *`candidates` never stopped listing a tracked document, on Windows.*
+13. **Closed 2026-08-14 on the separator axis; the wire half closed at version 2;
+    the case axis closed with (19).** *`candidates` never stopped listing a
+    tracked document, on Windows.*
     Reproduced 2026-08-13: extract `docs/guide.md`, then
     `GET /api/state` still returned it under `candidates`. `_scan_sources` built
     its "already seen" set from `docs[].source`, which is `os.path.relpath`
@@ -847,15 +912,25 @@ inherit.
     Linux, wrong on the development machine. Both sides now go through
     `store.doc_id`, which is what the state database keys a document on, so the
     comparison is the project's own identity rather than a rule this list
-    invented. **The wire still carries two spellings** — see *Common to all of
-    them* — because normalizing the label a client reads changes what a value
-    means, and that waits for the next version bump.
-14. **`status: "translated"` does not mean the segment has text.** `do_apply` sets
-    it for every id in the payload without testing the text, so saving an empty
-    string produces `{status: "translated", target: "", origin: "human"}`, while
-    `report.translated` and `docs[].done` both count non-empty targets. A progress
-    bar computed from `status` disagrees with the two counters in the same
-    response.
+    invented. The wire carried two spellings until version 2, which normalized the
+    label in `store.doc_label` where it is read and where it is written — see
+    *Common to all of them*. Fixing only the comparison had left the condition in
+    place and would have pushed a normalizer into every client.
+14. **Closed at version 2.** *`status: "translated"` did not mean the segment has
+    text.* `do_apply` set it for every id in the payload without testing the text,
+    so saving an empty string produced
+    `{status: "translated", target: "", origin: "human"}` while
+    `report.translated` and `docs[].done` both counted non-empty targets — a
+    progress bar computed from `status` disagreed with two counters in the same
+    response, and, worse, `status` is the draft queue's selection predicate, so
+    clearing a segment took it out of the queue that would have redone it. Closed
+    from both ends rather than by adding a third counter: `do_apply` and
+    `store.save_targets` derive `status` from the text, and an empty target is
+    refused at the door. Those are write-time guards and they say nothing about a
+    row already on disk, which is the population this exists for — so `status` is
+    recomputed from the target on **read** as well, the way the identity label
+    beside it already was. Found by the adversarial pass over the first version of
+    this fix, which had made one of the two self-healing and not the other.
 15. **A malformed `providers` block takes the whole bootstrap endpoint down.**
     `_routing_state` degrades per stage and reports the error inside the
     projection; `providers.available` has no equivalent and raises, so
@@ -867,59 +942,93 @@ inherit.
     `do_check`'s own return, which loaded the same row again. Harmless and
     measurable: two SQLite reads per request on the endpoint a review pane calls
     most.
-17. **Nothing detects a lost update.** Two clients, or one client and a running
-    translation job, write the same segment with no version token and no conflict
-    status. On the surface whose entire purpose is human review, a background job
-    can overwrite a reviewer's sentence and report `200` to both.
+17. **Closed at version 2 for a client that opts in.** *Nothing detected a lost
+    update.* Two clients, or one client and a running translation job, wrote the
+    same segment with no version token and no conflict status: on the surface
+    whose entire purpose is human review, a background job could overwrite a
+    reviewer's sentence and report `200` to both. `POST /api/save` takes a `base`
+    token per id now and reports refusals in the `conflicts` map, with the
+    comparison made **inside the write** — the first version compared against a
+    snapshot read in an earlier transaction and then wrote unconditionally, which
+    two threads defeated on the first attempt, both being told they had succeeded.
+    The redundant final apply is gone from the job **and from `lx translate`**,
+    which shrinks that window from the whole run to one batch on both surfaces;
+    removing it from the job alone had left the CLI, which invariant 8 calls the
+    product, carrying the larger exposure. **What is not closed:** a writer that
+    sends no `base` is still last-write-wins, and `/api/translate` is such a
+    writer by construction — the model's output is not based on a token. The
+    reviewer's side is what the token protects.
 
 Measured 2026-08-14, by the adversarial pass over the change that closed (1) and
 (13). The first is that change's own cost and the other three are older; all four
 are on `candidates`, which is what a pass aimed at one list finds.
 
-18. **A `candidates` entry is an identity, so a distinct file can be permanently
-    invisible.** The identity flattens every character outside `A-Za-z0-9._-`, so
-    `docs/guide.md` and a root-level `docs_guide.md` are one string — and
-    `books/第一章.md` and `books/第二章.md` are both `books____.md`. Reproduced with
-    nothing tracked at all: two real files matching one glob, one entry in
-    `candidates` and in `lx untracked`, no diagnostic. The suppression is faithful
-    to storage — `.lx/state.db` keys a document row on that identity, so extracting
-    the second would overwrite the first — but the file is then absent from the one
-    list whose job is to say what there is. The old code listed both and lost the
-    state instead. **Neither surface says which path it collapsed**, and that is
-    the part worth fixing: it needs a response field, so it belongs to a version
-    that is already changing this key.
-19. **`candidates` still lists a tracked document when the two spellings differ in
-    case.** The other half of (13), on the axis that fix held constant, and older
-    than it. The identity is case-sensitive; NTFS is not. Reproduced on the
-    development machine: one file `docs/Guide.md`, then
+18. **Decided at version 2: the suppression stays and stops being silent.** *An
+    entry is an identity, so a distinct file could be permanently invisible.* The
+    identity flattens every character outside `A-Za-z0-9._-`, so `docs/guide.md`
+    and a root-level `docs_guide.md` are one string — and `books/第一章.md` and
+    `books/第二章.md` are both `books____.md`, which is a whole Chinese-titled
+    library collapsing to one row in the use case this project exists for.
+    Reproduced with nothing tracked at all: two real files matching one glob, one
+    entry, no diagnostic. The suppression is faithful to storage — `.lx/state.db`
+    keys a document row on that identity, so extracting the second would overwrite
+    the first — and the old code, which listed both, lost the state instead. What
+    was wrong is that neither surface said which path it had collapsed.
+    `/api/state`'s `collisions` and `lx untracked`'s own warning block say it now,
+    including the case that produced no entry at all: a file whose identity a
+    *tracked* document already holds. `offered` is `null` for that case **and**
+    when no target language is configured, so it means "nothing was offered here"
+    rather than "this is tracked". The collision itself is `doc_id`'s and is
+    answered by the structural identity the *Reserved* section schedules.
+19. **Closed at version 2.** *A tracked document was still listed when the two
+    spellings differed in case.* The other half of (13), on the axis that fix held
+    constant, and older than it. The identity is case-sensitive; NTFS is not.
+    Reproduced on the development machine: one file `docs/Guide.md`, then
     `lx extract docs/guide.md --lang zh-TW` succeeds and `lx stats` shows it, and
-    `lx untracked` still offers `docs/Guide.md`. Two identities,
-    `docs_Guide.md` and `docs_guide.md`; one file. Case-folding the identity is not
-    the fix — it would merge two genuinely distinct documents on a case-sensitive
-    filesystem — so this waits for the identity to be structural rather than a
-    flattened string, which the *Reserved* section already schedules.
-20. **`candidates` can carry an entry no endpoint will accept.** The list is a
-    glob over `sources` and nothing else: it is not filtered to files, to
-    extensions the format registry knows, or to paths inside the confinement root.
-    Measured: `sources: ["book/**/*"]` listed a directory and a `.jpg`, and
-    `POST /api/extract` answered `400` for both — "has no format this project knows
-    how to read"; `sources: ["../shelf/*.md"]` listed a path outside the project
-    and `POST /api/extract` answered `403`. Filtering the list narrows what the key
-    means, so it is a version decision rather than a patch. The CLI has the same
-    list and the same closing line offering `lx extract`, which is where a person
-    meets it first.
-21. **`candidates[].source` reaches the shipped page's DOM through an unescaped
-    HTML attribute.** `static/index.html` builds `data-src="${c.source}"` by string
-    concatenation; its `esc()` handles `&`, `<` and `>` and not the quote, and it
-    is applied to the visible text only. `docs[].source` is built the same way. No
-    `Content-Security-Policy` is sent — see *Transport*, which lists every header
-    this server emits. A filename is not always the user's own on a surface whose
-    corpus is downloaded novels, and a POSIX filename may contain `"`. The page has
-    unauthenticated access to every endpoint here, including one that spends money.
-    The static assets are *What is not frozen*'s last bullet and HANDOFF-204
-    replaces them wholesale, so this is recorded rather than patched — a rebuild
-    that escapes attributes by construction closes it, and one that string-builds
-    markup inherits it.
+    `lx untracked` still offered `docs/Guide.md`. Two identities, `docs_Guide.md`
+    and `docs_guide.md`; one file. Case-folding the identity is **not** the fix —
+    it would merge two genuinely distinct documents on a case-sensitive filesystem
+    — so the subtraction is made on `os.path.normcase` of the identity, which
+    lowercases on Windows and is the **identity function on POSIX**: the
+    platform's own answer rather than a rule this list invented. It folds the
+    tracked side and the candidate side alike, so two spellings of one file
+    reaching the list through two `sources` entries are offered once too.
+    *Lost:* `os.path.normcase(os.path.realpath(p))`, which additionally folds 8.3
+    short names, junctions and symlinks; it was written first and measured out at
+    **463 ms per 2000 tracked documents, 4.7x the read it rides beside**, for
+    coverage on axes nothing had asked about. **What is not closed:** `doc_id` is
+    still case-sensitive, so `lx extract` on each spelling still opens two state
+    rows for one file, and a symlink or an 8.3 spelling still reaches one file two
+    ways. That is the identity's defect and waits with (18).
+20. **Decided at version 2: two of its three axes filtered, the third kept.** *An
+    entry no endpoint would accept.* The list was a glob over `sources` and
+    nothing else — not filtered to files, to extensions the format registry knows,
+    or to paths inside the confinement root. Measured: `sources: ["book/**/*"]`
+    listed a directory and a `.jpg`, and `POST /api/extract` answered `400` for
+    both — "has no format this project knows how to read". Those two are filtered
+    now: both surfaces refuse them, so they were never work. The third axis is
+    **deliberately not filtered**: `sources: ["../shelf/*.md"]` lists a path
+    outside the project, `POST /api/extract` answers `403` — and `lx extract
+    ../shelf/book.md` **succeeds**, because a CLI argument is invariant 11's named
+    exception. Filtering it would take a row out of the list that the product's
+    own primary surface can act on, which invariant 8 does not allow a web
+    concern to do. It waits for `roots`, when an outside path stops being a
+    colliding identity.
+21. **Closed at version 2, in the page that is still being replaced.**
+    *`candidates[].source` reached the shipped page's DOM through an unescaped
+    HTML attribute.* `static/index.html` built `data-src="${c.source}"` by string
+    concatenation; its `esc()` handled `&`, `<` and `>` and not the quote, and was
+    applied to the visible text only. No `Content-Security-Policy` is sent — see
+    *Transport*, which lists every header this server emits — and the page has
+    unauthenticated access to every endpoint here, including one that spends
+    money. A filename is not always the user's own on a surface whose corpus is
+    downloaded novels, and a POSIX filename may contain `"`. Patched rather than
+    left for the rebuild, because the rename touched those exact lines anyway:
+    `esc()` covers `"` and `'` now and **every** interpolation goes through it.
+    That last word is the finding: this entry's own list of unescaped sites was
+    short by one — `data-lang` went through nothing at all — which is why the fix
+    is a rule rather than a patch to the named sites. The rebuild must escape by
+    construction; one that string-builds markup inherits this.
 
 ## What is not frozen
 

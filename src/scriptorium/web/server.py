@@ -35,7 +35,7 @@ from ..cli import (
 from ..config import ROUTING_STAGES, ConfigError, load_config, resolve_route
 from ..docio import write_document
 from ..providers import available
-from ..store import append_tm, load_doc, load_tm, save_targets, tm_records, tracked
+from ..store import append_tm, load_doc, load_tm, save_targets, target_token, tm_records, tracked
 
 STATIC = os.path.join(os.path.dirname(__file__), "static")
 
@@ -50,7 +50,15 @@ STATIC = os.path.join(os.path.dirname(__file__), "static")
 #: Not a response header. The set of headers this server sends is itself part of
 #: the frozen surface, and `/api/state` is the endpoint a client must call first
 #: in any case, since nothing else tells it which documents exist.
-CONTRACT_VERSION = 1
+#:
+#: 2 — M0 of the workbench rebuild, moved once and carrying five items together
+#:     rather than five times: `candidates` renamed to `untracked`, the identity
+#:     label normalized so one response stops carrying two spellings of it,
+#:     `status` derived from the target text, an empty target refused, and the
+#:     lost-update token. Moving it per item would have spent the property the
+#:     freeze exists for, since a client is required to refuse a number it does
+#:     not know. See `docs/decisions.md`, 2026-08-14.
+CONTRACT_VERSION = 2
 
 #: The three spellings of loopback. `serve()` binds one and the browser may be
 #: pointed at any of them, so the bound literal alone is not the answer.
@@ -392,6 +400,7 @@ class _Handler(BaseHTTPRequestHandler):
             # one page, on the endpoint a client must call before it can do
             # anything at all.
             docs = tracked()
+            untracked, collisions = do_untracked(cfg, docs)
             return {
                 # First, and before `version`, because the two are read for
                 # different reasons and are confused when they sit apart: this
@@ -403,17 +412,26 @@ class _Handler(BaseHTTPRequestHandler):
                 "targets": cfg.get("targets", []),
                 "providers": available(cfg),
                 "routing": _routing_state(cfg),
+                # `d["source"]` is normalized by `store._meta` on the way out of
+                # the database, so this and `untracked[].source` below are now one
+                # spelling of one identity. They were two — `docs\guide.md` here
+                # and `docs/guide.md` there — and a client was told not to compare
+                # them. Contract divergence (13), closed on its remaining axis.
                 "docs": [{
                     "source": d["source"], "lang": d["lang"],
                     "total": len(d["segments"]),
                     "done": sum(1 for s in d["segments"] if s.get("target")),
                 } for d in docs],
-                # The key is still `candidates` and the rename to `untracked`
-                # rides the contract's next version bump with the rest of it. The
-                # value is `lx untracked`'s, so the two surfaces cannot answer
-                # this differently — which is what closed the divergence: the
-                # glob-and-subtract lived only here.
-                "candidates": do_untracked(cfg, docs),
+                # `untracked`, spelling the command, the key and HANDOFF-203's
+                # forthcoming field one way. The value is `lx untracked`'s, so the
+                # two surfaces cannot answer this differently — which is what
+                # closed the divergence: the glob-and-subtract lived only here.
+                "untracked": untracked,
+                # Which files one identity swallowed. Empty on any project whose
+                # paths do not collide, which is most of them; never absent, so a
+                # client does not have to tell "no collisions" from "an older
+                # server". Contract divergence (18).
+                "collisions": collisions,
             }
         if path == "/api/doc":
             # `q["src"]` used to raise KeyError here and 400. Both parameters are
@@ -432,6 +450,10 @@ class _Handler(BaseHTTPRequestHandler):
                     "id": s["id"], "kind": s["kind"], "status": s["status"],
                     "origin": s.get("origin"), "source": s["masked"],
                     "target": s.get("target") or "",
+                    # What a client hands back to `POST /api/save` to prove its
+                    # edit was based on this text. Derived, so it costs no column
+                    # and no state version; see `store.target_token`.
+                    "token": target_token(s.get("target")),
                     "issues": issues.get(s["id"], []),
                 } for s in doc["segments"]],
             }
@@ -463,8 +485,14 @@ class _Handler(BaseHTTPRequestHandler):
                                                body.get("reset", False))
             return {"segments": len(doc["segments"]), "reused": reused, "rejected": rejected}
         if path == "/api/save":
-            applied, unknown = do_apply(src, lang, cfg, body["targets"], origin="human")
-            return {"applied": applied, "unknown": unknown}
+            # `base` is optional and per id, so a client that has not opted in
+            # writes exactly as it did. An empty target raises `EmptyTarget`,
+            # which reaches the 400 below like every other refusal — the rule
+            # lives in `do_apply` so `lx apply` cannot walk around it.
+            applied, unknown, stored, conflicts = do_apply(
+                src, lang, cfg, body["targets"], origin="human", base=body.get("base"))
+            return {"applied": applied, "unknown": unknown,
+                    "stored": stored, "conflicts": conflicts}
         if path == "/api/check":
             report, _ = do_check(src, lang, cfg)
             return report
@@ -528,22 +556,50 @@ def _translate_job(src, lang, cfg, body):
         with _JOB_LOCK:
             state["log"].append(msg)
 
+    def commit(ok):
+        """One batch, durable the moment it lands, and counted as it lands.
+
+        The `do_apply` that used to run over every result *again* at the end of
+        the job is gone. It wrote nothing `save_targets` had not already written —
+        `translate.accept` has normalized, repaired and reseated the text before
+        either of them sees it, and both set the same `status` and `origin` and
+        clear the same issues — so its only effect was to rewrite every segment of
+        the run at the end, over whatever a reviewer had edited in the meantime.
+        Deleting it shrinks that clobber window from the whole run to one batch.
+
+        Deleted on **both** surfaces in one move, deliberately: the first version
+        of this change removed it here only, which left `cli._translate` — the
+        surface invariant 8 calls the product — carrying the wider exposure the
+        change claimed to have closed. Adversarial review, 2026-08-14.
+
+        `applied` now counts what was **written** rather than what the final apply
+        touched, so it moves during the run and is right on the failure path,
+        where it used to report 0 for a run that had already changed the
+        document. That is what makes this a contract change rather than a
+        tidy-up.
+
+        `_JOB_LOCK` covers the counter and not the write — but not for the reason
+        it first appears to. `translate_segments` already calls `on_batch` under
+        the lock that guards its own results, so these writes are serialized
+        whatever this function does; the lock here is for `_job_status`, which
+        reads this dict from a request thread.
+        """
+        written = save_targets(src, lang, ok, f"llm:{mode}")
+        with _JOB_LOCK:
+            state["applied"] += written
+
     def work():
         try:
             if not segments:
                 log("nothing to do")
                 return
-            # Committed per batch, as on the CLI path: the job outlives the
-            # request that started it, and a workbench closed mid-run must not
-            # be how an hour of model time is discarded.
-            results, failures = translate_segments(
+            _results, failures = translate_segments(
                 segments, doc, cfg, provider_name=body.get("provider"), mode=mode,
                 batch_size=body.get("batch"), concurrency=body.get("concurrency"),
-                progress=Progress(log),
-                on_batch=lambda ok: save_targets(src, lang, ok, f"llm:{mode}"))
-            applied, _ = do_apply(src, lang, cfg, results, origin=f"llm:{mode}")
+                progress=Progress(log), on_batch=commit)
             with _JOB_LOCK:
-                state["applied"], state["failures"] = applied, failures
+                state["failures"] = failures
+                applied = state["applied"]
             log(f"applied {applied} segment(s)")
         except Exception as e:  # noqa: BLE001
             with _JOB_LOCK:

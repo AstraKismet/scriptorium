@@ -3,6 +3,314 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-08-14 · `contract_version = 2`, and the four divergences it was the only cheap moment to decide
+
+HANDOFF-204's M0 floor. The version moves **once** and carries five items, because
+each had been settled as its own bump: taken as written the sequence was 1 → 2 → 3
+→ 4 → 5, the frontend is required to read the number at startup and refuse one it
+does not know, and a contract that moves five times during the build it was frozen
+for has spent the property it was frozen for. Everything after this that would
+bump is a work package, not a commit.
+
+Four contract divergences — (18) to (21) — were decided in the same move, because
+each changes what a key on this surface means and this is the one bump M0 gets.
+All four were put to the maintainer with recommendations and all four
+recommendations were taken.
+
+### The identity label is normalized where it is read *and* where it is written
+
+`docs[].source`, `/api/doc`'s and `/api/check`'s `source` were `os.path.relpath`
+verbatim — `docs\guide.md` here — beside `untracked[].source`'s `docs/guide.md`,
+so one response carried two spellings of one identity and the contract had to tell
+clients not to compare them.
+
+The fix is `store.doc_label`, and it is applied at both ends: `cli.do_extract`
+writes through it, and `store._meta` — the single funnel from a stored row to a
+dict, confirmed by enumerating its callers — applies it on read. That second half
+is what makes it free: a row written by an older build answers in the new spelling
+with no migration, because `doc_label` is idempotent on its own output. Nothing
+about an older row is *wrong*, which is `STATE_VERSION`'s own bar, so the state
+version does not move.
+
+*Lost:* normalizing at the HTTP projection only, which buys the wire fix at the
+price of `lx stats` and the workbench disagreeing about one value. *Lost:*
+normalizing at write time only, which leaves a project holding two spellings until
+every document is re-extracted. Three copies of `.replace(os.sep, "/")` existed in
+`src/`; there is one function now, and `doc_id` is defined in terms of it.
+
+### An empty target is a rejected input, and the refusal is in `do_apply`
+
+`status` is derived from the target text in `cli.do_apply` and `store.save_targets`
+rather than asserted by the act of writing. The half the divergence text never
+mentioned is that `status` is the **draft queue's selection predicate**: clearing a
+segment marked it `translated` and removed it from the queue, so a reviewer's
+"this needs redoing" quietly meant the opposite.
+
+Deriving it is not enough on its own — combined with the origin precedence
+scheduled next it produces a segment every run selects, no writer may write and
+`lx check` can never pass. So an empty or all-blank target is refused, for the
+whole request, before anything is written.
+
+**Where the refusal lives was the real decision, and it amends `AGENTS.md`.** That
+file records `lx apply` as the deliberate exception to refusal — a person's words
+are reported at `lx check`, not rejected at the door. Putting the refusal only at
+`POST /api/save` would have honoured the sentence and left `lx apply --origin
+human ""` able to create exactly the state the endpoint exists to prevent, so
+origin precedence would have had to grow a second guard for it. It is in
+`do_apply`: an empty string is not "a person's words", it is their absence, and
+the exception protects *content* from a mechanical rule. `AGENTS.md` is corrected
+rather than worked around.
+
+*Lost:* the endpoint-only refusal, on the argument above. *Lost:* a `do_apply`
+refusal with an opt-out parameter, which is the endpoint-only answer plus a switch
+any caller can flip. *Lost:* per-id refusal returning `200` — a workbench save
+carries every dirty segment, so a partial write leaves the other edits applied
+with no way for the page to say which.
+
+One consequence worth stating because it reads like luck: **three predicates that
+disagreed now agree by construction.** `checks.py`'s `missing` rule uses
+`.strip()`, the two progress counters use truthiness, and `status` used the act of
+writing. With an empty target unable to reach storage, all three answer the same
+question about every stored segment. Divergence (14) closed without a fourth
+counter. The cost is that `reseat_outer_blanks`' blank-text guard — found by a
+mutation pass — is no longer reachable from either caller; it is pinned by a direct
+unit test rather than left to rot until someone deletes it as dead.
+
+### The lost-update token is a content hash, and `base` is optional per id
+
+`GET /api/doc`'s segments carry `token`; `POST /api/save` takes `base`, a
+`{id: token}` map, and answers with `stored` and `conflicts` — both
+`{id: {text, token}}`.
+
+Content hash, not a revision counter: a counter needs a column and therefore a
+`SCHEMA_VERSION` bump, it would have to survive `lx apply` which does not go
+through this surface, and it reports two writes producing the *same wording* as a
+conflict. The hash costs nothing and gets that case right.
+
+Optional and per id, because the check must not be something a caller has to know
+about in order to keep its old behaviour — `lx apply` writes from a file that
+carries no token, and any existing client keeps working. Reported in the `200`
+body rather than as a status code, because one request carries a hundred segments
+and a status cannot say which of them lost.
+
+`stored` is the other half and it is not a nicety: it removes the
+save-then-refetch-the-whole-book loop on a five-thousand-segment novel, and it
+gives a conflict presentation something authoritative to diff against. It carries
+the text **as stored** — after normalization and reseating — which is the whole
+reason it exists, since a client that trusted what it sent would show a paragraph
+missing its indent until it refetched.
+
+**The job's redundant final apply is deleted.** It re-applied every result at the
+end of a run over whatever a reviewer had edited meanwhile, and wrote nothing
+`save_targets` had not already written: `translate.accept` normalizes, repairs and
+reseats before either sees the text, and both set the same `status` and `origin`
+and clear the same issues. Deleting it shrinks the job's clobber window from the
+whole run to one batch. It is a contract change rather than a tidy-up because
+`applied` now counts what was **written**, accumulated per batch — so it moves
+during the run and is right on the failure path, where it used to report `0` for a
+run that had already changed the document.
+
+What this does **not** close, stated because a maintainer composing three
+sub-rules may reasonably think the combination is more than it is: a writer that
+sends no `base` is still last-write-wins, and `/api/translate` is such a writer by
+construction. The token protects the reviewer's side.
+
+### (18) The suppression stays; the silence does not
+
+`doc_id` flattens every character outside `A-Za-z0-9._-`, so `docs/guide.md` and a
+root-level `docs_guide.md` are one identity — and `books/第一章.md` and
+`books/第二章.md` are both `books____.md`. That is a whole Chinese-titled library
+collapsing to one row **in the use case this project exists for**, which is what
+moved this from a listing wrinkle to something worth a response field.
+
+The suppression is right and stays: `.lx/state.db` keys a row on that identity, so
+extracting the second overwrites the first, and the code this replaced listed both
+and lost the state. What was wrong is that neither surface said which path it had
+collapsed. `/api/state` gains `collisions` — `{paths, offered}` per colliding
+identity — and `lx untracked` prints the same thing.
+
+The shape is a top-level list rather than a `shadowed` field on each entry
+because of the case a per-entry field cannot reach: a file whose identity a
+*tracked* document already holds produces no entry to hang a field on, and was
+therefore completely invisible. *Lost:* the per-entry field, on that. *Lost:*
+refusing to list a colliding identity at all, which is safer and removes two real
+files' worth of work from the list. *Lost:* deferring to the structural identity,
+which leaves the primary use case with no diagnostic in the meantime.
+
+`paths` does not carry the flattened identity itself: a client is told the fact —
+these paths are one document here — without being handed a value the same contract
+tells it not to reproduce.
+
+### (19) The filesystem's own answer, which the contract had not listed as an option
+
+The identity is case-sensitive and NTFS is not, so `lx extract docs/guide.md`
+against an on-disk `docs/Guide.md` tracked the file and `lx untracked` went on
+offering it. The contract had considered two options — case-fold `doc_id`, which
+merges two genuinely distinct documents on a case-sensitive filesystem, or wait
+for the structural identity — and scheduled the second.
+
+There is a third: **fold the identity with `os.path.normcase` on the subtraction
+only.** It lowercases on Windows and is the *identity function on POSIX*, so it is
+the platform's own answer rather than a rule of ours — which is exactly the
+objection that killed case-folding `doc_id` itself. It is pure string work, needs
+no filesystem, and therefore compares a tracked document whose file has since been
+renamed as readily as one that is still there. It folds both sides, so two
+spellings of one file reaching the list through two `sources` entries are offered
+once as well.
+
+*Lost:* `os.path.normcase(os.path.realpath(p))` as a supplementary key, which was
+written first and shipped in the first version of this change. It additionally
+folds 8.3 short names, junctions and symlinks, and it was measured out — see the
+adversarial section below, which is where the number is. The lesson is not the
+number: it bought coverage on axes nobody had asked about, at four times the cost
+of the read it rode beside, on the endpoint a client must call first.
+
+What this closes is the *listing*. `doc_id` is still case-sensitive, so extracting
+each spelling still opens two rows for one file, and a symlink still reaches one
+file two ways. That is the identity's defect and waits with (18).
+
+### (20) Two axes filtered, the third kept, and invariant 8 is why
+
+The list was a glob and nothing else. A directory and a `.jpg` matched
+`sources: ["book/**/*"]` and `POST /api/extract` answered `400` for both; those
+are filtered now, because both surfaces refuse them and they were never work.
+
+The third axis is **not** filtered, and this is the part that needed deciding
+rather than doing: a path outside the project root is refused by `confined_path`
+at the endpoint and **accepted by `lx extract`**, because a CLI argument is
+invariant 11's named exception — measured, `lx extract ../shelf/book.md` exits 0.
+Filtering it would take a row out of a shared list that the product's own primary
+surface can act on, which is a web concern narrowing the CLI. It waits for `roots`.
+
+*Lost:* filtering all three, which makes the list and the endpoint agree at the
+price above. *Lost:* an `extractable` field per entry, which pushes the judgement
+into every client and leaves `lx untracked`'s human output having to decide
+anyway.
+
+### (21) Escaping is a rule, not a patch to the sites an audit named
+
+The shipped page built `data-src="${c.source}"` by concatenation and its `esc()`
+handled `&<>` and not the quote. It is patched rather than left for the rebuild,
+because the rename touched those exact lines anyway: `esc()` covers `"` and `'`
+now and **every** interpolation into markup goes through it.
+
+That last word is the finding. This divergence's own inventory of unescaped sites
+was short by one — `data-lang` went through nothing at all, not even the partial
+`esc()` — which is the third time this project has recorded the same shape: a
+correctly stated rule whose *enumeration* was read as its definition. So the fix
+is "everything interpolated is escaped" rather than "these two attributes are
+escaped", and the rebuild inherits the rule rather than the list.
+
+### Verification, and the axes
+
+The suite grew by exactly the behaviours that changed: the refusal and its
+whole-request atomicity, the token round trip and a stale-token conflict, the
+derived status on both writers, the collision report in three shapes (offered,
+nothing offered, Chinese-titled), the two filtered axes and the kept one, and the
+case axis. The numbers are restated at the end of this entry, after the
+adversarial pass added twelve more.
+
+Axes varied: platform separator, case, 8.3 short names, path collision across two
+alphabets, glob overlap, extractability by kind and by extension, in-root against
+out-of-root, `base` present against absent against stale, blank targets across
+four spellings including U+3000, and the CLI against the endpoint for each rule.
+
+Held constant when the change was first written, and named so the adversarial pass
+had a map: **one filesystem and one volume**; **one process** — every concurrency
+claim was argued from where the write happens rather than from a race actually
+run; **`realpath` cost** — reasoned to be per-listed-candidate and never timed on
+a library-sized glob; and **the legacy page** — changed but not exercised, since
+nothing in the suite drives `index.html`.
+
+Three of those four were where the defects were. That list was the map, exactly as
+`docs/conventions/delegated-work.md` §6.7 says it would be.
+
+### What the adversarial pass found, and it was most of the work
+
+Five lenses over the first version: behaviour, contract fidelity, invariants, the
+held-constant axes, and a mutation pass. Every one returned findings. Two were
+blocking, three were false statements in files this change had just written, and
+the mutation pass killed only 7 of 10 — the three survivors were all real holes.
+
+**The lost-update check did not work.** `do_apply` read the document in one
+transaction, compared the caller's token against that snapshot, and wrote in
+another transaction, unconditionally. Two writers whose reads both land before
+either write both pass the comparison; the loser is told `applied: 1,
+conflicts: {}` and its text is gone. Reproduced with two threads under
+`ThreadingHTTPServer`, which is what `lx web` runs, so this is an ordinary
+interleaving and not a rare one. The contract sentence "written only if the stored
+target **still** hashes to the token the caller was shown" was written in this
+change and was false — *still* implies a check at write time, and there was none.
+
+The fix is a compare-and-swap: the previous target travels to `save_segments` as
+`expect` and the write is `UPDATE … WHERE … AND target IS ?` in one statement.
+`IS` rather than `=`, because a never-translated segment holds SQL NULL and `=`
+is never true against NULL — with `=` the first write to every fresh segment would
+have been refused as stale. The snapshot comparison stays as a cheap filter that
+answers with the text already in hand; the guarantee is the swap. Both halves are
+pinned by tests that were checked to go red without it, and the failure message is
+the defect verbatim: `{'A': (1, [], …), 'B': (1, [], …)}`.
+
+**The `realpath` key cost 4.7x the read it rides beside.** Measured on 2000
+tracked documents: `tracked()` 98.6 ms, the `_fs_key` sweep 463.8 ms,
+`do_untracked` 671.6 ms end to end — and the sweep is per *tracked document*, not
+per listed candidate, because the whole set has to exist before one membership
+test can be made. The claim in the first version of this entry was wrong in both
+halves. Worse, the coordinating session's first response was to argue the sweep
+was noise beside `tracked()`; measuring it directly, which §6.7 requires, showed
+the opposite by a factor of five. Replaced by the string fold above: the same
+sweep is 27 ms, most of it work already being done, and `do_untracked` is 212 ms.
+
+**`status` was repaired on write and not on read, one paragraph away from a fix
+that did both.** The identity label is re-normalized in `store._meta` on the way
+out precisely so a row an older build wrote answers correctly; `status` got no
+such treatment, so a segment already carrying the pre-version-2 shape —
+`translated` with an empty target — is loaded, served and re-persisted unchanged.
+That is the exact population divergence (14) exists for: the segment shows as done,
+counts as undone, and `pending_segments` never selects it again. `store._segment`
+recomputes it on read now.
+
+**The improvement landed on the server and not on the CLI.** The job's redundant
+final apply was deleted; `cli._translate`'s identical sweep was not — leaving the
+surface invariant 8 calls the product with the wider clobber window, under a
+decision entry claiming the class was closed. Deleted on both.
+
+**Two malformed payloads were interpreted rather than refused.** A numeric target
+reached the blank check and raised `AttributeError: 'int' object has no attribute
+'strip'` — exit 1 and a stack trace on the CLI, a 400 quoting a CPython internal
+on the wire. And `base` sent as a string made `sid in base` a substring test, so a
+client that asked for the lost-update check silently did not get it. Both are named
+refusals now, sharing one exception class because the caller does the same thing
+about each: fix the payload.
+
+**Three mutants survived, and two of them survived because the other's code was
+still correct.** A mutant that deleted `store._meta`'s read-side normalization
+survived because every test writes through `do_extract`, which normalizes on the
+way in; a mutant that reverted `do_extract` survived because every reader goes
+through `_meta`. Each guard was covered only by the other one being right. The
+third was `save_targets`' status derivation, unreachable from above because
+`accept` refuses an empty proposal first. All three now have tests at their own
+level, and the third is the case where a *surviving* mutant is the finding rather
+than a failure: a guard nothing exercises is one somebody later deletes as dead.
+
+**And one that stayed green on purpose.** A behaviour-preserving rewrite of
+`if base and sid in base:` left the suite green, which is the answer that was
+wanted — a test that turned red on it would be asserting the spelling of the code
+rather than what it does.
+
+Two findings were recorded rather than fixed, both pre-existing and both outside
+what this change touched: `lx extract` on an unreadable file ends in a traceback
+and exit 1 rather than a sentence and exit 2, because `PermissionError` is not in
+`main`'s handled list; and `do_check`'s persist path still rewrites every segment
+from a snapshot it read earlier, which is the third writer none of the seventeen
+divergences names. Both belong to the next package.
+
+### Verification, restated after the pass
+
+`1061 passed, 1 skipped` from `1029`; ruff clean. Thirty-two new tests. One is
+skipped where the filesystem does not fold case, because there the two names are
+two files and listing both is the right answer.
+
 ## 2026-08-14 · `lx untracked`, and the identity the candidate list should have been comparing all along
 
 The first unit of HANDOFF-204's M0 floor, and deliberately the non-bumping one:

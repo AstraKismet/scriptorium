@@ -20,24 +20,30 @@ import argparse
 import json
 import os
 import sys
+import threading
 
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import statedb  # noqa: E402
+from scriptorium import cli as cli_mod  # noqa: E402
 from scriptorium import translate as translate_mod  # noqa: E402
-from scriptorium.cli import _translate, do_extract, pending_segments  # noqa: E402
+from scriptorium.cli import _translate, do_apply, do_extract, pending_segments  # noqa: E402
 from scriptorium.config import DEFAULT_CONFIG  # noqa: E402
 from scriptorium.store import (  # noqa: E402
     SEGMENTATION_VERSION,
     StateVersionError,
+    db_path,
+    doc_id,
     load_doc,
     prior_doc,
     prior_targets,
     save_doc,
+    save_segments,
     save_targets,
     segment_key,
+    target_token,
     tm_key,
 )
 
@@ -361,3 +367,197 @@ def test_state_for_a_document_that_was_never_extracted_names_the_command(tmp_pat
     with pytest.raises(FileNotFoundError) as e:
         load_doc("missing.md", "zh-TW")
     assert "state.db" in str(e.value)
+
+
+# --- what a row means, on the way in and on the way out ----------------------
+#
+# Every test below was written because a mutant survived without it, or because
+# an adversarial pass reproduced the gap it now guards. Each names which.
+
+
+def _raw_meta(src, lang):
+    """The stored `meta` JSON, read past `store._meta`'s normalization."""
+    import sqlite3
+    conn = sqlite3.connect(db_path())
+    try:
+        row = conn.execute("SELECT meta FROM documents WHERE doc_id=? AND lang=?",
+                           (doc_id(src), lang)).fetchone()
+        return json.loads(row[0])
+    finally:
+        conn.close()
+
+
+def _set_raw(src, lang, seg_id, **columns):
+    """Write columns straight into a segment row, past every guard above it."""
+    import sqlite3
+    conn = sqlite3.connect(db_path())
+    try:
+        with conn:
+            sets = ", ".join(f"{k}=?" for k in columns)
+            conn.execute(f"UPDATE segments SET {sets} WHERE doc_id=? AND lang=? AND seg_id=?",
+                         (*columns.values(), doc_id(src), lang, seg_id))
+    finally:
+        conn.close()
+
+
+def test_save_targets_derives_status_from_the_text_it_is_given(tmp_path, monkeypatch):
+    """A mutant that hardcoded `status='translated'` here survived the whole suite.
+
+    Every production caller feeds this `translate.accept`'s output, which refuses
+    an empty proposal, so the derivation is unreachable from above — and a guard
+    nothing exercises is one somebody deletes as dead. Asserted at its own level.
+    """
+    _project(tmp_path, monkeypatch, doc=b"A sentence.\n\nAnother one.\n", name="d.md")
+    doc, _r, _j = do_extract("d.md", "zh-TW", CFG)
+    first, second = doc["segments"][0]["id"], doc["segments"][1]["id"]
+    save_targets("d.md", "zh-TW", {first: "一句話。", second: ""}, "agent")
+    stored = {s["id"]: s for s in load_doc("d.md", "zh-TW")["segments"]}
+    assert stored[first]["status"] == "translated"
+    assert stored[second]["status"] == "pending", "an empty target is not a translation"
+
+
+def test_a_status_written_by_an_older_build_is_repaired_on_read(tmp_path, monkeypatch):
+    """The population the write-side guard cannot reach.
+
+    Reproduced by the adversarial pass over the change that added it: a build
+    that let an empty target through left `status="translated"` with `target=""`,
+    which every counter reads as undone while `pending_segments` never selects it
+    again — the segment falls out of the queue that would redo it, which is the
+    whole of contract divergence (14). The neighbouring `source` fix was
+    self-healing on read and this one was not.
+    """
+    _project(tmp_path, monkeypatch, doc=b"A sentence.\n", name="d.md")
+    doc, _r, _j = do_extract("d.md", "zh-TW", CFG)
+    seg_id = doc["segments"][0]["id"]
+    _set_raw("d.md", "zh-TW", seg_id, status="translated", target="")
+
+    stored = load_doc("d.md", "zh-TW")["segments"][0]
+    assert stored["status"] == "pending"
+    assert [s["id"] for s in pending_segments(load_doc("d.md", "zh-TW"))] == [seg_id]
+
+
+def test_a_source_written_by_an_older_build_reads_back_normalized(tmp_path, monkeypatch):
+    """`store._meta`'s read-side normalization, at its own level.
+
+    A mutant that deleted it survived, because every test writes its row through
+    this build's `do_extract`, which normalizes on the way in. The row this
+    exists for is one an older build wrote.
+
+    The stored spelling is built from `os.sep` rather than from a literal
+    backslash, and that is not a portability nicety — it is the property under
+    test. `doc_label` normalizes the *platform's* separator, so on POSIX a
+    backslash is an ordinary filename character and leaving it alone is correct.
+    A literal `sub\\d.md` here asserted a cross-platform repair this project has
+    never claimed: `doc_id` is `os.sep`-based too, and `.lx/state.db` is
+    machine-local and gitignored, so a state file does not travel between
+    platforms in the first place. The leading `.` is what makes the repair
+    observable on both.
+    """
+    import sqlite3
+    _project(tmp_path, monkeypatch, doc=b"A sentence.\n", name="d.md")
+    do_extract("d.md", "zh-TW", CFG)
+    meta = _raw_meta("d.md", "zh-TW")
+    meta["source"] = os.sep.join([".", "sub", "d.md"])
+    conn = sqlite3.connect(db_path())
+    with conn:
+        conn.execute("UPDATE documents SET meta=? WHERE doc_id=? AND lang=?",
+                     (json.dumps(meta), doc_id("d.md"), "zh-TW"))
+    conn.close()
+    assert load_doc("d.md", "zh-TW")["source"] == "sub/d.md"
+
+
+def test_extract_writes_the_normalized_source_and_not_only_reads_one(
+        tmp_path, monkeypatch):
+    """The other half, and the two masked each other.
+
+    A mutant that put `os.path.relpath` back in `do_extract` also survived, because
+    every reader goes through `store._meta`, which re-normalizes. Each guard was
+    covered only by the other one still being correct. This reads the stored JSON
+    directly.
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config").mkdir(exist_ok=True)
+    (tmp_path / "config" / "dnt.txt").write_text("", encoding="utf-8")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "d.md").write_bytes(b"A sentence.\n")
+    src = os.path.join("sub", "d.md")
+    do_extract(src, "zh-TW", CFG)
+    assert _raw_meta(src, "zh-TW")["source"] == "sub/d.md"
+
+
+def test_save_segments_swaps_rather_than_writes_when_it_is_given_an_expectation(
+        tmp_path, monkeypatch):
+    """The compare-and-swap, including the null the `=` operator would miss.
+
+    A never-translated segment holds SQL NULL and a written one holds a string,
+    so the condition is `target IS ?`: with `=` the first write to every fresh
+    segment would have been refused as stale.
+    """
+    _project(tmp_path, monkeypatch, doc=b"A sentence.\n\nAnother one.\n", name="d.md")
+    doc, _r, _j = do_extract("d.md", "zh-TW", CFG)
+    fresh, other = doc["segments"][0], doc["segments"][1]
+
+    fresh["target"] = "第一版"
+    written, stale = save_segments("d.md", "zh-TW", [fresh], expect={fresh["id"]: None})
+    assert (written, stale) == (1, []), "NULL expected against NULL stored must match"
+
+    other["target"] = "拒絕"
+    written, stale = save_segments("d.md", "zh-TW", [other], expect={other["id"]: "沒有這個"})
+    assert (written, stale) == (0, [other["id"]])
+    assert not load_doc("d.md", "zh-TW")["segments"][1]["target"]
+
+    fresh["target"] = "第二版"
+    written, stale = save_segments("d.md", "zh-TW", [fresh], expect={fresh["id"]: "第一版"})
+    assert (written, stale) == (1, [])
+    assert load_doc("d.md", "zh-TW")["segments"][0]["target"] == "第二版"
+
+
+def test_two_savers_whose_reads_both_land_first_do_not_both_win(tmp_path, monkeypatch):
+    """The race the token exists to lose, actually run.
+
+    `do_apply` reads the document in one transaction and writes in another, so
+    comparing the caller's token against that snapshot is a filter and not a
+    guarantee: two writers whose reads both land before either write both pass
+    it. Reproduced by the adversarial pass over the change that introduced the
+    token — both were told `applied: 1, conflicts: {}` and one text was gone,
+    under `ThreadingHTTPServer`, which is what `lx web` runs.
+
+    The barrier does not create the window; it makes an existing one
+    deterministic. It is hung on `save_segments` rather than inside it, so
+    nothing about the code under test is arranged for the test.
+    """
+    _project(tmp_path, monkeypatch, doc=b"A sentence.\n", name="d.md")
+    doc, _r, _j = do_extract("d.md", "zh-TW", CFG)
+    seg_id = doc["segments"][0]["id"]
+    do_apply("d.md", "zh-TW", CFG, {seg_id: "原文。"}, origin="human")
+    token = target_token("原文。")
+
+    real, gate = cli_mod.save_segments, threading.Barrier(2, timeout=20)
+    monkeypatch.setattr(cli_mod, "save_segments",
+                        lambda *a, **kw: (gate.wait(), real(*a, **kw))[1])
+
+    answers = {}
+
+    def writer(name, text):
+        answers[name] = do_apply("d.md", "zh-TW", CFG, {seg_id: text},
+                                 origin="human", base={seg_id: token})
+
+    threads = [threading.Thread(target=writer, args=("A", "甲。")),
+               threading.Thread(target=writer, args=("B", "乙。"))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    assert not any(t.is_alive() for t in threads), "a writer never returned"
+
+    applied = sorted(a[0] for a in answers.values())
+    assert applied == [0, 1], f"exactly one write may land, got {answers}"
+    winner = next(n for n, a in answers.items() if a[0] == 1)
+    loser = next(n for n in answers if n != winner)
+    stored = load_doc("d.md", "zh-TW")["segments"][0]["target"]
+    assert answers[winner][2][seg_id]["text"] == stored
+    assert answers[winner][3] == {}
+    # And the loser is told, with the text the winner left behind rather than the
+    # one it was shown — which is what a merge presentation has to diff against.
+    assert list(answers[loser][3]) == [seg_id]
+    assert answers[loser][3][seg_id] == {"text": stored, "token": target_token(stored)}

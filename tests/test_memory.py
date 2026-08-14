@@ -19,10 +19,10 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from scriptorium.cli import do_apply, do_extract, do_render  # noqa: E402
+from scriptorium.cli import UnusableTarget, do_apply, do_extract, do_render  # noqa: E402
 from scriptorium.config import DEFAULT_CONFIG, DEFAULT_TONE  # noqa: E402
 from scriptorium.mdparse import parse  # noqa: E402
-from scriptorium.normalize import normalize  # noqa: E402
+from scriptorium.normalize import reseat_outer_blanks  # noqa: E402
 from scriptorium.store import (  # noqa: E402
     SEGMENTATION_VERSION,
     append_tm,
@@ -32,6 +32,7 @@ from scriptorium.store import (  # noqa: E402
     save_doc,
     seg_hash,
     segment_key,
+    target_token,
     tm_key,
     tm_lookup,
     tm_record,
@@ -688,50 +689,87 @@ def test_apply_seats_a_person_s_words_in_the_indent_the_same_way_accept_does(
     _project(tmp_path, monkeypatch, doc=b"- item one\n\n    A second paragraph.\n")
     doc, _r, _j = do_extract("d.md", "zh-TW", CFG)
     seg = next(s for s in doc["segments"] if s["source"].startswith("    "))
-    applied_n, unknown = do_apply("d.md", "zh-TW", CFG, {seg["id"]: applied})
-    assert (applied_n, unknown) == (1, [])
+    applied_n, unknown, written, conflicts = do_apply(
+        "d.md", "zh-TW", CFG, {seg["id"]: applied})
+    assert (applied_n, unknown, conflicts) == (1, [], {})
     stored = next(s for s in load_doc("d.md", "zh-TW")["segments"] if s["id"] == seg["id"])
     assert stored["target"] == "    這是第二段。"
+    # The readback is the stored text, not the submitted one, which is the whole
+    # reason it exists: a client that trusted what it sent would show the indent
+    # missing until it refetched the book.
+    assert written[seg["id"]]["text"] == stored["target"]
+    assert written[seg["id"]]["token"] == target_token(stored["target"])
 
 
 @pytest.mark.parametrize("blank", ["", "   ", "\n", "　"])
-def test_apply_clearing_a_segment_does_not_leave_an_indent_standing_alone(
+def test_apply_refuses_a_blank_target_and_names_the_way_to_redo_the_segment(
         tmp_path, monkeypatch, blank):
-    """The reachable half of `reseat_outer_blanks`'s blank-text guard.
+    """An empty target is a rejected input at `contract_version = 2`, not a result.
 
-    `accept` never reaches it — it refuses an empty proposal before reseating —
-    but `lx apply` and the workbench's save endpoint do, and clearing a segment
-    is what a reviewer does when a paragraph needs redoing. Reseated, a cleared
-    target becomes `"    "`, which is *truthy*: `render` would emit four spaces
-    where the untranslated marker belongs and report nothing missing. Found by
-    the mutation pass; nothing else in the suite could see the guard.
+    It used to be storable, and combined with status-derived-from-text and the
+    origin precedence scheduled next it produces a segment every run selects, no
+    writer may write, and `lx check` can never pass: the draft pass takes it on
+    `status == "pending"`, the repair pass on the `missing` error, and both writes
+    are refused for being `llm:*` over `human`. Refusing at the door makes that
+    state unreachable rather than guarded against.
+
+    The refusal is in `do_apply` rather than at the endpoint, so `lx apply` cannot
+    walk around it: an empty string is not "a person's words" that `AGENTS.md`
+    exempts from refusal, it is their absence. `docs/decisions.md`, 2026-08-14.
+
+    All four blanks, because the predicate is `.strip()` — the same one
+    `checks.check_segment`'s `missing` rule uses, so the two cannot come to
+    disagree about what empty means. U+3000 is in the list because it is what a
+    zh-TW reviewer's own paragraph indent is made of.
     """
     _project(tmp_path, monkeypatch, doc=b"- item one\n\n    A second paragraph.\n")
     doc, _r, _j = do_extract("d.md", "zh-TW", CFG)
     seg = next(s for s in doc["segments"] if s["source"].startswith("    "))
-    do_apply("d.md", "zh-TW", CFG, {seg["id"]: blank})
+    with pytest.raises(UnusableTarget) as e:
+        do_apply("d.md", "zh-TW", CFG, {seg["id"]: blank})
+    assert seg["id"] in str(e.value)
+    assert "lx translate" in str(e.value), "a refusal says what to do next"
     stored = next(s for s in load_doc("d.md", "zh-TW")["segments"] if s["id"] == seg["id"])
-    # What `normalize` made of it and nothing more — not the four spaces in front.
-    assert stored["target"] == normalize(blank, "zh-TW", CFG)
+    assert not stored["target"]
 
 
-def test_apply_clearing_a_segment_still_renders_the_untranslated_marker(
+def test_one_blank_target_refuses_the_whole_save_and_writes_none_of_it(
         tmp_path, monkeypatch):
-    """The consequence, on the one blank `render` can tell apart.
+    """Whole-request, before anything is written.
 
-    `render` reads a target for truth, so only `""` reaches the marker branch —
-    which is exactly the value the reseat would have destroyed. A whitespace-only
-    target renders as whitespace and always has; that is `render`'s question, not
-    this one's.
+    A workbench save carries every dirty segment at once, so refusing per id
+    would leave a reviewer's other edits half-applied with no way for the page to
+    say which. Rejected input, not partial failure.
     """
     _project(tmp_path, monkeypatch, doc=b"- item one\n\n    A second paragraph.\n")
     doc, _r, _j = do_extract("d.md", "zh-TW", CFG)
     do_apply("d.md", "zh-TW", CFG, {s["id"]: "譯文。" for s in doc["segments"]})
-    seg = next(s for s in doc["segments"] if s["source"].startswith("    "))
-    do_apply("d.md", "zh-TW", CFG, {seg["id"]: ""})
+    blanked = next(s for s in doc["segments"] if s["source"].startswith("    "))
+    other = next(s for s in doc["segments"] if s["id"] != blanked["id"])
+    with pytest.raises(UnusableTarget):
+        do_apply("d.md", "zh-TW", CFG,
+                 {blanked["id"]: "", other["id"]: "改過的譯文。"})
+    stored = {s["id"]: s.get("target") for s in load_doc("d.md", "zh-TW")["segments"]}
+    assert stored[blanked["id"]] == "    譯文。"
+    assert stored[other["id"]] == "譯文。", "the good edit in the same payload was not written"
     out, missing = do_render("d.md", "zh-TW", CFG, fallback=False)
-    assert missing == 1
-    assert "    A second paragraph." not in out and "譯文。" in out
+    assert missing == 0 and "譯文。" in out
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\n", "　"])
+def test_reseat_leaves_a_blank_target_blank_rather_than_dressing_it_in_an_indent(blank):
+    """The guard the mutation pass found, pinned at its own level now.
+
+    `do_apply` was the only caller that could reach it with a blank text and it
+    refuses one at the door since `contract_version = 2`, so the property is
+    asserted directly rather than through a path that can no longer produce it —
+    the alternative was letting a guard nothing exercises rot until someone
+    deletes it as dead. Reseated, a cleared target becomes `"    "`, which is
+    *truthy*: `render` would emit four spaces where the untranslated marker
+    belongs and report nothing missing.
+    """
+    assert reseat_outer_blanks("    A second paragraph.", blank,
+                               keep_added_indent=True) == blank
 
 
 @pytest.mark.parametrize("doc, name", [
@@ -842,6 +880,6 @@ def test_apply_still_takes_a_target_accept_would_refuse(tmp_path, monkeypatch):
     seg = next(s for s in doc["segments"] if s["source"].startswith("    "))
     assert seg["masked"] == "    Run ⟦1⟧ now."
     assert accept(seg, "現在執行。", "zh-TW", CFG)[0] is None
-    assert do_apply("d.md", "zh-TW", CFG, {seg["id"]: "現在執行。"}) == (1, [])
+    assert do_apply("d.md", "zh-TW", CFG, {seg["id"]: "現在執行。"})[:2] == (1, [])
     stored = next(s for s in load_doc("d.md", "zh-TW")["segments"] if s["id"] == seg["id"])
     assert stored["target"] == "    現在執行。"

@@ -151,9 +151,47 @@ def record_key(rec):
                   0 if version is None else version, rec.get("variant"), rec.get("tone"))
 
 
+def target_token(target):
+    """What a client sends back to prove its edit was based on what it was shown.
+
+    The hash of the stored target and nothing else. Derived rather than stored,
+    so it costs no column and no :data:`SCHEMA_VERSION` — and derived *from the
+    text* rather than from a revision counter on purpose: two writes that produce
+    the same wording are not a lost update, and a counter would report one. A
+    counter would also have to survive `lx apply`, which does not go through this
+    surface at all.
+
+    ``None`` and ``""`` are one value here, because they are one value to every
+    reader of a target in this project — `checks.check_segment` reads
+    ``seg.get("target") or ""`` and both counters test truthiness.
+    """
+    return seg_hash(target or "")
+
+
+def doc_label(src):
+    """The one spelling of a document's identity that every surface shows.
+
+    :func:`doc_id` is what a state row is keyed on and is deliberately lossy;
+    this is what a person and a client read, and its only difference from
+    ``os.path.relpath`` is that the separator is ``/`` on every platform.
+
+    Two spellings of one identity used to travel in one ``/api/state`` body —
+    ``docs\\guide.md`` from `os.path.relpath` beside ``docs/guide.md`` from the
+    candidate scan — and nothing compared them, which is what made the Windows
+    defect in `docs/contracts/workbench-http.md` (13) possible. Fixing only the
+    comparison would have left the condition and pushed a normalizer into every
+    client, so the label is normalized where it is read and where it is written
+    and there is one spelling from here down. See ``docs/decisions.md``,
+    2026-08-14.
+
+    Idempotent on a value it produced, which is what lets :func:`_meta` apply it
+    to a row written before this existed instead of migrating one.
+    """
+    return os.path.relpath(src).replace(os.sep, "/")
+
+
 def doc_id(src):
-    rel = os.path.relpath(src).replace(os.sep, "/")
-    return re.sub(r"[^A-Za-z0-9._-]", "_", rel)
+    return re.sub(r"[^A-Za-z0-9._-]", "_", doc_label(src))
 
 
 def db_path():
@@ -368,6 +406,20 @@ def _segment(row):
     seg = json.loads(row[-1])
     for value, (_, field) in zip(row, _SEG_COLUMNS):
         seg[field] = value
+    # Derived on read as well as on write, and for the same reason `_meta`
+    # re-normalizes `source`: the guard that keeps the two agreeing — an empty
+    # target is refused at the door — binds every *future* write and does nothing
+    # for a row already on disk. A document translated under a build that let an
+    # empty target through carries `status="translated"` with `target=""`, which
+    # `report.translated` and `docs[].done` both count as undone while
+    # `pending_segments` never selects it again: the segment falls out of the
+    # queue that would redo it, which is the whole of divergence (14). Recomputing
+    # here closes it for the population the fix exists for, with no
+    # `STATE_VERSION` bump, because nothing about the old row is unreadable —
+    # only wrong. Found by the adversarial pass over the change that added the
+    # write-side guard, which had made the neighbouring `source` fix self-healing
+    # on read and this one not.
+    seg["status"] = "translated" if (seg.get("target") or "").strip() else "pending"
     return seg
 
 
@@ -378,6 +430,18 @@ _SEG_READ = ("SELECT seg_id, content_hash, context, variant, status, target, bod
 def _meta(row_meta, state_version):
     doc = json.loads(row_meta)
     doc["state_version"] = state_version
+    # Normalized on the way out as well as on the way in. `cli.do_extract` writes
+    # the label through `doc_label`, so a row written by this build is already in
+    # one spelling — but a row written before the normalization landed holds the
+    # platform separator, and a project holding both would show two spellings of
+    # one kind of value in one listing. `doc_label` is idempotent on its own
+    # output, so this costs a string operation and no state migration: nothing
+    # about an older row is *wrong*, which is `STATE_VERSION`'s own bar, only
+    # spelled the old way. This is the single funnel from a stored row to a
+    # dict — `_read_meta` and `tracked` are its only callers — so normalizing
+    # here covers every reader, including ones added later.
+    if doc.get("source"):
+        doc["source"] = doc_label(doc["source"])
     return doc
 
 
@@ -526,8 +590,8 @@ def save_doc(src, lang, doc):
         conn.close()
 
 
-def save_segments(src, lang, segments):
-    """Write these segments and nothing else. Returns how many rows were written.
+def save_segments(src, lang, segments, expect=None):
+    """Write these segments and nothing else. ``(written, stale)``.
 
     The narrow write, and the reason this package exists. `lx apply` and
     `lx check` touch the segments they changed instead of rewriting a novel's
@@ -537,19 +601,46 @@ def save_segments(src, lang, segments):
     A segment whose id is not in the stored document is skipped rather than
     inserted: an id that was never extracted is a caller's mistake, and inserting
     it would put a segment in the document with no node referring to it.
+
+    ``expect`` is ``{seg_id: previous_target}`` and makes the write a
+    **compare-and-swap**: a named id is written only if the row still holds that
+    exact text, and lands in ``stale`` otherwise. It is the only place the
+    comparison is not racing. Checking a token against a snapshot read in an
+    earlier transaction and then writing unconditionally — which is what
+    :func:`cli.do_apply` did when the token was introduced — is not a check at
+    all: two writers whose reads both land before either write both pass it, and
+    the loser is told it succeeded while its text is discarded. Reproduced
+    2026-08-14 with two threads under `ThreadingHTTPServer`, which is what `lx web`
+    runs; ``UPDATE … WHERE … AND target IS ?`` closes it, and exactly one of the
+    two sees a rowcount of 1.
+
+    ``IS`` rather than ``=``, because a never-translated segment holds SQL NULL
+    and an explicitly written one holds ``''``. ``=`` is never true against NULL,
+    so the first write to every fresh segment would have been refused as stale.
     """
     rows = [(*_seg_row(0, seg)[2:], doc_id(src), lang, seg["id"]) for seg in segments]
     if not rows:
-        return 0
+        return 0, []
+    expect = expect or {}
     conn = _connect()
     try:
         with conn:
-            written = 0
-            for row in rows:
-                written += conn.execute(
-                    "UPDATE segments SET content_hash=?, context=?, variant=?, status=?, "
-                    "target=?, body=? WHERE doc_id=? AND lang=? AND seg_id=?", row).rowcount
-        return written
+            written, stale = 0, []
+            for row, seg in zip(rows, segments):
+                seg_id = seg["id"]
+                if seg_id in expect:
+                    n = conn.execute(
+                        "UPDATE segments SET content_hash=?, context=?, variant=?, status=?, "
+                        "target=?, body=? WHERE doc_id=? AND lang=? AND seg_id=? "
+                        "AND target IS ?", (*row, expect[seg_id])).rowcount
+                    if not n:
+                        stale.append(seg_id)
+                else:
+                    n = conn.execute(
+                        "UPDATE segments SET content_hash=?, context=?, variant=?, status=?, "
+                        "target=?, body=? WHERE doc_id=? AND lang=? AND seg_id=?", row).rowcount
+                written += n
+        return written, stale
     finally:
         conn.close()
 
@@ -565,6 +656,13 @@ def save_targets(src, lang, targets, origin):
 
     Issues are cleared with the target for the same reason :func:`cli.do_apply`
     clears them: they describe wording that has just been replaced.
+
+    ``status`` is derived from the text rather than hardcoded to ``translated``.
+    Unreachable with an empty text today — every caller feeds this
+    `translate.accept`'s output, which refuses one — and written this way anyway,
+    because `status` is the *draft queue's selection predicate* and a writer that
+    can mark an empty segment done is the shape of the defect, not the instance.
+    The instance is closed at the door by :func:`cli.do_apply`.
     """
     conn = _connect()
     try:
@@ -580,9 +678,10 @@ def save_targets(src, lang, targets, origin):
                 body["origin"] = origin
                 body.pop("issues", None)
                 written += conn.execute(
-                    "UPDATE segments SET status='translated', target=?, body=? "
+                    "UPDATE segments SET status=?, target=?, body=? "
                     "WHERE doc_id=? AND lang=? AND seg_id=?",
-                    (text, json.dumps(body, ensure_ascii=False),
+                    ("translated" if (text or "").strip() else "pending",
+                     text, json.dumps(body, ensure_ascii=False),
                      doc_id(src), lang, seg_id)).rowcount
         return written
     finally:

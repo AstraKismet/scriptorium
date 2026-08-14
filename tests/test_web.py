@@ -17,8 +17,21 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import scriptorium.cli as cli  # noqa: E402
 import statedb  # noqa: E402
 from scriptorium.cli import UnsafePath, confined_path  # noqa: E402
+from scriptorium.store import target_token  # noqa: E402
 from scriptorium.web import server as web_server  # noqa: E402
 from scriptorium.web.server import _Handler, _own_hosts, _own_origins  # noqa: E402
+
+
+def _try_post(base, path, obj):
+    """`(status, body)` with a 4xx returned rather than raised."""
+    req = urllib.request.Request(
+        base + path, data=json.dumps(obj).encode("utf-8"), method="POST",
+        headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
 
 
 @pytest.fixture(scope="module")
@@ -128,31 +141,34 @@ def test_state_stops_offering_a_document_it_has_already_extracted(base, tmp_path
     """Reproduced on the wire 2026-08-13, closed 2026-08-14.
 
     Extract `docs/guide.md`, ask for the page again, and the file was still in
-    `candidates` with an Extract button on it: the already-seen set held
+    the list with an Extract button on it: the already-seen set held
     `docs\\guide.md` from `os.path.relpath` and the candidate key held
     `docs/guide.md` from `.replace(os.sep, "/")`, so the subtraction never fired
     on any platform whose separator is not `/`. Both sides are `store.doc_id`
     now. Over HTTP rather than through the helper, because the defect was
     platform-dependent and this has to be the run that happens on this machine.
+
+    The key is `untracked` at `contract_version = 2`, spelling the command, this
+    response key and HANDOFF-203's forthcoming field one way.
     """
     _sources_project(tmp_path, monkeypatch)
 
     code, body = _get(base, "/api/state")
     assert code == 200
-    assert json.loads(body)["candidates"] == [{"source": "docs/guide.md", "lang": "zh-TW"}]
+    assert json.loads(body)["untracked"] == [{"source": "docs/guide.md", "lang": "zh-TW"}]
 
     code, _ = _post(base, "/api/extract", {"src": "docs/guide.md", "lang": "zh-TW"})
     assert code == 200
 
     state = json.loads(_get(base, "/api/state")[1])
-    assert state["candidates"] == []
-    # And the half that is deliberately still here: one body, two spellings of
-    # one identity. `docs[].source` is `os.path.relpath` verbatim, so on Windows
-    # it is `docs\guide.md` while the candidate above said `docs/guide.md`.
-    # Normalizing the label changes what a client reads, so it waits for the
-    # contract's next version bump — see the contract, *Common to all of them*.
-    assert [(d["source"], d["lang"]) for d in state["docs"]] == [
-        (os.path.join("docs", "guide.md"), "zh-TW")]
+    assert state["untracked"] == []
+    # And the other half, which used to be deliberately left open: one body no
+    # longer carries two spellings of one identity. `docs[].source` was
+    # `os.path.relpath` verbatim — `docs\guide.md` on this machine, beside the
+    # `docs/guide.md` above — and both go through `store.doc_label` now. Asserted
+    # against the literal rather than `os.path.join`, because the whole point is
+    # that the answer no longer depends on the platform.
+    assert [(d["source"], d["lang"]) for d in state["docs"]] == [("docs/guide.md", "zh-TW")]
 
 
 def test_state_reads_every_document_once_to_draw_one_page(base, tmp_path, monkeypatch):
@@ -665,3 +681,173 @@ def test_the_degraded_origin_check_still_refuses_a_foreign_page(base, tmp_path, 
     with pytest.raises(urllib.error.HTTPError) as e:
         _get(base, "/api/state", headers={"Origin": "http://evil.example"})
     assert e.value.code == 403
+
+
+# ── the lost-update token, and what a save may not store ───────────────────
+#
+# `contract_version = 2`. The surface whose entire purpose is human review had no
+# concurrency control of any kind: a background translation job, or a second
+# window, overwrote a reviewer's sentence and both requests answered 200.
+
+def _segments(base, name):
+    return json.loads(_get(base, f"/api/doc?src={name}&lang=zh-TW")[1])["segments"]
+
+
+def test_doc_gives_every_segment_the_token_a_save_hands_back(base, tmp_path, monkeypatch):
+    name, _root = _project(base, tmp_path, monkeypatch)
+    segments = _segments(base, name)
+    assert segments, "the fixture must produce at least one segment"
+    for s in segments:
+        assert s["token"] == target_token(s["target"])
+    # Untranslated and empty are one value here, which is what every reader of a
+    # target in this project already believes — `checks` reads
+    # `seg.get("target") or ""` and both progress counters test truthiness.
+    assert segments[0]["token"] == target_token("")
+
+
+def test_save_refuses_an_empty_target(base, tmp_path, monkeypatch):
+    """The acceptance criterion, on the wire: 400, not 200.
+
+    An empty string used to be a legal target that produced
+    `{status: "translated", target: ""}` — a segment marked done with nothing in
+    it, removed from the draft queue by the act of being cleared.
+    """
+    name, _root = _project(base, tmp_path, monkeypatch)
+    seg = _segments(base, name)[0]
+    code, body = _try_post(base, "/api/save",
+                           {"src": name, "lang": "zh-TW", "targets": {seg["id"]: ""}})
+    assert code == 400
+    assert "lx translate" in json.loads(body)["error"], "the refusal says what to do next"
+    assert _segments(base, name)[0]["target"] == ""
+
+
+def test_save_hands_back_the_text_it_stored_and_its_new_token(
+        base, tmp_path, monkeypatch):
+    """The readback that removes the save-then-refetch-the-whole-book loop."""
+    name, _root = _project(base, tmp_path, monkeypatch)
+    seg = _segments(base, name)[0]
+    code, body = _post(base, "/api/save", {
+        "src": name, "lang": "zh-TW", "targets": {seg["id"]: "標題"},
+        "base": {seg["id"]: seg["token"]}})
+    assert code == 200
+    saved = json.loads(body)
+    assert (saved["applied"], saved["unknown"], saved["conflicts"]) == (1, [], {})
+    assert saved["stored"][seg["id"]]["text"] == "標題"
+    assert saved["stored"][seg["id"]]["token"] == target_token("標題")
+    # And the token it handed back is the one the next save must send.
+    assert _segments(base, name)[0]["token"] == saved["stored"][seg["id"]]["token"]
+
+
+def test_a_stale_token_is_reported_as_a_conflict_and_writes_nothing(
+        base, tmp_path, monkeypatch):
+    """Divergence (17): the reviewer's sentence used to lose, silently, at 200.
+
+    Reported in the body rather than as a status, because one request carries
+    every dirty segment and a status code cannot say which of them lost.
+    """
+    name, _root = _project(base, tmp_path, monkeypatch)
+    seg = _segments(base, name)[0]
+    stale = seg["token"]
+
+    code, _ = _post(base, "/api/save", {
+        "src": name, "lang": "zh-TW", "targets": {seg["id"]: "第一版"},
+        "base": {seg["id"]: stale}})
+    assert code == 200
+
+    code, body = _post(base, "/api/save", {
+        "src": name, "lang": "zh-TW", "targets": {seg["id"]: "第二版"},
+        "base": {seg["id"]: stale}})
+    assert code == 200, "a conflict is a 200 with a body, not an error status"
+    answer = json.loads(body)
+    assert answer["applied"] == 0 and answer["stored"] == {}
+    assert answer["conflicts"][seg["id"]] == {
+        "text": "第一版", "token": target_token("第一版")}
+    assert _segments(base, name)[0]["target"] == "第一版", "the second write was refused"
+
+
+def test_a_save_that_sends_no_base_writes_the_way_it_always_did(
+        base, tmp_path, monkeypatch):
+    """`base` is opt-in per id, which is what keeps `lx apply` and any existing
+    client working — the check cannot be something a caller has to know about to
+    keep its old behaviour."""
+    name, _root = _project(base, tmp_path, monkeypatch)
+    seg = _segments(base, name)[0]
+    _post(base, "/api/save", {"src": name, "lang": "zh-TW", "targets": {seg["id"]: "甲"}})
+    code, body = _post(base, "/api/save",
+                       {"src": name, "lang": "zh-TW", "targets": {seg["id"]: "乙"}})
+    assert code == 200
+    assert json.loads(body)["conflicts"] == {}
+    assert _segments(base, name)[0]["target"] == "乙"
+
+
+def test_a_written_target_makes_the_segment_translated_and_an_absent_one_pending(
+        base, tmp_path, monkeypatch):
+    """Divergence (14), closed by construction rather than by a second counter.
+
+    `status` is the draft queue's selection predicate. It said "a target was
+    written" and every count in this contract said "a target is non-empty"; with
+    an empty target refused at the door, the two predicates cannot disagree.
+    """
+    name, _root = _project(base, tmp_path, monkeypatch)
+    before = _segments(base, name)[0]
+    assert (before["status"], before["target"]) == ("pending", "")
+    _post(base, "/api/save", {"src": name, "lang": "zh-TW", "targets": {before["id"]: "標題"}})
+    after = _segments(base, name)[0]
+    assert (after["status"], after["target"]) == ("translated", "標題")
+
+
+@pytest.mark.parametrize("payload,mark", [
+    ({"targets": {"s0001": 42}}, "a target is text"),
+    ({"targets": {"s0001": ["a"]}}, "a target is text"),
+    ({"targets": {"s0001": "x"}, "base": "not-a-map"}, "`base` is a map"),
+    ({"targets": {"s0001": "x"}, "base": ["s0001"]}, "`base` is a map"),
+])
+def test_a_malformed_save_is_refused_with_a_sentence_rather_than_a_traceback(
+        base, tmp_path, monkeypatch, payload, mark):
+    """Both shapes the adversarial pass reproduced, 2026-08-14.
+
+    A numeric target reached the blank check and raised
+    `AttributeError: 'int' object has no attribute 'strip'` — exit 1 and a stack
+    trace on the CLI, a 400 quoting a CPython internal on the wire. A `base` sent
+    as a string was worse than an error: `sid in base` is a substring test, so the
+    lost-update protection was silently switched off for a client that had asked
+    for it.
+    """
+    name, _root = _project(base, tmp_path, monkeypatch)
+    seg = _segments(base, name)[0]
+    payload = {**payload, "targets": {seg["id"]: list(payload["targets"].values())[0]}}
+    code, body = _try_post(base, "/api/save", {"src": name, "lang": "zh-TW", **payload})
+    assert code == 400
+    message = json.loads(body)["error"]
+    assert mark in message
+    assert "strip" not in message, "a CPython internal is not a sentence"
+    assert _segments(base, name)[0]["target"] == "", "a refused save writes nothing"
+
+
+def test_state_carries_the_collision_list_even_when_it_is_empty(
+        base, tmp_path, monkeypatch):
+    """Present and empty, so a client never has to tell "none" from "older build"."""
+    _sources_project(tmp_path, monkeypatch)
+    state = json.loads(_get(base, "/api/state")[1])
+    assert state["collisions"] == []
+
+
+def test_state_names_the_file_one_identity_swallowed(base, tmp_path, monkeypatch):
+    """Divergence (18), on the wire.
+
+    `store.doc_id` flattens every character outside `A-Za-z0-9._-`, so
+    `docs/guide.md` and a root-level `docs_guide.md` are one row to
+    `.lx/state.db`. Only one can be offered — extracting the second overwrites the
+    first — and until now neither surface said which one it had dropped.
+    """
+    root = _sources_project(tmp_path, monkeypatch)
+    # Both inside `docs/`, because the scaffolded `sources` is `docs/**/*.md` and
+    # a collision the glob cannot reach proves nothing.
+    (root / "docs" / "a").mkdir()
+    (root / "docs" / "a" / "b.md").write_bytes(b"# One\n\nA sentence.\n")
+    (root / "docs" / "a_b.md").write_bytes(b"# Two\n\nAnother sentence.\n")
+    state = json.loads(_get(base, "/api/state")[1])
+    assert sorted(u["source"] for u in state["untracked"]) == [
+        "docs/a/b.md", "docs/guide.md"]
+    assert state["collisions"] == [
+        {"paths": ["docs/a/b.md", "docs/a_b.md"], "offered": "docs/a/b.md"}]
