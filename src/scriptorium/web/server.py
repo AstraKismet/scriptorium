@@ -14,6 +14,7 @@ import json
 import mimetypes
 import os
 import posixpath
+import re
 import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -530,8 +531,93 @@ class _Handler(BaseHTTPRequestHandler):
 
 # ── background translation jobs ────────────────────────────────────────────
 
+#: Every job this process still has a record of, in mint order — which is age
+#: order, because ids only rise. Guarded by `_JOB_LOCK` together with the two
+#: names below it; nothing here may be read or written outside that lock.
 _JOBS = {}
 _JOB_LOCK = threading.Lock()
+
+#: The high-water mark: how many jobs this process has ever minted. A counter
+#: rather than `len(_JOBS)`, and the difference is the whole of divergences (9)
+#: and half of (4). A length goes *backwards* the moment anything is evicted, so
+#: retention and id-uniqueness were the same defect: two runs would be handed one
+#: id and a client polling the id it was given would watch someone else's run.
+#: A counter only rises, so an id is never reused — and the numbers at or below
+#: it are exactly the ones that have existed, which is what lets `/api/job`
+#: answer "this finished and was dropped" differently from "this never was".
+_JOB_SEQ = 0
+
+#: The ids of finished jobs in **completion** order, and how many are kept.
+#: Nothing is persisted — a mid-run crash is already cheap, because batches are
+#: durable as they land, so a restart loses the progress log rather than the
+#: work. `docs/decisions.md`, 2026-08-14, names the three triggers that would
+#: force real records, and none of them exists.
+#:
+#: Two properties, and the second is why this list exists rather than a scan of
+#: `_JOBS`. **A job that is not done is never evicted**, because its record is
+#: the only way its client can find out what happened to it — and a job absent
+#: from this list cannot be chosen. And "oldest" means oldest *to finish*, not
+#: oldest to start: under mint order, an hour-long run minted first would be the
+#: eviction candidate the instant it completed, so its client would poll once,
+#: be told the record was dropped, and never learn the outcome. Completion order
+#: puts the run that just ended at the back, where it is safest.
+_JOB_DONE = []
+_JOB_KEEP = 50
+
+_JOB_ID_RE = re.compile(r"job(\d+)\Z")
+
+
+def _mint_job(total):
+    """A new job's state, minted **and** inserted under one lock acquisition.
+
+    One acquisition and not two, which is what divergence (9) is about: the id
+    used to be `f"job{len(_JOBS) + 1}"`, computed before the lock was taken, so
+    two simultaneous requests could read the same length and the second would
+    overwrite the first's state.
+    """
+    global _JOB_SEQ
+    with _JOB_LOCK:
+        _JOB_SEQ += 1
+        job_id = f"job{_JOB_SEQ}"
+        _JOBS[job_id] = state = {
+            "id": job_id, "done": False, "log": [], "applied": 0,
+            "failures": [], "error": None, "total": total}
+        return state
+
+
+def _finish_job(state):
+    """Mark a run over and bring the table back inside its bound.
+
+    Both under one lock acquisition, and this is the only place `done` is set —
+    so the bound holds continuously rather than only at the moment the next run
+    starts, and there is one place to read to know what retention does.
+    """
+    with _JOB_LOCK:
+        state["done"] = True
+        _JOB_DONE.append(state["id"])
+        while len(_JOB_DONE) > _JOB_KEEP:
+            _JOBS.pop(_JOB_DONE.pop(0), None)
+
+
+def _job_status(job_id):
+    """A job's record, or one sentence saying which kind of nothing this is.
+
+    Still a `200` carrying `error` alone — divergence (5) is not closed here,
+    only made informative. The distinction is a real question rather than a
+    nicety: "your run is over and the log is gone" and "you asked for something
+    that was never started" send a client to two different places, and before the
+    high-water mark this server could not tell them apart.
+    """
+    with _JOB_LOCK:
+        state = _JOBS.get(job_id)
+        if state:
+            return dict(state)
+        found = _JOB_ID_RE.match(str(job_id or ""))
+        if found and 0 < int(found.group(1)) <= _JOB_SEQ:
+            return {"error": f"job {job_id} has finished and its record has been "
+                             f"dropped — only the most recent {_JOB_KEEP} are kept, "
+                             f"and no job survives a restart. Re-read the document."}
+        return {"error": "no such job"}
 
 
 def _translate_job(src, lang, cfg, body):
@@ -556,11 +642,7 @@ def _translate_job(src, lang, cfg, body):
     # describe different runs.
     route = _stage_route(cfg, mode, body.get("provider"), body.get("model"))
 
-    job_id = f"job{len(_JOBS) + 1}"
-    state = {"id": job_id, "done": False, "log": [], "applied": 0,
-             "failures": [], "error": None, "total": len(segments)}
-    with _JOB_LOCK:
-        _JOBS[job_id] = state
+    state = _mint_job(len(segments))
 
     def log(msg):
         with _JOB_LOCK:
@@ -601,17 +683,10 @@ def _translate_job(src, lang, cfg, body):
                 state["error"] = str(e)
             log(f"failed: {e}")
         finally:
-            with _JOB_LOCK:
-                state["done"] = True
+            _finish_job(state)
 
     threading.Thread(target=work, daemon=True).start()
-    return {"id": job_id, "total": len(segments), "route": route}
-
-
-def _job_status(job_id):
-    with _JOB_LOCK:
-        state = _JOBS.get(job_id)
-        return dict(state) if state else {"error": "no such job"}
+    return {"id": state["id"], "total": len(segments), "route": route}
 
 
 def serve(host="127.0.0.1", port=8787, open_browser=True):

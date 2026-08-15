@@ -964,3 +964,146 @@ def test_a_malformed_routing_block_is_reported_in_the_route_not_raised(
                        {"src": "d.md", "lang": "zh-TW", "ids": ["no-such-segment"]})
     assert code == 200, "a malformed routing entry must not fail the request"
     assert json.loads(body)["route"]["error"]
+
+
+# ── the job table ──────────────────────────────────────────────────────────
+
+@pytest.fixture
+def jobs(monkeypatch):
+    """An empty job table, restored afterwards.
+
+    Module-level state in `web.server`, shared by every test in this process —
+    including `test_contract.py`'s, which asserts an unknown id's exact body. So
+    it is replaced rather than emptied, and the sequence is put back where it
+    was: leaving the counter high would make that assertion depend on what ran
+    before it, and leaving it low would let this file mint an id that file
+    expects to be unknown.
+    """
+    monkeypatch.setattr(web_server, "_JOBS", {})
+    monkeypatch.setattr(web_server, "_JOB_DONE", [])
+    monkeypatch.setattr(web_server, "_JOB_SEQ", 0)
+    yield
+
+
+def test_two_jobs_minted_at_once_never_share_an_id(jobs):
+    """Divergence (9), reproduced rather than argued.
+
+    `f"job{len(_JOBS) + 1}"` was computed *before* `_JOB_LOCK` was taken, so two
+    threads could read the same length, mint the same id, and have the second
+    overwrite the first's state — a client polling the id it was handed would
+    then be watching someone else's run.
+
+    **This test is the weaker half of the pair and says so**, measured rather
+    than assumed: restoring the old minting expression and running this file
+    left *this* test green and reddened
+    `test_a_job_id_is_never_reused_after_an_eviction` instead, because twenty
+    threads under the GIL doing almost no work rarely interleave where it
+    matters. The deterministic catch is that one — a length goes backwards the
+    moment anything is evicted, so `len(_JOBS)` reissues an id with no race at
+    all. Keep both: this one is the only thing watching the lock itself.
+    """
+    minted, ready = [], threading.Barrier(20)
+
+    def mint():
+        ready.wait(timeout=10)
+        minted.append(web_server._mint_job(0)["id"])
+
+    threads = [threading.Thread(target=mint) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert len(minted) == 20
+    assert len(set(minted)) == 20, "two runs were handed one id"
+    assert sorted(int(i[3:]) for i in minted) == list(range(1, 21))
+    assert set(web_server._JOBS) == set(minted), "a state was overwritten"
+
+
+def test_a_running_job_is_never_evicted_however_many_finish_after_it(jobs):
+    """The one rule retention is not allowed to break.
+
+    A record is the only way a client finds out what happened to its run, so the
+    bound is on *finished* jobs alone. Asserted with the long-running job minted
+    first, which is the order that makes a naive "drop the oldest" wrong.
+    """
+    running = web_server._mint_job(1)
+    for _ in range(web_server._JOB_KEEP + 10):
+        web_server._finish_job(web_server._mint_job(0))
+
+    assert running["id"] in web_server._JOBS, "a job still running was dropped"
+    assert web_server._job_status(running["id"])["done"] is False
+    finished = [k for k, v in web_server._JOBS.items() if v["done"]]
+    assert len(finished) == web_server._JOB_KEEP
+
+
+def test_the_jobs_dropped_are_the_oldest_finished_ones(jobs):
+    ids = []
+    for _ in range(web_server._JOB_KEEP + 5):
+        state = web_server._mint_job(0)
+        web_server._finish_job(state)
+        ids.append(state["id"])
+    assert set(web_server._JOBS) == set(ids[-web_server._JOB_KEEP:])
+
+
+def test_a_dropped_job_is_a_different_answer_from_one_that_never_existed(base, jobs):
+    """What the high-water mark is for.
+
+    Both are still a `200` with `error` alone — divergence (5) stands — but a
+    client told "no such job" for a run it watched start has been told something
+    false, and the two answers send it to two different places.
+    """
+    state = web_server._mint_job(0)
+    web_server._finish_job(state)
+    for _ in range(web_server._JOB_KEEP + 1):
+        web_server._finish_job(web_server._mint_job(0))
+    assert state["id"] not in web_server._JOBS
+
+    dropped = json.loads(_post(base, "/api/job", {"id": state["id"]})[1])
+    assert set(dropped) == {"error"}, "the shape is one key, whatever the sentence"
+    assert "dropped" in dropped["error"]
+
+    never = json.loads(_post(base, "/api/job", {"id": "job9999"})[1])
+    assert never == {"error": "no such job"}
+    # And a spelling that is not a job id at all falls to the same answer rather
+    # than to an exception from the parse.
+    assert json.loads(_post(base, "/api/job", {"id": "../etc"})[1]) == {
+        "error": "no such job"}
+    assert json.loads(_post(base, "/api/job", {"id": ""})[1]) == {
+        "error": "no such job"}
+
+
+def test_a_job_id_is_never_reused_after_an_eviction(jobs):
+    """The reason the counter is not `len(_JOBS)`.
+
+    A length goes backwards the moment anything is evicted, so the id after a
+    drop would collide with one already handed out — which is how retention and
+    id-uniqueness turned out to be one defect rather than two.
+    """
+    seen = set()
+    for _ in range(web_server._JOB_KEEP * 2):
+        state = web_server._mint_job(0)
+        web_server._finish_job(state)
+        assert state["id"] not in seen, f"{state['id']} was minted twice"
+        seen.add(state["id"])
+
+
+def test_a_long_run_that_finishes_last_is_not_the_first_thing_evicted(jobs):
+    """Why the retention key is completion order and not mint order.
+
+    An hour-long chapter is minted first and finishes last. Under "drop the
+    oldest to *start*" it becomes the eviction candidate the instant it
+    completes, so its client polls once, is told the record was dropped, and
+    never learns whether the run succeeded — the one moment the record exists
+    for. Completion order puts the run that just ended at the back of the
+    window, which is the safest place in it.
+    """
+    long_run = web_server._mint_job(1)
+    for _ in range(web_server._JOB_KEEP):
+        web_server._finish_job(web_server._mint_job(0))
+    assert len(web_server._JOB_DONE) == web_server._JOB_KEEP
+
+    web_server._finish_job(long_run)
+    status = web_server._job_status(long_run["id"])
+    assert status["done"] is True, "the record was gone the moment the run ended"
+    assert status["id"] == long_run["id"]

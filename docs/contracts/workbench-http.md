@@ -554,9 +554,29 @@ This is a real gap in the CLI, and it is structural rather than an oversight —
 | `failures` | array | Each entry is a **two-element array** `[segment_id, reason]`. Empty on the failure path. |
 | `error` | string \| null | `str(exception)` if the run raised. |
 
-**An unknown id answers `200` with `{"error": "no such job"}`** — a body with that
-one key and none of the seven above, not `404` and not `400`. A *failed* job is
-also `200`; failure is visible only in the body. *Known divergences* (5).
+**An id with no record answers `200` with a body carrying `error` and nothing
+else** — that one key and none of the seven above, not `404` and not `400`. A
+*failed* job is also `200`; failure is visible only in the body. *Known
+divergences* (5).
+
+Since 2026-08-15 there are **two such answers**, and a client that distinguishes
+them tells its reader two different things. An id at or below the high-water mark
+of ids this process has minted has *existed*: its run finished and its record was
+dropped, and the sentence says so. Anything else — a higher number, a spelling
+that is not a job id, a request after a restart — is `{"error": "no such job"}`,
+unchanged. The `error` sentences themselves are not frozen (see *What is not
+frozen*); what is stated here is that the shape of both is a `200` with one key.
+
+**Retention.** The most recent **50 finished** jobs are kept. A job that is not
+done is never evicted, whatever finishes around it, because its record is the
+only way its client learns the outcome. "Most recent" is by **completion**, not
+by start: under start order an hour-long chapter minted first would become the
+eviction candidate the instant it completed, and its client would poll once, be
+told the record was gone, and never find out whether the run succeeded. Ids are a
+monotonic sequence and are never reused, which is what makes the high-water mark
+above meaningful — and is why the sequence is a counter rather than `len(_JOBS)`,
+since a length goes backwards the moment anything is evicted. *Known divergences*
+(9), closed.
 
 ⚠️ **A non-null `error` does not mean nothing was written.** Accepted batches are
 committed as they land, so a run that dies partway has already changed the
@@ -901,9 +921,13 @@ were decided at version 2 and each entry says how.
    and the CLI come to describe different runs.
 4. **`/api/job` is a genuine CLI gap.** Structural rather than accidental: a
    browser request cannot block for the minutes-to-hours a run takes, and a
-   terminal invocation can. Recorded so it is not mistaken for leaked logic.
-   Whatever replaces it still owes an id that does not depend on `len(_JOBS)` and
-   a retention rule — see HANDOFF-204, which carries both.
+   terminal invocation can. Recorded so it is not mistaken for leaked logic, and
+   **still open as a gap** — deliberately, because it is the only part of this
+   endpoint's neighbourhood that is not pipeline logic. The two debts it named
+   were paid on 2026-08-15: the id no longer depends on `len(_JOBS)` (9), and
+   there is a retention rule, stated under the endpoint. What is left here is the
+   job table, the progress log and the polling; selecting the segments and
+   running the model became `cli.do_select` and `cli.do_translate` — see (2).
 5. **`/api/job` reports failure as `200`.** An unknown id answers
    `{"error": "no such job"}` at `200`; a job that raised answers `200` with a
    non-null `error`. Status alone never distinguishes a successful poll from a
@@ -919,10 +943,21 @@ were decided at version 2 and each entry says how.
    a `400`, but the message is an accident and differs per endpoint.
 8. **`/api/doc` calls the masked source `source`; `lx todo --json` calls it
    `text`.** One thing, two names, across two surfaces of the same product.
-9. **The job id is minted outside the lock.** `f"job{len(_JOBS) + 1}"` is computed
-   before `_JOB_LOCK` is taken, so two simultaneous requests can mint the same id
-   and the second overwrites the first's state. `_JOBS` is never pruned. Both are
-   already carried by HANDOFF-204.
+9. **Closed 2026-08-15.** *The job id was minted outside the lock, and `_JOBS`
+   was never pruned.* `f"job{len(_JOBS) + 1}"` was computed before `_JOB_LOCK`
+   was taken, so two simultaneous requests could mint the same id and the second
+   would overwrite the first's state — a client polling the id it was handed
+   would be watching someone else's run. The id is minted **and** inserted under
+   one acquisition now. The two halves turned out to be one defect rather than
+   two: a length goes backwards the moment anything is evicted, so `len(_JOBS)`
+   would have reissued a live id the day pruning landed, with no race needed at
+   all. A monotonic counter fixes both and buys the high-water mark the endpoint
+   now answers "this finished and was dropped" from. Retention is stated under
+   the endpoint. **Not closed:** the concurrent-mint half is asserted by a
+   twenty-thread test that is honest about being the weaker of the two — under
+   the GIL it rarely interleaves where it matters, and the mutant that restored
+   the old expression was caught by the id-reuse test instead. Both are kept;
+   only one of them is watching the lock.
 10. **`default_output` is never confined.** When `/api/render` is given no `out`,
     the path comes from `output_pattern` in the project's configuration, which is
     trusted because it is hand-edited. Invariant 11 names this: the moment
