@@ -461,10 +461,12 @@ Side effects: **writes.** Each segment's issue list goes back into
 Start a translation run. Returns immediately; the run happens on a background
 thread and is polled through `/api/job`.
 
-Backed by: no `cli.do_*` — there is none. The server composes
-`translate.translate_segments` with `store.save_targets` per batch. Segment
-selection uses `cli.pending_segments` and `translate.failing_segments`. One
-selection decision lives only here; see *Known divergences* (2).
+Backed by: `cli.do_select` for which segments the run works on, and
+`cli.do_translate` for the run itself — including the per-batch write, which used
+to be assembled here. What is left in the server is the job table: the id, the
+progress log and the polling, which is the part a browser genuinely needs and a
+terminal does not. See *Known divergences* (4) for why that part has no CLI
+equivalent, and (2) for the selection copy this replaced.
 
 Before version 2 it also ran `cli.do_apply` over every result once more at the
 end. That wrote nothing `save_targets` had not already written — `translate.accept`
@@ -484,6 +486,7 @@ surface invariant 8 calls the product the riskier of the two.
 | `mode` | no | string | `"draft"` | Selects segments *and* names the routing stage. See the selection table below. |
 | `ids` | no | array of string | — | **When present and non-empty, overrides `mode`'s selection entirely.** An empty array is falsy and falls through to `mode`. |
 | `provider` | no | string | the routing table's answer | An unknown name fails *inside the job*, not on this request. |
+| `model` | no | string | the routing entry's model, else the provider's own | The model id for this run only. Most specific first, exactly as `lx translate --model`: this value, then the routing entry's, then the provider's. A `provider` naming a **different** backend drops the entry's model, because a model id belongs to the backend that serves it — this field survives that, because it was named for this run and for this provider. |
 | `batch` | no | integer | `batch.size` from config, else 25 | |
 | `concurrency` | no | integer | `batch.concurrency` from config, else 2 | |
 
@@ -496,8 +499,15 @@ What each `mode` selects, which the response's `total` is a count of:
 | `"repair"` | Segments a fresh check rejects with at least one **error**-severity issue. Warnings do not qualify. |
 | anything else | As `"draft"`. The value is still forwarded as the routing stage, where an unconfigured stage name falls back to the `draft` entry. |
 
-There is no `model` field. The CLI has `--model`; this endpoint cannot override
-the model id, only the provider. *Known divergences* (3).
+This table is `cli.do_select`, and since 2026-08-15 it is the CLI's answer too.
+`lx translate --mode repair` used to select *pending* segments, because
+`cmd_translate` had no repair branch at all — two surfaces of one product
+answering the same question differently, with the server silently picking one.
+The CLI was aligned to this table rather than the reverse, so nothing here moved:
+the mirror settlement bumps the version and turns a Repair button into "translate
+the rest of the book". *Known divergences* (2), closed. The `ids`-outranks-`mode`
+rule in the row above was part of the same disagreement — the CLI tested `mode ==
+"polish"` first and silently ignored `--ids`.
 
 **Response**
 
@@ -505,6 +515,12 @@ the model id, only the provider. *Known divergences* (3).
 |---|---|---|
 | `id` | string | The job id, to be polled through `/api/job`. |
 | `total` | integer | Segments selected, fixed at creation. `0` is a legal answer and means the run does nothing. |
+| `route` | object | `{provider, model}` — what this run will actually dispatch to, resolved by the same `config.resolve_route` `/api/state`'s `routing` projection uses. `model` is `""` when neither the request, the routing entry nor the provider names one. A malformed `routing` block answers `{provider: "", model: "", error: "…"}` here rather than failing the request, because this endpoint's documented behaviour is that a routing problem surfaces *inside the job*; resolving eagerly to report the answer must not quietly convert that into a `400`. |
+
+**Why the readback exists.** Without it the only place the answer appears is the
+job's first `log` line, which this contract forbids parsing — so a workbench
+could not tell a reviewer which model produced the wording in front of them.
+*Known divergences* (3), closed.
 
 **`200` does not mean the translation succeeded.** It means the job was accepted.
 Everything after that is reported through `/api/job` and nowhere else.
@@ -848,8 +864,9 @@ and keeps its number; a new one is appended. The numbers are referenced from
 would silently repoint every one of them — which means the section is a history
 and its length is not a count of what is outstanding. Read the entries.
 
-Numbers (2) and (3) are the ones HANDOFF-204 must still **decide**, not merely
-inherit. (18) to (21) were decided at version 2 and each entry says how.
+(2) and (3) were the two HANDOFF-204 had to **decide** rather than merely
+inherit; both were decided and closed on 2026-08-15, additively. (18) to (21)
+were decided at version 2 and each entry says how.
 
 1. **Closed 2026-08-14.** *`/api/state`'s `candidates` had no CLI equivalent.*
    `_scan_sources` globbed the configured `sources` patterns and subtracted what
@@ -857,15 +874,31 @@ inherit. (18) to (21) were decided at version 2 and each entry says how.
    Under invariant 8 that was behaviour living only in the server. `lx untracked`
    is the command it now stands in front of, `cli.do_untracked` decides the list
    for both surfaces, and the silent 200-entry cap went with it.
-2. **`/api/translate`'s `mode: "repair"` means `lx repair`, not
-   `lx translate --mode repair`.** The endpoint selects failing segments;
-   `lx translate --mode repair` selects pending ones, because `cmd_translate` has
-   no repair branch. Two CLI commands disagree and the server silently picked one.
-   Whichever way it is settled, it is settled in one place, not in the server.
-3. **`/api/translate` cannot name a model.** `translate.translate_segments` takes
-   `model`, `lx translate --model` forwards it, and the endpoint does not. A
-   settings surface that can route a stage to a model but cannot run one is
-   half a feature.
+2. **Closed 2026-08-15.** *`/api/translate`'s `mode: "repair"` meant `lx repair`,
+   not `lx translate --mode repair`.* The endpoint selected failing segments;
+   `lx translate --mode repair` selected pending ones, because `cmd_translate`
+   had no repair branch. Two CLI commands disagreed and the server silently
+   picked one. Settled the way this section said it had to be — **in one place,
+   not in the server**: `cli.do_select` is that place, and `cmd_translate`,
+   `cmd_repair`, `cmd_run` and this endpoint all call it. **The CLI was aligned
+   to the wire**, so no key and no meaning on this surface moved; the mirror
+   settlement was refused because it bumps the version and makes a Repair button
+   select the untranslated remainder of the book. Two smaller copies went with
+   it: the polish predicate, which existed twice in `cli.py` byte for byte and
+   once more in the server, and `cmd_run`'s inline spelling of the draft queue.
+   The `ids`-before-`mode` order was part of the same defect — the CLI tested
+   `mode == "polish"` first, so `lx translate --mode polish --ids s3` ignored
+   `--ids` while the endpoint honoured it.
+3. **Closed 2026-08-15.** *`/api/translate` could not name a model.*
+   `translate.translate_segments` takes `model`, `lx translate --model` forwards
+   it, and the endpoint did not — a settings surface that can route a stage to a
+   model but cannot run one is half a feature. The endpoint takes an optional
+   `model` now **and reports the resolved route back**, because the readback is
+   the half that makes it usable: the only other place the answer appeared was a
+   `log` line this contract forbids parsing. Both are additive, so the version
+   did not move. One call to `config.resolve_route`, shared with `/api/state`'s
+   projection — a second site resolving this independently is how the workbench
+   and the CLI come to describe different runs.
 4. **`/api/job` is a genuine CLI gap.** Structural rather than accidental: a
    browser request cannot block for the minutes-to-hours a run takes, and a
    terminal invocation can. Recorded so it is not mistaken for leaked logic.

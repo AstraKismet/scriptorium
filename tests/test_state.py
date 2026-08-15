@@ -16,7 +16,6 @@ Everything runs on the library functions. The commands are covered in
 `test_cli.py`, and a process boundary would only make these slower to read.
 """
 
-import argparse
 import json
 import os
 import sys
@@ -29,7 +28,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import statedb  # noqa: E402
 from scriptorium import cli as cli_mod  # noqa: E402
 from scriptorium import translate as translate_mod  # noqa: E402
-from scriptorium.cli import _translate, do_apply, do_extract, pending_segments  # noqa: E402
+from scriptorium.cli import do_apply, do_extract, do_translate, pending_segments  # noqa: E402
 from scriptorium.config import DEFAULT_CONFIG  # noqa: E402
 from scriptorium.store import (  # noqa: E402
     SEGMENTATION_VERSION,
@@ -88,9 +87,9 @@ class _Interrupting:
         return json.dumps({sid: "已翻譯。" for sid in ids}, ensure_ascii=False)
 
 
-def _args(**over):
-    return argparse.Namespace(**{"dry_run": False, "provider": None, "model": None,
-                                 "batch": 2, "concurrency": 1, **over})
+def _run(src, segments):
+    """One draft run through the seam both surfaces call, serial and two per batch."""
+    return do_translate(src, "zh-TW", CFG, segments, "draft", batch=2, concurrency=1)
 
 
 def test_resume_after_interrupt_keeps_every_completed_batch(tmp_path, monkeypatch):
@@ -110,7 +109,7 @@ def test_resume_after_interrupt_keeps_every_completed_batch(tmp_path, monkeypatc
     stub = _Interrupting(answer_batches=2)
     monkeypatch.setattr(translate_mod, "build_provider", lambda name, cfg, model=None: stub)
     with pytest.raises(KeyboardInterrupt):
-        _translate(src, "zh-TW", CFG, doc["segments"], "draft", _args())
+        _run(src, doc["segments"])
 
     done = [s for s in load_doc(src, "zh-TW")["segments"] if s.get("target")]
     answered = [sid for batch in stub.seen for sid in batch]
@@ -123,7 +122,7 @@ def test_resume_after_interrupt_keeps_every_completed_batch(tmp_path, monkeypatc
     monkeypatch.setattr(translate_mod, "build_provider", lambda name, cfg, model=None: resumed)
     pending = pending_segments(load_doc(src, "zh-TW"))
     assert len(pending) == 6
-    _translate(src, "zh-TW", CFG, pending, "draft", _args())
+    _run(src, pending)
     asked = {sid for batch in resumed.seen for sid in batch}
     assert asked.isdisjoint(answered), "a completed segment was translated twice"
     assert all(s.get("target") for s in load_doc(src, "zh-TW")["segments"])

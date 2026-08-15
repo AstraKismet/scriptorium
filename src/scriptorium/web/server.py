@@ -28,14 +28,15 @@ from ..cli import (
     do_check,
     do_extract,
     do_render,
+    do_select,
+    do_translate,
     do_untracked,
     language_tag,
-    pending_segments,
 )
 from ..config import ROUTING_STAGES, ConfigError, load_config, resolve_route
 from ..docio import write_document
 from ..providers import available
-from ..store import append_tm, load_doc, load_tm, save_targets, target_token, tm_records, tracked
+from ..store import append_tm, load_doc, load_tm, target_token, tm_records, tracked
 
 STATIC = os.path.join(os.path.dirname(__file__), "static")
 
@@ -66,8 +67,8 @@ _LOOPBACK_BINDS = ("127.0.0.1", "::1", "localhost")
 _LOOPBACK_NAMES = ("127.0.0.1", "localhost", "[::1]")
 
 
-def _routing_state(cfg):
-    """Every stage resolved to the backend and the model it will actually use.
+def _stage_route(cfg, stage, provider=None, model=None):
+    """One stage resolved to the backend and the model it will actually use.
 
     Resolved rather than echoed. A routing value is two shapes now — a provider
     name or `{provider, model}` — and a page that read one of them would silently
@@ -77,19 +78,23 @@ def _routing_state(cfg):
     workbench and `lx routing show` from disagreeing about which model is about
     to spend an hour, which is what `resolve_route` exists for.
 
-    A malformed entry is reported in the projection rather than raised: this is
-    the endpoint that draws the whole page, and one bad stage must not take the
-    document list down with it.
+    **A malformed entry is reported rather than raised**, and that is load-bearing
+    on both callers rather than a convenience on one. `/api/state` draws the whole
+    page, so one bad stage must not take the document list down with it; and
+    `/api/translate`'s documented behaviour is that a routing problem fails
+    *inside the job*, not on the request that starts it — resolving eagerly to
+    report the answer back must not quietly convert that into a `400`.
     """
-    state = {}
-    for stage in ROUTING_STAGES:
-        try:
-            provider, model = resolve_route(cfg, stage)
-        except ConfigError as e:
-            state[stage] = {"provider": "", "model": "", "error": str(e)}
-        else:
-            state[stage] = {"provider": provider, "model": model}
-    return state
+    try:
+        name, chosen = resolve_route(cfg, stage, provider, model)
+    except ConfigError as e:
+        return {"provider": "", "model": "", "error": str(e)}
+    return {"provider": name, "model": chosen}
+
+
+def _routing_state(cfg):
+    """Every stage resolved, in `_stage_route`'s shape."""
+    return {stage: _stage_route(cfg, stage) for stage in ROUTING_STAGES}
 
 
 def _own_hosts(port):
@@ -530,21 +535,26 @@ _JOB_LOCK = threading.Lock()
 
 
 def _translate_job(src, lang, cfg, body):
-    """Translation runs off-thread so the UI stays responsive on slow local models."""
-    from ..translate import Progress, failing_segments, translate_segments
+    """Translation runs off-thread so the UI stays responsive on slow local models.
 
+    What is *left* here is the job table and nothing else. Selecting the segments
+    and running the model are `cli.do_select` and `cli.do_translate`, which is the
+    whole of contract divergence (2): this function used to carry its own copy of
+    the selection chain, and the copy disagreed with the CLI's about what
+    `repair` means. `/api/job` stays a documented CLI gap — a browser cannot
+    block for the minutes-to-hours a run takes — but the gap is the polling, not
+    the pipeline.
+    """
     doc = load_doc(src, lang)
     mode = body.get("mode", "draft")
-    if body.get("ids"):
-        wanted = set(body["ids"])
-        segments = [s for s in doc["segments"] if s["id"] in wanted]
-    elif mode == "repair":
-        segments = failing_segments(doc, cfg)
-    elif mode == "polish":
-        segments = [s for s in doc["segments"]
-                    if s.get("target") and s["kind"] in ("para", "quote", "list")]
-    else:
-        segments = pending_segments(doc)
+    segments = do_select(doc, cfg, mode, ids=body.get("ids"))
+    # Resolved once, here, and reported back: the only other place the answer
+    # appears is a `log` line the contract forbids parsing, so a reviewer had no
+    # way to tell which model produced the wording in front of them. One call to
+    # the same `config.resolve_route` every other surface uses — a second site
+    # resolving this independently is how the workbench and the CLI come to
+    # describe different runs.
+    route = _stage_route(cfg, mode, body.get("provider"), body.get("model"))
 
     job_id = f"job{len(_JOBS) + 1}"
     state = {"id": job_id, "done": False, "log": [], "applied": 0,
@@ -556,35 +566,20 @@ def _translate_job(src, lang, cfg, body):
         with _JOB_LOCK:
             state["log"].append(msg)
 
-    def commit(ok):
-        """One batch, durable the moment it lands, and counted as it lands.
+    def counted(written):
+        """`applied` moves while the run is going, and is right when it dies.
 
-        The `do_apply` that used to run over every result *again* at the end of
-        the job is gone. It wrote nothing `save_targets` had not already written —
-        `translate.accept` has normalized, repaired and reseated the text before
-        either of them sees it, and both set the same `status` and `origin` and
-        clear the same issues — so its only effect was to rewrite every segment of
-        the run at the end, over whatever a reviewer had edited in the meantime.
-        Deleting it shrinks that clobber window from the whole run to one batch.
+        The batch is already durable when this is called — `do_translate` banks
+        it and hands the count on — so this only has to publish the number.
+        Before version 2 it counted what a final apply touched and therefore
+        stayed 0 for a run that raised after changing the document.
 
-        Deleted on **both** surfaces in one move, deliberately: the first version
-        of this change removed it here only, which left `cli._translate` — the
-        surface invariant 8 calls the product — carrying the wider exposure the
-        change claimed to have closed. Adversarial review, 2026-08-14.
-
-        `applied` now counts what was **written** rather than what the final apply
-        touched, so it moves during the run and is right on the failure path,
-        where it used to report 0 for a run that had already changed the
-        document. That is what makes this a contract change rather than a
-        tidy-up.
-
-        `_JOB_LOCK` covers the counter and not the write — but not for the reason
-        it first appears to. `translate_segments` already calls `on_batch` under
-        the lock that guards its own results, so these writes are serialized
-        whatever this function does; the lock here is for `_job_status`, which
-        reads this dict from a request thread.
+        `_JOB_LOCK` covers the counter and not the write, and not for the reason
+        it first appears to: `translate_segments` already calls `on_batch` under
+        the lock that guards its own results, so these are serialized whatever
+        this function does. The lock here is for `_job_status`, which reads this
+        dict from a request thread.
         """
-        written = save_targets(src, lang, ok, f"llm:{mode}")
         with _JOB_LOCK:
             state["applied"] += written
 
@@ -593,10 +588,10 @@ def _translate_job(src, lang, cfg, body):
             if not segments:
                 log("nothing to do")
                 return
-            _results, failures = translate_segments(
-                segments, doc, cfg, provider_name=body.get("provider"), mode=mode,
-                batch_size=body.get("batch"), concurrency=body.get("concurrency"),
-                progress=Progress(log), on_batch=commit)
+            _applied, failures = do_translate(
+                src, lang, cfg, segments, mode, provider=body.get("provider"),
+                model=body.get("model"), batch=body.get("batch"),
+                concurrency=body.get("concurrency"), progress=log, on_batch=counted)
             with _JOB_LOCK:
                 state["failures"] = failures
                 applied = state["applied"]
@@ -610,7 +605,7 @@ def _translate_job(src, lang, cfg, body):
                 state["done"] = True
 
     threading.Thread(target=work, daemon=True).start()
-    return {"id": job_id, "total": len(segments)}
+    return {"id": job_id, "total": len(segments), "route": route}
 
 
 def _job_status(job_id):

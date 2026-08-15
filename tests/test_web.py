@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import scriptorium.cli as cli  # noqa: E402
 import statedb  # noqa: E402
 from scriptorium.cli import UnsafePath, confined_path  # noqa: E402
+from scriptorium.config import DEFAULT_CONFIG  # noqa: E402
 from scriptorium.store import target_token  # noqa: E402
 from scriptorium.web import server as web_server  # noqa: E402
 from scriptorium.web.server import _Handler, _own_hosts, _own_origins  # noqa: E402
@@ -851,3 +852,115 @@ def test_state_names_the_file_one_identity_swallowed(base, tmp_path, monkeypatch
         "docs/a/b.md", "docs/guide.md"]
     assert state["collisions"] == [
         {"paths": ["docs/a/b.md", "docs/a_b.md"], "offered": "docs/a/b.md"}]
+
+
+# ── which segments a run works on, and which backend it reaches ────────────
+
+def _translate_project(base, tmp_path, monkeypatch):
+    """A document in the three states `test_select.py`'s fixture builds.
+
+    Deliberately the same shape, because the claim under test spans the two
+    files: the endpoint must select what `cli.do_select` selects, and the way to
+    show that is to ask both about a document where the three modes disagree.
+    """
+    root = tmp_path / "nest" / "proj"
+    root.mkdir(parents=True)
+    monkeypatch.chdir(root)
+    (root / "d.md").write_bytes(
+        b"# Title\n\nSee [the guide](https://example.com/here) for details.\n\n"
+        b"The gate stood open when she came down the hill.\n\n"
+        b"She went in anyway, and it swung shut behind her.\n")
+    assert _post(base, "/api/extract", {"src": "d.md", "lang": "zh-TW"})[0] == 200
+    ids = [s["id"] for s in json.loads(_get(base, "/api/doc?src=d.md&lang=zh-TW")[1])["segments"]]
+    assert _post(base, "/api/save", {"src": "d.md", "lang": "zh-TW",
+                                     "targets": {ids[0]: "標題", ids[1]: "請見指南。"}})[0] == 200
+    return ids
+
+
+@pytest.mark.parametrize("mode,want", [
+    ("draft", [2, 3]),
+    ("repair", [1, 2, 3]),
+    ("polish", [1]),
+    ("audit", [2, 3]),
+])
+def test_the_endpoint_selects_what_the_cli_selects(base, tmp_path, monkeypatch,
+                                                   mode, want):
+    """Divergence (2), asserted on the wire rather than by reading the source.
+
+    `total` is a count of the selection and is fixed at creation, so it is the
+    endpoint's own answer to "which segments". Named against the fixture's
+    positions rather than against `do_select`'s return value: an oracle that
+    calls the code under test moves with it and passes for a mutant that breaks
+    both surfaces at once.
+
+    The run itself never reaches a network — every selected segment is banked or
+    refused inside the job thread against no provider, and this asserts only the
+    number the request answered with.
+    """
+    _translate_project(base, tmp_path, monkeypatch)
+    code, body = _post(base, "/api/translate", {"src": "d.md", "lang": "zh-TW",
+                                                "mode": mode})
+    assert code == 200
+    assert json.loads(body)["total"] == len(want)
+
+
+def test_ids_outrank_the_mode_on_the_wire_too(base, tmp_path, monkeypatch):
+    ids = _translate_project(base, tmp_path, monkeypatch)
+    body = json.loads(_post(base, "/api/translate", {
+        "src": "d.md", "lang": "zh-TW", "mode": "polish", "ids": [ids[0]]})[1])
+    assert body["total"] == 1
+    # An empty array is falsy and falls through to the mode, which the contract
+    # states in as many words.
+    body = json.loads(_post(base, "/api/translate", {
+        "src": "d.md", "lang": "zh-TW", "mode": "polish", "ids": []})[1])
+    assert body["total"] == 1
+
+
+def test_translate_reports_the_route_it_resolved(base, tmp_path, monkeypatch):
+    """Divergence (3): the endpoint could not name a model, and did not say which
+    one it had picked.
+
+    The readback is the half that makes the field usable — the only other place
+    the answer appears is a `log` line the contract forbids parsing, so a
+    workbench could not tell a reviewer which model produced the wording in front
+    of them. `ids` names nothing, so `total` is 0 and no provider is ever built.
+    """
+    _translate_project(base, tmp_path, monkeypatch)
+    nowhere = {"src": "d.md", "lang": "zh-TW", "ids": ["no-such-segment"]}
+
+    body = json.loads(_post(base, "/api/translate", nowhere)[1])
+    assert body["total"] == 0
+    assert body["route"] == {
+        "provider": "local",
+        "model": DEFAULT_CONFIG["providers"]["local"]["model"]}
+
+    # The request's own model outranks the routing entry's and the provider's.
+    body = json.loads(_post(base, "/api/translate", {**nowhere, "model": "x:7b"})[1])
+    assert body["route"] == {"provider": "local", "model": "x:7b"}
+
+    # A provider naming a different backend drops the entry's model, because a
+    # model id belongs to the backend that serves it — and the caller's own
+    # survives, because that one was typed for this run and this provider.
+    body = json.loads(_post(base, "/api/translate", {**nowhere, "provider": "openai"})[1])
+    assert body["route"]["provider"] == "openai"
+    body = json.loads(_post(base, "/api/translate",
+                            {**nowhere, "provider": "openai", "model": "x:7b"})[1])
+    assert body["route"] == {"provider": "openai", "model": "x:7b"}
+
+
+def test_a_malformed_routing_block_is_reported_in_the_route_not_raised(
+        base, tmp_path, monkeypatch):
+    """This endpoint's documented behaviour is that a routing problem fails
+    *inside the job*, not on the request that starts it.
+
+    Resolving eagerly in order to report the answer back must not quietly turn
+    that into a `400` — which is the shape of change the version rule calls a
+    bump. `/api/state` degrades the same way and for a neighbouring reason.
+    """
+    _translate_project(base, tmp_path, monkeypatch)
+    (tmp_path / "nest" / "proj" / "lx.config.json").write_text(
+        json.dumps({"routing": {"draft": {"provider": ""}}}), encoding="utf-8")
+    code, body = _post(base, "/api/translate",
+                       {"src": "d.md", "lang": "zh-TW", "ids": ["no-such-segment"]})
+    assert code == 200, "a malformed routing entry must not fail the request"
+    assert json.loads(body)["route"]["error"]

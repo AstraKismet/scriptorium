@@ -861,7 +861,7 @@ def test_do_config_set_reports_the_previous_value_and_writes_the_new_one(tmp_pat
 
 
 def test_an_argparse_namespace_from_the_parser_carries_every_flag_translate_reads():
-    """`_translate` reads `args.model`; a subcommand that forgot the flag would crash.
+    """`_run_translate` reads `args.model`; a subcommand that forgot it would crash.
 
     Asserted for all three model-calling commands rather than for one, because
     `_add_llm_flags` is applied per subparser and the omission is invisible until

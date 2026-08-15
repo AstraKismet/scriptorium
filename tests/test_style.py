@@ -33,7 +33,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from scriptorium import translate as translate_mod  # noqa: E402
-from scriptorium.cli import _translate, do_extract  # noqa: E402
+from scriptorium.cli import do_extract, do_translate  # noqa: E402
 from scriptorium.config import (  # noqa: E402
     DEFAULT_CONFIG,
     STYLE_BLOCK_MAX,
@@ -107,10 +107,8 @@ class _Recorder:
         return json.dumps({i["id"]: DONE for i in items}, ensure_ascii=False)
 
 
-def _args(**over):
-    # Serial, because every test here asserts which request carried what.
-    return argparse.Namespace(**{"dry_run": False, "provider": None, "model": None,
-                                 "batch": 6, "concurrency": 1, **over})
+#: Serial, because every test here asserts which request carried what.
+_SERIAL = 1
 
 
 def _project(tmp_path, monkeypatch, sheet=SHEET, text=BOOK, name="novel.md",
@@ -131,7 +129,8 @@ def _project(tmp_path, monkeypatch, sheet=SHEET, text=BOOK, name="novel.md",
 
 def _run(src, segments, stub, monkeypatch, batch=6, cfg=CFG):
     monkeypatch.setattr(translate_mod, "build_provider", lambda name, _cfg, model=None: stub)
-    return _translate(src, "zh-TW", cfg, segments, "draft", _args(batch=batch))
+    return do_translate(src, "zh-TW", cfg, segments, "draft", batch=batch,
+                        concurrency=_SERIAL)
 
 
 # ── the four the package names ─────────────────────────────────────────────

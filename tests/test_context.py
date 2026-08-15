@@ -19,7 +19,6 @@ Four properties keep the fix honest, and each has a test here:
 `docs/decisions.md`, 2026-07-29, D5.
 """
 
-import argparse
 import json
 import os
 import sys
@@ -27,7 +26,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from scriptorium import translate as translate_mod  # noqa: E402
-from scriptorium.cli import _translate, do_extract  # noqa: E402
+from scriptorium.cli import do_extract, do_translate  # noqa: E402
 from scriptorium.config import DEFAULT_CONFIG  # noqa: E402
 from scriptorium.store import load_doc  # noqa: E402
 from scriptorium.translate import (  # noqa: E402
@@ -81,13 +80,9 @@ class _Recorder:
         return json.dumps({i["id"]: DONE for i in items}, ensure_ascii=False)
 
 
-def _args(**over):
-    return argparse.Namespace(**{"dry_run": False, "provider": None, "model": None,
-                                 "batch": 6,
-                                 # Serial on purpose: two workers make the order
-                                 # of `stub.payloads` a race, and every test here
-                                 # asserts on which request carried what.
-                                 "concurrency": 1, **over})
+#: Serial on purpose: two workers make the order of `stub.payloads` a race, and
+#: every test here asserts on which request carried what.
+_SERIAL = 1
 
 
 def _book(tmp_path, monkeypatch, text=BOOK, name="novel.md"):
@@ -103,7 +98,8 @@ def _book(tmp_path, monkeypatch, text=BOOK, name="novel.md"):
 
 def _run(src, cfg, segments, stub, monkeypatch, batch=6, mode="draft"):
     monkeypatch.setattr(translate_mod, "build_provider", lambda name, _cfg, model=None: stub)
-    return _translate(src, "zh-TW", cfg, segments, mode, _args(batch=batch))
+    return do_translate(src, "zh-TW", cfg, segments, mode, batch=batch,
+                        concurrency=_SERIAL)
 
 
 def test_neighbour_by_id_keeps_an_interior_segment_from_being_sent_three_times(

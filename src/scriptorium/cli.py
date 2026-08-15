@@ -2109,9 +2109,106 @@ def _route_word(cfg, stage):
     return f"{stage}={provider}" + (f":{model}" if model else "")
 
 
-def _translate(src, lang, cfg, segments, mode, args):
+def do_select(doc, cfg, mode, ids=None, include_all=False, limit=0):
+    """Which segments a run of ``mode`` works on. One answer for every surface.
+
+    The rule used to live in three places and they disagreed. `cmd_translate`
+    read `--mode repair` as *pending* segments because it had no repair branch at
+    all, while `POST /api/translate` read `mode: "repair"` as the segments a
+    fresh check rejects — two surfaces of one product answering the same question
+    differently, with the server silently picking one. That is
+    `docs/contracts/workbench-http.md` divergence (2), and the settlement is that
+    **`repair` means failing segments on both**, decided in one function neither
+    surface may branch around. The mirror settlement — making the wire mean
+    pending — was refused: it bumps the contract version and turns a Repair
+    button into "translate the rest of the book".
+
+    `ids` is tested **first**, which is the wire's order and was not the CLI's:
+    `lx translate --mode polish --ids s3` used to ignore `--ids` entirely,
+    because the polish branch came before it. An explicit id is a person naming
+    the work, so it outranks the mode — and it is deliberately *not* filtered by
+    anything else, which is what makes the sentence `do_apply` prints
+    (`lx translate --ids <id>`) true whatever state the segment is in.
+
+    `include_all` and `limit` reach only the pending branch, as they always have:
+    `--all` means "everything, not only the pending ones", which the other three
+    branches each answer for themselves.
+    """
+    if ids:
+        wanted = set(ids)
+        return [s for s in doc["segments"] if s["id"] in wanted]
+    if mode == "repair":
+        # Lazily, like every other reach into `translate` from here: importing it
+        # pulls in the provider stack, and `do_select` is called on paths that
+        # never dispatch to a model.
+        from .translate import failing_segments
+        return failing_segments(doc, cfg)
+    if mode == "polish":
+        return [s for s in doc["segments"]
+                if s.get("target") and s["kind"] in ("para", "quote", "list")]
+    return pending_segments(doc, include_all=include_all, limit=limit)
+
+
+def do_translate(src, lang, cfg, segments, mode, provider=None, model=None,
+                 batch=None, concurrency=None, progress=None, on_batch=None):
+    """Run a model over these segments and bank each batch. ``(applied, failures)``.
+
+    Plain parameters rather than an argparse ``Namespace``, because the workbench
+    calls this too. It used to be a private `_translate` that read `args.model`
+    and friends off a `Namespace`, so `web/server.py` could not call it and had
+    assembled its own copy of the same six lines — which is how the two surfaces
+    came to disagree about what `repair` selects in the first place.
+
+    ``progress`` is a plain sink taking one line; the lock that makes it safe to
+    call from several worker threads is put on here rather than asked of the
+    caller. ``on_batch`` is handed the count this batch wrote, so a caller that
+    reports progress while the run is still going — the job table does — has a
+    number that moves without reaching inside.
+    """
     from .translate import Progress, translate_segments
     doc = load_doc(src, lang)
+    if not segments:
+        return 0, []
+    origin = f"llm:{mode}"
+    applied = 0
+
+    def commit(ok):
+        """One batch, durable the moment it lands, and counted as it lands.
+
+        The `do_apply` that used to run over every result *again* at the end is
+        gone. It wrote nothing `save_targets` had not already written — `accept`
+        normalizes, repairs and reseats before either of them sees the text, and
+        both set the same `status` and `origin` and clear the same issues — so
+        its only effect was to rewrite every segment of the run at the end, over
+        whatever a reviewer had edited in the meantime. Deleting it shrinks that
+        window from the whole run to one batch.
+
+        Deleted on **both** surfaces in one move, deliberately. The first version
+        of that change removed it from the job only, which left `lx translate` —
+        the surface invariant 8 calls the product — carrying the wider exposure
+        the change claimed to have closed. Adversarial review, 2026-08-14. There
+        is one copy of it now, which is what makes that class of divergence
+        unreachable rather than repaired.
+
+        No lock: `translate_segments` calls `on_batch` under the same lock that
+        guards its own results, so these calls are already serialized.
+        """
+        nonlocal applied
+        written = save_targets(src, lang, ok, origin)
+        applied += written
+        if on_batch:
+            on_batch(written)
+
+    _results, failures = translate_segments(
+        segments, doc, cfg, provider_name=provider, mode=mode,
+        batch_size=batch, concurrency=concurrency,
+        progress=Progress(progress) if progress else None,
+        on_batch=commit, model=model)
+    return applied, failures
+
+
+def _run_translate(src, lang, cfg, segments, mode, args):
+    """`do_translate` with the terminal's own reporting around it."""
     if not segments:
         _out("nothing to do")
         return 0, []
@@ -2121,35 +2218,9 @@ def _translate(src, lang, cfg, segments, mode, args):
         _out(f"dry run: {len(segments)} segment(s), {chars} source characters, "
              f"mode={mode}, provider={provider}, model={model or 'unset'}")
         return 0, []
-    origin = f"llm:{mode}"
-    applied = 0
-
-    def commit(ok):
-        """One batch, durable the moment it lands, and counted as it lands.
-
-        The `do_apply` that used to run over every result *again* at the end is
-        gone, here and in `web/server.py`'s job. It wrote nothing `save_targets`
-        had not already written — `accept` normalizes, repairs and reseats before
-        either of them sees the text, and both set the same `status` and `origin`
-        and clear the same issues — so its only effect was to rewrite every
-        segment of the run at the end, over whatever a reviewer had edited in the
-        meantime. Deleting it shrinks that window from the whole run to one batch.
-
-        Deleted on **both** surfaces in one move, deliberately. The first version
-        of this change removed it from the job only, which left `lx translate` —
-        the surface invariant 8 calls the product — carrying the wider exposure
-        the change claimed to have closed. Adversarial review, 2026-08-14.
-
-        No lock: `translate_segments` calls `on_batch` under the same lock that
-        guards its own results, so these calls are already serialized.
-        """
-        nonlocal applied
-        applied += save_targets(src, lang, ok, origin)
-
-    _results, failures = translate_segments(
-        segments, doc, cfg, provider_name=args.provider, mode=mode,
-        batch_size=args.batch, concurrency=args.concurrency,
-        progress=Progress(_out), on_batch=commit, model=args.model)
+    applied, failures = do_translate(
+        src, lang, cfg, segments, mode, provider=args.provider, model=args.model,
+        batch=args.batch, concurrency=args.concurrency, progress=_out)
     for sid, why in failures:
         _out(f"  unresolved {sid}: {why}")
     return applied, failures
@@ -2157,27 +2228,21 @@ def _translate(src, lang, cfg, segments, mode, args):
 
 def cmd_translate(args, cfg):
     doc = load_doc(args.src, args.lang)
-    if args.mode == "polish":
-        segments = [s for s in doc["segments"] if s.get("target") and s["kind"] in ("para", "quote", "list")]
-    elif args.ids:
-        wanted = set(args.ids.split(","))
-        segments = [s for s in doc["segments"] if s["id"] in wanted]
-    else:
-        segments = pending_segments(doc, include_all=args.all, limit=args.limit)
-    applied, failures = _translate(args.src, args.lang, cfg, segments, args.mode, args)
+    segments = do_select(doc, cfg, args.mode, ids=args.ids.split(",") if args.ids else None,
+                         include_all=args.all, limit=args.limit)
+    applied, failures = _run_translate(args.src, args.lang, cfg, segments, args.mode, args)
     _out(f"translated {applied} segment(s)" + (f", {len(failures)} unresolved" if failures else ""))
 
 
 def cmd_repair(args, cfg):
-    from .translate import failing_segments
     do_check(args.src, args.lang, cfg)
     doc = load_doc(args.src, args.lang)
-    segments = failing_segments(doc, cfg)
+    segments = do_select(doc, cfg, "repair")
     if not segments:
         _out("nothing failing")
         return
     _out(f"repairing {len(segments)} failing segment(s)")
-    _translate(args.src, args.lang, cfg, segments, "repair", args)
+    _run_translate(args.src, args.lang, cfg, segments, "repair", args)
     report, _ = do_check(args.src, args.lang, cfg)
     _out(f"after repair: {report['errors']} error(s), {report['warnings']} warning(s)")
 
@@ -2185,35 +2250,34 @@ def cmd_repair(args, cfg):
 def cmd_run(args, cfg):
     """extract → translate → check → repair* → render, in one command."""
     doc, reused, rejected = do_extract(args.src, args.lang, cfg, args.tone)
-    pending = [s for s in doc["segments"] if s["status"] == "pending"]
+    # Through `do_select` rather than inline, so this is not a fourth spelling of
+    # the draft queue's predicate. It was one until 2026-08-15.
+    pending = do_select(doc, cfg, "draft")
     _out(f"{args.src} [{args.lang}] · {len(doc['segments'])} segments · "
          f"{reused} reused · {len(pending)} to translate"
          + (f" · {rejected} stale memory hit(s) refused" if rejected else ""))
 
     if pending:
-        _translate(args.src, args.lang, cfg, pending, "draft", args)
+        _run_translate(args.src, args.lang, cfg, pending, "draft", args)
     if args.polish:
-        doc = load_doc(args.src, args.lang)
-        prose = [s for s in doc["segments"]
-                 if s.get("target") and s["kind"] in ("para", "quote", "list")]
+        prose = do_select(load_doc(args.src, args.lang), cfg, "polish")
         _out(f"polishing {len(prose)} prose segment(s)")
-        _translate(args.src, args.lang, cfg, prose, "polish", args)
+        _run_translate(args.src, args.lang, cfg, prose, "polish", args)
 
-    from .translate import failing_segments
     rounds = args.max_rounds if args.max_rounds is not None else cfg.get("batch", {}).get("max_repair_rounds", 3)
     previous = None
     for attempt in range(rounds):
         report, _ = do_check(args.src, args.lang, cfg)
         if not report["errors"]:
             break
-        bad = failing_segments(load_doc(args.src, args.lang), cfg)
+        bad = do_select(load_doc(args.src, args.lang), cfg, "repair")
         signature = {s["id"]: s.get("target") for s in bad}
         if signature == previous:
             _out("repair made no difference last round; stopping so it does not spin")
             break
         previous = signature
         _out(f"repair round {attempt + 1}/{rounds}: {len(bad)} failing segment(s)")
-        _translate(args.src, args.lang, cfg, bad, "repair", args)
+        _run_translate(args.src, args.lang, cfg, bad, "repair", args)
 
     report, _ = do_check(args.src, args.lang, cfg)
     _out(f"check: {report['errors']} error(s), {report['warnings']} warning(s)")
