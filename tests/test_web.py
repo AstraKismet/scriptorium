@@ -3,8 +3,10 @@
 import http.client
 import json
 import os
+import re
 import sys
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -16,6 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import scriptorium.cli as cli  # noqa: E402
 import statedb  # noqa: E402
+from scriptorium import translate as translate_mod  # noqa: E402
 from scriptorium.cli import UnsafePath, confined_path  # noqa: E402
 from scriptorium.config import DEFAULT_CONFIG  # noqa: E402
 from scriptorium.store import target_token  # noqa: E402
@@ -1107,3 +1110,102 @@ def test_a_long_run_that_finishes_last_is_not_the_first_thing_evicted(jobs):
     status = web_server._job_status(long_run["id"])
     assert status["done"] is True, "the record was gone the moment the run ended"
     assert status["id"] == long_run["id"]
+
+
+# ── hold, and origin precedence on the wire ────────────────────────────────
+
+def test_a_segment_carries_its_review_state_and_hold_sets_it(base, tmp_path, monkeypatch):
+    """`review` is always present rather than omitted when absent, so a client
+    does not have to tell "not held" from "an older server" — the rule
+    `collisions` already follows on `/api/state`."""
+    ids = _translate_project(base, tmp_path, monkeypatch)
+    segs = json.loads(_get(base, "/api/doc?src=d.md&lang=zh-TW")[1])["segments"]
+    assert all("review" in s for s in segs)
+    assert all(s["review"] is None for s in segs)
+
+    code, body = _post(base, "/api/hold", {"src": "d.md", "lang": "zh-TW",
+                                           "ids": [ids[1], "nope"]})
+    assert code == 200
+    assert json.loads(body) == {"applied": 1, "unknown": ["nope"]}
+
+    segs = {s["id"]: s for s in
+            json.loads(_get(base, "/api/doc?src=d.md&lang=zh-TW")[1])["segments"]}
+    assert segs[ids[1]]["review"] == "held"
+    assert [i["rule"] for i in segs[ids[1]]["issues"] if i["severity"] == "warn"] == ["held"]
+
+    code, body = _post(base, "/api/hold", {"src": "d.md", "lang": "zh-TW",
+                                           "ids": [ids[1]], "held": False})
+    assert json.loads(body)["applied"] == 1
+    segs = {s["id"]: s for s in
+            json.loads(_get(base, "/api/doc?src=d.md&lang=zh-TW")[1])["segments"]}
+    assert segs[ids[1]]["review"] is None
+
+
+def test_holding_a_segment_with_no_target_is_a_400_naming_the_way_forward(
+        base, tmp_path, monkeypatch):
+    ids = _translate_project(base, tmp_path, monkeypatch)
+    code, body = _try_post(base, "/api/hold",
+                           {"src": "d.md", "lang": "zh-TW", "ids": [ids[2]]})
+    assert code == 400
+    assert "lx translate" in json.loads(body)["error"]
+    # And nothing was written, which is what makes the refusal whole-request.
+    segs = {s["id"]: s for s in
+            json.loads(_get(base, "/api/doc?src=d.md&lang=zh-TW")[1])["segments"]}
+    assert segs[ids[2]]["review"] is None
+
+
+def test_a_save_does_not_release_a_hold_on_the_wire_either(base, tmp_path, monkeypatch):
+    """Lifting is the hold control's own act and never a side effect of a save."""
+    ids = _translate_project(base, tmp_path, monkeypatch)
+    _post(base, "/api/hold", {"src": "d.md", "lang": "zh-TW", "ids": [ids[1]]})
+    _post(base, "/api/save", {"src": "d.md", "lang": "zh-TW",
+                              "targets": {ids[1]: "改過的字。"}})
+    segs = {s["id"]: s for s in
+            json.loads(_get(base, "/api/doc?src=d.md&lang=zh-TW")[1])["segments"]}
+    assert segs[ids[1]]["target"] == "改過的字。"
+    assert segs[ids[1]]["review"] == "held", "the save released the hold"
+
+
+def test_a_job_reports_the_segments_it_left_alone(base, tmp_path, monkeypatch, jobs):
+    """Origin precedence, on the surface a reviewer actually watches.
+
+    `/api/save` writes `human`, so the two segments this project starts with are
+    a person's. A run that selects them writes neither and says which — reported
+    in `refused` rather than only in a `log` line this contract forbids parsing,
+    which is the same mistake divergence (3) was about.
+
+    No network: the provider is stubbed, which works here because this server
+    runs in *this* process — the job thread picks up the patched factory. It has
+    to be stubbed rather than avoided: the guard fires at the write, so the model
+    is asked first, and an unstubbed run spends its retry budget against a
+    backend nobody is running. The job is polled until it is done, never slept on.
+    """
+    class _Echo:
+        def describe(self):
+            return "stub"
+
+        def complete(self, system, user):
+            items = json.loads(user[user.index("["):])
+            return json.dumps(
+                {i["id"]: "潤過的字。" + "".join(re.findall(r"⟦\d+⟧", i["text"]))
+                 for i in items}, ensure_ascii=False)
+
+    monkeypatch.setattr(translate_mod, "build_provider",
+                        lambda name, cfg, model=None: _Echo())
+    ids = _translate_project(base, tmp_path, monkeypatch)
+    started = json.loads(_post(base, "/api/translate", {
+        "src": "d.md", "lang": "zh-TW", "mode": "polish"})[1])
+    assert started["total"] == 1, "the run must select the hand-written segment"
+
+    for _ in range(200):
+        job = json.loads(_post(base, "/api/job", {"id": started["id"]})[1])
+        if job["done"]:
+            break
+        time.sleep(0.05)
+    assert job["done"], "the job never finished"
+    assert job["applied"] == 0
+    assert job["refused"] == [ids[1]]
+    segs = {s["id"]: s for s in
+            json.loads(_get(base, "/api/doc?src=d.md&lang=zh-TW")[1])["segments"]}
+    assert segs[ids[1]]["target"] == "請見指南。"
+    assert segs[ids[1]]["origin"] == "human"

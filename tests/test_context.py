@@ -231,9 +231,10 @@ def test_neighbour_echo_ignored_when_the_model_answers_for_one(tmp_path, monkeyp
         return json.dumps(out, ensure_ascii=False)
 
     stub = _Recorder(answer)
-    applied, failures = _run(src, CFG, [segs[2], segs[3]], stub, monkeypatch, batch=2)
+    applied, failures, refused = _run(src, CFG, [segs[2], segs[3]], stub, monkeypatch,
+                                      batch=2)
 
-    assert (applied, failures) == (2, [])
+    assert (applied, failures, refused) == (2, [], [])
     after = {s["id"]: s.get("target") for s in load_doc(src, "zh-TW")["segments"]}
     assert after[ids[2]] == after[ids[3]] == DONE
     assert after[ids[1]] is None and after[ids[4]] is None, "a neighbour was written"

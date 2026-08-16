@@ -328,7 +328,7 @@ def _snapshot(root):
 
 
 def test_every_endpoint_returns_exactly_the_keys_the_contract_documents(base, project):
-    """One valid call to each of the ten, compared against the document.
+    """One valid call to each documented endpoint, compared against the document.
 
     Without this, the contract's own definition of a breaking change — renaming
     or removing a response key — was the one class of break nothing could see:
@@ -356,6 +356,10 @@ def test_every_endpoint_returns_exactly_the_keys_the_contract_documents(base, pr
     seen = record("GET", "/api/doc")
     seg = seen["segments"][0]["id"]
     record("POST", "/api/save", {"targets": {seg: "標題"}})
+    # After the save, because holding refuses a segment with no target — the
+    # order here is the order a reviewer works in, not an arrangement.
+    record("POST", "/api/hold", {"ids": [seg]})
+    record("POST", "/api/hold", {"ids": [seg], "held": False})
     record("POST", "/api/check")
     record("GET", "/api/preview")
     record("POST", "/api/render")

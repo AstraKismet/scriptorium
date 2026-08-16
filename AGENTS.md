@@ -188,7 +188,9 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    the list only grows — read the section rather than this paragraph for what is
    outstanding. (1) and (13) closed on 2026-08-14, which leaves one of the two
    server-only behaviours: (4), the job endpoint, which the contract argues is a
-   structural CLI gap rather than leaked logic. (2) and (3) closed on
+   structural CLI gap rather than leaked logic — its two named debts, an id that
+   does not depend on `len(_JOBS)` and a retention rule, were paid on 2026-08-15
+   as (9). (2) and (3) closed on
    2026-08-15, additively and with no version move: the segment-selection rule is
    `cli.do_select` now and both surfaces call it — **the CLI was aligned to the
    wire**, because the mirror settlement bumps — and the endpoint gained the
@@ -196,7 +198,9 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    the only other place that answer appeared was a log line the contract forbids
    parsing. The run itself moved with the selection: `cli.do_translate` is the
    one copy of it, so the per-batch write the two surfaces had each assembled
-   cannot drift apart again. `contract_version` moved to **2**
+   cannot drift apart again. (22) and (23) were appended the same day, both
+   closed: `POST /api/check` had carried a whole stale snapshot back over newer
+   text, and nothing on the surface could say "leave this segment to me". `contract_version` moved to **2**
    the same day, once, carrying five items: the `candidates` → `untracked` rename,
    the identity label normalized, `status` derived from the target text, an empty
    target refused, and a lost-update token. It closed (13)'s wire half, (14), (17)
@@ -279,7 +283,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 1087 tests; no network (one is POSIX-only,
+python -m pytest -q                 # 1114 tests; no network (one is POSIX-only,
                                     #   one runs only where the filesystem folds case)
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
@@ -474,6 +478,37 @@ own.
   belongs to the host syntax rather than to whichever of the three sources wrote
   the target — closing that half on 2026-08-03 was what stopped one document
   rendering differently depending on who translated it.
+- **An `llm:*` write does not land on a segment whose stored `origin` is
+  `human`.** Since 2026-08-15, and enforced inside `store.save_targets` and
+  `store.save_segments` rather than at the call sites, because all three writers
+  — `cli.do_apply`, the per-batch commit, and `do_check`'s persist path — pass
+  through those two. The comparison is made **inside the write**, against the
+  origin on disk at that moment, for the reason the lost-update token was
+  rewritten on 2026-08-14. The refused ids are returned rather than dropped: a
+  run reporting "translated 40" while having skipped four is a report nobody can
+  act on. `over_human` is the opt-out, spelled `--overwrite-human` on the CLI and
+  `overwrite_human` on the wire.
+
+  It singles out one of the three equal sources on purpose. An `agent` write is a
+  peer's own words and is unguarded, as is a person over a person; what this stops
+  is the *unattended* pass, which runs over whatever the queue hands it.
+- **A hold is a `review` field with a closed vocabulary**, spelled `held`, with
+  `lx hold` / `lx unhold` and `POST /api/hold`. It lives in the segment's `body`
+  JSON the way `origin` does, so it cost no `SCHEMA_VERSION` and no
+  `STATE_VERSION`. Three rules hold it together and each closes something:
+  **holding requires a non-empty target**, which is what makes it compose with
+  status-derived-from-text instead of fighting it; the exclusion from work
+  selection is added **once, in `checks.workable`**, and applied at every
+  predicate that selects work — `translate.failing_segments` included, which is
+  status-blind and would otherwise feed a held segment back to the model on every
+  repair round; and **lifting is the hold control's own act**, never a side
+  effect of a save, so `do_apply` carries the field through untouched.
+
+  `checks.py` reports a held segment at **warn**, never error: a severity that
+  failed the build would make lifting every hold the only way to finish a book.
+  And an explicitly named id still reaches a held segment — holding says no
+  *queue* may take it, and `do_apply`'s own refusal message tells a reviewer to
+  run `lx translate --ids <id>`, which a hold swallowing it would make false.
 - The project style sheet (`config/style.txt`) says how *this book* sounds, where
   the register brief says how the target language's prose is written. Its two
   halves are injected differently and that is the design, not an accident: the

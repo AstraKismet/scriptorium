@@ -445,6 +445,42 @@ def escaping_problems(target, host):
     return out
 
 
+#: The `review` field's closed vocabulary. One value today and a *closed* set
+#: rather than a boolean, which costs exactly the same and leaves room for
+#: `approved` — a workflow stage the 2026-07-29 re-founding has promised since it
+#: made review distinct from translation. The same reasoning `variant` was added
+#: under.
+#:
+#: It lives in this module rather than in `store.py` because this is the one both
+#: `translate.py` and `cli.py` already import, so the name that decides what
+#: `held` means and the rule that reports it have one home and add no edge to the
+#: import graph. `store.py` writes whatever it is handed, the way it already
+#: trusts an `origin`.
+HELD = "held"
+REVIEW_VALUES = (HELD,)
+
+
+def is_held(seg):
+    """Whether this segment is held out of every queue that selects work."""
+    return seg.get("review") == HELD
+
+
+def workable(segments):
+    """The segments a run may touch: everything not held.
+
+    **One helper, applied at every predicate that selects work** — the draft
+    queue, the repair set and the polish set — rather than a condition copied
+    into each. `translate.failing_segments` is the one that makes this worth
+    stating: it is status-blind by design, so without the exclusion a held
+    segment would be handed back to the model on every repair round of every run,
+    which is the opposite of what holding it asked for.
+
+    Naming the work an explicit id does is deliberately *not* filtered by this;
+    see `cli.do_select`.
+    """
+    return [s for s in segments if not is_held(s)]
+
+
 def check_segment(seg, lang, cfg, glossary, dnt):
     issues = []
     src, tgt = seg["masked"], seg.get("target") or ""
@@ -457,6 +493,16 @@ def check_segment(seg, lang, cfg, glossary, dnt):
     if not tgt.strip():
         add("missing", "error", "no translation")
         return issues
+
+    # A hold is reported and never fails a build. `warn` is the whole design:
+    # holding a segment says "leave this to me", and a severity that stopped
+    # `lx check` would turn every held segment into a blocked render, so the one
+    # way to finish a book would be to lift every hold first. Disable-able like
+    # any other rule, and below the `missing` return because holding requires a
+    # target — a segment with none is answered by `missing`, which is the more
+    # useful sentence.
+    if is_held(seg):
+        add("held", "warn", "held for review; no run will select this segment")
 
     # 1. placeholder integrity — presence as a multiset, then pair order
     a, b = Counter(PH_RE.findall(src)), Counter(PH_RE.findall(tgt))

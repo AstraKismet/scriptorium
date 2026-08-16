@@ -331,3 +331,53 @@ def test_extract_names_a_non_default_register_and_stays_quiet_about_the_default(
 
     r = _lx(["extract", "d.md", "--lang", "zh-TW", "--tone", "technical"], tmp_path, env)
     assert "tone" not in r.stdout.decode("utf-8")
+
+
+def test_hold_and_unhold_report_what_they_did_and_refuse_an_empty_segment(tmp_path):
+    """`lx hold` / `lx unhold` end to end, including the exit code of a refusal.
+
+    Two commands rather than `lx hold --lift`, because a verb command is named
+    for what it does and `lx hold --lift` reads as the opposite of what it would
+    do. One handler behind both, so the pair cannot drift.
+    """
+    (tmp_path / "d.md").write_bytes(b"First sentence.\n\nSecond sentence.\n")
+    env = {**os.environ, "PYTHONPATH": SRC}
+    assert _lx(["init"], tmp_path, env).returncode == 0
+    assert _lx(["extract", "d.md", "--lang", "zh-TW"], tmp_path, env).returncode == 0
+    ids = [s["id"] for s in statedb.segments(tmp_path)]
+
+    # Nothing to hold yet: refused with a sentence and exit 2, not a traceback.
+    r = _lx(["hold", "d.md", "--lang", "zh-TW", "--ids", ids[0]], tmp_path, env)
+    assert r.returncode == 2, r.stdout.decode("utf-8", "replace")
+    message = r.stderr.decode("utf-8")
+    assert "lx translate" in message, "the refusal must name the way forward"
+    assert "Traceback" not in message
+    assert all(s.get("review") is None for s in statedb.segments(tmp_path))
+
+    payload = json.dumps({ids[0]: "第一句。"}, ensure_ascii=False)
+    (tmp_path / "t.json").write_bytes(payload.encode("utf-8"))
+    assert _lx(["apply", "d.md", "--lang", "zh-TW", "--file", "t.json",
+                "--origin", "human"], tmp_path, env).returncode == 0
+
+    r = _lx(["hold", "d.md", "--lang", "zh-TW", "--ids", f"{ids[0]},nope"], tmp_path, env)
+    assert r.returncode == 0, r.stderr.decode("utf-8", "replace")
+    out = r.stdout.decode("utf-8")
+    assert "held 1 segment(s)" in out
+    assert "nope" in out, "an unknown id is reported, not refused"
+    assert statedb.segments(tmp_path)[0]["review"] == "held"
+
+    # A held segment is a warning and never an error, so `lx check` still passes
+    # on a document whose every segment has a target.
+    (tmp_path / "t.json").write_bytes(
+        json.dumps({ids[1]: "第二句。"}, ensure_ascii=False).encode("utf-8"))
+    assert _lx(["apply", "d.md", "--lang", "zh-TW", "--file", "t.json"],
+               tmp_path, env).returncode == 0
+    r = _lx(["check", "d.md", "--lang", "zh-TW"], tmp_path, env)
+    assert r.returncode == 0, r.stdout.decode("utf-8", "replace")
+    assert "1 warning(s)" in r.stdout.decode("utf-8")
+
+    r = _lx(["unhold", "d.md", "--lang", "zh-TW", "--ids", ids[0]], tmp_path, env)
+    assert r.returncode == 0
+    assert "released 1 segment(s)" in r.stdout.decode("utf-8")
+    assert "review" not in statedb.segments(tmp_path)[0]
+    assert _lx(["check", "d.md", "--lang", "zh-TW"], tmp_path, env).returncode == 0

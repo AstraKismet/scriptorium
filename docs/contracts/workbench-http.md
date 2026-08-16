@@ -429,6 +429,61 @@ else. A refused request writes nothing at all.
 
 ---
 
+### POST /api/hold
+
+Hold segments out of every queue that selects work, or return them to it.
+
+Backed by: `cli.do_hold`. Equivalent to `lx hold` / `lx unhold`.
+
+**Request**
+
+| Key | Required | Type | Default | Notes |
+|---|---|---|---|---|
+| `src` | yes | string | — | confined |
+| `lang` | yes | string | — | whitelisted |
+| `ids` | no | array of string | `[]` | An id naming no segment is ignored, not refused. An empty list is a no-op. |
+| `held` | no | boolean | `true` | `false` lifts the hold. |
+
+**Response**
+
+| Key | Type | Meaning |
+|---|---|---|
+| `applied` | integer | Segments whose `review` field this request changed or re-affirmed. |
+| `unknown` | array of string | Ids with no matching segment. |
+
+**A hold is a `review` value, not a `status` value**, and its vocabulary is
+closed — `held` is the only member today, and a closed set rather than a boolean
+because `approved` is a workflow stage this project has promised since it made
+review distinct from translation.
+
+⚠️ **Holding requires a non-empty target**, whole-request and before anything is
+written, with a `400` naming `lx translate --ids`. A hold on an untranslated
+segment would say "leave this one to me" about a segment nobody has written yet
+*and* remove it from the draft queue by a route that queue cannot see — the same
+shape as the empty target `/api/save` refuses. Lifting a hold carries no such
+condition: undoing something must never be harder than doing it.
+
+**What a hold does and does not do.** It removes the segment from every predicate
+that selects work — the draft queue, the repair set, the polish set — through one
+shared helper, `translate.failing_segments` included, which is status-blind and
+would otherwise hand a held segment back to the model on every repair round.
+It does **not** stop a person editing it: `/api/save` writes a held segment
+normally and the hold survives, because the two answer different questions and a
+save that quietly released a hold would return the segment to the model's queue
+at the moment its wording changed. And it does **not** exempt an id named
+explicitly — `ids` on `/api/translate` still selects a held segment, because that
+is a person pointing at one rather than a queue sweeping. Lifting is this
+endpoint's own act and never a side effect of another.
+
+`checks.py` reports a held segment at **warn** severity, so `lx check` still
+exits 0 and a held segment never blocks a render. It is disable-able like any
+other rule.
+
+Side effects: updates the `review` field of the named segment rows in
+`.lx/state.db`, and nothing else — not `target`, not `status`.
+
+---
+
 ### POST /api/check
 
 Run the validators and persist the result.
@@ -489,6 +544,7 @@ surface invariant 8 calls the product the riskier of the two.
 | `model` | no | string | the routing entry's model, else the provider's own | The model id for this run only. Most specific first, exactly as `lx translate --model`: this value, then the routing entry's, then the provider's. A `provider` naming a **different** backend drops the entry's model, because a model id belongs to the backend that serves it — this field survives that, because it was named for this run and for this provider. |
 | `batch` | no | integer | `batch.size` from config, else 25 | |
 | `concurrency` | no | integer | `batch.concurrency` from config, else 2 | |
+| `overwrite_human` | no | boolean | `false` | Let this run replace segments whose stored `origin` is `human`. Off by default — see *Origin precedence* below. |
 
 What each `mode` selects, which the response's `total` is a count of:
 
@@ -522,6 +578,28 @@ job's first `log` line, which this contract forbids parsing — so a workbench
 could not tell a reviewer which model produced the wording in front of them.
 *Known divergences* (3), closed.
 
+**Origin precedence.** Since 2026-08-15 a write from this run — origin `llm:*` —
+**does not land on a segment whose stored `origin` is `human`** unless
+`overwrite_human` is sent. The refused ids come back in `/api/job`'s `refused`,
+not dropped in silence. The comparison happens **inside the write**, against the
+origin on disk at that moment rather than one read when the run started, for the
+same reason the lost-update token's does.
+
+Only `llm:*` is guarded. This project treats an API model, an agent in its own
+context and a person as three equal sources of a translation, so an `agent` write
+is a peer's and is not restricted; what this stops is the *unattended* pass,
+which runs over whatever the queue hands it. `/api/save` writes `human` and is
+therefore never the refused writer.
+
+This narrows a sentence under *Deliberately not in the contract* — every
+`/api/translate` job was last-write-wins, silently — and narrows it rather than
+reversing it: a run still overwrites `agent`, `carryover`, `tm` and its own
+earlier output with no token and no check. It does not bump the version. No key
+was removed or renamed, no type changed, no status code moved, and `applied`
+still means "segments written"; a version-2 client sees a smaller number for a
+document it has reviewed and re-reads `/api/doc` after any terminal state, which
+this contract already requires of it.
+
 **`200` does not mean the translation succeeded.** It means the job was accepted.
 Everything after that is reported through `/api/job` and nowhere else.
 
@@ -552,10 +630,11 @@ This is a real gap in the CLI, and it is structural rather than an oversight —
 | `applied` | integer | Segments **written**, accumulated per batch as they land. It moves during the run and it is right on the failure path. Before version 2 it counted what a final apply touched and therefore stayed `0` whenever the run raised, while completed batches had already changed the document. |
 | `log` | array of string | Progress lines. Free text, not stable, and not to be parsed. The first line names the provider, its model and its `base_url` — in `config.printable_url` form, like every other surface that shows one. |
 | `failures` | array | Each entry is a **two-element array** `[segment_id, reason]`. Empty on the failure path. |
+| `refused` | array of string | Segments this run left alone because a person had written them — see *Origin precedence* on `/api/translate`. Accumulated per batch as they land, like `applied`, so it moves during the run rather than appearing at the end. Empty unless the guard fired. |
 | `error` | string \| null | `str(exception)` if the run raised. |
 
 **An id with no record answers `200` with a body carrying `error` and nothing
-else** — that one key and none of the seven above, not `404` and not `400`. A
+else** — that one key and none of the eight above, not `404` and not `400`. A
 *failed* job is also `200`; failure is visible only in the body. *Known
 divergences* (5).
 
@@ -653,6 +732,7 @@ Side effects: appends to `.lx/tm.<lang>.jsonl`. Never overwrites.
 | `origin` | string \| null | Where the target came from: `human`, `agent`, `llm:<mode>` (where `<mode>` is whatever the request sent), `carryover`, `tm`, `tm:legacy`, or `null` when there is none. |
 | `source` | string | **The masked text** — placeholders as `⟦n⟧`, not the raw source. Note the name: `lx todo --json` calls the same thing `text`. |
 | `target` | string | `""` when absent, never `null`. |
+| `review` | string \| null | The review state, from a **closed** vocabulary: `held`, or `null`. Always present rather than omitted when absent, so a client does not have to tell "not held" from "an older server". `held` means no queue that selects work will take this segment — see `POST /api/hold`, which is the only thing that sets or clears it. |
 | `token` | string | What `POST /api/save`'s `base` takes for this segment: `sha1(target)[:12]`, where an absent target hashes as `""`. Opaque — a client stores it and hands it back, and must not compute or compare it beyond equality. |
 | `issues` | array of *issue* | Only this segment's. |
 
@@ -661,13 +741,16 @@ Side effects: appends to `.lx/tm.<lang>.jsonl`. Never overwrites.
 | Key | Type | Notes |
 |---|---|---|
 | `seg` | string | Segment id. |
-| `rule` | string | One of `containment`, `dnt`, `eol`, `escaping`, `glossary`, `length`, `lexicon`, `missing`, `numbers`, `punct`, `spacing`, `tags`, `untranslated`. |
+| `rule` | string | One of `containment`, `dnt`, `eol`, `escaping`, `glossary`, `held`, `length`, `lexicon`, `missing`, `numbers`, `punct`, `spacing`, `tags`, `untranslated`. |
 | `severity` | string | `error` or `warn` for every rule the code decides. The `glossary` rule passes column four of `config/glossary.csv` through unvalidated, and `lexicon_extra` does the same, so a hand-edited configuration can put any string here. Anything that is not exactly `error` is counted as a warning. |
 | `message` | string | Human-readable. Not stable; do not parse it. |
 
 The rule set is expected to grow. A new rule name is additive and does not bump
 the contract version; a consumer must not treat the list as closed, and must not
-crash on a `severity` outside the two it knows.
+crash on a `severity` outside the two it knows. `held` was added on 2026-08-15
+under exactly that rule, at **warn** severity, so a held segment never blocks a
+render — a severity that failed `lx check` would make lifting every hold the only
+way to finish a book.
 
 **provider** — an element of `GET /api/state`'s `providers`.
 
@@ -783,8 +866,19 @@ absence closes.
   a sentence. A conflict is handed back with the current text for the client to
   present, and it is the client that decides what to do with it. Of two writers
   sending the same token, exactly one write lands and the other is told; neither
-  waits for the other. A writer that sends no `base` — including every
-  `/api/translate` job — is still last-write-wins, silently.
+  waits for the other. A writer that sends no `base` is still last-write-wins.
+
+  **Narrowed, not reversed, on 2026-08-15.** That last sentence used to end
+  "— including every `/api/translate` job — is still last-write-wins, silently".
+  Two of its three words are still true and one is not: an `llm:*` write no
+  longer lands on a segment whose stored `origin` is `human`, and the ids it
+  left alone come back in `/api/job`'s `refused` rather than nowhere. Everything
+  else is unchanged — a run still overwrites `agent`, `carryover`, `tm` and its
+  own earlier output with no token and no check, and a person saving over a
+  person is still last-write-wins unless they sent a `base`. Recorded here at
+  length because this bullet is the load-bearing kind: somebody implementing a
+  second client reads it as the whole of what protects a reviewer's sentence, and
+  it now protects slightly more than it did.
 - **No caching semantics.** `no-store` and nothing else. A client must not build
   conditional requests.
 - **No pagination, anywhere, and no list on this surface is capped.** `/api/doc`
@@ -1097,6 +1191,33 @@ are on `candidates`, which is what a pass aimed at one list finds.
     short by one — `data-lang` went through nothing at all — which is why the fix
     is a rule rather than a patch to the named sites. The rebuild must escape by
     construction; one that string-builds markup inherits this.
+
+Measured 2026-08-15, while closing (2), (3) and (9). Appended rather than folded
+into those entries because each is a separate condition, and because a divergence
+found *and* fixed in one change is still worth a number — the next person to ask
+"what has this surface been wrong about" reads this list, not a commit log.
+
+22. **Closed 2026-08-15.** *`POST /api/check` carried a whole stale snapshot back
+    over newer text.* The third writer none of (1) to (21) names, and the largest
+    of the three. `do_check` read the document, walked every segment attaching
+    `issues`, and wrote **all of them** back — `target`, `status` and `origin`
+    included — so a target saved through `/api/save`, or banked by a running
+    `/api/translate` job, between that read and that write was silently replaced
+    by the copy the check had loaded. `/api/doc` calls `do_check` on every
+    request, which is what made the window ordinary rather than rare; it passes
+    `persist=False` and so was never the writer, but `POST /api/check` and every
+    `lx check` were. Closed with the compare-and-swap `save_segments` already had
+    for `do_apply`: a row that moved is skipped, and skipping it loses nothing,
+    because the issues describe wording that is no longer there and the next
+    check recomputes them against what is. Reproduced with two threads before the
+    fix and after it.
+23. **Closed 2026-08-15.** *Nothing on this surface could say "leave this segment
+    to me".* There was no review state on a segment at all: `status` had two
+    values derived from the text, `origin` recorded provenance only, and a
+    reviewer part-way through a difficult paragraph had no way to keep the next
+    `/api/translate` run off it. `POST /api/hold` and the `review` field are the
+    answer, and the exclusion is one shared helper applied at every predicate
+    that selects work rather than a condition copied into each.
 
 ## What is not frozen
 

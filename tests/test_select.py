@@ -25,7 +25,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from scriptorium import cli  # noqa: E402
 from scriptorium import translate as translate_mod  # noqa: E402
-from scriptorium.cli import do_apply, do_extract, do_select  # noqa: E402
+from scriptorium.cli import (  # noqa: E402
+    UnusableTarget,
+    do_apply,
+    do_extract,
+    do_hold,
+    do_select,
+)
 from scriptorium.config import DEFAULT_CONFIG  # noqa: E402
 from scriptorium.store import load_doc  # noqa: E402
 
@@ -242,3 +248,161 @@ def test_lx_repair_asks_for_the_failing_segments_and_asks_once(book, monkeypatch
     asked = _through_the_parser(monkeypatch, ["repair", "d.md", "--lang", "zh-TW"])
     assert set(asked) == {ids["broken"], *ids["pending"]}
     assert len(asked) == 3, "a segment was asked for twice"
+
+
+# ── a held segment is out of every queue, and in reach of an explicit id ────
+
+def _hold(ids):
+    return do_hold("d.md", "zh-TW", CFG, ids)
+
+
+def test_a_held_segment_leaves_every_queue_at_once(book):
+    """The exclusion is one helper applied at every predicate that selects work.
+
+    Asserted against every mode in one test on purpose: the defect this guards
+    is not "the helper is wrong", it is "somebody added a fourth predicate and
+    did not call it", and a per-mode test would pass for three of them while the
+    fourth quietly fed a held segment back to the model.
+    """
+    doc, ids = book
+    before = {m: _picked(doc, CFG, m) for m in ("draft", "repair", "polish")}
+    assert ids["broken"] in before["repair"] and ids["broken"] in before["polish"]
+    assert _hold([ids["broken"]]) == (1, [])
+
+    doc = load_doc("d.md", "zh-TW")
+    after = {m: _picked(doc, CFG, m) for m in ("draft", "repair", "polish")}
+    for mode in after:
+        assert ids["broken"] not in after[mode], f"{mode} still selects a held segment"
+    # And nothing else moved: holding one segment must not change what the
+    # queues think about the rest.
+    for mode in before:
+        assert set(after[mode]) == set(before[mode]) - {ids["broken"]}
+    # `--all` is the only way a held segment could reach the draft branch, since
+    # the branch's own predicate is `status == "pending"` — see the test below.
+    assert ids["broken"] not in _picked(doc, CFG, "draft", include_all=True)
+
+
+def test_a_held_segment_can_never_be_pending_and_that_is_by_construction(book):
+    """Two rules compose into a third, and it is worth writing down.
+
+    Holding requires a non-empty target, and `status` is derived from the target
+    text — so a held segment is always `translated` and the *draft* queue could
+    not have selected it even with no exclusion at all. The exclusion still
+    earns its place on that branch: `--all` ignores `status` entirely, and a
+    predicate that is only correct because of a rule two modules away is one
+    refactor from being wrong.
+    """
+    doc, ids = book
+    _hold([ids["broken"]])
+    held = {s["id"]: s for s in load_doc("d.md", "zh-TW")["segments"]}[ids["broken"]]
+    assert held["review"] == "held"
+    assert held["status"] == "translated"
+
+
+def test_failing_segments_itself_excludes_a_held_one(book):
+    """The predicate the shared helper exists for.
+
+    `translate.failing_segments` asks the validators rather than the queue, so it
+    is status-blind by construction: without the exclusion *inside it*, a held
+    segment carrying an unrelated error would come back to the model on every
+    repair round of every run. Called directly rather than through `do_select`,
+    because a future caller reaching for it directly is exactly the case.
+    """
+    from scriptorium.translate import failing_segments
+    doc, ids = book
+    assert ids["broken"] in [s["id"] for s in failing_segments(doc, CFG)]
+    _hold([ids["broken"]])
+    doc = load_doc("d.md", "zh-TW")
+    assert ids["broken"] not in [s["id"] for s in failing_segments(doc, CFG)]
+
+
+def test_pending_segments_excludes_a_held_one_before_the_limit(book):
+    """Before the limit, not after: filtering afterwards lets a run of held
+    segments eat a `--limit 20` and hand back four."""
+    from scriptorium.cli import pending_segments
+    doc, ids = book
+    _hold([ids["heading"]])
+    doc = load_doc("d.md", "zh-TW")
+    # `--all` is where a held segment can reach this predicate at all, since a
+    # held one is always `translated`. Two of the four remain.
+    assert [s["id"] for s in pending_segments(doc, include_all=True, limit=2)] == [
+        ids["broken"], ids["pending"][0]]
+    assert [s["id"] for s in pending_segments(doc, include_all=True)] == [
+        ids["broken"], *ids["pending"]]
+
+
+def test_an_explicit_id_still_reaches_a_held_segment(book):
+    """The one exemption, and it is the design.
+
+    Holding says "no *queue* may take this"; naming an id is a person pointing
+    at one segment. It is also what keeps `do_apply`'s own refusal message
+    honest — that message tells a reviewer to run `lx translate --ids <id>`, and
+    a hold silently swallowing it would make the sentence false. The model still
+    cannot overwrite their wording, because origin precedence is a separate rule
+    enforced at the write.
+    """
+    doc, ids = book
+    _hold([ids["broken"]])
+    doc = load_doc("d.md", "zh-TW")
+    for mode in ("draft", "repair", "polish"):
+        assert _picked(doc, CFG, mode, ids=[ids["broken"]]) == [ids["broken"]]
+
+
+def test_holding_reports_a_held_segment_at_warn_and_check_still_passes(book):
+    """Warn and never error, which is the whole design of the severity choice.
+
+    A severity that failed the build would make lifting every hold the only way
+    to finish a book — so `lx check` still exits 0 with a held segment in the
+    document, and the reviewer is told rather than blocked.
+    """
+    from scriptorium.checks import check_segment
+    doc, ids = book
+    _hold([ids["broken"]])
+    seg = {s["id"]: s for s in load_doc("d.md", "zh-TW")["segments"]}[ids["broken"]]
+
+    found = check_segment(seg, "zh-TW", CFG, [], [])
+    held = [i for i in found if i["rule"] == "held"]
+    assert len(held) == 1 and held[0]["severity"] == "warn"
+    # Disable-able like every other rule.
+    off = {**CFG, "checks_disabled": ["held"]}
+    assert not [i for i in check_segment(seg, "zh-TW", off, [], []) if i["rule"] == "held"]
+
+
+def test_an_untranslated_segment_is_answered_by_missing_rather_than_held(book):
+    """`check_segment` returns on an empty target before any other rule runs, and
+    that ordering is right rather than incidental: `missing` is the more useful
+    sentence, and holding an untranslated segment is refused at the door anyway.
+    """
+    from scriptorium.checks import check_segment
+    doc, ids = book
+    seg = dict({s["id"]: s for s in doc["segments"]}[ids["pending"][0]], review="held")
+    rules = {i["rule"] for i in check_segment(seg, "zh-TW", CFG, [], [])}
+    assert rules == {"missing"}
+
+
+def test_holding_an_untranslated_segment_is_refused_for_the_whole_request(book):
+    """Whole-request, like `do_apply`'s empty-target refusal and for the same
+    reason: a control that carries several ids must not half-happen."""
+    doc, ids = book
+    with pytest.raises(UnusableTarget) as caught:
+        do_hold("d.md", "zh-TW", CFG, [ids["broken"], ids["pending"][0]])
+    assert ids["pending"][0] in str(caught.value)
+    assert "lx translate" in str(caught.value), "the message must name the way forward"
+    # Nothing was written, including the id that was fine.
+    doc = load_doc("d.md", "zh-TW")
+    assert all(s.get("review") is None for s in doc["segments"])
+
+
+def test_lifting_a_hold_carries_no_such_condition(book):
+    """Undoing something must never be harder than doing it."""
+    doc, ids = book
+    _hold([ids["broken"]])
+    assert do_hold("d.md", "zh-TW", CFG, [ids["broken"], ids["pending"][0]],
+                   held=False) == (2, [])
+    assert all(s.get("review") is None
+               for s in load_doc("d.md", "zh-TW")["segments"])
+
+
+def test_an_id_naming_no_segment_is_ignored_rather_than_refused(book):
+    doc, ids = book
+    assert do_hold("d.md", "zh-TW", CFG, ["nope", ids["broken"]]) == (1, ["nope"])

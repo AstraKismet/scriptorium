@@ -12,7 +12,7 @@ import urllib.parse
 from collections import Counter
 
 from . import __version__, formats
-from .checks import check_segment
+from .checks import HELD, check_segment, workable
 from .config import (
     DEFAULT_TONE,
     GLOSSARY_HEADER,
@@ -60,6 +60,7 @@ from .store import (
     prior_targets,
     report_path,
     save_doc,
+    save_review,
     save_segments,
     save_targets,
     segment_key,
@@ -497,7 +498,14 @@ def cmd_extract(args, cfg):
 # ── todo ───────────────────────────────────────────────────────────────────
 
 def pending_segments(doc, include_all=False, limit=0):
-    out = [s for s in doc["segments"] if include_all or s["status"] == "pending"]
+    """The draft queue, and what `lx todo` hands an agent.
+
+    Held segments are excluded through the one shared helper, and before the
+    limit rather than after it: filtering afterwards would let a run of held
+    segments eat a `--limit 20` and hand back four.
+    """
+    out = [s for s in workable(doc["segments"])
+           if include_all or s["status"] == "pending"]
     return out[:limit] if limit else out
 
 
@@ -1050,6 +1058,50 @@ def do_apply(src, lang, cfg, incoming, origin="agent", base=None):
     return len(stored), unknown, stored, conflicts
 
 
+def do_hold(src, lang, cfg, ids, held=True):
+    """Hold segments out of every queue that selects work, or lift the hold.
+
+    ``(applied, unknown)``. An id that names no segment is ignored rather than
+    refused, which is what ``unknown`` means everywhere else on this surface.
+
+    **Holding requires a non-empty target**, whole-request and before anything is
+    written, which is what makes it compose with status-derived-from-text rather
+    than fight it. A hold on an untranslated segment would say "leave this one to
+    me" about a segment nobody has written yet, and would take it out of the
+    draft queue by a route that queue cannot see — the same shape as the empty
+    target :func:`do_apply` refuses, and refused here for the same reason.
+    Lifting a hold has no such requirement: undoing something must never be
+    harder than doing it.
+
+    Lifting is this command's own act and never a side effect of a save. A
+    reviewer editing a held segment keeps the hold — `do_apply` carries the field
+    through untouched — because the two answer different questions, and a save
+    that quietly released a hold would return the segment to the model's queue at
+    the moment its wording changed.
+    """
+    doc = load_doc(src, lang)
+    by_id = {s["id"]: s for s in doc["segments"]}
+    wanted = [sid for sid in ids if sid in by_id]
+    unknown = [sid for sid in ids if sid not in by_id]
+    if held:
+        blank = sorted(sid for sid in wanted if not (by_id[sid].get("target") or "").strip())
+        if blank:
+            raise UnusableTarget(
+                f"{', '.join(blank)}: there is nothing here to hold — a hold says the "
+                f"wording is yours to finish, and these segments have no wording yet. "
+                f"Translate them first, or leave them in the queue: "
+                f"`lx translate {src} --lang {lang} --ids {','.join(blank)}`.")
+    return save_review(src, lang, {sid: (HELD if held else None) for sid in wanted}), unknown
+
+
+def cmd_hold(args, cfg):
+    ids = [s for s in args.ids.split(",") if s]
+    applied, unknown = do_hold(args.src, args.lang, cfg, ids, held=not args.lift)
+    verb = "released" if args.lift else "held"
+    _out(f"{verb} {applied} segment(s)"
+         + (f"; unknown ids ignored: {unknown}" if unknown else ""))
+
+
 def cmd_apply(args, cfg):
     raw = sys.stdin.read() if args.file == "-" else open(args.file, encoding="utf-8").read()
     data = json.loads(raw)
@@ -1091,7 +1143,19 @@ def do_check(src, lang, cfg, persist=True):
         # Only the segments, never the skeleton: check reads the document and
         # writes back one field of each segment, and the nodes it would rewrite
         # are the largest thing in the state.
-        save_segments(src, lang, doc["segments"])
+        #
+        # And only the rows that have not moved since the read above. This write
+        # is the third writer none of the seventeen divergences named: it carried
+        # a whole snapshot back, so a target saved by the workbench or banked by a
+        # running job between this function's read and its write was silently
+        # replaced by the copy this call had loaded — with `target`, `status` and
+        # `origin` all coming from the stale side. The compare-and-swap
+        # `save_segments` already had for `do_apply` is the whole fix: a row that
+        # moved is skipped, and skipping it loses nothing, because the issues
+        # computed here describe wording that is no longer there and the next
+        # check recomputes them against what is.
+        save_segments(src, lang, doc["segments"],
+                      expect={s["id"]: s.get("target") for s in doc["segments"]})
         dump_json(report_path(src, lang), report)
     return report, doc
 
@@ -2133,6 +2197,14 @@ def do_select(doc, cfg, mode, ids=None, include_all=False, limit=0):
     `include_all` and `limit` reach only the pending branch, as they always have:
     `--all` means "everything, not only the pending ones", which the other three
     branches each answer for themselves.
+
+    **A held segment is excluded from every branch except `ids`.** That exemption
+    is the design and not an oversight: holding says "no *queue* may take this",
+    and naming an id is a person pointing at one segment. It is also what keeps
+    `do_apply`'s own refusal message honest — it tells a reviewer to run
+    `lx translate --ids <id>`, and a hold silently swallowing that would make the
+    sentence false. The model still cannot overwrite their wording, because
+    origin precedence is a separate rule enforced at the write.
     """
     if ids:
         wanted = set(ids)
@@ -2144,14 +2216,22 @@ def do_select(doc, cfg, mode, ids=None, include_all=False, limit=0):
         from .translate import failing_segments
         return failing_segments(doc, cfg)
     if mode == "polish":
-        return [s for s in doc["segments"]
-                if s.get("target") and s["kind"] in ("para", "quote", "list")]
+        return workable([s for s in doc["segments"]
+                         if s.get("target") and s["kind"] in ("para", "quote", "list")])
     return pending_segments(doc, include_all=include_all, limit=limit)
 
 
 def do_translate(src, lang, cfg, segments, mode, provider=None, model=None,
-                 batch=None, concurrency=None, progress=None, on_batch=None):
-    """Run a model over these segments and bank each batch. ``(applied, failures)``.
+                 batch=None, concurrency=None, progress=None, on_batch=None,
+                 over_human=False):
+    """Run a model over these segments and bank each batch.
+
+    ``(applied, failures, refused)``, where ``refused`` names the segments a
+    person had already written and this run therefore left alone — reported
+    rather than dropped in silence, because a run that says "translated 40" while
+    having skipped four is a report nobody can act on. ``over_human`` is the way
+    past the guard, and it is a deliberate act on every surface rather than a
+    default.
 
     Plain parameters rather than an argparse ``Namespace``, because the workbench
     calls this too. It used to be a private `_translate` that read `args.model`
@@ -2161,16 +2241,17 @@ def do_translate(src, lang, cfg, segments, mode, provider=None, model=None,
 
     ``progress`` is a plain sink taking one line; the lock that makes it safe to
     call from several worker threads is put on here rather than asked of the
-    caller. ``on_batch`` is handed the count this batch wrote, so a caller that
-    reports progress while the run is still going — the job table does — has a
-    number that moves without reaching inside.
+    caller. ``on_batch`` is handed ``(written, refused)`` for the batch that just
+    landed, so a caller reporting progress while the run is still going — the job
+    table does — has both numbers moving rather than one of them appearing at the
+    end.
     """
     from .translate import Progress, translate_segments
     doc = load_doc(src, lang)
     if not segments:
-        return 0, []
+        return 0, [], []
     origin = f"llm:{mode}"
-    applied = 0
+    applied, refused = 0, []
 
     def commit(ok):
         """One batch, durable the moment it lands, and counted as it lands.
@@ -2194,17 +2275,21 @@ def do_translate(src, lang, cfg, segments, mode, provider=None, model=None,
         guards its own results, so these calls are already serialized.
         """
         nonlocal applied
-        written = save_targets(src, lang, ok, origin)
+        written, left_alone = save_targets(src, lang, ok, origin, over_human=over_human)
         applied += written
+        refused.extend(left_alone)
+        if left_alone and progress:
+            progress(f"  left {len(left_alone)} segment(s) alone: a person wrote them "
+                     f"({', '.join(sorted(left_alone))})")
         if on_batch:
-            on_batch(written)
+            on_batch(written, sorted(left_alone))
 
     _results, failures = translate_segments(
         segments, doc, cfg, provider_name=provider, mode=mode,
         batch_size=batch, concurrency=concurrency,
         progress=Progress(progress) if progress else None,
         on_batch=commit, model=model)
-    return applied, failures
+    return applied, failures, sorted(refused)
 
 
 def _run_translate(src, lang, cfg, segments, mode, args):
@@ -2218,11 +2303,15 @@ def _run_translate(src, lang, cfg, segments, mode, args):
         _out(f"dry run: {len(segments)} segment(s), {chars} source characters, "
              f"mode={mode}, provider={provider}, model={model or 'unset'}")
         return 0, []
-    applied, failures = do_translate(
+    applied, failures, refused = do_translate(
         src, lang, cfg, segments, mode, provider=args.provider, model=args.model,
-        batch=args.batch, concurrency=args.concurrency, progress=_out)
+        batch=args.batch, concurrency=args.concurrency, progress=_out,
+        over_human=args.overwrite_human)
     for sid, why in failures:
         _out(f"  unresolved {sid}: {why}")
+    if refused:
+        _out(f"{len(refused)} segment(s) were left alone because a person wrote them. "
+             f"Pass --overwrite-human to replace them anyway.")
     return applied, failures
 
 
@@ -2308,6 +2397,10 @@ def _add_llm_flags(p):
     p.add_argument("--batch", type=int, help="segments per request")
     p.add_argument("--concurrency", type=int, help="parallel requests")
     p.add_argument("--dry-run", action="store_true", help="report the work without calling a model")
+    p.add_argument("--overwrite-human", action="store_true",
+                   help="let this run replace segments a person wrote. Off by "
+                        "default: an unattended pass runs over whatever the queue "
+                        "hands it, and review is the thing it would overwrite")
 
 
 def build_parser():
@@ -2390,6 +2483,19 @@ def build_parser():
     a.add_argument("--file", default="-", help="'-' reads stdin")
     a.add_argument("--origin", default="agent")
     a.set_defaults(fn=cmd_apply)
+
+    for name, lift, blurb in (
+            ("hold", False, "keep segments out of every queue that selects work"),
+            ("unhold", True, "return held segments to the queues")):
+        h = sub.add_parser(name, help=blurb)
+        h.add_argument("src")
+        h.add_argument("--lang", required=True)
+        h.add_argument("--ids", required=True, help="comma-separated segment ids")
+        # Not a flag a person types: two commands rather than `--lift`, because a
+        # verb command is named for what it does and `lx hold --lift` reads as the
+        # opposite of what it would do. One handler behind both, so the pair
+        # cannot drift.
+        h.set_defaults(fn=cmd_hold, lift=lift)
 
     c = sub.add_parser("check", help="validate; exit 1 on error")
     c.add_argument("src")

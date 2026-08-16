@@ -11,7 +11,7 @@ import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
-from .checks import check_segment
+from .checks import check_segment, workable
 from .config import (
     DEFAULT_TONE,
     canonical_tone,
@@ -627,10 +627,19 @@ def translate_segments(segments, doc, cfg, provider_name=None, mode="draft",
 
 
 def failing_segments(doc, cfg):
-    """Segments a fresh check would reject — the repair pass works on these."""
+    """Segments a fresh check would reject — the repair pass works on these.
+
+    Held segments are excluded through the one shared helper, and this is the
+    predicate that makes the helper worth having: this function is *status-blind*
+    by design — it asks the validators, not the queue — so without the exclusion
+    a held segment would come back to the model on every repair round of every
+    run, which is the opposite of what holding it asked for. Its own `held` rule
+    is at warn severity and so never selects it here, but the errors it may carry
+    alongside would.
+    """
     glossary, dnt = load_glossary(cfg), load_dnt(cfg)
     out = []
-    for seg in doc["segments"]:
+    for seg in workable(doc["segments"]):
         issues = check_segment(seg, doc["lang"], cfg, glossary, dnt)
         errors = [i for i in issues if i["severity"] == "error"]
         if errors:

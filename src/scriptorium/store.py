@@ -590,7 +590,42 @@ def save_doc(src, lang, doc):
         conn.close()
 
 
-def save_segments(src, lang, segments, expect=None):
+#: The `origin` a model's own pass may not silently replace. Three sources of a
+#: translation are treated as equals here — an API model, an agent in its own
+#: context, and a person — and this rule singles out exactly one of the three,
+#: which is deliberate: `agent` stays unguarded, because an agent is a peer
+#: writing its own words, while `llm:*` is the *unattended* pass that runs over
+#: whatever it selects.
+HUMAN = "human"
+_MODEL_PREFIX = "llm:"
+
+
+def is_model_origin(origin):
+    """Whether a write claiming this origin is the model pass's rather than a peer's."""
+    return isinstance(origin, str) and origin.startswith(_MODEL_PREFIX)
+
+
+def _written_by_hand(conn, did, lang, ids):
+    """Which of these ids hold a person's own words. Read inside the write.
+
+    Inside, and not before, for the reason the lost-update token was rewritten on
+    2026-08-14: a check against a snapshot read in an earlier transaction is not
+    a check at all when the thing it guards is a concurrent write. The read is
+    also *narrow* — the caller passes only the ids whose incoming origin is
+    `llm:*`, which is none of them on the two paths that write a person's or an
+    agent's words, so `lx apply` and `lx check` pay nothing for this at all.
+    """
+    out = set()
+    for seg_id in ids:
+        row = conn.execute(
+            "SELECT body FROM segments WHERE doc_id=? AND lang=? AND seg_id=?",
+            (did, lang, seg_id)).fetchone()
+        if row is not None and json.loads(row[0]).get("origin") == HUMAN:
+            out.add(seg_id)
+    return out
+
+
+def save_segments(src, lang, segments, expect=None, over_human=False):
     """Write these segments and nothing else. ``(written, stale)``.
 
     The narrow write, and the reason this package exists. `lx apply` and
@@ -617,6 +652,15 @@ def save_segments(src, lang, segments, expect=None):
     ``IS`` rather than ``=``, because a never-translated segment holds SQL NULL
     and an explicitly written one holds ``''``. ``=`` is never true against NULL,
     so the first write to every fresh segment would have been refused as stale.
+
+    **A segment whose stored ``origin`` is ``human`` is left alone** when the
+    incoming one is ``llm:*``, unless ``over_human``. It lands in ``stale`` with
+    the ids that lost a compare-and-swap, because from the caller's side the two
+    are the same answer — this write did not happen and the row holds something
+    else. `lx apply` and `lx check` never trip it: one writes ``human`` or
+    ``agent``, and the other writes each row's own origin back unchanged. What it
+    does catch on `lx check`'s path is a *stale* one — a snapshot that still says
+    ``llm:draft`` for a row a reviewer has since claimed.
     """
     rows = [(*_seg_row(0, seg)[2:], doc_id(src), lang, seg["id"]) for seg in segments]
     if not rows:
@@ -626,8 +670,14 @@ def save_segments(src, lang, segments, expect=None):
     try:
         with conn:
             written, stale = 0, []
+            guard = () if over_human else _written_by_hand(
+                conn, doc_id(src), lang,
+                [s["id"] for s in segments if is_model_origin(s.get("origin"))])
             for row, seg in zip(rows, segments):
                 seg_id = seg["id"]
+                if seg_id in guard:
+                    stale.append(seg_id)
+                    continue
                 if seg_id in expect:
                     n = conn.execute(
                         "UPDATE segments SET content_hash=?, context=?, variant=?, status=?, "
@@ -645,8 +695,8 @@ def save_segments(src, lang, segments, expect=None):
         conn.close()
 
 
-def save_targets(src, lang, targets, origin):
-    """Record translated text for these ids, reading nothing first.
+def save_targets(src, lang, targets, origin, over_human=False):
+    """Record translated text for these ids. ``(written, refused)``.
 
     What a translation run calls per batch. It goes through the row rather than
     through a loaded document on purpose: the point is that a batch is durable
@@ -663,11 +713,27 @@ def save_targets(src, lang, targets, origin):
     because `status` is the *draft queue's selection predicate* and a writer that
     can mark an empty segment done is the shape of the defect, not the instance.
     The instance is closed at the door by :func:`cli.do_apply`.
+
+    **A segment a person has written is left alone**, and their ids come back in
+    ``refused`` rather than being dropped in silence — a run that reports
+    "translated 40" while having skipped four is the shape of report nobody can
+    act on. The guard costs nothing here: this function already reads each row's
+    ``body`` before it writes, inside the transaction that writes it, so the
+    origin it compares is the one on disk at the moment of the write rather than
+    one read earlier. ``over_human`` is the way past it, and it is a deliberate
+    act on both surfaces rather than a default.
+
+    Only ``llm:*`` is guarded. `AGENTS.md` treats an API model, an agent in its
+    own context and a person as three equal sources, so an ``agent`` write is a
+    peer's and not restricted; what this stops is the *unattended* pass, which
+    runs over whatever the queue hands it and is the one that was measured
+    overwriting review.
     """
     conn = _connect()
     try:
         with conn:
-            written = 0
+            written, refused = 0, []
+            guarded = is_model_origin(origin) and not over_human
             for seg_id, text in targets.items():
                 row = conn.execute(
                     "SELECT body FROM segments WHERE doc_id=? AND lang=? AND seg_id=?",
@@ -675,6 +741,9 @@ def save_targets(src, lang, targets, origin):
                 if row is None:
                     continue
                 body = json.loads(row[0])
+                if guarded and body.get("origin") == HUMAN:
+                    refused.append(seg_id)
+                    continue
                 body["origin"] = origin
                 body.pop("issues", None)
                 written += conn.execute(
@@ -682,6 +751,47 @@ def save_targets(src, lang, targets, origin):
                     "WHERE doc_id=? AND lang=? AND seg_id=?",
                     ("translated" if (text or "").strip() else "pending",
                      text, json.dumps(body, ensure_ascii=False),
+                     doc_id(src), lang, seg_id)).rowcount
+        return written, refused
+    finally:
+        conn.close()
+
+
+def save_review(src, lang, review):
+    """Set or clear the review flag on these ids, touching nothing else. ``written``.
+
+    The narrowest write in this module: one JSON key inside ``body``, and not
+    ``target`` or ``status`` at all. That is the point rather than an
+    optimization — a hold is placed on a segment somebody is in the middle of
+    reviewing, so a writer that carried a target along would be a way for the
+    hold control to undo an edit made since the page was drawn. The read and the
+    write share the transaction, so a concurrent save of the same segment lands
+    either side of this and neither is lost.
+
+    ``review[seg_id]`` is the value to store, or ``None`` to remove the key
+    entirely — removal rather than a stored null, so a segment that was never
+    held and one whose hold was lifted are one row and not two. The vocabulary is
+    the caller's to check; this writes what it is given, the way
+    :func:`save_targets` trusts its ``origin``.
+    """
+    conn = _connect()
+    try:
+        with conn:
+            written = 0
+            for seg_id, value in review.items():
+                row = conn.execute(
+                    "SELECT body FROM segments WHERE doc_id=? AND lang=? AND seg_id=?",
+                    (doc_id(src), lang, seg_id)).fetchone()
+                if row is None:
+                    continue
+                body = json.loads(row[0])
+                if value is None:
+                    body.pop("review", None)
+                else:
+                    body["review"] = value
+                written += conn.execute(
+                    "UPDATE segments SET body=? WHERE doc_id=? AND lang=? AND seg_id=?",
+                    (json.dumps(body, ensure_ascii=False),
                      doc_id(src), lang, seg_id)).rowcount
         return written
     finally:

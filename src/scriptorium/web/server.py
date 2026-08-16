@@ -28,6 +28,7 @@ from ..cli import (
     do_apply,
     do_check,
     do_extract,
+    do_hold,
     do_render,
     do_select,
     do_translate,
@@ -455,6 +456,10 @@ class _Handler(BaseHTTPRequestHandler):
                 "segments": [{
                     "id": s["id"], "kind": s["kind"], "status": s["status"],
                     "origin": s.get("origin"), "source": s["masked"],
+                    # Always present, `null` when the segment is not held, so a
+                    # client does not have to tell "not held" from "an older
+                    # server" — the rule `collisions` follows on `/api/state`.
+                    "review": s.get("review"),
                     "target": s.get("target") or "",
                     # What a client hands back to `POST /api/save` to prove its
                     # edit was based on this text. Derived, so it costs no column
@@ -499,6 +504,10 @@ class _Handler(BaseHTTPRequestHandler):
                 src, lang, cfg, body["targets"], origin="human", base=body.get("base"))
             return {"applied": applied, "unknown": unknown,
                     "stored": stored, "conflicts": conflicts}
+        if path == "/api/hold":
+            applied, unknown = do_hold(src, lang, cfg, body.get("ids") or [],
+                                       held=bool(body.get("held", True)))
+            return {"applied": applied, "unknown": unknown}
         if path == "/api/check":
             report, _ = do_check(src, lang, cfg)
             return report
@@ -581,7 +590,7 @@ def _mint_job(total):
         job_id = f"job{_JOB_SEQ}"
         _JOBS[job_id] = state = {
             "id": job_id, "done": False, "log": [], "applied": 0,
-            "failures": [], "error": None, "total": total}
+            "failures": [], "refused": [], "error": None, "total": total}
         return state
 
 
@@ -648,7 +657,7 @@ def _translate_job(src, lang, cfg, body):
         with _JOB_LOCK:
             state["log"].append(msg)
 
-    def counted(written):
+    def counted(written, refused):
         """`applied` moves while the run is going, and is right when it dies.
 
         The batch is already durable when this is called — `do_translate` banks
@@ -664,16 +673,18 @@ def _translate_job(src, lang, cfg, body):
         """
         with _JOB_LOCK:
             state["applied"] += written
+            state["refused"].extend(refused)
 
     def work():
         try:
             if not segments:
                 log("nothing to do")
                 return
-            _applied, failures = do_translate(
+            _applied, failures, _refused = do_translate(
                 src, lang, cfg, segments, mode, provider=body.get("provider"),
                 model=body.get("model"), batch=body.get("batch"),
-                concurrency=body.get("concurrency"), progress=log, on_batch=counted)
+                concurrency=body.get("concurrency"), progress=log, on_batch=counted,
+                over_human=bool(body.get("overwrite_human")))
             with _JOB_LOCK:
                 state["failures"] = failures
                 applied = state["applied"]

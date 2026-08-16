@@ -39,6 +39,7 @@ from scriptorium.store import (  # noqa: E402
     prior_doc,
     prior_targets,
     save_doc,
+    save_review,
     save_segments,
     save_targets,
     segment_key,
@@ -560,3 +561,253 @@ def test_two_savers_whose_reads_both_land_first_do_not_both_win(tmp_path, monkey
     # one it was shown — which is what a merge presentation has to diff against.
     assert list(answers[loser][3]) == [seg_id]
     assert answers[loser][3][seg_id] == {"text": stored, "token": target_token(stored)}
+
+
+# --- origin precedence -------------------------------------------------------
+
+
+def _one(tmp_path, monkeypatch, doc=b"A sentence.\n\nAnother sentence.\n"):
+    """A tracked two-segment document, and its ids."""
+    _project(tmp_path, monkeypatch, doc=doc, name="d.md")
+    built, _r, _j = do_extract("d.md", "zh-TW", CFG)
+    return [s["id"] for s in built["segments"]]
+
+
+def _stored(seg_id):
+    return {s["id"]: s for s in load_doc("d.md", "zh-TW")["segments"]}[seg_id]
+
+
+def test_a_model_pass_does_not_land_on_a_segment_a_person_wrote(tmp_path, monkeypatch):
+    """The rule, at the writer every model run passes through.
+
+    `save_targets` is what a translation run calls per batch, and it took whatever
+    it was handed: a repair round selecting a reviewed segment for an unrelated
+    error overwrote the reviewer's sentence and reported it as applied.
+    """
+    ids = _one(tmp_path, monkeypatch)
+    save_targets("d.md", "zh-TW", {ids[0]: "審校者的字。"}, "human")
+
+    written, refused = save_targets("d.md", "zh-TW", {ids[0]: "模型的字。"}, "llm:repair")
+    assert (written, refused) == (0, [ids[0]])
+    assert _stored(ids[0])["target"] == "審校者的字。"
+    assert _stored(ids[0])["origin"] == "human"
+
+
+def test_the_refusal_is_reported_and_not_a_silent_skip(tmp_path, monkeypatch):
+    """A run that says "translated 1" while having skipped one is a report nobody
+    can act on. The ids come back so both surfaces can name them."""
+    ids = _one(tmp_path, monkeypatch)
+    save_targets("d.md", "zh-TW", {ids[0]: "審校者的字。"}, "human")
+
+    written, refused = save_targets(
+        "d.md", "zh-TW", {ids[0]: "甲。", ids[1]: "乙。"}, "llm:draft")
+    assert written == 1, "the segment nobody had claimed must still be written"
+    assert refused == [ids[0]]
+    assert _stored(ids[1])["target"] == "乙。"
+
+
+def test_only_the_model_pass_is_guarded_and_a_peer_is_not(tmp_path, monkeypatch):
+    """`AGENTS.md` treats an API model, an agent in its own context and a person
+    as three equal sources, so this rule singles out exactly one of the three.
+
+    What it stops is the *unattended* pass, which runs over whatever the queue
+    hands it. An `agent` write is a peer's own words and is not restricted — if
+    it were, the sanctioned way for an agent to answer `lx todo` would refuse
+    every segment a reviewer had ever touched.
+    """
+    ids = _one(tmp_path, monkeypatch)
+    save_targets("d.md", "zh-TW", {ids[0]: "審校者的字。"}, "human")
+
+    written, refused = save_targets("d.md", "zh-TW", {ids[0]: "代理的字。"}, "agent")
+    assert (written, refused) == (1, [])
+    assert _stored(ids[0])["target"] == "代理的字。"
+
+    # And a person over a person is unguarded too, which is what keeps the
+    # workbench's own save working on a segment it wrote a moment ago.
+    written, refused = save_targets("d.md", "zh-TW", {ids[0]: "再一次。"}, "human")
+    assert (written, refused) == (1, [])
+
+
+def test_the_opt_out_is_explicit_and_it_works(tmp_path, monkeypatch):
+    ids = _one(tmp_path, monkeypatch)
+    save_targets("d.md", "zh-TW", {ids[0]: "審校者的字。"}, "human")
+
+    written, refused = save_targets("d.md", "zh-TW", {ids[0]: "模型的字。"},
+                                    "llm:draft", over_human=True)
+    assert (written, refused) == (1, [])
+    assert _stored(ids[0])["target"] == "模型的字。"
+    assert _stored(ids[0])["origin"] == "llm:draft"
+
+
+def test_the_narrow_writer_refuses_a_model_write_over_a_person_too(tmp_path, monkeypatch):
+    """`save_segments` is the other writer, and `lx apply --origin llm:x` reaches it.
+
+    Reported in `stale` rather than in a list of its own, because from the
+    caller's side the two answers are one: this write did not happen and the row
+    holds something else.
+    """
+    ids = _one(tmp_path, monkeypatch)
+    do_apply("d.md", "zh-TW", CFG, {ids[0]: "審校者的字。"}, origin="human")
+
+    seg = dict(_stored(ids[0]), target="模型的字。", origin="llm:draft")
+    written, stale = save_segments("d.md", "zh-TW", [seg])
+    assert (written, stale) == (0, [ids[0]])
+    assert _stored(ids[0])["target"] == "審校者的字。"
+
+    written, stale = save_segments("d.md", "zh-TW", [seg], over_human=True)
+    assert (written, stale) == (1, [])
+    assert _stored(ids[0])["target"] == "模型的字。"
+
+
+def test_the_origin_compared_is_the_one_on_disk_when_the_write_happens(
+        tmp_path, monkeypatch):
+    """Inside the write, not against a snapshot read earlier.
+
+    The same lesson the lost-update token was rewritten for on 2026-08-14: a
+    check against a value read in an earlier transaction is not a check when the
+    thing it guards is a concurrent write. Here the reviewer's save lands while
+    the run is between its own read and its own write.
+    """
+    ids = _one(tmp_path, monkeypatch)
+    save_targets("d.md", "zh-TW", {ids[0]: "模型的初稿。"}, "llm:draft")
+
+    claimed = threading.Event()
+    answers = {}
+
+    def reviewer():
+        answers["human"] = save_targets("d.md", "zh-TW", {ids[0]: "審校者的字。"}, "human")
+        claimed.set()
+
+    def run():
+        # Ordered by an event rather than a sleep, because a sleep makes this
+        # test *usually* reproduce the scenario and silently stop reproducing it
+        # on a slow machine — measured on this file's neighbour, which passed one
+        # run in three against a deliberately broken build before it was made
+        # deterministic.
+        assert claimed.wait(timeout=20), "the reviewer never wrote"
+        answers["model"] = save_targets("d.md", "zh-TW", {ids[0]: "模型的第二稿。"},
+                                        "llm:repair")
+
+    threads = [threading.Thread(target=reviewer), threading.Thread(target=run)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    assert not any(t.is_alive() for t in threads), "a writer never returned"
+
+    assert answers["human"] == (1, [])
+    assert answers["model"] == (0, [ids[0]]), "the run used a stale origin"
+    assert _stored(ids[0])["target"] == "審校者的字。"
+
+
+# --- the review field, and the write that carries nothing with it ------------
+
+
+def test_save_review_touches_the_review_field_and_nothing_else(tmp_path, monkeypatch):
+    """The narrowest write in the module, and narrow on purpose.
+
+    A hold is placed on a segment somebody is in the middle of reviewing, so a
+    writer that carried a target along would be a way for the hold control to
+    undo an edit made since the page was drawn.
+    """
+    ids = _one(tmp_path, monkeypatch)
+    do_apply("d.md", "zh-TW", CFG, {ids[0]: "審校者的字。"}, origin="human")
+    before = dict(_stored(ids[0]))
+
+    assert save_review("d.md", "zh-TW", {ids[0]: "held"}) == 1
+    after = _stored(ids[0])
+    assert after["review"] == "held"
+    assert {k: v for k, v in after.items() if k != "review"} == {
+        k: v for k, v in before.items() if k != "review"}
+
+
+def test_lifting_a_hold_removes_the_key_rather_than_storing_a_null(tmp_path, monkeypatch):
+    """One row for "never held" and "no longer held", not two.
+
+    A stored `null` would read back as a key that is present and empty, so
+    anything walking the body would have to know that `review: null` and no
+    `review` at all are the same thing — the class of question `variant` was
+    given a construction-level answer to rather than a canonicalizer.
+    """
+    ids = _one(tmp_path, monkeypatch)
+    do_apply("d.md", "zh-TW", CFG, {ids[0]: "字。"}, origin="human")
+    save_review("d.md", "zh-TW", {ids[0]: "held"})
+    save_review("d.md", "zh-TW", {ids[0]: None})
+
+    assert "review" not in statedb.segments(tmp_path)[0]
+    assert _stored(ids[0]).get("review") is None
+
+
+def test_a_save_does_not_release_a_hold(tmp_path, monkeypatch):
+    """Lifting is the hold control's own act and never a side effect.
+
+    A reviewer may edit a held segment — holding says "no queue may take this",
+    not "nobody may type here" — and a save that quietly released the hold would
+    return the segment to the model's queue at the moment its wording changed,
+    which is the opposite of what holding it asked for.
+    """
+    ids = _one(tmp_path, monkeypatch)
+    do_apply("d.md", "zh-TW", CFG, {ids[0]: "第一版。"}, origin="human")
+    save_review("d.md", "zh-TW", {ids[0]: "held"})
+
+    do_apply("d.md", "zh-TW", CFG, {ids[0]: "第二版。"}, origin="human")
+    assert _stored(ids[0])["target"] == "第二版。"
+    assert _stored(ids[0])["review"] == "held", "the save released the hold"
+
+
+# --- check stops writing from a snapshot it read earlier ---------------------
+
+
+def test_check_does_not_carry_a_stale_snapshot_back_over_a_newer_target(
+        tmp_path, monkeypatch):
+    """The third writer none of the seventeen divergences names.
+
+    `do_check` read the document, walked every segment attaching `issues`, and
+    wrote the **whole snapshot** back — `target`, `status` and `origin` included.
+    A target the workbench saved, or a batch a running job banked, between that
+    read and that write was silently replaced by the copy this call had loaded
+    minutes earlier. The compare-and-swap `save_segments` already had is the
+    whole fix; a row that moved is skipped, and skipping it loses nothing,
+    because the issues computed here describe wording that is no longer there.
+
+    The gate is hung on `save_segments` from outside, so nothing about the code
+    under test is arranged for the test. Two events rather than one barrier,
+    which is not a style choice: a barrier releases both threads and leaves the
+    order of the two writes to the scheduler, so the first draft of this test
+    passed one run in three against a build with the fix removed.
+    """
+    ids = _one(tmp_path, monkeypatch)
+    do_apply("d.md", "zh-TW", CFG, {ids[0]: "第一版。", ids[1]: "另一句。"}, origin="human")
+
+    real = cli_mod.save_segments
+    at_the_write, claimed = threading.Event(), threading.Event()
+
+    def gated(*a, **kw):
+        # `do_check` has read the document and is about to write it back.
+        at_the_write.set()
+        assert claimed.wait(timeout=20), "the reviewer never wrote"
+        return real(*a, **kw)
+
+    monkeypatch.setattr(cli_mod, "save_segments", gated)
+    done = {}
+
+    def checker():
+        done["check"] = cli_mod.do_check("d.md", "zh-TW", CFG)[0]["segments"]
+
+    def reviewer():
+        assert at_the_write.wait(timeout=20), "do_check never reached its write"
+        save_targets("d.md", "zh-TW", {ids[0]: "第二版。"}, "human")
+        claimed.set()
+
+    threads = [threading.Thread(target=checker), threading.Thread(target=reviewer)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    assert not any(t.is_alive() for t in threads), "a writer never returned"
+
+    assert done["check"] == 2, "the check itself must still have run"
+    assert _stored(ids[0])["target"] == "第二版。", "check carried a stale target back"
+    # And the segment nobody raced is written as normal, so the fix is not
+    # "stop persisting".
+    assert _stored(ids[1])["target"] == "另一句。"
