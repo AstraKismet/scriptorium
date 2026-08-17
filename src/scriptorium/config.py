@@ -629,7 +629,20 @@ def load_dnt(cfg):
             line = line.strip()
             if line and not line.startswith("#"):
                 terms.append(line)
-    return sorted(set(terms), key=len, reverse=True)
+    # **Longest first, then alphabetical, and the tie-break is the load-bearing
+    # half.** Longest first is what stops `Go` masking inside `Google`. The
+    # second key is not tidiness: `sorted` is stable, so terms of equal length
+    # used to come out in `set` iteration order, and `str`'s hash is randomised
+    # per process. `mask.mask` numbers slots in this order, so `⟦4⟧` meant a
+    # different term in every `lx` invocation — and `translate.accept` compares
+    # the *set* of placeholder ids, which a wholesale renumbering satisfies. A
+    # second process re-extracting an unedited document therefore accepted the
+    # carried target and unmasked its ids against the new map: measured
+    # 2026-08-17 on a character list of eight five-letter names, five runs gave
+    # five different permutations of the names in the rendered book, with
+    # `lx check` exiting 0 every time. Numbering now depends on the contents of
+    # `config/dnt.txt` and nothing else.
+    return sorted(set(terms), key=lambda t: (-len(t), t))
 
 
 def load_style(cfg):

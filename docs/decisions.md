@@ -3,6 +3,68 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-08-17 · A placeholder number has to mean the same term twice, and it did not
+
+`config.load_dnt` returned `sorted(set(terms), key=len, reverse=True)`. Python's
+sort is stable, so terms of *equal length* kept the order the `set` iterated in —
+and `str`'s hash is randomised per process. `mask.mask` numbers slots in that
+order, so `⟦4⟧` meant a different term in every `lx` invocation.
+
+Nothing downstream could see it. `translate.accept` compares the *set* of
+placeholder ids, which a wholesale renumbering satisfies; `checks.py`'s `tags`
+rule compares the same multiset; `mask.unmask` resolves each id against whatever
+map it is handed. So a second process re-extracting an **unedited** document with
+an **unedited** configuration accepted the carried target and rendered the wrong
+names. Measured on a character list of eight five-letter names — which is what a
+novel's do-not-translate list looks like:
+
+```
+process A   'Alice met Brian, and Clara greeted Derek.'  ->  Alice 遇見了 Brian，Clara 迎接了 Derek。
+process B   reused 1 · rejected 0 · lx check errors 0    ->  Clara 遇見了 Brian，Alice 迎接了 Derek。
+process C   reused 1 · rejected 0 · lx check errors 0    ->  Derek 遇見了 Brian，Alice 迎接了 Clara。
+process D   reused 1 · rejected 0 · lx check errors 0    ->  Brian 遇見了 Clara，Alice 迎接了 Derek。
+```
+
+Invariant 10's exit code was certifying a document whose proper nouns were wrong.
+The fix is one line — `key=lambda t: (-len(t), t)` — and the same three processes
+now produce byte-identical output. Longest-first is unchanged and is what stops
+`Go` masking inside `Google`; the tie-break is the part that was missing.
+
+⚠️ **The fix costs one more renumbering, and every project that has the defect
+will pay it.** A document extracted before this landed holds targets numbered by
+whatever order that process happened to use; the next extract numbers them
+canonically, and where the two differ the stored `⟦n⟧` change meaning one last
+time — accepted in silence, exactly as every re-extract before it was. The fix is
+still strictly better, because the damage stops after that, but it does not repair
+what is already stored and it does not announce itself. Anyone with a novel in
+progress and two same-length terms in `config/dnt.txt` should re-read the
+placeholders in their reviewed segments once. Detecting it needs the *stored* slot
+map, which is HANDOFF-033, and this is the reason that package is priority 1
+rather than a tidy-up.
+
+**What this does not close, and why it is a separate package.** The gate still
+compares ids rather than meanings, so an edit that keeps the placeholder *count*
+while changing what a placeholder stands for is accepted in silence. Measured:
+`config/dnt.txt` protecting `Brian`, the sentence `Brian greeted Wendy at the
+gate.`, the human target `⟦1⟧ 在門口迎接了 Wendy。` — protect `Wendy` instead of
+`Brian` and the same target is accepted (`reused 1`, `rejected 0`, `errors 0`) and
+renders **`Wendy 在門口迎接了 Wendy。`**.
+
+Closing that means comparing what each placeholder *means*, and the first sketch
+of it does not survive contact with the data: `translate.accept` receives a
+proposal as a string and looks both sides up in the *same* slot map, so comparing
+originals there is a tautology. The map the proposal was written against lives in
+the stored segment's `body` for a carryover and **nowhere at all** for a
+translation-memory hit, which is the deliberate consequence of a key that is blind
+to the mask configuration. So the two paths need different answers, and that is
+HANDOFF-033 rather than an improvisation inside this one.
+
+*Lost:* fixing it only in `mask.py`, by numbering slots in order of first
+appearance in the text rather than in the order of the term list. It is stable
+too, and it was refused because it changes every existing stored target's ids at
+once — the numbering is currently list-order, and a wholesale renumbering is
+exactly the damage being repaired.
+
 ## 2026-08-17 · A re-parse may not delete a sentence, and two positions holding one sentence are told apart by where they are
 
 `docs/contracts/workbench-http.md` divergences **(24)** and **(25)**, both closed,

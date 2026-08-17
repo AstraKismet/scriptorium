@@ -9,7 +9,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from scriptorium.checks import check_segment, containment_problems  # noqa: E402
-from scriptorium.config import DEFAULT_CONFIG  # noqa: E402
+from scriptorium.config import DEFAULT_CONFIG, load_dnt  # noqa: E402
 from scriptorium.mask import mask, repair_placeholders, unmask  # noqa: E402
 from scriptorium.mdparse import parse, render  # noqa: E402
 from scriptorium.normalize import normalize, reseat_outer_blanks  # noqa: E402
@@ -1497,6 +1497,32 @@ def test_dnt_respects_word_boundaries():
     masked, slots = mask("Go to Google with Go.", ["Go"])
     assert "Google" in unmask(masked, slots)
     assert masked.count("\u27e6") == 2
+
+
+def test_the_do_not_translate_order_is_total_so_a_slot_number_means_one_thing(tmp_path):
+    """A placeholder number is only meaningful if it means the same term twice.
+
+    `load_dnt` sorted by length alone and `sorted` is stable, so terms of equal
+    length kept `set` iteration order \u2014 and `str`'s hash is randomised per
+    process. `mask` numbers slots in that order and `translate.accept` compares
+    the *set* of ids, which a wholesale renumbering satisfies, so a second `lx`
+    process re-extracting an unedited document accepted the carried target and
+    resolved its ids against a different map. Measured 2026-08-17 on a character
+    list of eight five-letter names: five runs, five different permutations of
+    the names in the rendered book, `lx check` exit 0 every time.
+
+    Asserted on the order itself rather than on a rendered document, because the
+    defect is one function's return value and a test that reproduces it end to
+    end would depend on hash randomisation being on. The second half of the
+    hazard \u2014 an edit that keeps the placeholder *count* and changes what a
+    placeholder means \u2014 is not closed by this and is HANDOFF-033.
+    """
+    (tmp_path / "dnt.txt").write_text("Helen\nAlice\nBrian\nAlexander\nZoe\n",
+                                      encoding="utf-8")
+    order = load_dnt({"dnt": str(tmp_path / "dnt.txt")})
+    assert order == ["Alexander", "Alice", "Brian", "Helen", "Zoe"]
+    assert order == sorted(order, key=lambda t: (-len(t), t)), \
+        "longest first is what stops `Go` masking inside `Google`"
 
 
 def test_slots_are_records_and_html_tags_pair():
