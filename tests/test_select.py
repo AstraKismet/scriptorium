@@ -59,6 +59,12 @@ def book(tmp_path, monkeypatch):
       placeholder the source carries. Reached through `do_apply`, which is the
       one write path that deliberately does not refuse a person's words.
     * the last two — no target at all, so pending *and* failing on `missing`.
+
+    ``origin="agent"`` and not ``"human"``, deliberately: an agent is a peer and
+    is not guarded, so these tests measure what a *mode* selects and nothing
+    else. What origin precedence removes from a selection is asserted separately,
+    under "a person's wording is not offered to a model run", against the same
+    document written the other way.
     """
     monkeypatch.chdir(tmp_path)
     (tmp_path / "config").mkdir(exist_ok=True)
@@ -67,7 +73,7 @@ def book(tmp_path, monkeypatch):
     do_extract("d.md", "zh-TW", CFG)
     ids = [s["id"] for s in load_doc("d.md", "zh-TW")["segments"]]
     assert len(ids) == 4
-    do_apply("d.md", "zh-TW", CFG, {ids[0]: "標題", ids[1]: "請見指南。"}, origin="human")
+    do_apply("d.md", "zh-TW", CFG, {ids[0]: "標題", ids[1]: "請見指南。"}, origin="agent")
     doc = load_doc("d.md", "zh-TW")
     return doc, {"heading": ids[0], "broken": ids[1],
                  "pending": [ids[2], ids[3]]}
@@ -397,8 +403,12 @@ def test_lifting_a_hold_carries_no_such_condition(book):
     """Undoing something must never be harder than doing it."""
     doc, ids = book
     _hold([ids["broken"]])
+    # One, not two: `applied` counts rows whose review value actually moved. It
+    # counted every row it touched until 2026-08-16, so `lx unhold` on a segment
+    # that was never held printed "released 1 segment(s)" — and that count is the
+    # only feedback the command gives.
     assert do_hold("d.md", "zh-TW", CFG, [ids["broken"], ids["pending"][0]],
-                   held=False) == (2, [])
+                   held=False) == (1, [])
     assert all(s.get("review") is None
                for s in load_doc("d.md", "zh-TW")["segments"])
 
@@ -406,3 +416,111 @@ def test_lifting_a_hold_carries_no_such_condition(book):
 def test_an_id_naming_no_segment_is_ignored_rather_than_refused(book):
     doc, ids = book
     assert do_hold("d.md", "zh-TW", CFG, ["nope", ids["broken"]]) == (1, ["nope"])
+
+
+# ── a hold survives the commands a translator runs most ────────────────────
+
+def test_a_hold_survives_a_re_extract(book):
+    """`lx run`'s first statement is `do_extract`, so this is the difference
+    between a hold and a hold that lasts until the next run.
+
+    Before 2026-08-15 `review` was dropped by every re-extract while `origin`
+    survived, because `prior_targets` carried `(target, origin)` and the
+    carryover loop wrote only those two. The reviewer was told nothing; the
+    source had not even changed. Found by an adversarial pass on the axis the
+    change had listed as held constant.
+    """
+    doc, ids = book
+    # The heading, whose wording carries over cleanly. `broken` is the segment
+    # whose carryover `accept` refuses — see the test below, which is the other
+    # half of this rule.
+    _hold([ids["heading"]])
+    do_extract("d.md", "zh-TW", CFG)
+    after = {s["id"]: s for s in load_doc("d.md", "zh-TW")["segments"]}
+    assert after[ids["heading"]]["review"] == "held", "the re-extract lifted the hold"
+    assert after[ids["heading"]]["origin"] == "agent"
+    assert after[ids["heading"]]["target"] == "標題"
+
+
+def test_reset_drops_a_hold_with_everything_else(book):
+    """`--reset` reads no prior state at all, which is what "start over" means.
+
+    Asserted rather than left implicit: the carryover is where the hold now
+    rides, so a reader could reasonably expect the hold to be independent of it.
+    """
+    doc, ids = book
+    _hold([ids["heading"]])
+    do_extract("d.md", "zh-TW", CFG, reset=True)
+    after = {s["id"]: s for s in load_doc("d.md", "zh-TW")["segments"]}
+    assert after[ids["heading"]].get("review") is None
+    assert not after[ids["heading"]].get("target"), "reset kept a target"
+
+
+def test_a_hold_whose_wording_is_refused_is_dropped_with_it(book):
+    """There is nothing left to hold once the wording it was placed on is gone.
+
+    No monkeypatching: `broken`'s target dropped the placeholder its masked
+    source carries, so `translate.accept` refuses that carryover for real. The
+    hold has to go with the target, or the segment comes back held,
+    untranslated, and out of the queue that would fix it — the deadlock shape
+    this feature exists to make unreachable.
+
+    ⚠️ **This test also pins a defect, deliberately.** The refused carryover
+    takes the *human target with it* and `lx extract` says only "1 stale memory
+    hit(s) refused", which names the memory rather than the sentence it just
+    deleted. That is `docs/contracts/workbench-http.md` divergence (24), recorded
+    and not fixed here because what should happen instead is a decision. When it
+    is taken, this test changes with it — the hold half stays true either way.
+    """
+    doc, ids = book
+    _hold([ids["broken"]])
+    do_extract("d.md", "zh-TW", CFG)
+    after = {s["id"]: s for s in load_doc("d.md", "zh-TW")["segments"]}
+    assert after[ids["broken"]].get("review") is None
+    assert not after[ids["broken"]].get("target"), "divergence (24) has changed"
+
+
+def test_repair_names_the_failing_segments_it_declined_to_select(book, capsys):
+    """`lx check` exits 1 and `lx repair` said "nothing failing" — two commands
+    of one product disagreeing, which is the class `do_select` was unified to
+    remove and which the hold exclusion re-created by another route.
+
+    `do_check` walks every segment, so a held segment's errors still count in the
+    exit code; `failing_segments` cannot select one. The repair pass says so now
+    instead of reporting silence.
+    """
+    doc, ids = book
+    # Everything else clean, so the held segment is the *only* thing failing and
+    # the repair pass genuinely has nothing it may select.
+    do_apply("d.md", "zh-TW", CFG, {i: "已翻譯。" for i in ids["pending"]}, origin="agent")
+    _hold([ids["broken"]])
+    cli.cmd_repair(cli.build_parser().parse_args(
+        ["repair", "d.md", "--lang", "zh-TW"]), CFG)
+    said = capsys.readouterr().out
+    assert "nothing failing" not in said
+    assert ids["broken"] in said
+    assert "lx unhold" in said, "the message must name the way forward"
+
+    # And with nothing failing at all, the old sentence is unchanged.
+    do_hold("d.md", "zh-TW", CFG, [ids["broken"]], held=False)
+    do_apply("d.md", "zh-TW", CFG, {ids["broken"]: "請見指南。⟦1⟧"}, origin="agent")
+    cli.cmd_repair(cli.build_parser().parse_args(
+        ["repair", "d.md", "--lang", "zh-TW"]), CFG)
+    assert "nothing failing" in capsys.readouterr().out
+
+
+def test_hold_refuses_a_payload_shape_it_cannot_mean(book):
+    """The silent-coercion defect `do_apply` already refuses a mis-shaped `base`
+    for: `held: null` would read as false and *release* a hold, and a bare
+    string `ids` would be walked one character at a time and answer
+    `applied: 0` while looking like it had worked."""
+    doc, ids = book
+    for bad in (None, "false", 0, 1):
+        with pytest.raises(UnusableTarget):
+            do_hold("d.md", "zh-TW", CFG, [ids["broken"]], held=bad)
+    for bad in ("s0002", 7, {"a": 1}):
+        with pytest.raises(UnusableTarget):
+            do_hold("d.md", "zh-TW", CFG, bad)
+    # An empty or whitespace-only id is dropped rather than reported unknown.
+    assert do_hold("d.md", "zh-TW", CFG, ["", "  ", ids["broken"]]) == (1, [])
+    assert do_hold("d.md", "zh-TW", CFG, None, held=False) == (0, [])

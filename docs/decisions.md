@@ -785,10 +785,19 @@ seventeen divergences names.
 **An `llm:*` write may not overwrite a segment whose stored origin is `human`,
 with an explicit opt-out.** This was the option missing from the set: all six
 treated the two writers symmetrically and none prevented the case the divergence
-actually describes without the client's cooperation. The data is already read
-inside the transaction that overwrites it, so the guard is a comparison between
-two values both in scope. It protects `lx run` as well as the workbench, which is
-what makes it invariant-8 shaped rather than a workbench feature.
+actually describes without the client's cooperation. It protects `lx run` as well
+as the workbench, which is what makes it invariant-8 shaped rather than a
+workbench feature.
+
+*Corrected 2026-08-16, at implementation.* This paragraph read "the data is
+already read inside the transaction that overwrites it, so the guard is a
+comparison between two values both in scope". **The first half was false.**
+Python's `sqlite3` defers `BEGIN` to the first statement that *writes*, so the
+read ran in autocommit and the guard was two transactions with a window between
+them — a second `lx` process drove a human target through it and the run reported
+that it had refused nothing. `store._begin_write` takes the lock first now. The
+sentence is worth keeping in its corrected form rather than deleting, because it
+is exactly the assumption a reader of this file would otherwise make again.
 
 **`do_apply` derives status from the text**, and — the half the divergence text
 never mentioned — that field is the *draft queue's selection predicate*, not
@@ -806,8 +815,20 @@ origin precedence, and the exit code is 1 forever.
 
 The resolution is to **refuse an empty target at `POST /api/save`** and make
 clearing the hold control's own act. An empty string stops being a storable result
-and becomes a rejected input that names what to use instead, so the deadlock is
-impossible by construction rather than guarded against. *Lost:* clearing `origin`
+and becomes a rejected input that names what to use instead, so **that instance**
+of the deadlock is impossible by construction rather than guarded against.
+
+*Narrowed 2026-08-16, at implementation.* This said "the deadlock is impossible
+by construction" without qualification, and the enumeration above it lists one
+route in — an empty target, `missing` at error severity. `missing` is not the
+only error-severity rule: `tags`, `containment`, `eol`, `numbers`, `escaping` and
+a `forbidden` glossary row all reach a segment a person wrote, and every one of
+them produced a segment the repair pass selected forever, no automatic writer
+could write, and `lx check` failed on forever. What closes the general case is
+not this refusal but the rule added beside it on 2026-08-16: **selection knows
+what the write enforces**, so those segments are not offered to a run at all, and
+`lx repair` and `lx run` name them and name `--overwrite-human` instead of paying
+a model for a round they will discard. *Lost:* clearing `origin`
 when the text is empty, which lets the model silently undo a deliberate deletion —
 the precise thing origin precedence was just adopted to prevent. *Lost:* a "held
 but deliberately empty" value, which contradicts the hold design and forces a third

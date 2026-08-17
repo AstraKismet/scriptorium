@@ -30,6 +30,8 @@ the second, third, and seventh translation of a document nearly free.
 | `lx terms SRC --lang L [--json]` | propose glossary rows from the source; target column left empty |
 | `lx terms SRC --lang L --append` | add only candidates the glossary does not have |
 | `lx apply SRC --lang L --file F` | ingest translations (`-` reads stdin), auto-normalize |
+| `lx hold SRC --lang L --ids A,B` | keep segments out of every queue that selects work |
+| `lx unhold SRC --lang L --ids A,B` | return held segments to the queues |
 | `lx check SRC --lang L [--json]` | validate; exit 1 if any error |
 | `lx render SRC --lang L -o OUT` | rebuild the target document |
 | `lx render SRC --lang L --fallback` | untranslated segments fall back to source |

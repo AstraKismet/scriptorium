@@ -12,7 +12,7 @@ import urllib.parse
 from collections import Counter
 
 from . import __version__, formats
-from .checks import HELD, check_segment, workable
+from .checks import HELD, check_segment, is_held, workable
 from .config import (
     DEFAULT_TONE,
     GLOSSARY_HEADER,
@@ -49,6 +49,7 @@ from .formats import UnknownFormat
 from .mask import repair_placeholders
 from .normalize import normalize, polish_rendered, reseat_outer_blanks
 from .store import (
+    HUMAN,
     StateVersionError,
     append_tm,
     db_path,
@@ -60,6 +61,7 @@ from .store import (
     prior_targets,
     report_path,
     save_doc,
+    save_issues,
     save_review,
     save_segments,
     save_targets,
@@ -405,7 +407,7 @@ def do_extract(src, lang, cfg, tone=None, reset=False):
     prior = {} if reset else prior_targets(src, lang)
 
     tm = load_tm(lang)
-    reused, rejected = 0, 0
+    reused, rejected, dropped = 0, 0, []
     for seg in segments:
         # This document's own state first, then the memory. Both are proposals,
         # not results: reuse goes through `accept` for the same reason model
@@ -418,19 +420,40 @@ def do_extract(src, lang, cfg, tone=None, reset=False):
             candidates.append(prior[key])
         hit, hit_origin = tm_lookup(tm, seg, tone)
         if hit is not None:
-            candidates.append((hit, hit_origin))
-        for proposal, origin in candidates:
+            # No review state on a memory hit, and that is the design: the memory
+            # is wording banked from somewhere else, and a hold is one reviewer
+            # saying this segment is theirs to finish. Carrying a hold in would
+            # hold a segment nobody has looked at.
+            candidates.append((hit, hit_origin, None))
+        for proposal, origin, review in candidates:
             # The memory is tried even when this document's own target was
             # refused: the two can differ, and a good banked wording should not be
             # lost to a stale one sitting in front of it.
             target, _why = accept(seg, proposal, lang, cfg)
             if target is not None:
                 seg["target"], seg["origin"], seg["status"] = target, origin, "translated"
+                # A hold rides with the wording it was placed on. Only when the
+                # wording itself carried over — a refused proposal leaves nothing
+                # to hold, and `--reset` reads no prior state at all, so it drops
+                # holds with everything else, which is what "start over" means.
+                if review:
+                    seg["review"] = review
                 reused += 1
                 break
         else:
             if candidates:
                 rejected += 1
+                # Which of the two kinds of refusal this was. A memory hit that
+                # no longer fits is routine; **this document's own stored target
+                # being refused means a sentence somebody wrote is gone**, and
+                # until 2026-08-15 both were reported as "stale memory hit(s)
+                # refused", which names the memory rather than the wording it
+                # just deleted. Counting them apart is a message fix and nothing
+                # more — what *should* happen to a refused human target instead
+                # of deleting it is `docs/contracts/workbench-http.md`
+                # divergence (24), and a decision.
+                if key in prior:
+                    dropped.append(seg["id"])
 
     doc = {
         # `doc_label`, not `os.path.relpath`: one spelling of one identity, on
@@ -459,11 +482,12 @@ def do_extract(src, lang, cfg, tone=None, reset=False):
     # colliding with one above is the format's bug, and there are two formats.
     doc.update(facts)
     save_doc(src, lang, doc)
-    return doc, reused, rejected
+    return doc, reused, rejected, dropped
 
 
 def cmd_extract(args, cfg):
-    doc, reused, rejected = do_extract(args.src, args.lang, cfg, args.tone, args.reset)
+    doc, reused, rejected, dropped = do_extract(
+        args.src, args.lang, cfg, args.tone, args.reset)
     pending = sum(1 for s in doc["segments"] if s["status"] == "pending")
     _out(f"{args.src} [{args.lang}] -> {db_path()}")
     line = f"  segments {len(doc['segments'])} | reused {reused} | pending {pending}"
@@ -478,6 +502,15 @@ def cmd_extract(args, cfg):
     if canonical_tone(doc["tone"]) != DEFAULT_TONE:
         line += f" | tone {doc['tone']}"
     _out(line)
+    if dropped:
+        # Its own line rather than a field in the count above, because this one
+        # is not a memory problem: these segments held a stored target and it did
+        # not survive re-parsing. Said loudly, because it is wording somebody
+        # wrote. Until 2026-08-15 the only thing printed was "stale memory hit(s)
+        # refused", which names the memory rather than the sentence it deleted.
+        _out(f"  {len(dropped)} segment(s) lost a stored target that no longer fits "
+             f"this document: {', '.join(dropped)}. Their wording is in the last "
+             f"render, or in `.lx/tm.{args.lang}.jsonl` if it was committed.")
     # Everything the parse decided rather than read. Printed only when it is not
     # the ordinary answer, so a Markdown project's output does not change at all
     # — but printed *always* for a document whose encoding or paragraph shape was
@@ -912,12 +945,19 @@ def cmd_terms(args, cfg):
 
 # ── apply ──────────────────────────────────────────────────────────────────
 
-def do_apply(src, lang, cfg, incoming, origin="agent", base=None):
-    """Write reviewed targets. ``(applied, unknown, stored, conflicts)``.
+def do_apply(src, lang, cfg, incoming, origin="agent", base=None, over_human=False):
+    """Write reviewed targets.
 
-    ``stored`` is ``{id: {"text", "token"}}`` for what was written and
-    ``conflicts`` the same shape for what was refused, so a caller never has to
-    re-read the document to find out what it now holds. That readback is what
+    ``(applied, unknown, stored, conflicts, refused)``. ``stored`` is
+    ``{id: {"text", "token"}}`` for what was written and ``conflicts`` the same
+    shape for what lost a lost-update check, so a caller never has to re-read the
+    document to find out what it now holds. ``refused`` is separate and names the
+    ids an ``llm:*`` ``origin`` was not allowed to overwrite — separate because
+    `docs/contracts/workbench-http.md` defines ``conflicts`` as "refused because
+    its ``base`` token did not match", and folding a second meaning into it would
+    have been a silent contract change the day any endpoint passed an origin
+    other than ``human``. `/api/save` hardcodes ``human``, so on the wire it is
+    always empty and is not projected. That readback is what
     removes the save-then-refetch-the-whole-book loop on a five-thousand-segment
     novel, and it is what gives a conflict presentation something authoritative
     to diff against.
@@ -986,7 +1026,13 @@ def do_apply(src, lang, cfg, incoming, origin="agent", base=None):
             f"result — it would leave nothing to review while taking the segment out of "
             f"the queue that would have it retranslated. Write the wording you want, or "
             f"have the model do this one again: "
-            f"`lx translate {src} --lang {lang} --ids {','.join(blank)}`.")
+            f"`lx translate {src} --lang {lang} --ids {','.join(blank)}"
+            # Named only when it is needed, and it is needed exactly when the
+            # segment already holds a person's words — which is the common case
+            # here, since clearing one is a reviewer's act. Without it the
+            # sentence sends them to a command origin precedence then refuses,
+            # which is the two halves of this feature contradicting each other.
+            f"{' --overwrite-human' if any(by_id[s].get('origin') == HUMAN for s in blank) else ''}`.")
     unknown, changed = [], []
     stored, conflicts, expect = {}, {}, {}
     for sid, text in incoming.items():
@@ -1045,7 +1091,10 @@ def do_apply(src, lang, cfg, incoming, origin="agent", base=None):
     # workbench calls on every keystroke-sized save, and rewriting a novel's
     # skeleton to record one edited paragraph is the amplification the state
     # layer moved to SQLite to remove.
-    _written, stale = save_segments(src, lang, changed, expect=expect)
+    _written, stale, refused = save_segments(src, lang, changed, expect=expect,
+                                            over_human=over_human)
+    for sid in refused:
+        stored.pop(sid, None)
     if stale:
         # The row moved between this call's read and its write. One extra read,
         # and only when that actually happened, so the conflict carries the text
@@ -1055,7 +1104,7 @@ def do_apply(src, lang, cfg, incoming, origin="agent", base=None):
             text = (fresh[sid].get("target") or "") if sid in fresh else ""
             conflicts[sid] = {"text": text, "token": target_token(text)}
             stored.pop(sid, None)
-    return len(stored), unknown, stored, conflicts
+    return len(stored), unknown, stored, conflicts, sorted(refused)
 
 
 def do_hold(src, lang, cfg, ids, held=True):
@@ -1079,6 +1128,21 @@ def do_hold(src, lang, cfg, ids, held=True):
     that quietly released a hold would return the segment to the model's queue at
     the moment its wording changed.
     """
+    if not isinstance(held, bool):
+        raise UnusableTarget(
+            f"`held` is true or false, and this request sent "
+            f"{type(held).__name__}. A string or a null here is a client building "
+            f"the payload wrongly — `null` would read as false and *release* a "
+            f"hold, which is the opposite of the default.")
+    if ids is None:
+        ids = []
+    if isinstance(ids, str) or not isinstance(ids, (list, tuple)):
+        raise UnusableTarget(
+            f"`ids` is a list of segment ids, and this request sent "
+            f"{type(ids).__name__}. A bare string would be read one character at "
+            f"a time and answer `applied: 0` while looking like it worked.")
+    ids = [str(sid).strip() for sid in ids]
+    ids = [sid for sid in ids if sid]
     doc = load_doc(src, lang)
     by_id = {s["id"]: s for s in doc["segments"]}
     wanted = [sid for sid in ids if sid in by_id]
@@ -1112,9 +1176,17 @@ def cmd_apply(args, cfg):
     # No `base`: a file on disk carries no token, so `lx apply` writes
     # unconditionally, exactly as it did. The lost-update check is opt-in per id
     # and the workbench is what opts in.
-    applied, unknown, _stored, _conflicts = do_apply(
-        args.src, args.lang, cfg, incoming, args.origin)
+    applied, unknown, _stored, _conflicts, refused = do_apply(
+        args.src, args.lang, cfg, incoming, args.origin,
+        over_human=args.overwrite_human)
     _out(f"applied {applied} segment(s)" + (f"; unknown ids ignored: {unknown}" if unknown else ""))
+    if refused:
+        # Said out loud, for the reason `_run_translate` says it: `--origin`
+        # takes free text, so `lx apply --origin llm:draft` reaches the guard,
+        # and "applied 0 segment(s)" with exit 0 is a report nobody can act on.
+        _out(f"{len(refused)} segment(s) were left alone because a person wrote them: "
+             f"{', '.join(refused)}. Use `--origin agent` for your own words, or "
+             f"pass --overwrite-human to replace theirs.")
 
 
 # ── check ──────────────────────────────────────────────────────────────────
@@ -1140,22 +1212,28 @@ def do_check(src, lang, cfg, persist=True):
         "issues": issues,
     }
     if persist:
-        # Only the segments, never the skeleton: check reads the document and
-        # writes back one field of each segment, and the nodes it would rewrite
-        # are the largest thing in the state.
+        # **One field, not one row.** This is the third writer none of the
+        # seventeen divergences names, and it took two attempts to close.
         #
-        # And only the rows that have not moved since the read above. This write
-        # is the third writer none of the seventeen divergences named: it carried
-        # a whole snapshot back, so a target saved by the workbench or banked by a
-        # running job between this function's read and its write was silently
-        # replaced by the copy this call had loaded — with `target`, `status` and
-        # `origin` all coming from the stale side. The compare-and-swap
-        # `save_segments` already had for `do_apply` is the whole fix: a row that
-        # moved is skipped, and skipping it loses nothing, because the issues
-        # computed here describe wording that is no longer there and the next
-        # check recomputes them against what is.
-        save_segments(src, lang, doc["segments"],
-                      expect={s["id"]: s.get("target") for s in doc["segments"]})
+        # It began as `save_segments(src, lang, doc["segments"])`, which carried
+        # a whole snapshot back: a target saved by the workbench, or banked by a
+        # running job, between this function's read and its write was replaced by
+        # the copy loaded here. The first fix added the compare-and-swap
+        # `save_segments` already had — and an adversarial pass found that
+        # insufficient the same day, because that swap compares the `target`
+        # *column* while the statement writes the whole `body` blob, where
+        # `origin`, `review` and `issues` all live. A hold placed while a check
+        # was running was rolled back with `applied: 1` reported to the client
+        # that placed it, and an `origin` rolled from `human` back to `tm` —
+        # which is how a segment silently stops being covered by origin
+        # precedence at all.
+        #
+        # `save_issues` touches the one key this function actually decides. The
+        # `expect` on top is not what makes it safe — narrowness is — it only
+        # keeps the stored issues from describing wording that has since moved.
+        save_issues(src, lang,
+                    {s["id"]: s.get("issues") for s in doc["segments"]},
+                    expect={s["id"]: s.get("target") for s in doc["segments"]})
         dump_json(report_path(src, lang), report)
     return report, doc
 
@@ -2173,7 +2251,35 @@ def _route_word(cfg, stage):
     return f"{stage}={provider}" + (f":{model}" if model else "")
 
 
-def do_select(doc, cfg, mode, ids=None, include_all=False, limit=0):
+def _model_writable(segments, over_human):
+    """Drop what an ``llm:*`` write would be refused at the door.
+
+    **Selection has to know the rule the write enforces.** Origin precedence
+    lives in `store`, at the write, which is what makes it hold for every writer
+    — but a queue that cannot see it hands the model work it will pay for and
+    then throw away. Measured by an adversarial pass on 2026-08-16: `lx repair`
+    selected a human-written failing segment, was refused, exited **0** with the
+    error count unmoved, and did the same again on the next invocation; and
+    `lx translate --mode polish` on a 2000-paragraph reviewed novel selected all
+    two thousand and applied none of them. Neither is visible on a four-segment
+    document, which is the size everything here was verified at.
+
+    This is the argument the hold exclusion already makes — a predicate that
+    selects work must not select work no run may do — applied to the other new
+    rule, which has the identical property. ``over_human`` turns it off here
+    exactly as it turns the write's own guard off, so the two can never disagree
+    about what a run will touch.
+
+    Not applied to an explicitly named ``ids``, for the reason the hold is not:
+    naming an id is a person pointing at one segment. What they get there is a
+    refusal at the write, with a sentence naming ``--overwrite-human``.
+    """
+    if over_human:
+        return segments
+    return [s for s in segments if s.get("origin") != HUMAN]
+
+
+def do_select(doc, cfg, mode, ids=None, include_all=False, limit=0, over_human=False):
     """Which segments a run of ``mode`` works on. One answer for every surface.
 
     The rule used to live in three places and they disagreed. `cmd_translate`
@@ -2214,11 +2320,16 @@ def do_select(doc, cfg, mode, ids=None, include_all=False, limit=0):
         # pulls in the provider stack, and `do_select` is called on paths that
         # never dispatch to a model.
         from .translate import failing_segments
-        return failing_segments(doc, cfg)
+        return _model_writable(failing_segments(doc, cfg), over_human)
     if mode == "polish":
-        return workable([s for s in doc["segments"]
-                         if s.get("target") and s["kind"] in ("para", "quote", "list")])
-    return pending_segments(doc, include_all=include_all, limit=limit)
+        return _model_writable(
+            workable([s for s in doc["segments"]
+                      if s.get("target") and s["kind"] in ("para", "quote", "list")]),
+            over_human)
+    # `--all` is where this reaches the draft queue: a pending segment has no
+    # target and therefore no origin, but `include_all` ignores `status` wholly.
+    return _model_writable(
+        pending_segments(doc, include_all=include_all, limit=limit), over_human)
 
 
 def do_translate(src, lang, cfg, segments, mode, provider=None, model=None,
@@ -2317,18 +2428,51 @@ def _run_translate(src, lang, cfg, segments, mode, args):
 
 def cmd_translate(args, cfg):
     doc = load_doc(args.src, args.lang)
-    segments = do_select(doc, cfg, args.mode, ids=args.ids.split(",") if args.ids else None,
-                         include_all=args.all, limit=args.limit)
+    segments = do_select(doc, cfg, args.mode,
+                         ids=args.ids.split(",") if args.ids else None,
+                         include_all=args.all, limit=args.limit,
+                         over_human=args.overwrite_human)
     applied, failures = _run_translate(args.src, args.lang, cfg, segments, args.mode, args)
     _out(f"translated {applied} segment(s)" + (f", {len(failures)} unresolved" if failures else ""))
+
+
+def _unrepairable(doc, cfg):
+    """Failing segments no run may touch, and which reason. ``(held, by_hand)``.
+
+    `lx check` counts their errors in its exit code — it walks every segment,
+    because a structural error is a structural error whoever wrote the sentence —
+    and the repair pass can select neither kind. Without this the two commands
+    contradict each other in silence: `lx check` exits 1 while `lx repair`
+    answers "nothing failing", or worse pays a model for a segment whose write it
+    then refuses.
+    """
+    from .translate import failing_segments
+    failing = failing_segments(doc, cfg, include_held=True)
+    return ([s["id"] for s in failing if is_held(s)],
+            [s["id"] for s in failing if not is_held(s) and s.get("origin") == HUMAN])
+
+
+def _report_blockers(src, lang, held, by_hand):
+    if held:
+        _out(f"{len(held)} failing segment(s) are held and no queue will select "
+             f"them: {', '.join(held)}. Fix the wording yourself, or return them "
+             f"with `lx unhold {src} --lang {lang} --ids {','.join(held)}`.")
+    if by_hand:
+        _out(f"{len(by_hand)} failing segment(s) were written by a person and a "
+             f"model run may not replace them: {', '.join(by_hand)}. Fix the "
+             f"wording yourself, or pass --overwrite-human to let the run try.")
 
 
 def cmd_repair(args, cfg):
     do_check(args.src, args.lang, cfg)
     doc = load_doc(args.src, args.lang)
-    segments = do_select(doc, cfg, "repair")
+    segments = do_select(doc, cfg, "repair", over_human=args.overwrite_human)
     if not segments:
-        _out("nothing failing")
+        held, by_hand = _unrepairable(doc, cfg)
+        if held or by_hand:
+            _report_blockers(args.src, args.lang, held, by_hand)
+        else:
+            _out("nothing failing")
         return
     _out(f"repairing {len(segments)} failing segment(s)")
     _run_translate(args.src, args.lang, cfg, segments, "repair", args)
@@ -2338,10 +2482,10 @@ def cmd_repair(args, cfg):
 
 def cmd_run(args, cfg):
     """extract → translate → check → repair* → render, in one command."""
-    doc, reused, rejected = do_extract(args.src, args.lang, cfg, args.tone)
+    doc, reused, rejected, _dropped = do_extract(args.src, args.lang, cfg, args.tone)
     # Through `do_select` rather than inline, so this is not a fourth spelling of
     # the draft queue's predicate. It was one until 2026-08-15.
-    pending = do_select(doc, cfg, "draft")
+    pending = do_select(doc, cfg, "draft", over_human=args.overwrite_human)
     _out(f"{args.src} [{args.lang}] · {len(doc['segments'])} segments · "
          f"{reused} reused · {len(pending)} to translate"
          + (f" · {rejected} stale memory hit(s) refused" if rejected else ""))
@@ -2349,7 +2493,8 @@ def cmd_run(args, cfg):
     if pending:
         _run_translate(args.src, args.lang, cfg, pending, "draft", args)
     if args.polish:
-        prose = do_select(load_doc(args.src, args.lang), cfg, "polish")
+        prose = do_select(load_doc(args.src, args.lang), cfg, "polish",
+                          over_human=args.overwrite_human)
         _out(f"polishing {len(prose)} prose segment(s)")
         _run_translate(args.src, args.lang, cfg, prose, "polish", args)
 
@@ -2359,7 +2504,8 @@ def cmd_run(args, cfg):
         report, _ = do_check(args.src, args.lang, cfg)
         if not report["errors"]:
             break
-        bad = do_select(load_doc(args.src, args.lang), cfg, "repair")
+        bad = do_select(load_doc(args.src, args.lang), cfg, "repair",
+                        over_human=args.overwrite_human)
         signature = {s["id"]: s.get("target") for s in bad}
         if signature == previous:
             _out("repair made no difference last round; stopping so it does not spin")
@@ -2371,6 +2517,11 @@ def cmd_run(args, cfg):
     report, _ = do_check(args.src, args.lang, cfg)
     _out(f"check: {report['errors']} error(s), {report['warnings']} warning(s)")
     if report["errors"] and not args.force:
+        # Named before the general advice, because "inspect with `lx check`"
+        # sends a reviewer to a command that will show them errors on a segment
+        # every repair round silently skipped.
+        held, by_hand = _unrepairable(load_doc(args.src, args.lang), cfg)
+        _report_blockers(args.src, args.lang, held, by_hand)
         _out("not rendering while errors remain — inspect with `lx check` or fix in `lx web`, "
              "or pass --force to render anyway")
         sys.exit(1)
@@ -2482,6 +2633,11 @@ def build_parser():
     a.add_argument("--lang", required=True)
     a.add_argument("--file", default="-", help="'-' reads stdin")
     a.add_argument("--origin", default="agent")
+    # Here as well as on the three model-calling commands: `--origin` takes free
+    # text, so `lx apply --origin llm:draft` reaches the same guard, and until
+    # 2026-08-16 that path was refused with no way past it at all.
+    a.add_argument("--overwrite-human", action="store_true",
+                   help="let this write replace segments a person wrote")
     a.set_defaults(fn=cmd_apply)
 
     for name, lift, blurb in (

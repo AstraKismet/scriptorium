@@ -502,7 +502,7 @@ def check_segment(seg, lang, cfg, glossary, dnt):
     # target — a segment with none is answered by `missing`, which is the more
     # useful sentence.
     if is_held(seg):
-        add("held", "warn", "held for review; no run will select this segment")
+        add("held", "warn", "held for review; no queue will select this segment — `lx translate --ids` still will")
 
     # 1. placeholder integrity — presence as a multiset, then pair order
     a, b = Counter(PH_RE.findall(src)), Counter(PH_RE.findall(tgt))

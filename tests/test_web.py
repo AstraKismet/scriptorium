@@ -882,8 +882,13 @@ def _translate_project(base, tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("mode,want", [
     ("draft", [2, 3]),
-    ("repair", [1, 2, 3]),
-    ("polish", [1]),
+    # `/api/save` writes `origin: human`, so segments 0 and 1 are a person's
+    # wording and no model run may replace them — selection knows that rule as
+    # of 2026-08-16, so neither is offered. Before that, `repair` selected
+    # segment 1 and the write refused it, and `polish` selected it on a whole
+    # reviewed book and applied none of it.
+    ("repair", [2, 3]),
+    ("polish", []),
     ("audit", [2, 3]),
 ])
 def test_the_endpoint_selects_what_the_cli_selects(base, tmp_path, monkeypatch,
@@ -911,12 +916,16 @@ def test_ids_outrank_the_mode_on_the_wire_too(base, tmp_path, monkeypatch):
     ids = _translate_project(base, tmp_path, monkeypatch)
     body = json.loads(_post(base, "/api/translate", {
         "src": "d.md", "lang": "zh-TW", "mode": "polish", "ids": [ids[0]]})[1])
+    # One, and the id is a segment `polish` would not have offered at all — it is
+    # a heading *and* a person's wording. Naming an id is a person pointing at a
+    # segment, so it outranks both exclusions; the write still refuses it.
     assert body["total"] == 1
     # An empty array is falsy and falls through to the mode, which the contract
-    # states in as many words.
+    # states in as many words. `polish` offers nothing on a document written by
+    # hand, which is the point of the parametrized test above.
     body = json.loads(_post(base, "/api/translate", {
         "src": "d.md", "lang": "zh-TW", "mode": "polish", "ids": []})[1])
-    assert body["total"] == 1
+    assert body["total"] == 0
 
 
 def test_translate_reports_the_route_it_resolved(base, tmp_path, monkeypatch):
@@ -1193,9 +1202,13 @@ def test_a_job_reports_the_segments_it_left_alone(base, tmp_path, monkeypatch, j
     monkeypatch.setattr(translate_mod, "build_provider",
                         lambda name, cfg, model=None: _Echo())
     ids = _translate_project(base, tmp_path, monkeypatch)
+    # Through `ids`, because that is now the only way a run reaches a segment a
+    # person wrote: every *mode* excludes one. The exemption is the design — a
+    # named id is a person pointing at a segment — and the write refusing it
+    # anyway is what this test is about.
     started = json.loads(_post(base, "/api/translate", {
-        "src": "d.md", "lang": "zh-TW", "mode": "polish"})[1])
-    assert started["total"] == 1, "the run must select the hand-written segment"
+        "src": "d.md", "lang": "zh-TW", "ids": [ids[1]]})[1])
+    assert started["total"] == 1, "an explicit id must still reach the segment"
 
     for _ in range(200):
         job = json.loads(_post(base, "/api/job", {"id": started["id"]})[1])

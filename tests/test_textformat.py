@@ -599,7 +599,7 @@ def test_a_plaintext_document_survives_extract_render_and_write(tmp_path, monkey
     src = tmp_path / path.name
     src.write_bytes(raw)
 
-    doc, _reused, _rejected = do_extract(str(src), "zh-TW", CFG)
+    doc, _reused, _rejected, _dropped = do_extract(str(src), "zh-TW", CFG)
     assert doc["format"] == "text"
     rendered, _missing = do_render(str(src), "zh-TW", CFG, fallback=True)
 
@@ -626,7 +626,7 @@ def test_plaintext_eol_is_a_document_level_fact(tmp_path, monkeypatch, name, exp
     src = tmp_path / name
     src.write_bytes(raw)
 
-    doc, _reused, _rejected = do_extract(str(src), "zh-TW", CFG)
+    doc, _reused, _rejected, _dropped = do_extract(str(src), "zh-TW", CFG)
     assert doc["eol"] == ("\r\n" if expect_crlf else "\n")
     if expect_crlf:
         assert not any("\r" in s["source"] for s in doc["segments"]), \

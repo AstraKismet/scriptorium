@@ -176,7 +176,7 @@ one is not.
 
 ## Endpoints
 
-Ten. Every one is listed here; a test walks the dispatch chain in
+Eleven. Every one is listed here; a test walks the dispatch chain in
 `web/server.py` and fails if the two lists disagree in either direction.
 
 Common to all of them:
@@ -1209,8 +1209,18 @@ found *and* fixed in one change is still worth a number — the next person to a
     `lx check` were. Closed with the compare-and-swap `save_segments` already had
     for `do_apply`: a row that moved is skipped, and skipping it loses nothing,
     because the issues describe wording that is no longer there and the next
-    check recomputes them against what is. Reproduced with two threads before the
-    fix and after it.
+    check recomputes them against what is.
+
+    **Closed twice, and the first attempt is the interesting one.** That
+    compare-and-swap keys on the `target` **column** while the statement it
+    guards writes the whole `body` blob — where `origin`, `review` and `issues`
+    live. So it always passed for a segment whose only change was a hold or an
+    origin claim, and the stale body went over it: `POST /api/hold` answered
+    `applied: 1` and a check already in flight put the pre-hold `review` back,
+    and an `origin` rolled from `human` to `tm`, which is how a segment stops
+    being covered by *Origin precedence* at all. Found by an adversarial pass the
+    same day. `do_check` is not a whole-row writer any more — it writes the one
+    key it decides, through the narrow writer `POST /api/hold` already used.
 23. **Closed 2026-08-15.** *Nothing on this surface could say "leave this segment
     to me".* There was no review state on a segment at all: `status` had two
     values derived from the text, `origin` recorded provenance only, and a
@@ -1218,6 +1228,46 @@ found *and* fixed in one change is still worth a number — the next person to a
     `/api/translate` run off it. `POST /api/hold` and the `review` field are the
     answer, and the exclusion is one shared helper applied at every predicate
     that selects work rather than a condition copied into each.
+
+    **A hold survives `POST /api/extract`** as of 2026-08-16 — it rides with the
+    wording it was placed on, through the same carryover that moves the target
+    and the origin. It does *not* survive `reset: true`, which reads no prior
+    state at all, and it does not survive a carryover the acceptance path
+    refuses, because there is then no wording left to hold. The first version of
+    this shipped without any of that: `POST /api/extract` lifted every hold in
+    the document and said nothing, which the "re-extract from source" control
+    this contract tells a client to offer would have done on every press.
+
+Measured 2026-08-16 by the adversarial pass over the change that closed (22) and
+(23). Both are older than that change and neither is fixed here; both are about
+`POST /api/extract`, which is the endpoint least like the rest of this surface —
+it is the only one that rebuilds a document rather than editing it.
+
+24. **A stored target that no longer fits is deleted, and the reply does not say
+    which.** `POST /api/extract` carries prior wording over through the
+    acceptance path, and a carryover it refuses — the measured case is a
+    `config/dnt.txt` edit moving the mask configuration under banked wording, so
+    the placeholder set no longer matches — leaves the segment with **no target
+    at all**. A sentence a person wrote is gone. `rejected` counts it, but
+    `rejected` also counts a refused *memory* hit, and until 2026-08-16 the CLI
+    printed only "stale memory hit(s) refused", which names the memory rather
+    than the wording it just deleted. `lx extract` now names the ids on their own
+    line; **the endpoint still does not**, because a new response key is a
+    version decision and this one is not scheduled. What *should* happen instead
+    of deleting — keep the target and let `lx check` report it, the way `lx apply`
+    is allowed to store wording the validators will reject — is a decision, not a
+    patch.
+25. **One identity, two positions: duplicate source text collapses.** Carryover
+    is keyed on the translation-memory key, so two segments whose source text is
+    byte-identical share one entry and the last row read wins. Measured with a
+    document whose first and third paragraphs are both `Yes.`: the human target
+    on the first was replaced by the machine draft from the third **and its
+    `origin` was laundered to `llm:draft`**, and the reverse order launders a
+    machine draft into `human`, which locks the model out of it permanently. This
+    predates *Origin precedence* and is what makes it evadable: the guard
+    compares the origin on disk, and this is the path that rewrites the origin on
+    disk. `context` already separates a paragraph from a blockquote; what is
+    missing is position, for two segments of the same kind.
 
 ## What is not frozen
 

@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import statedb  # noqa: E402
 from scriptorium import cli as cli_mod  # noqa: E402
+from scriptorium import store as store_mod  # noqa: E402
 from scriptorium import translate as translate_mod  # noqa: E402
 from scriptorium.cli import do_apply, do_extract, do_translate, pending_segments  # noqa: E402
 from scriptorium.config import DEFAULT_CONFIG  # noqa: E402
@@ -39,6 +40,7 @@ from scriptorium.store import (  # noqa: E402
     prior_doc,
     prior_targets,
     save_doc,
+    save_issues,
     save_review,
     save_segments,
     save_targets,
@@ -211,7 +213,7 @@ def test_non_utf8_state_roundtrip_through_the_commands(tmp_path, monkeypatch):
 
     body = "第一章\n\n他走進了屋裡。\n\n十年後，一切都變了。\n"
     src = _project(tmp_path, monkeypatch, body.encode("cp950"), name="novel.txt")
-    doc, _, _ = do_extract(src, "zh-TW", CFG)
+    doc, _, _, _ = do_extract(src, "zh-TW", CFG)
     assert doc["encoding"] == "cp950"
 
     text, _ = do_render(src, "zh-TW", CFG, fallback=True)
@@ -288,7 +290,7 @@ def test_segment_identity_carries_over_only_within_its_own_register(tmp_path, mo
              origin="human")
 
     assert len(prior_targets(src, "zh-TW")) == 1
-    _, reused, _ = do_extract(src, "zh-TW", CFG, tone="literary")
+    _, reused, _, _ = do_extract(src, "zh-TW", CFG, tone="literary")
     assert reused == 0
     assert load_doc(src, "zh-TW")["segments"][0]["status"] == "pending"
 
@@ -408,7 +410,7 @@ def test_save_targets_derives_status_from_the_text_it_is_given(tmp_path, monkeyp
     nothing exercises is one somebody deletes as dead. Asserted at its own level.
     """
     _project(tmp_path, monkeypatch, doc=b"A sentence.\n\nAnother one.\n", name="d.md")
-    doc, _r, _j = do_extract("d.md", "zh-TW", CFG)
+    doc, _r, _j, _d = do_extract("d.md", "zh-TW", CFG)
     first, second = doc["segments"][0]["id"], doc["segments"][1]["id"]
     save_targets("d.md", "zh-TW", {first: "一句話。", second: ""}, "agent")
     stored = {s["id"]: s for s in load_doc("d.md", "zh-TW")["segments"]}
@@ -427,7 +429,7 @@ def test_a_status_written_by_an_older_build_is_repaired_on_read(tmp_path, monkey
     self-healing on read and this one was not.
     """
     _project(tmp_path, monkeypatch, doc=b"A sentence.\n", name="d.md")
-    doc, _r, _j = do_extract("d.md", "zh-TW", CFG)
+    doc, _r, _j, _d = do_extract("d.md", "zh-TW", CFG)
     seg_id = doc["segments"][0]["id"]
     _set_raw("d.md", "zh-TW", seg_id, status="translated", target="")
 
@@ -494,21 +496,21 @@ def test_save_segments_swaps_rather_than_writes_when_it_is_given_an_expectation(
     segment would have been refused as stale.
     """
     _project(tmp_path, monkeypatch, doc=b"A sentence.\n\nAnother one.\n", name="d.md")
-    doc, _r, _j = do_extract("d.md", "zh-TW", CFG)
+    doc, _r, _j, _d = do_extract("d.md", "zh-TW", CFG)
     fresh, other = doc["segments"][0], doc["segments"][1]
 
     fresh["target"] = "第一版"
-    written, stale = save_segments("d.md", "zh-TW", [fresh], expect={fresh["id"]: None})
-    assert (written, stale) == (1, []), "NULL expected against NULL stored must match"
+    written, stale, refused = save_segments("d.md", "zh-TW", [fresh], expect={fresh["id"]: None})
+    assert (written, stale, refused) == (1, [], []), "NULL expected against NULL stored must match"
 
     other["target"] = "拒絕"
-    written, stale = save_segments("d.md", "zh-TW", [other], expect={other["id"]: "沒有這個"})
-    assert (written, stale) == (0, [other["id"]])
+    written, stale, refused = save_segments("d.md", "zh-TW", [other], expect={other["id"]: "沒有這個"})
+    assert (written, stale, refused) == (0, [other["id"]], [])
     assert not load_doc("d.md", "zh-TW")["segments"][1]["target"]
 
     fresh["target"] = "第二版"
-    written, stale = save_segments("d.md", "zh-TW", [fresh], expect={fresh["id"]: "第一版"})
-    assert (written, stale) == (1, [])
+    written, stale, refused = save_segments("d.md", "zh-TW", [fresh], expect={fresh["id"]: "第一版"})
+    assert (written, stale, refused) == (1, [], [])
     assert load_doc("d.md", "zh-TW")["segments"][0]["target"] == "第二版"
 
 
@@ -527,7 +529,7 @@ def test_two_savers_whose_reads_both_land_first_do_not_both_win(tmp_path, monkey
     nothing about the code under test is arranged for the test.
     """
     _project(tmp_path, monkeypatch, doc=b"A sentence.\n", name="d.md")
-    doc, _r, _j = do_extract("d.md", "zh-TW", CFG)
+    doc, _r, _j, _d = do_extract("d.md", "zh-TW", CFG)
     seg_id = doc["segments"][0]["id"]
     do_apply("d.md", "zh-TW", CFG, {seg_id: "原文。"}, origin="human")
     token = target_token("原文。")
@@ -569,7 +571,7 @@ def test_two_savers_whose_reads_both_land_first_do_not_both_win(tmp_path, monkey
 def _one(tmp_path, monkeypatch, doc=b"A sentence.\n\nAnother sentence.\n"):
     """A tracked two-segment document, and its ids."""
     _project(tmp_path, monkeypatch, doc=doc, name="d.md")
-    built, _r, _j = do_extract("d.md", "zh-TW", CFG)
+    built, _r, _j, _d = do_extract("d.md", "zh-TW", CFG)
     return [s["id"] for s in built["segments"]]
 
 
@@ -650,23 +652,31 @@ def test_the_narrow_writer_refuses_a_model_write_over_a_person_too(tmp_path, mon
     do_apply("d.md", "zh-TW", CFG, {ids[0]: "審校者的字。"}, origin="human")
 
     seg = dict(_stored(ids[0]), target="模型的字。", origin="llm:draft")
-    written, stale = save_segments("d.md", "zh-TW", [seg])
-    assert (written, stale) == (0, [ids[0]])
+    written, stale, refused = save_segments("d.md", "zh-TW", [seg])
+    # `refused`, not `stale`: the two answers look alike from the caller's side
+    # and mean different things, and `do_apply` projects `stale` into the
+    # `conflicts` the contract defines as a *lost-update* answer.
+    assert (written, stale, refused) == (0, [], [ids[0]])
     assert _stored(ids[0])["target"] == "審校者的字。"
 
-    written, stale = save_segments("d.md", "zh-TW", [seg], over_human=True)
-    assert (written, stale) == (1, [])
+    written, stale, refused = save_segments("d.md", "zh-TW", [seg], over_human=True)
+    assert (written, stale, refused) == (1, [], [])
     assert _stored(ids[0])["target"] == "模型的字。"
 
 
-def test_the_origin_compared_is_the_one_on_disk_when_the_write_happens(
+def test_a_human_write_that_lands_first_is_seen_by_the_run_that_follows(
         tmp_path, monkeypatch):
-    """Inside the write, not against a snapshot read earlier.
+    """Sequential, and named that way now.
 
-    The same lesson the lost-update token was rewritten for on 2026-08-14: a
-    check against a value read in an earlier transaction is not a check when the
-    thing it guards is a concurrent write. Here the reviewer's save lands while
-    the run is between its own read and its own write.
+    **This test used to claim more than it proved.** It was called
+    `test_the_origin_compared_is_the_one_on_disk_when_the_write_happens` and its
+    docstring said the reviewer's save landed *while the run was between its own
+    read and its own write* — but the event it waits on is set after the
+    reviewer's `save_targets` has already returned, so the two calls are strictly
+    sequential and it passes against any implementation that reads the origin at
+    all. Found by an adversarial pass on 2026-08-15. The property it claimed is
+    asserted by `test_the_guard_reads_inside_the_write_transaction` below; this
+    one keeps the case it does cover, which is worth covering.
     """
     ids = _one(tmp_path, monkeypatch)
     save_targets("d.md", "zh-TW", {ids[0]: "模型的初稿。"}, "llm:draft")
@@ -708,17 +718,60 @@ def test_save_review_touches_the_review_field_and_nothing_else(tmp_path, monkeyp
 
     A hold is placed on a segment somebody is in the middle of reviewing, so a
     writer that carried a target along would be a way for the hold control to
-    undo an edit made since the page was drawn.
+    undo an edit made since the page was drawn. The contract states the
+    narrowness as a promise — "updates the `review` field … and nothing else —
+    not `target`, not `status`".
+
+    **Asserted against the raw row, not through `load_doc`.** The first version
+    of this test read its oracle through `store._segment`, which *recomputes*
+    `status` from the target on every read — so a `save_review` that corrupted
+    the `status` column passed this test and the entire suite. Found by an
+    adversarial pass on 2026-08-16, which is the same class of blindness as a
+    test whose expected value is produced by the code under test.
     """
     ids = _one(tmp_path, monkeypatch)
     do_apply("d.md", "zh-TW", CFG, {ids[0]: "審校者的字。"}, origin="human")
-    before = dict(_stored(ids[0]))
+    raw_before = statedb.segments(tmp_path)
+    assert raw_before[0]["status"] == "translated", "the fixture must have a status to lose"
 
     assert save_review("d.md", "zh-TW", {ids[0]: "held"}) == 1
-    after = _stored(ids[0])
-    assert after["review"] == "held"
-    assert {k: v for k, v in after.items() if k != "review"} == {
-        k: v for k, v in before.items() if k != "review"}
+    raw_after = statedb.segments(tmp_path)
+    assert raw_after[0]["review"] == "held"
+    for before, after in zip(raw_before, raw_after):
+        assert {k: v for k, v in after.items() if k != "review"} == {
+            k: v for k, v in before.items() if k != "review"}
+
+
+def test_save_review_refuses_a_value_outside_the_closed_vocabulary(tmp_path, monkeypatch):
+    """The contract advertises the set as a client-visible guarantee, so
+    something has to enforce it.
+
+    `checks.REVIEW_VALUES` existed for a day with no reader at all: nothing
+    validated, `save_review` documented the check as "the caller's", and no
+    caller performed one. Enforcing it at the single writer is what makes the
+    guarantee true for a caller added later.
+    """
+    ids = _one(tmp_path, monkeypatch)
+    do_apply("d.md", "zh-TW", CFG, {ids[0]: "字。"}, origin="human")
+    for bad in ("approved", "HELD", 1, ["held"]):
+        with pytest.raises(ValueError):
+            save_review("d.md", "zh-TW", {ids[0]: bad})
+    assert statedb.segments(tmp_path)[0].get("review") is None
+
+
+def test_a_review_write_that_changes_nothing_is_not_counted(tmp_path, monkeypatch):
+    """`applied` is the only feedback `lx hold` / `lx unhold` give.
+
+    It counted every row the statement touched, so `lx unhold` on a segment that
+    was never held printed "released 1 segment(s)" — telling a reviewer checking
+    they had unheld the right id that they had, either way.
+    """
+    ids = _one(tmp_path, monkeypatch)
+    do_apply("d.md", "zh-TW", CFG, {ids[0]: "字。"}, origin="human")
+    assert save_review("d.md", "zh-TW", {ids[0]: None}) == 0
+    assert save_review("d.md", "zh-TW", {ids[0]: "held"}) == 1
+    assert save_review("d.md", "zh-TW", {ids[0]: "held"}) == 0
+    assert save_review("d.md", "zh-TW", {ids[0]: None}) == 1
 
 
 def test_lifting_a_hold_removes_the_key_rather_than_storing_a_null(tmp_path, monkeypatch):
@@ -758,37 +811,41 @@ def test_a_save_does_not_release_a_hold(tmp_path, monkeypatch):
 # --- check stops writing from a snapshot it read earlier ---------------------
 
 
-def test_check_does_not_carry_a_stale_snapshot_back_over_a_newer_target(
-        tmp_path, monkeypatch):
-    """The third writer none of the seventeen divergences names.
+def test_check_writes_one_field_and_carries_nothing_else_back(tmp_path, monkeypatch):
+    """The third writer none of the seventeen divergences names, closed twice.
 
-    `do_check` read the document, walked every segment attaching `issues`, and
-    wrote the **whole snapshot** back — `target`, `status` and `origin` included.
-    A target the workbench saved, or a batch a running job banked, between that
-    read and that write was silently replaced by the copy this call had loaded
-    minutes earlier. The compare-and-swap `save_segments` already had is the
-    whole fix; a row that moved is skipped, and skipping it loses nothing,
-    because the issues computed here describe wording that is no longer there.
+    `do_check` read the document, attached `issues` to every segment, and wrote
+    **all of them** back — `target`, `status` and `origin` included — so anything
+    saved between that read and that write was silently replaced by the copy this
+    call had loaded. `/api/doc` calls `do_check` on every request, which is what
+    made the window ordinary rather than rare.
 
-    The gate is hung on `save_segments` from outside, so nothing about the code
-    under test is arranged for the test. Two events rather than one barrier,
-    which is not a style choice: a barrier releases both threads and leaves the
-    order of the two writes to the scheduler, so the first draft of this test
-    passed one run in three against a build with the fix removed.
+    The first fix added the compare-and-swap `save_segments` already had, and an
+    adversarial pass showed it insufficient the same day: that swap compares the
+    `target` **column**, while the statement writes the whole `body` blob, where
+    `origin`, `review` and `issues` live. So a hold placed while a check was
+    running was rolled back — with `applied: 1` reported to the client that had
+    placed it — and an `origin` rolled from `human` back to `tm`, which is how a
+    segment stops being covered by origin precedence at all.
+
+    All three fields are asserted here, and the `review` and `origin` halves are
+    the ones the first fix passed while still being wrong. The gate is hung on
+    the writer from outside; two events rather than a barrier, because a barrier
+    releases both threads and leaves the order to the scheduler.
     """
     ids = _one(tmp_path, monkeypatch)
     do_apply("d.md", "zh-TW", CFG, {ids[0]: "第一版。", ids[1]: "另一句。"}, origin="human")
+    save_targets("d.md", "zh-TW", {ids[0]: "第一版。"}, "tm")
 
-    real = cli_mod.save_segments
+    real = cli_mod.save_issues
     at_the_write, claimed = threading.Event(), threading.Event()
 
     def gated(*a, **kw):
-        # `do_check` has read the document and is about to write it back.
         at_the_write.set()
         assert claimed.wait(timeout=20), "the reviewer never wrote"
         return real(*a, **kw)
 
-    monkeypatch.setattr(cli_mod, "save_segments", gated)
+    monkeypatch.setattr(cli_mod, "save_issues", gated)
     done = {}
 
     def checker():
@@ -796,18 +853,107 @@ def test_check_does_not_carry_a_stale_snapshot_back_over_a_newer_target(
 
     def reviewer():
         assert at_the_write.wait(timeout=20), "do_check never reached its write"
+        # Everything a reviewer can do to a segment while a check is in flight.
         save_targets("d.md", "zh-TW", {ids[0]: "第二版。"}, "human")
+        save_review("d.md", "zh-TW", {ids[1]: "held"})
         claimed.set()
 
     threads = [threading.Thread(target=checker), threading.Thread(target=reviewer)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(timeout=30)
-    assert not any(t.is_alive() for t in threads), "a writer never returned"
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join(timeout=30)
+    assert not any(th.is_alive() for th in threads), "a writer never returned"
 
     assert done["check"] == 2, "the check itself must still have run"
-    assert _stored(ids[0])["target"] == "第二版。", "check carried a stale target back"
-    # And the segment nobody raced is written as normal, so the fix is not
-    # "stop persisting".
-    assert _stored(ids[1])["target"] == "另一句。"
+    after = {s["id"]: s for s in load_doc("d.md", "zh-TW")["segments"]}
+    assert after[ids[0]]["target"] == "第二版。", "check carried a stale target back"
+    assert after[ids[0]]["origin"] == "human", "check rolled the origin back"
+    assert after[ids[1]]["review"] == "held", "check lifted a hold"
+
+
+def test_check_writes_no_column_but_the_body(tmp_path, monkeypatch):
+    """The columns `save_issues` must not touch, read raw.
+
+    Its sibling above reads through `load_doc`, and `store._segment` recomputes
+    `status` from the target on every read — so a writer that corrupted the
+    `status` **column** would be invisible there. Measured: mutating
+    `save_issues` to write `status='pending'` left the whole suite green until
+    this test existed. `tests/statedb.py` reads the columns verbatim, which is
+    the only oracle that can see them.
+    """
+    ids = _one(tmp_path, monkeypatch)
+    do_apply("d.md", "zh-TW", CFG, {ids[0]: "字。⟦9⟧"}, origin="human")
+    before = statedb.segments(tmp_path)
+    assert before[0]["status"] == "translated", "the fixture must have a status to lose"
+
+    report, _doc = cli_mod.do_check("d.md", "zh-TW", CFG)
+    # Two: the segment given a bad target fails `tags`, and its neighbour has no
+    # target at all and fails `missing`.
+    assert report["errors"] == 2, "the check must have had something to record"
+    after = statedb.segments(tmp_path)
+    for was, now in zip(before, after):
+        assert {k: v for k, v in now.items() if k != "issues"} == {
+            k: v for k, v in was.items() if k != "issues"}
+    assert after[0]["issues"], "the issues themselves must still have been written"
+
+
+
+def test_the_guard_reads_inside_the_write_transaction(tmp_path, monkeypatch):
+    """Every read-then-write in this module holds the write lock across both.
+
+    Python's `sqlite3` defers `BEGIN` to the first statement that *writes*, so a
+    `SELECT` inside `with conn:` runs in autocommit. Every guard here is a
+    read-then-write — the origin-precedence check, `save_targets`' body read,
+    `save_review`'s, `save_issues`' — so without an explicit `BEGIN IMMEDIATE`
+    the check and the write it guards are two transactions with a window between
+    them. An adversarial pass on 2026-08-16 drove a second `lx` process through
+    that window, overwrote a reviewer's sentence, and had the run report
+    `refused: []`; the docstrings here and `docs/decisions.md` had both asserted
+    the opposite.
+
+    Asserted white-box, on `conn.in_transaction`, because that is the property: a
+    black-box test cannot tell "the window is closed" from "nothing happened to
+    hit it". The connection is wrapped from outside, so nothing about the code
+    under test is arranged for the test.
+    """
+    ids = _one(tmp_path, monkeypatch)
+    save_targets("d.md", "zh-TW", {ids[0]: "審校者的字。"}, "human")
+    seen = []
+    real_connect = store_mod._connect
+
+    class _Watch:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def execute(self, sql, *a):
+            seen.append((sql.strip().split(None, 1)[0].upper(), self._conn.in_transaction))
+            return self._conn.execute(sql, *a)
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+        def __enter__(self):
+            return self._conn.__enter__()
+
+        def __exit__(self, *exc):
+            return self._conn.__exit__(*exc)
+
+    # Built before the connection is wrapped: `_stored` reads the document, and
+    # those reads are the test's rather than the writer's.
+    seg = dict(_stored(ids[0]), origin="llm:draft")
+    monkeypatch.setattr(store_mod, "_connect",
+                        lambda *a, **kw: _Watch(real_connect(*a, **kw)))
+
+    for name, call in (
+            ("save_targets",
+             lambda: save_targets("d.md", "zh-TW", {ids[0]: "模型。"}, "llm:draft")),
+            ("save_segments", lambda: save_segments("d.md", "zh-TW", [seg])),
+            ("save_review", lambda: save_review("d.md", "zh-TW", {ids[0]: "held"})),
+            ("save_issues", lambda: save_issues("d.md", "zh-TW", {ids[0]: ["x: y"]}))):
+        seen.clear()
+        call()
+        reads = [(verb, in_tx) for verb, in_tx in seen if verb == "SELECT"]
+        assert reads, f"{name} made no read to guard"
+        assert all(in_tx for _verb, in_tx in reads), (
+            f"{name}: a guard read ran outside the write transaction: {seen}")

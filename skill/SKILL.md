@@ -68,6 +68,7 @@ If `check` reports `tags` errors repeatedly on the same segment, the placeholder
 | `glossary` | configurable | agreed term rendered inconsistently, or a forbidden variant used |
 | `numbers` | error | a figure in the source missing from the target |
 | `missing` | error | segment never translated |
+| `held` | warn | a reviewer is finishing this one; no queue selects it |
 | `lexicon` | error/warn | a term the target locale writes differently |
 | `dnt` | warn | protected brand or product name altered |
 | `untranslated` | warn | source copied through verbatim |

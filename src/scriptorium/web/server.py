@@ -23,6 +23,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from .. import __version__
 from ..cli import (
     UnsafePath,
+    UnusableTarget,
     confined_path,
     default_output,
     do_apply,
@@ -492,7 +493,7 @@ class _Handler(BaseHTTPRequestHandler):
             lang = language_tag(lang)
         cfg = load_config()
         if path == "/api/extract":
-            doc, reused, rejected = do_extract(src, lang, cfg, body.get("tone"),
+            doc, reused, rejected, _dropped = do_extract(src, lang, cfg, body.get("tone"),
                                                body.get("reset", False))
             return {"segments": len(doc["segments"]), "reused": reused, "rejected": rejected}
         if path == "/api/save":
@@ -500,13 +501,22 @@ class _Handler(BaseHTTPRequestHandler):
             # writes exactly as it did. An empty target raises `EmptyTarget`,
             # which reaches the 400 below like every other refusal — the rule
             # lives in `do_apply` so `lx apply` cannot walk around it.
-            applied, unknown, stored, conflicts = do_apply(
+            # The fifth element is `do_apply`'s origin-precedence refusals, and
+            # it is deliberately not projected: this endpoint hardcodes
+            # `origin="human"`, so it is always empty. An endpoint that ever
+            # passes another origin has to add a key here, and that is a version
+            # decision rather than a line of plumbing.
+            applied, unknown, stored, conflicts, _refused = do_apply(
                 src, lang, cfg, body["targets"], origin="human", base=body.get("base"))
             return {"applied": applied, "unknown": unknown,
                     "stored": stored, "conflicts": conflicts}
         if path == "/api/hold":
-            applied, unknown = do_hold(src, lang, cfg, body.get("ids") or [],
-                                       held=bool(body.get("held", True)))
+            # Shapes are checked in `do_hold`, not here — a `bool()` at the
+            # endpoint would turn `held: null` into a *release* and `held:
+            # "false"` into a hold, which is the silent-coercion defect
+            # `do_apply` refuses a mis-shaped `base` to avoid.
+            applied, unknown = do_hold(src, lang, cfg, body.get("ids"),
+                                       held=body.get("held", True))
             return {"applied": applied, "unknown": unknown}
         if path == "/api/check":
             report, _ = do_check(src, lang, cfg)
@@ -621,8 +631,13 @@ def _job_status(job_id):
         state = _JOBS.get(job_id)
         if state:
             return dict(state)
+        # Compared against the spelling the minter produces, not against the
+        # pattern: `job01` and `job0000001` match `job(\d+)` and were never
+        # minted, so a client asking for one was told a run of theirs had
+        # finished. The distinction is the entire purpose of the mark.
         found = _JOB_ID_RE.match(str(job_id or ""))
-        if found and 0 < int(found.group(1)) <= _JOB_SEQ:
+        if (found and str(job_id) == f"job{int(found.group(1))}"
+                and 0 < int(found.group(1)) <= _JOB_SEQ):
             return {"error": f"job {job_id} has finished and its record has been "
                              f"dropped — only the most recent {_JOB_KEEP} are kept, "
                              f"and no job survives a restart. Re-read the document."}
@@ -642,7 +657,20 @@ def _translate_job(src, lang, cfg, body):
     """
     doc = load_doc(src, lang)
     mode = body.get("mode", "draft")
-    segments = do_select(doc, cfg, mode, ids=body.get("ids"))
+    # Validated, not coerced. `bool("false")` is `True`, and this is the
+    # opt-out for a rule whose failure direction is destructive and silent —
+    # a form or a `URLSearchParams` body sends the string. `do_apply` sets
+    # the precedent for a mis-shaped field on this surface: refuse it.
+    over_human = body.get("overwrite_human", False)
+    if not isinstance(over_human, bool):
+        raise UnusableTarget(
+            f"`overwrite_human` is true or false, and this request sent "
+            f"{type(over_human).__name__}. It turns off the rule that keeps a "
+            f"model run from replacing a person's wording, so it is not "
+            f"guessed at: the string \"false\" would switch the guard off.")
+    # Selection is given the same flag as the write, or the run pays a model
+    # for every segment the write will refuse. See `cli._model_writable`.
+    segments = do_select(doc, cfg, mode, ids=body.get("ids"), over_human=over_human)
     # Resolved once, here, and reported back: the only other place the answer
     # appears is a `log` line the contract forbids parsing, so a reviewer had no
     # way to tell which model produced the wording in front of them. One call to
@@ -684,7 +712,7 @@ def _translate_job(src, lang, cfg, body):
                 src, lang, cfg, segments, mode, provider=body.get("provider"),
                 model=body.get("model"), batch=body.get("batch"),
                 concurrency=body.get("concurrency"), progress=log, on_batch=counted,
-                over_human=bool(body.get("overwrite_human")))
+                over_human=over_human)
             with _JOB_LOCK:
                 state["failures"] = failures
                 applied = state["applied"]

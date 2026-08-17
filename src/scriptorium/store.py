@@ -507,7 +507,7 @@ def prior_doc(src, lang):
 
 
 def prior_targets(src, lang):
-    """``{key: (target, origin)}`` for what this document already holds.
+    """``{key: (target, origin, review)}`` for what this document already holds.
 
     The keys are :func:`tm_key`, not the content hash alone, because the
     collision the context axis removes is a within-document one first: a sentence
@@ -532,6 +532,14 @@ def prior_targets(src, lang):
     Why the register is read here rather than passed in: it is the one argument a
     caller could get wrong in a way nothing would report, and both callers would
     be reading it out of the row this function is already opening.
+
+    ``review`` travels with the target because a hold is about *this wording*,
+    not about a position in the file. Carrying it here rather than in
+    `cli.do_extract` is what makes a hold survive a re-extract — before
+    2026-08-15 it did not, so `lx run`, whose first statement is `do_extract`,
+    lifted every hold in the document before it did anything else and said
+    nothing. A hold whose target is *refused* by `translate.accept` is dropped
+    with the target, which is right: there is then no wording left to hold.
     """
     conn = _connect(create=False)
     if conn is None:
@@ -552,7 +560,8 @@ def prior_targets(src, lang):
             if not content_hash:
                 continue
             key = tm_key(content_hash, context, SEGMENTATION_VERSION, variant, tone)
-            out[key] = (target, json.loads(body).get("origin") or "carryover")
+            held = json.loads(body)
+            out[key] = (target, held.get("origin") or "carryover", held.get("review"))
         return out
     finally:
         conn.close()
@@ -605,23 +614,61 @@ def is_model_origin(origin):
     return isinstance(origin, str) and origin.startswith(_MODEL_PREFIX)
 
 
+def _begin_write(conn):
+    """Take the write lock **before** the first read of a read-then-write.
+
+    Python's ``sqlite3`` defers ``BEGIN`` to the first statement that writes, so
+    a ``SELECT`` inside ``with conn:`` runs in autocommit and sees a snapshot
+    nothing is holding. Every guard in this module is a read-then-write — the
+    origin-precedence check, :func:`save_targets`' body read,
+    :func:`save_review`'s — so without this the check and the write it guards
+    are two transactions with a window between them, which is exactly the defect
+    the compare-and-swap closes one level down.
+
+    Measured 2026-08-15 by an adversarial pass, with ``conn.in_transaction``
+    instrumented: the whole of :func:`_written_by_hand` ran outside a
+    transaction, and a second `lx` process writing a human target inside that
+    window had it overwritten while the run reported ``refused: []``. The
+    docstrings here, and `docs/decisions.md`, had asserted the opposite.
+
+    ``IMMEDIATE`` rather than the default deferred begin: a deferred reader that
+    later upgrades to a writer raises ``SQLITE_BUSY_SNAPSHOT`` under WAL, which
+    no caller here expects and which ``BUSY_TIMEOUT`` does not retry. Taking the
+    RESERVED lock up front is what that timeout is for.
+    """
+    conn.execute("BEGIN IMMEDIATE")
+
+
 def _written_by_hand(conn, did, lang, ids):
     """Which of these ids hold a person's own words. Read inside the write.
 
     Inside, and not before, for the reason the lost-update token was rewritten on
     2026-08-14: a check against a snapshot read in an earlier transaction is not
-    a check at all when the thing it guards is a concurrent write. The read is
-    also *narrow* — the caller passes only the ids whose incoming origin is
-    `llm:*`, which is none of them on the two paths that write a person's or an
-    agent's words, so `lx apply` and `lx check` pay nothing for this at all.
+    a check at all when the thing it guards is a concurrent write. That is true
+    only because :func:`_begin_write` runs first — read its docstring before
+    changing anything here.
+
+    One statement per chunk rather than one per id. The per-id form was measured
+    at **28% of the write and 10% of a whole `lx check`** on a 2000-segment
+    document, which is the ordinary case: `do_check` writes each row's own origin
+    back, so after a draft pass *every* id is `llm:*` and enters this read. The
+    docstring here used to claim `lx check` "pays nothing for this at all"; that
+    was true of `lx apply`, which writes `human` or `agent` and so passes an
+    empty list, and false of the command that runs on every `/api/doc` request.
+
+    Chunked at 500 because SQLite's default host-parameter limit is 999 and a
+    novel has thousands of segments.
     """
     out = set()
-    for seg_id in ids:
-        row = conn.execute(
-            "SELECT body FROM segments WHERE doc_id=? AND lang=? AND seg_id=?",
-            (did, lang, seg_id)).fetchone()
-        if row is not None and json.loads(row[0]).get("origin") == HUMAN:
-            out.add(seg_id)
+    ids = list(ids)
+    for start in range(0, len(ids), 500):
+        chunk = ids[start:start + 500]
+        marks = ",".join("?" * len(chunk))
+        for seg_id, body in conn.execute(
+                f"SELECT seg_id, body FROM segments WHERE doc_id=? AND lang=? "
+                f"AND seg_id IN ({marks})", (did, lang, *chunk)):
+            if json.loads(body).get("origin") == HUMAN:
+                out.add(seg_id)
     return out
 
 
@@ -636,6 +683,13 @@ def save_segments(src, lang, segments, expect=None, over_human=False):
     A segment whose id is not in the stored document is skipped rather than
     inserted: an id that was never extracted is a caller's mistake, and inserting
     it would put a segment in the document with no node referring to it.
+
+    ``stale`` and ``refused`` are separate lists and mean different things: the
+    first lost a compare-and-swap, the second was left alone because a person had
+    written it. Folding the second into the first was the first spelling of this,
+    and it made `/api/save`'s ``conflicts`` — documented as "refused because its
+    ``base`` token did not match" — quietly mean two things the day any endpoint
+    passed an origin other than ``human``.
 
     ``expect`` is ``{seg_id: previous_target}`` and makes the write a
     **compare-and-swap**: a named id is written only if the row still holds that
@@ -657,26 +711,30 @@ def save_segments(src, lang, segments, expect=None, over_human=False):
     incoming one is ``llm:*``, unless ``over_human``. It lands in ``stale`` with
     the ids that lost a compare-and-swap, because from the caller's side the two
     are the same answer — this write did not happen and the row holds something
-    else. `lx apply` and `lx check` never trip it: one writes ``human`` or
-    ``agent``, and the other writes each row's own origin back unchanged. What it
-    does catch on `lx check`'s path is a *stale* one — a snapshot that still says
-    ``llm:draft`` for a row a reviewer has since claimed.
+    else. `lx check` writes each row's own origin back unchanged, so it trips
+    this only on a *stale* one — a snapshot that still says ``llm:draft`` for a
+    row a reviewer has since claimed, which is the case it should trip on.
+    `lx apply` trips it whenever ``--origin`` names an ``llm:*`` value, which it
+    accepts as free text; an earlier version of this docstring said `lx apply`
+    could not, which was a claim about its *default* origin and not about the
+    command.
     """
     rows = [(*_seg_row(0, seg)[2:], doc_id(src), lang, seg["id"]) for seg in segments]
     if not rows:
-        return 0, []
+        return 0, [], []
     expect = expect or {}
     conn = _connect()
     try:
         with conn:
-            written, stale = 0, []
+            _begin_write(conn)
+            written, stale, refused = 0, [], []
             guard = () if over_human else _written_by_hand(
                 conn, doc_id(src), lang,
                 [s["id"] for s in segments if is_model_origin(s.get("origin"))])
             for row, seg in zip(rows, segments):
                 seg_id = seg["id"]
                 if seg_id in guard:
-                    stale.append(seg_id)
+                    refused.append(seg_id)
                     continue
                 if seg_id in expect:
                     n = conn.execute(
@@ -690,7 +748,7 @@ def save_segments(src, lang, segments, expect=None, over_human=False):
                         "UPDATE segments SET content_hash=?, context=?, variant=?, status=?, "
                         "target=?, body=? WHERE doc_id=? AND lang=? AND seg_id=?", row).rowcount
                 written += n
-        return written, stale
+        return written, stale, refused
     finally:
         conn.close()
 
@@ -732,6 +790,7 @@ def save_targets(src, lang, targets, origin, over_human=False):
     conn = _connect()
     try:
         with conn:
+            _begin_write(conn)
             written, refused = 0, []
             guarded = is_model_origin(origin) and not over_human
             for seg_id, text in targets.items():
@@ -757,6 +816,59 @@ def save_targets(src, lang, targets, origin, over_human=False):
         conn.close()
 
 
+def save_issues(src, lang, issues, expect=None):
+    """Write each segment's ``issues`` list and nothing else. ``written``.
+
+    The narrow write `lx check` needs, and narrow for the reason
+    :func:`save_review` is: :func:`save_segments` replaces the whole ``body``
+    blob, and ``origin``, ``review`` and ``issues`` all live inside it. A
+    compare-and-swap on the ``target`` **column** — which is what `do_check` used
+    on 2026-08-16, the first attempt at this — leaves every other field writing
+    unconditionally from a snapshot read earlier. Measured by an adversarial pass
+    the same day: `POST /api/hold` answered ``applied: 1``, a `POST /api/check`
+    already in flight put the pre-hold ``review`` back, and both clients were
+    told they had won. The same window rolled an ``origin`` back from ``human``
+    to ``tm``, which is how a segment silently stops being covered by the
+    precedence guard.
+
+    ``issues[seg_id]`` is the list to store, or a falsy value to remove the key —
+    removal rather than an empty list, so "checked and clean" and "never checked"
+    are one row, the rule :func:`save_review` follows for ``review``.
+
+    ``expect`` is ``{seg_id: target_at_read}``. An id whose stored target has
+    moved since is skipped rather than written: the issues computed for it
+    describe wording that is no longer there, and the next check recomputes them
+    against what is. It costs nothing — the target is read in the same statement
+    as the body.
+    """
+    expect = expect or {}
+    conn = _connect()
+    try:
+        with conn:
+            _begin_write(conn)
+            written = 0
+            for seg_id, found in issues.items():
+                row = conn.execute(
+                    "SELECT target, body FROM segments WHERE doc_id=? AND lang=? "
+                    "AND seg_id=?", (doc_id(src), lang, seg_id)).fetchone()
+                if row is None:
+                    continue
+                if seg_id in expect and row[0] != expect[seg_id]:
+                    continue
+                body = json.loads(row[1])
+                if found:
+                    body["issues"] = found
+                else:
+                    body.pop("issues", None)
+                written += conn.execute(
+                    "UPDATE segments SET body=? WHERE doc_id=? AND lang=? AND seg_id=?",
+                    (json.dumps(body, ensure_ascii=False),
+                     doc_id(src), lang, seg_id)).rowcount
+        return written
+    finally:
+        conn.close()
+
+
 def save_review(src, lang, review):
     """Set or clear the review flag on these ids, touching nothing else. ``written``.
 
@@ -770,13 +882,23 @@ def save_review(src, lang, review):
 
     ``review[seg_id]`` is the value to store, or ``None`` to remove the key
     entirely — removal rather than a stored null, so a segment that was never
-    held and one whose hold was lifted are one row and not two. The vocabulary is
-    the caller's to check; this writes what it is given, the way
-    :func:`save_targets` trusts its ``origin``.
+    held and one whose hold was lifted are one row and not two.
+
+    **The vocabulary is enforced here**, against :data:`checks.REVIEW_VALUES`,
+    and that is a change of mind: this docstring used to say the check was the
+    caller's, which named a check no caller performed while the contract
+    advertised the closed set as a client-visible guarantee. Enforcing it at the
+    one writer is what makes the guarantee true for a caller added later.
+
+    ``written`` counts the rows whose value actually **changed**. A no-op is not
+    reported as a release: `lx unhold` on a segment that was never held used to
+    print "released 1 segment(s)", which is the only feedback that command gives.
     """
+    from .checks import REVIEW_VALUES
     conn = _connect()
     try:
         with conn:
+            _begin_write(conn)
             written = 0
             for seg_id, value in review.items():
                 row = conn.execute(
@@ -785,6 +907,12 @@ def save_review(src, lang, review):
                 if row is None:
                     continue
                 body = json.loads(row[0])
+                if value is not None and value not in REVIEW_VALUES:
+                    raise ValueError(
+                        f"{value!r} is not a review state. The vocabulary is "
+                        f"closed: {', '.join(REVIEW_VALUES)}, or None to clear.")
+                if body.get("review") == value:
+                    continue
                 if value is None:
                     body.pop("review", None)
                 else:

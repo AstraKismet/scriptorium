@@ -626,8 +626,17 @@ def translate_segments(segments, doc, cfg, provider_name=None, mode="draft",
     return results, failures
 
 
-def failing_segments(doc, cfg):
+def failing_segments(doc, cfg, include_held=False):
     """Segments a fresh check would reject — the repair pass works on these.
+
+    ``include_held`` is for **reporting only** and nothing that selects work may
+    pass it. `cmd_repair` uses it to name the failing segments it declined to
+    select: `lx check` walks every segment and so counts a held segment's errors
+    in its exit code, while this function excludes them, so the two commands
+    answered "is anything failing?" differently and one of them said "nothing
+    failing" while the other exited 1. That is the class of divergence
+    `cli.do_select` was unified to remove on the same day, arriving by another
+    route.
 
     Held segments are excluded through the one shared helper, and this is the
     predicate that makes the helper worth having: this function is *status-blind*
@@ -639,7 +648,7 @@ def failing_segments(doc, cfg):
     """
     glossary, dnt = load_glossary(cfg), load_dnt(cfg)
     out = []
-    for seg in workable(doc["segments"]):
+    for seg in (doc["segments"] if include_held else workable(doc["segments"])):
         issues = check_segment(seg, doc["lang"], cfg, glossary, dnt)
         errors = [i for i in issues if i["severity"] == "error"]
         if errors:

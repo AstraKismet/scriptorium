@@ -382,7 +382,7 @@ def test_every_endpoint_returns_exactly_the_keys_the_contract_documents(base, pr
 def test_an_unknown_job_id_is_a_200_with_one_key(base, project):
     """The contract calls this out as a divergence, so it is pinned as it is.
 
-    Not `404`, not `400`, and not the seven-key shape — a body carrying `error`
+    Not `404`, not `400`, and not the eight-key shape — a body carrying `error`
     alone. A client that switched on the status code would read it as success.
     """
     code, body = _request(base, "POST", "/api/job", {"id": "job999"})

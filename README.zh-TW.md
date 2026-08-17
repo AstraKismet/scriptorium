@@ -122,6 +122,8 @@ CI 上有一組語料庫在把關，裡面收了 28 份刻意刁難的輸入，L
 | `lx todo SRC --lang L` | 以 JSON 吐出待譯 segment，供 agent 翻譯 |
 | `lx terms SRC --lang L` | 從原文挑出候選術語、開成詞彙表的列（加 `--append` 直接寫進去） |
 | `lx apply SRC --lang L --file F` | 收回譯文，自動正規化 |
+| `lx hold SRC --lang L --ids A,B` | 把 segment 排除在所有挑工作的佇列之外 |
+| `lx unhold SRC --lang L --ids A,B` | 讓被保留的 segment 回到佇列 |
 | `lx translate SRC --lang L` | 用設定好的模型翻譯（`--mode draft\|polish\|repair`） |
 | `lx check SRC --lang L` | 驗證；有 error 時以 1 結束（`--json` 可拿到完整報告） |
 | `lx repair SRC --lang L` | 只重譯失敗的 segment |
@@ -188,6 +190,7 @@ lx terms novel.md --lang zh-TW --append     # 沒收錄過的直接補進詞彙�
 | `untranslated` | warn | 原文整段照抄 |
 | `punct` / `spacing` | warn | 無法自動修好的標點寬度與中英文交界問題 |
 | `length` | warn | 長度比預期短得多或長得多 |
+| `held` | warn | 審校者正在自己收尾的段落；任何佇列都不會選到它 |
 
 每個專案都可以自行關掉任何一條，寫成 `"checks_disabled": ["length"]` 即可。
 

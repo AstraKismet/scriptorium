@@ -198,10 +198,15 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    the only other place that answer appeared was a log line the contract forbids
    parsing. The run itself moved with the selection: `cli.do_translate` is the
    one copy of it, so the per-batch write the two surfaces had each assembled
-   cannot drift apart again. (22) and (23) were appended the same day, both
+   cannot drift apart again. (22) and (23) were appended on 2026-08-16, both
    closed: `POST /api/check` had carried a whole stale snapshot back over newer
-   text, and nothing on the surface could say "leave this segment to me". `contract_version` moved to **2**
-   the same day, once, carrying five items: the `candidates` → `untracked` rename,
+   text, and nothing on the surface could say "leave this segment to me". (24)
+   and (25) were appended beside them and are **open** — `POST /api/extract`
+   deletes a stored target the acceptance path refuses, and two segments whose
+   source text is byte-identical collapse onto one carryover entry and launder
+   each other's `origin`. Read the second before relying on origin precedence:
+   it is the path that rewrites the field the rule compares.
+   `contract_version` moved to **2** on 2026-08-14, once, carrying five items: the `candidates` → `untracked` rename,
    the identity label normalized, `status` derived from the target text, an empty
    target refused, and a lost-update token. It closed (13)'s wire half, (14), (17)
    for a client that opts in, (19) and (21), and decided (18) and (20). Every
@@ -283,7 +288,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 1114 tests; no network (one is POSIX-only,
+python -m pytest -q                 # 1132 tests; no network (one is POSIX-only,
                                     #   one runs only where the filesystem folds case)
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
@@ -492,6 +497,21 @@ own.
   It singles out one of the three equal sources on purpose. An `agent` write is a
   peer's own words and is unguarded, as is a person over a person; what this stops
   is the *unattended* pass, which runs over whatever the queue hands it.
+
+  **Selection knows the rule too**, since 2026-08-16 and not before: `do_select`
+  drops what the write would refuse, from every branch except an explicitly named
+  `ids`. Without that the guard was the only line of defence and the queue could
+  not see it — `lx repair` paid a model for a segment it then refused and exited
+  0 with the error count unmoved, and `lx translate --mode polish` on a reviewed
+  novel selected the whole book and applied none of it. A rule enforced at the
+  write and invisible to the queue is a rule that costs money on every run.
+
+  The guard's read and its write share **one transaction**, and that needs saying
+  because it is not what the code looks like: Python's `sqlite3` defers `BEGIN`
+  to the first statement that *writes*, so every read-then-write in `store.py`
+  ran its read in autocommit until `store._begin_write` was added. A second `lx`
+  process drove a human target through that window and the run reported that it
+  had refused nothing.
 - **A hold is a `review` field with a closed vocabulary**, spelled `held`, with
   `lx hold` / `lx unhold` and `POST /api/hold`. It lives in the segment's `body`
   JSON the way `origin` does, so it cost no `SCHEMA_VERSION` and no

@@ -178,14 +178,14 @@ def test_tone_in_memory_key_keeps_two_registers_apart(tmp_path, monkeypatch):
     _project(tmp_path, monkeypatch, doc=LEAVING)
     (tmp_path / "novel.md").write_bytes(LEAVING)
 
-    doc, _reused, _rejected = do_extract("d.md", "zh-TW", CFG)
+    doc, _reused, _rejected, _dropped = do_extract("d.md", "zh-TW", CFG)
     do_apply("d.md", "zh-TW", CFG, {_only(doc)["id"]: AS_DOCUMENTATION})
     append_tm("zh-TW", tm_records(load_doc("d.md", "zh-TW"), load_tm("zh-TW")))
 
     # The documentation wording is not offered to the novel at all: not as a hit
     # that `accept` then refuses — it never reaches `accept`, because the key
     # does not match.
-    doc, reused, rejected = do_extract("novel.md", "zh-TW", CFG, tone="literary")
+    doc, reused, rejected, _dropped = do_extract("novel.md", "zh-TW", CFG, tone="literary")
     assert (reused, rejected) == (0, 0)
     assert _only(doc)["status"] == "pending"
 
@@ -244,10 +244,10 @@ def test_a_register_change_does_not_carry_the_old_wording_forward(tmp_path, monk
     `lx commit` banks all of it under the literary key.
     """
     _project(tmp_path, monkeypatch, doc=LEAVING)
-    doc, _reused, _rejected = do_extract("d.md", "zh-TW", CFG)
+    doc, _reused, _rejected, _dropped = do_extract("d.md", "zh-TW", CFG)
     do_apply("d.md", "zh-TW", CFG, {_only(doc)["id"]: AS_DOCUMENTATION})
 
-    doc, reused, rejected = do_extract("d.md", "zh-TW", CFG, tone="literary")
+    doc, reused, rejected, _dropped = do_extract("d.md", "zh-TW", CFG, tone="literary")
     assert (reused, rejected) == (0, 0)
     assert (doc["tone"], _only(doc)["status"]) == ("literary", "pending")
     assert tm_records(load_doc("d.md", "zh-TW"), load_tm("zh-TW")) == []
@@ -259,16 +259,16 @@ def test_the_register_is_frozen_on_the_document_and_a_later_extract_keeps_it(
     default. It was harmless while the register only reached the `Tone:` line;
     now it would take every carryover and every memory hit with it."""
     _project(tmp_path, monkeypatch, doc=LEAVING)
-    doc, _reused, _rejected = do_extract("d.md", "zh-TW", CFG, tone="literary")
+    doc, _reused, _rejected, _dropped = do_extract("d.md", "zh-TW", CFG, tone="literary")
     do_apply("d.md", "zh-TW", CFG, {_only(doc)["id"]: AS_PROSE})
 
-    doc, reused, rejected = do_extract("d.md", "zh-TW", CFG)
+    doc, reused, rejected, _dropped = do_extract("d.md", "zh-TW", CFG)
     assert (doc["tone"], reused, rejected) == ("literary", 1, 0)
     assert _only(doc)["target"] == AS_PROSE
 
     # `--reset` is the exception, and deliberately so: it does not read the state
     # file at all, because it has to work on one this build cannot read.
-    doc, _reused, _rejected = do_extract("d.md", "zh-TW", CFG, reset=True)
+    doc, _reused, _rejected, _dropped = do_extract("d.md", "zh-TW", CFG, reset=True)
     assert doc["tone"] == DEFAULT_TONE
 
 
@@ -330,7 +330,7 @@ def test_legacy_tm_survives_tone_for_a_document_in_the_default_register(
     assert tm_lookup(bare, segs[0], DEFAULT_TONE) == (LEGACY["target"], "tm:legacy")
 
     # End to end, because that is where a whole-memory invalidation would show.
-    doc, reused, rejected = do_extract("d.md", "zh-TW", CFG)
+    doc, reused, rejected, _dropped = do_extract("d.md", "zh-TW", CFG)
     assert (reused, rejected) == (1, 0)
     assert _only(doc)["target"] == LEGACY["target"]
 
@@ -364,7 +364,7 @@ def test_committing_upgrades_an_unversioned_record_instead_of_reusing_it_forever
     _project(tmp_path, monkeypatch, doc=b"A shared sentence.\n")
     append_tm("zh-TW", [LEGACY])
 
-    doc, reused, rejected = do_extract("d.md", "zh-TW", CFG)
+    doc, reused, rejected, _dropped = do_extract("d.md", "zh-TW", CFG)
     assert (reused, rejected) == (1, 0)
     assert _only(doc)["origin"] == "tm:legacy"
 
@@ -418,7 +418,7 @@ def test_a_memory_hit_is_refused_when_the_mask_configuration_moved_under_it(
     of this test is that difference.
     """
     _project(tmp_path, monkeypatch, dnt="Celurion\nAcme\n", doc=DNT_DOC)
-    doc, _reused, _rejected = do_extract("d.md", "zh-TW", CFG)
+    doc, _reused, _rejected, _dropped = do_extract("d.md", "zh-TW", CFG)
     assert _only(doc)["masked"] == "⟦1⟧ and ⟦2⟧ ship together."
     do_apply("d.md", "zh-TW", CFG, {_only(doc)["id"]: "⟦1⟧ 與 ⟦2⟧ 一同出貨。"})
     append_tm("zh-TW", tm_records(load_doc("d.md", "zh-TW"), load_tm("zh-TW")))
@@ -426,7 +426,7 @@ def test_a_memory_hit_is_refused_when_the_mask_configuration_moved_under_it(
     # Drop one term. The sentence is unchanged, so the key still matches — the
     # banked wording no longer does.
     (tmp_path / "config" / "dnt.txt").write_text("Celurion\n", encoding="utf-8")
-    doc, reused, rejected = do_extract("d.md", "zh-TW", CFG)
+    doc, reused, rejected, _dropped = do_extract("d.md", "zh-TW", CFG)
     assert (reused, rejected) == (0, 1)
     assert _only(doc)["status"] == "pending"
     assert "⟦2⟧" in list(load_tm("zh-TW").values())[0]     # the entry is still there
@@ -439,7 +439,7 @@ def test_a_memory_hit_is_refused_when_the_mask_configuration_moved_under_it(
     # Put the term back and the same entry answers again, restored through both
     # slots. Nothing was lost by refusing it.
     (tmp_path / "config" / "dnt.txt").write_text("Celurion\nAcme\n", encoding="utf-8")
-    doc, reused, rejected = do_extract("d.md", "zh-TW", CFG)
+    doc, reused, rejected, _dropped = do_extract("d.md", "zh-TW", CFG)
     assert (reused, rejected) == (1, 0)
     text, missing = do_render("d.md", "zh-TW", CFG)
     assert (missing, text) == (0, "Celurion 與 Acme 一同出貨。\n")
@@ -457,13 +457,13 @@ def test_adding_a_term_refuses_the_hit_that_was_banked_without_it(tmp_path, monk
     reading the output. The gate refuses both, and this asserts the quiet one.
     """
     _project(tmp_path, monkeypatch, dnt="Celurion\n", doc=DNT_DOC)
-    doc, _reused, _rejected = do_extract("d.md", "zh-TW", CFG)
+    doc, _reused, _rejected, _dropped = do_extract("d.md", "zh-TW", CFG)
     assert _only(doc)["masked"] == "⟦1⟧ and Acme ship together."
     do_apply("d.md", "zh-TW", CFG, {_only(doc)["id"]: "⟦1⟧ 與 Acme 一同出貨。"})
     append_tm("zh-TW", tm_records(load_doc("d.md", "zh-TW"), load_tm("zh-TW")))
 
     (tmp_path / "config" / "dnt.txt").write_text("Celurion\nAcme\n", encoding="utf-8")
-    doc, reused, rejected = do_extract("d.md", "zh-TW", CFG)
+    doc, reused, rejected, _dropped = do_extract("d.md", "zh-TW", CFG)
     assert (reused, rejected) == (0, 1)
 
     text, missing = do_render("d.md", "zh-TW", CFG, fallback=True)
@@ -481,7 +481,7 @@ def test_reuse_and_model_output_are_refused_by_the_same_gate(tmp_path, monkeypat
     append_tm("zh-TW", [{"hash": seg_hash("Plain text."), "context": "para",
                          "segmentation_version": SEGMENTATION_VERSION,
                          "source": "Plain text.", "target": "   "}])
-    doc, reused, rejected = do_extract("d.md", "zh-TW", CFG)
+    doc, reused, rejected, _dropped = do_extract("d.md", "zh-TW", CFG)
     assert (reused, rejected) == (0, 1)
     assert _only(doc)["status"] == "pending"
 
@@ -495,7 +495,7 @@ def test_the_memory_is_still_tried_when_this_document_holds_a_stale_target(
     wording is not lost behind a stale one sitting in front of it.
     """
     _project(tmp_path, monkeypatch, dnt="Celurion\n", doc=b"Celurion ships.\n")
-    doc, _reused, _rejected = do_extract("d.md", "zh-TW", CFG)
+    doc, _reused, _rejected, _dropped = do_extract("d.md", "zh-TW", CFG)
     do_apply("d.md", "zh-TW", CFG, {_only(doc)["id"]: "⟦1⟧ 出貨。"})
     append_tm("zh-TW", tm_records(load_doc("d.md", "zh-TW"), load_tm("zh-TW")))
 
@@ -504,7 +504,7 @@ def test_the_memory_is_still_tried_when_this_document_holds_a_stale_target(
     state["segments"][0]["target"] = "⟦1⟧ 與 ⟦2⟧ 出貨。"
     save_doc("d.md", "zh-TW", state)
 
-    doc, reused, rejected = do_extract("d.md", "zh-TW", CFG)
+    doc, reused, rejected, _dropped = do_extract("d.md", "zh-TW", CFG)
     assert (reused, rejected) == (1, 0)
     assert (_only(doc)["origin"], _only(doc)["target"]) == ("tm", "⟦1⟧ 出貨。")
 
@@ -552,7 +552,7 @@ def test_an_indented_code_block_survives_a_state_rebuilt_from_the_memory(
     list, because bytes are what the defect changed.
     """
     _project(tmp_path, monkeypatch, doc=CODE_DOC)
-    doc, _reused, _rejected = do_extract("d.md", "zh-TW", CFG)
+    doc, _reused, _rejected, _dropped = do_extract("d.md", "zh-TW", CFG)
     assert [s["source"] for s in doc["segments"]] == [
         "Introducing an indented code block.", "Closing paragraph."]
     do_apply("d.md", "zh-TW", CFG,
@@ -565,7 +565,7 @@ def test_an_indented_code_block_survives_a_state_rebuilt_from_the_memory(
     # about this step looks like an edit to the document, which is the point.
     for leftover in (tmp_path / ".lx").glob("state.db*"):
         leftover.unlink()
-    _doc2, reused, rejected = do_extract("d.md", "zh-TW", CFG)
+    _doc2, reused, rejected, _d = do_extract("d.md", "zh-TW", CFG)
     assert (reused, rejected) == (2, 0)
     second, missing = do_render("d.md", "zh-TW", CFG)
 
@@ -606,7 +606,7 @@ def test_an_indent_a_segment_owns_survives_a_state_rebuilt_from_the_memory(
     are what the defect changed and what a reader would have had to notice.
     """
     _project(tmp_path, monkeypatch, doc=INDENTED_ITEM_DOC)
-    doc, _reused, _rejected = do_extract("d.md", "zh-TW", CFG)
+    doc, _reused, _rejected, _dropped = do_extract("d.md", "zh-TW", CFG)
     indented = [s for s in doc["segments"] if s["source"][:1].isspace()]
     assert [s["source"] for s in indented] == [
         "    A second paragraph of the item.",
@@ -631,7 +631,7 @@ def test_an_indent_a_segment_owns_survives_a_state_rebuilt_from_the_memory(
 
     for leftover in (tmp_path / ".lx").glob("state.db*"):
         leftover.unlink()
-    _doc2, reused, rejected = do_extract("d.md", "zh-TW", CFG)
+    _doc2, reused, rejected, _d = do_extract("d.md", "zh-TW", CFG)
     assert (reused, rejected) == (4, 0)
     second, missing = do_render("d.md", "zh-TW", CFG)
     assert (missing, second) == (0, first)
@@ -650,7 +650,7 @@ def test_a_memory_entry_banked_without_the_indent_gets_it_back_on_reuse(
     from the entry, so the entry is reseated instead of trusted.
     """
     _project(tmp_path, monkeypatch, doc=b"- item one\n\n    A second paragraph.\n")
-    doc, _r, _j = do_extract("d.md", "zh-TW", CFG)
+    doc, _r, _j, _d = do_extract("d.md", "zh-TW", CFG)
     seg = next(s for s in doc["segments"] if s["source"].startswith("    "))
 
     # Written straight to the memory, bypassing `do_apply` on purpose: this is an
@@ -660,7 +660,7 @@ def test_a_memory_entry_banked_without_the_indent_gets_it_back_on_reuse(
 
     for leftover in (tmp_path / ".lx").glob("state.db*"):
         leftover.unlink()
-    doc2, reused, rejected = do_extract("d.md", "zh-TW", CFG)
+    doc2, reused, rejected, _d = do_extract("d.md", "zh-TW", CFG)
     assert (reused, rejected) == (1, 0)
     assert next(s["target"] for s in doc2["segments"] if s["id"] == seg["id"]) \
         == "    這是第二段。"
@@ -687,9 +687,9 @@ def test_apply_seats_a_person_s_words_in_the_indent_the_same_way_accept_does(
     the translator.
     """
     _project(tmp_path, monkeypatch, doc=b"- item one\n\n    A second paragraph.\n")
-    doc, _r, _j = do_extract("d.md", "zh-TW", CFG)
+    doc, _r, _j, _d = do_extract("d.md", "zh-TW", CFG)
     seg = next(s for s in doc["segments"] if s["source"].startswith("    "))
-    applied_n, unknown, written, conflicts = do_apply(
+    applied_n, unknown, written, conflicts, _refused = do_apply(
         "d.md", "zh-TW", CFG, {seg["id"]: applied})
     assert (applied_n, unknown, conflicts) == (1, [], {})
     stored = next(s for s in load_doc("d.md", "zh-TW")["segments"] if s["id"] == seg["id"])
@@ -723,7 +723,7 @@ def test_apply_refuses_a_blank_target_and_names_the_way_to_redo_the_segment(
     zh-TW reviewer's own paragraph indent is made of.
     """
     _project(tmp_path, monkeypatch, doc=b"- item one\n\n    A second paragraph.\n")
-    doc, _r, _j = do_extract("d.md", "zh-TW", CFG)
+    doc, _r, _j, _d = do_extract("d.md", "zh-TW", CFG)
     seg = next(s for s in doc["segments"] if s["source"].startswith("    "))
     with pytest.raises(UnusableTarget) as e:
         do_apply("d.md", "zh-TW", CFG, {seg["id"]: blank})
@@ -742,7 +742,7 @@ def test_one_blank_target_refuses_the_whole_save_and_writes_none_of_it(
     say which. Rejected input, not partial failure.
     """
     _project(tmp_path, monkeypatch, doc=b"- item one\n\n    A second paragraph.\n")
-    doc, _r, _j = do_extract("d.md", "zh-TW", CFG)
+    doc, _r, _j, _d = do_extract("d.md", "zh-TW", CFG)
     do_apply("d.md", "zh-TW", CFG, {s["id"]: "譯文。" for s in doc["segments"]})
     blanked = next(s for s in doc["segments"] if s["source"].startswith("    "))
     other = next(s for s in doc["segments"] if s["id"] != blanked["id"])
@@ -793,7 +793,7 @@ def test_apply_keeps_the_paragraph_indent_a_zh_TW_translator_types(
     package, which closed the `do_apply` asymmetry too far.
     """
     _project(tmp_path, monkeypatch, doc=doc, name=name)
-    parsed, _r, _j = do_extract(name, "zh-TW", CFG)
+    parsed, _r, _j, _d = do_extract(name, "zh-TW", CFG)
     do_apply(name, "zh-TW", CFG,
              {s["id"]: "　　" + w for s, w in zip(parsed["segments"],
                                                  ["他走進房間。", "她沒有抬頭。"])},
@@ -824,7 +824,7 @@ def test_an_indent_apply_keeps_survives_normalization_on_the_way_through(
     caller depends on it, which is the part that was written down wrongly twice.
     """
     _project(tmp_path, monkeypatch, doc=b"He walked into the room.\n")
-    parsed, _r, _j = do_extract("d.md", "zh-TW", CFG)
+    parsed, _r, _j, _d = do_extract("d.md", "zh-TW", CFG)
     seg = parsed["segments"][0]
     do_apply("d.md", "zh-TW", CFG, {seg["id"]: typed}, origin="human")
     saved = next(s for s in load_doc("d.md", "zh-TW")["segments"] if s["id"] == seg["id"])
@@ -840,7 +840,7 @@ def test_a_model_s_own_indent_is_still_stripped_where_apply_s_is_kept(
     the case the strip exists for, and it stays stripped on that path.
     """
     _project(tmp_path, monkeypatch, doc=b"He walked into the room.\n")
-    parsed, _r, _j = do_extract("d.md", "zh-TW", CFG)
+    parsed, _r, _j, _d = do_extract("d.md", "zh-TW", CFG)
     seg = parsed["segments"][0]
     assert accept(seg, "　　他走進房間。", "zh-TW", CFG) == ("他走進房間。", None)
     do_apply("d.md", "zh-TW", CFG, {seg["id"]: "　　他走進房間。"}, origin="human")
@@ -860,7 +860,7 @@ def test_apply_does_not_let_a_deeper_indent_replace_the_one_the_source_has(
     2026-08-03.
     """
     _project(tmp_path, monkeypatch, doc=b"- item one\n\n    A second paragraph.\n")
-    parsed, _r, _j = do_extract("d.md", "zh-TW", CFG)
+    parsed, _r, _j, _d = do_extract("d.md", "zh-TW", CFG)
     seg = next(s for s in parsed["segments"] if s["source"].startswith("    "))
     do_apply("d.md", "zh-TW", CFG, {seg["id"]: "        這是程式碼"}, origin="human")
     stored = next(s for s in load_doc("d.md", "zh-TW")["segments"] if s["id"] == seg["id"])
@@ -876,7 +876,7 @@ def test_apply_still_takes_a_target_accept_would_refuse(tmp_path, monkeypatch):
     into a second acceptance gate.
     """
     _project(tmp_path, monkeypatch, doc=b"- item\n\n    Run `make build` now.\n")
-    doc, _r, _j = do_extract("d.md", "zh-TW", CFG)
+    doc, _r, _j, _d = do_extract("d.md", "zh-TW", CFG)
     seg = next(s for s in doc["segments"] if s["source"].startswith("    "))
     assert seg["masked"] == "    Run ⟦1⟧ now."
     assert accept(seg, "現在執行。", "zh-TW", CFG)[0] is None

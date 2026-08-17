@@ -135,6 +135,8 @@ It does not mean the translation is good; that is what review is for.
 | `lx todo SRC --lang L` | pending segments as JSON, for an agent to translate |
 | `lx terms SRC --lang L` | propose glossary rows from the source text (`--append` to add them) |
 | `lx apply SRC --lang L --file F` | ingest translations, auto-normalize |
+| `lx hold SRC --lang L --ids A,B` | keep segments out of every queue that selects work |
+| `lx unhold SRC --lang L --ids A,B` | return held segments to the queues |
 | `lx translate SRC --lang L` | translate with a configured model (`--mode draft\|polish\|repair`) |
 | `lx check SRC --lang L` | validate; exit 1 on error (`--json` for the full report) |
 | `lx repair SRC --lang L` | re-translate only failing segments |
@@ -146,6 +148,12 @@ It does not mean the translation is good; that is what review is for.
 | `lx routing show\|set STAGE PROVIDER[:MODEL]` | which backend, and which model, serves each stage |
 | `lx untracked` | files matching `sources` with no state yet, one row per target language |
 | `lx providers` / `lx stats` | backends / coverage |
+
+`--overwrite-human` on `translate`, `repair`, `run` and `apply` lets a model
+run replace segments a person wrote. Off by default: an unattended pass runs
+over whatever the queue hands it, and review is what it would overwrite — so
+those segments are not even selected, and the count of what was left alone is
+reported rather than dropped.
 
 `--dry-run` on `translate`, `repair` and `run` reports the work without calling a
 model; `--provider` and `--model` override the routing entry for one run.
@@ -207,6 +215,7 @@ notes for the segments it emitted.
 | `untranslated` | warn | the source copied through verbatim |
 | `punct` / `spacing` | warn | width and CJK/Latin boundary problems that could not be auto-fixed |
 | `length` | warn | a segment much shorter or longer than expected |
+| `held` | warn | a segment a reviewer is finishing themselves; no queue selects it |
 
 Turn any of them off per project with `"checks_disabled": ["length"]`.
 
