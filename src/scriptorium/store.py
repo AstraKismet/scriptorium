@@ -1,10 +1,12 @@
 """On-disk state: per-document segment stores and the translation memory."""
 
+import difflib
 import hashlib
 import json
 import os
 import re
 import sqlite3
+from collections import Counter
 
 from .config import DEFAULT_TONE, STATE, canonical_tone
 
@@ -506,8 +508,163 @@ def prior_doc(src, lang):
         conn.close()
 
 
+#: How much work `Carryover.align` may spend aligning two key sequences, as
+#: ``len(prior) × the commonest key's count``. `SequenceMatcher` is near-linear
+#: on sequences whose elements are mostly distinct and quadratic on ones that are
+#: not, and a document is allowed to be pathological: measured 2026-08-17 on this
+#: machine, five thousand *byte-identical* paragraphs take 2.0 s and twelve
+#: thousand take 14.2 s, while a realistic five-thousand-segment novel with six
+#: lines of dialogue repeated six hundred times takes 8 ms and the same novel with
+#: a third of it repeated takes 80 ms. The budget sits between them. Over it the
+#: alignment is skipped and every segment resolves the way it did before
+#: 2026-08-17, which is a worse answer rather than no answer.
+ALIGN_BUDGET = 8_000_000
+
+
+class Carryover:
+    """What a document already holds, and which entry a re-parsed segment inherits.
+
+    The prior document as two parallel lists — every segment's :func:`tm_key` in
+    document order, and the entry it holds, ``None`` where it holds nothing —
+    plus the translated entries grouped by key, which is what answers when the
+    lists cannot.
+
+    **Untranslated segments are in the sequence on purpose.** They occupy
+    positions, and the first version of this read only rows with a target: a
+    document with four identical paragraphs of which three were translated then
+    had its ordinals counted over three rows on one side and four segments on the
+    other, and a paragraph nobody had ever translated came back holding somebody
+    else's wording, `status: translated`, out of the draft queue for good.
+
+    The map this replaced held **one entry per key**, so a document containing one
+    sentence twice held one entry for two positions and the last row read won: a
+    person's wording at one position was replaced by the model's draft from the
+    other **carrying its `origin`**, which is what made origin precedence evadable
+    with no race and no second process.
+    `docs/contracts/workbench-http.md` divergence (25).
+
+    :meth:`align` is where the answer is decided, for the document as a whole
+    rather than a segment at a time, because two positions holding the same
+    sentence can only be told apart by looking at what is around them.
+    """
+
+    def __init__(self, keys, entries, by_key):
+        #: Every prior segment's key, in document order.
+        self.keys = keys
+        #: Parallel to :attr:`keys`: ``(target, origin, review)``, or ``None``
+        #: where that segment held no translation.
+        self.entries = entries
+        #: ``{key: [entry, ...]}`` — the *translated* entries under a key, in
+        #: document order. The fallback, and the old rule's whole world.
+        self.by_key = by_key
+
+    def __len__(self):
+        """How many translations this document holds — not how many segments."""
+        return sum(len(rows) for rows in self.by_key.values())
+
+    def align(self, segments, tone):
+        """``{seg_id: (entry, ambiguous)}`` — what each freshly parsed segment inherits.
+
+        ``entry`` is ``(target, origin, review)`` or ``None``.
+
+        **The two key sequences are diffed, and the matching blocks are the
+        answer.** Nothing else establishes which of two identical paragraphs is
+        which: an id is worthless the moment an insertion shifts it, an ordinal
+        within the key's own class survives an insertion outside the class and
+        slides by one the moment a member is added or removed inside it, and both
+        were measured wrong — the ordinal rule on a delete, where it laundered a
+        machine draft into `human`, and the id rule on the insertion it was
+        written for. A diff gets both right, because the unique prose on either
+        side of a repeated line anchors it. `difflib` is the standard library and
+        pure Python, so invariant 1 permits it; ``autojunk=False`` is not
+        optional, since the default discards any element occurring in more than
+        1% of a sequence longer than 200 — every repeated line of dialogue in a
+        novel.
+
+        What the diff cannot place — text that moved, and a *new* occurrence of a
+        sentence the document already had — falls back to the last translated
+        entry under that key, which is the rule that carried everything before
+        2026-08-17. **The fallback does not carry a hold.** A hold is one
+        reviewer's statement about a position, and this is the branch that could
+        not establish one; carrying it would take a paragraph nobody has looked at
+        out of every queue, silently, which is how a run of new dialogue came back
+        `held` and rendered into the book.
+
+        **A block with no anchor is not evidence.** When every element of a
+        matching block carries the same key, a run has been matched against a run
+        and the diff simply took the first offset that fitted; if that run also
+        changed size, one of its members was added or removed and the offset is a
+        coin toss. Those blocks are refused rather than believed, and their
+        segments fall to the fallback — which is the answer this build gave
+        before, so the degenerate document (a file that is one sentence repeated,
+        with one occurrence deleted) is no worse than it was rather than newly
+        wrong in the direction that locks a model out of a position. A run whose
+        size did not change is placed, which is what carries forty identical
+        paragraphs across an insertion.
+
+        ``ambiguous`` is then simply "the diff could not place this and something
+        was carried anyway": a new occurrence of a sentence the document already
+        had, a lone paragraph that moved, or a member of a run nothing could tell
+        apart. `lx extract` names them.
+        """
+        fresh = [(seg["id"], segment_key(seg, tone)) for seg in segments]
+        keys = [key for _, key in fresh]
+        prior_runs, fresh_runs = Counter(self.keys), Counter(keys)
+
+        placed = {}
+        for i, j, size in self._blocks(keys):
+            if not size:
+                continue                      # the sentinel block
+            block = {keys[j + d] for d in range(size)}
+            if len(block) == 1:
+                key = next(iter(block))
+                if prior_runs.get(key, 0) != fresh_runs[key]:
+                    continue
+            for d in range(size):
+                placed[fresh[j + d][0]] = self.entries[i + d]
+
+        out = {}
+        for sid, key in fresh:
+            if sid in placed:
+                out[sid] = (placed[sid], False)
+                continue
+            rows = self.by_key.get(key)
+            # `review` does not survive the fallback: a hold is one reviewer's
+            # statement about a position, and this is the branch that could not
+            # establish one.
+            entry = (rows[-1][0], rows[-1][1], None) if rows else None
+            out[sid] = (entry, entry is not None)
+        return out
+
+    def _blocks(self, keys):
+        """The matching blocks, or none at all when the diff would cost too much.
+
+        The budget is the only thing standing between `lx extract` and a
+        quadratic afternoon on a document that is one sentence repeated ten
+        thousand times. Over it, every segment falls to the key fallback — which
+        is exactly what this build did before the diff existed, so the answer
+        degrades rather than disappearing.
+        """
+        if not self.keys or not keys:
+            return []
+        commonest = max(Counter(keys).values())
+        if len(self.keys) * commonest > ALIGN_BUDGET:
+            return []
+        return difflib.SequenceMatcher(None, self.keys, keys,
+                                       autojunk=False).get_matching_blocks()
+
+
+def no_carryover():
+    """An empty :class:`Carryover`, for the paths that read no prior state.
+
+    A function rather than a module-level constant: a shared empty singleton is
+    the kind of thing that acquires an entry once and is very hard to find again.
+    """
+    return Carryover([], [], {})
+
+
 def prior_targets(src, lang):
-    """``{key: (target, origin, review)}`` for what this document already holds.
+    """A :class:`Carryover` over what this document already holds.
 
     The keys are :func:`tm_key`, not the content hash alone, because the
     collision the context axis removes is a within-document one first: a sentence
@@ -538,31 +695,52 @@ def prior_targets(src, lang):
     `cli.do_extract` is what makes a hold survive a re-extract — before
     2026-08-15 it did not, so `lx run`, whose first statement is `do_extract`,
     lifted every hold in the document before it did anything else and said
-    nothing. A hold whose target is *refused* by `translate.accept` is dropped
-    with the target, which is right: there is then no wording left to hold.
+    nothing. A hold whose target the acceptance path refuses rides with it all
+    the same since 2026-08-17: the wording is kept rather than deleted, so there
+    is something left to hold. It is dropped when another proposal took the
+    segment, because the wording it was placed on is then gone, and by the
+    fallback in :meth:`Carryover.align`, which could not establish a position.
+
+    **Every segment is read, translated or not.** The `WHERE target != ''` this
+    used to carry looked like a free filter and was not: the alignment counts
+    positions, and a filtered read counts them in one document and not the other.
+    The untranslated ones arrive as ``None`` entries and are filtered where it is
+    free — out of ``by_key``, which is the only structure that answers by content.
     """
     conn = _connect(create=False)
     if conn is None:
-        return {}
+        return no_carryover()
     try:
         meta = _read_meta(conn, src, lang)
         if meta is None:
-            return {}
+            return no_carryover()
         tone = meta.get("tone")
-        out = {}
+        keys, entries, by_key = [], [], {}
+        # `ORDER BY pos` because the order *is* the answer now: this list is one
+        # side of a diff. It was rowid order in practice and never stated, and
+        # even "the last row wins" had rested on that.
+        #
         # `origin` stays inside `body`: it is written and read with the target it
         # describes and nothing looks a segment up by it, so promoting it would
         # be a column for one JSON parse per translated segment.
         for content_hash, context, variant, target, body in conn.execute(
                 "SELECT content_hash, context, variant, target, body FROM segments "
-                "WHERE doc_id=? AND lang=? AND target IS NOT NULL AND target != ''",
+                "WHERE doc_id=? AND lang=? ORDER BY pos",
                 (doc_id(src), lang)):
-            if not content_hash:
-                continue
-            key = tm_key(content_hash, context, SEGMENTATION_VERSION, variant, tone)
-            held = json.loads(body)
-            out[key] = (target, held.get("origin") or "carryover", held.get("review"))
-        return out
+            # A row with no content hash cannot be keyed and cannot match, but it
+            # still occupied a position: `None` keeps the sequence honest, and no
+            # freshly parsed key is ever `None`, so it can only ever read as a
+            # deletion.
+            key = (tm_key(content_hash, context, SEGMENTATION_VERSION, variant, tone)
+                   if content_hash else None)
+            entry = None
+            if key is not None and target:
+                held = json.loads(body)
+                entry = (target, held.get("origin") or "carryover", held.get("review"))
+                by_key.setdefault(key, []).append(entry)
+            keys.append(key)
+            entries.append(entry)
+        return Carryover(keys, entries, by_key)
     finally:
         conn.close()
 

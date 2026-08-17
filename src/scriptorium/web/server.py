@@ -493,7 +493,14 @@ class _Handler(BaseHTTPRequestHandler):
             lang = language_tag(lang)
         cfg = load_config()
         if path == "/api/extract":
-            doc, reused, rejected, _dropped = do_extract(src, lang, cfg, body.get("tone"),
+            # The fourth element names the segments whose stored wording the
+            # acceptance path refused and `do_extract` kept anyway, and those it
+            # could not tell apart from another position. Deliberately not
+            # projected: a new response key is additive and would not bump, but
+            # nothing is lost any more — `POST /api/doc` runs `do_check` and
+            # carries the placeholder error on the segment itself, which is where
+            # a client is already looking. See *Known divergences* (24) and (26).
+            doc, reused, rejected, _notes = do_extract(src, lang, cfg, body.get("tone"),
                                                body.get("reset", False))
             return {"segments": len(doc["segments"]), "reused": reused, "rejected": rejected}
         if path == "/api/save":

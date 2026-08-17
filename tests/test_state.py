@@ -257,22 +257,27 @@ def test_segment_identity_is_three_columns_and_a_null_is_not_a_second_row(tmp_pa
     }
     save_doc("d.md", "zh-TW", doc)
 
+    # `by_key` holds a *list* of entries per key, in document order, because a
+    # document may legitimately hold one sentence twice and the length of that
+    # list is how `Carryover.align` tells the two positions apart. Each entry is
+    # `(target, origin, review)`.
     prior = prior_targets("d.md", "zh-TW")
-    assert len(prior) == 3
-    assert prior[tm_key(same_hash, "para", SEGMENTATION_VERSION)][0] == "段落"
-    assert prior[tm_key(same_hash, "quote", SEGMENTATION_VERSION)][0] == "引言"
+    assert len(prior.by_key) == 3
+    assert [e[0] for e in prior.by_key[tm_key(same_hash, "para", SEGMENTATION_VERSION)]] == ["段落"]
+    assert [e[0] for e in prior.by_key[tm_key(same_hash, "quote", SEGMENTATION_VERSION)]] == ["引言"]
 
     # Absent and null are one key in both directions: the row was written from a
     # segment with no `variant` key, and it answers a lookup that spells it null.
     assert segment_key({"hash": "deadbeef0002", "context": "para"}) == \
         segment_key({"hash": "deadbeef0002", "context": "para", "variant": None})
-    assert prior[segment_key({"hash": "deadbeef0002", "context": "para", "variant": None})][0] \
+    assert prior.by_key[
+        segment_key({"hash": "deadbeef0002", "context": "para", "variant": None})][0][0] \
         == "無 variant 欄"
 
     # An untranslated segment is not a carryover candidate, so it is filtered in
     # SQL rather than in the loop that would otherwise have to load it.
     save_doc("d.md", "zh-TW", {**doc, "segments": [{**doc["segments"][0], "target": ""}]})
-    assert prior_targets("d.md", "zh-TW") == {}
+    assert prior_targets("d.md", "zh-TW").by_key == {}
 
 
 def test_segment_identity_carries_over_only_within_its_own_register(tmp_path, monkeypatch):
@@ -289,7 +294,7 @@ def test_segment_identity_carries_over_only_within_its_own_register(tmp_path, mo
     do_apply(src, "zh-TW", CFG, {load_doc(src, "zh-TW")["segments"][0]["id"]: "他一言不發地走了。"},
              origin="human")
 
-    assert len(prior_targets(src, "zh-TW")) == 1
+    assert len(prior_targets(src, "zh-TW").by_key) == 1
     _, reused, _, _ = do_extract(src, "zh-TW", CFG, tone="literary")
     assert reused == 0
     assert load_doc(src, "zh-TW")["segments"][0]["status"] == "pending"
@@ -322,7 +327,7 @@ def test_state_version_refuses_both_directions_and_names_the_way_out(tmp_path, m
     assert f"lx extract {src} --lang zh-TW" in str(e.value)
     assert "do not pass --reset" in str(e.value), "the older direction keeps the translations"
     assert prior_doc(src, "zh-TW")["source"] == src
-    assert prior_targets(src, "zh-TW") == {}
+    assert prior_targets(src, "zh-TW").by_key == {}
 
 
 def test_state_version_of_the_schema_is_refused_before_a_document_is_named(tmp_path, monkeypatch):

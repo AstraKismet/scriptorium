@@ -351,8 +351,29 @@ must send the document's current `tone` alongside `reset`, or ask first.**
 | Key | Type | Meaning |
 |---|---|---|
 | `segments` | integer | Segments the parse produced. |
-| `reused` | integer | Targets carried over from prior state or the memory. |
-| `rejected` | integer | Carryover or memory hits **refused** by the acceptance path — a banked wording no longer fits the segment it matched. |
+| `reused` | integer | Targets carried over from prior state or the memory **and accepted**. A stored target the acceptance path refused is carried over too, since 2026-08-17, and counts in `rejected` rather than here. |
+| `rejected` | integer | Carryover or memory hits **refused** by the acceptance path — a banked wording no longer fits the segment it matched. Unchanged in value and in meaning since 2026-08-17; what changed is that a refusal no longer **deletes** this document's own stored target. See below. |
+
+**Carrying over is position-aware, and a refusal does not delete.** Two rules
+landed on 2026-08-17 and neither moves a key:
+
+- A stored target the acceptance path refuses is **kept**, with its `origin` and
+  its `review`. The segment comes back `status: "translated"` carrying wording
+  that will fail validation, and `POST /api/doc` shows the placeholder error on
+  the segment itself — which is where a client is already looking.
+  ⚠️ **The counts do not distinguish this from a refusal that carried nothing.**
+  `rejected` covers both, and `reused` deliberately does not count a kept target,
+  so a client that wants to know which segments came back holding wording that
+  fails must read `POST /api/doc`. *Known divergences* (24), closed.
+- Two segments whose source text, kind, variant and register are identical are
+  told apart by **where they sit in the document** rather than sharing one entry.
+  The prior document's key sequence and the fresh one are diffed, and the
+  matching blocks decide; what the diff cannot place — a sentence that moved, or a
+  *new* occurrence of one the document already had — falls back to the last
+  stored wording under that key, without its hold. *Known divergences* (25),
+  closed. What is still open is (26), a run of identical paragraphs that changed
+  size, and (27), a memory hit answering over wording this document was already
+  holding.
 
 Side effects: writes the document's row in `.lx/state.db`.
 
@@ -1232,8 +1253,14 @@ found *and* fixed in one change is still worth a number — the next person to a
     **A hold survives `POST /api/extract`** as of 2026-08-16 — it rides with the
     wording it was placed on, through the same carryover that moves the target
     and the origin. It does *not* survive `reset: true`, which reads no prior
-    state at all, and it does not survive a carryover the acceptance path
-    refuses, because there is then no wording left to hold. The first version of
+    state at all. Until 2026-08-17 it also did not survive a carryover the
+    acceptance path refused, "because there is then no wording left to hold" —
+    an argument that was true only because the refusal deleted the wording.
+    Closing (24) removed the deletion, so a hold now rides with wording the
+    acceptance path refused, and the segment comes back held, `translated` and
+    failing `POST /api/check`. It is still dropped when another proposal takes
+    the segment, because the wording it was placed on is gone then. The first
+    version of
     this shipped without any of that: `POST /api/extract` lifted every hold in
     the document and said nothing, which the "re-extract from source" control
     this contract tells a client to offer would have done on every press.
@@ -1243,31 +1270,145 @@ Measured 2026-08-16 by the adversarial pass over the change that closed (22) and
 `POST /api/extract`, which is the endpoint least like the rest of this surface —
 it is the only one that rebuilds a document rather than editing it.
 
-24. **A stored target that no longer fits is deleted, and the reply does not say
-    which.** `POST /api/extract` carries prior wording over through the
-    acceptance path, and a carryover it refuses — the measured case is a
-    `config/dnt.txt` edit moving the mask configuration under banked wording, so
-    the placeholder set no longer matches — leaves the segment with **no target
-    at all**. A sentence a person wrote is gone. `rejected` counts it, but
-    `rejected` also counts a refused *memory* hit, and until 2026-08-16 the CLI
-    printed only "stale memory hit(s) refused", which names the memory rather
-    than the wording it just deleted. `lx extract` now names the ids on their own
-    line; **the endpoint still does not**, because a new response key is a
-    version decision and this one is not scheduled. What *should* happen instead
-    of deleting — keep the target and let `lx check` report it, the way `lx apply`
-    is allowed to store wording the validators will reject — is a decision, not a
-    patch.
-25. **One identity, two positions: duplicate source text collapses.** Carryover
-    is keyed on the translation-memory key, so two segments whose source text is
-    byte-identical share one entry and the last row read wins. Measured with a
-    document whose first and third paragraphs are both `Yes.`: the human target
-    on the first was replaced by the machine draft from the third **and its
-    `origin` was laundered to `llm:draft`**, and the reverse order launders a
-    machine draft into `human`, which locks the model out of it permanently. This
-    predates *Origin precedence* and is what makes it evadable: the guard
-    compares the origin on disk, and this is the path that rewrites the origin on
-    disk. `context` already separates a paragraph from a blockquote; what is
-    missing is position, for two segments of the same kind.
+24. **Closed 2026-08-17.** *A stored target that no longer fits is deleted, and
+    the reply does not say which.* `POST /api/extract` carries prior wording over
+    through the acceptance path, and a carryover it refused — the measured case
+    is a `config/dnt.txt` edit moving the mask configuration under banked
+    wording, so the placeholder set no longer matches — left the segment with
+    **no target at all**. A sentence a person wrote was gone. `rejected` counted
+    it, but `rejected` also counts a refused *memory* hit, and until 2026-08-16
+    the CLI printed only "stale memory hit(s) refused", which names the memory
+    rather than the wording it had just deleted.
+
+    Closed by keeping it. **`lx extract` does not delete wording this document
+    already holds**: the target stays with its `origin` and its `review`, the
+    segment comes back `translated` and failing, and `POST /api/check` reports
+    the placeholder mismatch at *error* severity. The acceptance path answers
+    "may this wording be written into a segment as a translation", and until
+    now `do_extract` also read it as "and if not, delete what is there" — two
+    questions, of which only the first is the gate's. This is the rule `lx apply`
+    already states for wording somebody wrote: reported at `lx check`, not
+    rejected at the door.
+
+    *Lost:* keeping it and marking it with a second `review` value, which spends
+    a vocabulary this contract advertises as closed on a state the check already
+    reports, and which would then have to be excluded from `checks.workable` or
+    become a second hold. *Lost:* deleting it and naming the ids on both
+    surfaces, which answers "which sentence did I lose" with a list instead of
+    with the sentence. *Not done, and the entry above was wrong about why:* a
+    `kept` array on this reply. A new response key is **additive** — see
+    *Versioning* — so it never needed a version decision, and the sentence
+    claiming it did was steering the choice. It is unnecessary rather than
+    forbidden: nothing is deleted, and the segments that came back failing carry
+    their errors on `POST /api/doc`. It is scheduled into **HANDOFF-026**, which
+    is rewriting this endpoint's section anyway, for a client that wants them
+    without a second call.
+
+    **The cost, measured and worse than it first looked.** `mask.unmask` leaves
+    an unknown `⟦n⟧` verbatim and `cli.do_render` runs no check, so `lx render` on
+    a document that fails `lx check` writes the kept target into the output where
+    it used to write the untranslated source. The first version of this entry said
+    that cost was a visible stale placeholder. It is larger: **dropping a
+    do-not-translate term renumbers the ones that survive it**, so the kept
+    target's remaining `⟦n⟧` resolve against a different slot map and the rendered
+    sentence can name the *wrong entity* — measured 2026-08-17, `Gamma、Beta` where
+    the person had written `Gamma、Alpha` — with nothing visibly broken about it,
+    and `missing` falling from 1 to 0 because the segment now has a target.
+    `lx run` never gets there, since it refuses to render while errors remain, and
+    a person's `lx apply` could already produce exactly that target. Teaching
+    `render` to treat a target whose placeholders do not match as missing is the
+    repair and is **HANDOFF-031**, which also has to answer whether that changes
+    what `missing` counts, since it is documented as a count of segments with no
+    target and changing it bumps.
+25. **Closed 2026-08-17.** *One identity, two positions: duplicate source text
+    collapses.* Carryover was keyed on the translation-memory key alone, so two
+    segments whose source text is byte-identical shared one entry and the last
+    row read won. Measured with a document whose first and third paragraphs are
+    both `Yes.`: the human target on the first was replaced by the machine draft
+    from the third **and its `origin` was laundered to `llm:draft`**, and the
+    reverse order laundered a machine draft into `human`, which locks the model
+    out of it permanently. It predated *Origin precedence* and is what made it
+    evadable: the guard compares the origin on disk, and this is the path that
+    rewrites the origin on disk.
+
+    Closed with position, in the one place that has any: the document's own prior
+    state. `store.prior_targets` reads the document's whole key sequence and
+    `store.Carryover.align` **diffs it against the fresh one**, taking the
+    matching blocks as the answer; what the diff cannot place falls back to the
+    last stored wording under that key, which is the rule that carried everything
+    before. The **translation memory is untouched**: its key stays blind to
+    position, which is what keeps one wording one entry across documents and
+    machines.
+
+    *Lost:* putting position into `tm_key`, which invalidates every memory file
+    and is refused by `AGENTS.md` as a convention. *Lost:* refusing a document
+    with a collision, which is safe and useless on a novel with repeated
+    dialogue. *Lost, and measured:* carrying by segment id, which is what the
+    package proposed, and carrying by a member's ordinal within its key's run,
+    which was the first implementation of it. Both were shipped to a review and
+    both were wrong. Ids are sequential over translatable blocks, so inserting one
+    paragraph shifts every id after it and an id rule answers for the segments
+    before the insertion and nothing else; worse, on a *deletion* it hands the row
+    that used to sit at an id to whatever sentence sits there now, which moved a
+    person's wording — and `origin: human` — onto a machine's position. The
+    ordinal rule guarded itself with a count that compared the translated rows on
+    one side against every parsed segment on the other, so a document with an
+    untranslated duplicate slid every wording by one. Measured against the rule
+    they replaced, across twelve edit shapes, position by position: a run of forty
+    identical paragraphs with one insertion before it carries 41/41 under the
+    diff, 2/41 under the old rule, and 4/41 under the id rule that was meant to
+    fix it; ten lines of dialogue interleaved with narration carry 21/21 to 24/24
+    under the diff against 12/21 to 15/24, for one to four inserted paragraphs.
+    The diff is at or above the old rule on every shape, including the two nothing
+    can align, which are equal and are now reported.
+
+Appended 2026-08-17 by the package that closed (24) and (25), and by the design
+pass over it. Both are open. Neither is a regression: (26) is what position
+cannot reach and (27) predates all of this.
+
+26. **A sentence the document already had, written again, is still told apart by
+    nothing.** The diff answers wherever the text around a repeated line places
+    it. Two shapes are left where nothing does. A **new occurrence** of a sentence
+    the document already holds matches no unused position, so it takes the last
+    stored wording under that key — the old rule's answer, and possibly another
+    position's — though it no longer takes that position's *hold* with it. And a
+    **run of identical paragraphs that changed size**, where every element of the
+    matching block carries the same key, has no anchor at all: the diff would
+    place it at the first offset that fits, which is a coin toss, so those blocks
+    are refused and their members fall to the same fallback. Both are named by
+    `lx extract`; `POST /api/extract` does not name them, which is the reporting
+    gap (24) had, and is why the `kept` and `ambiguous` arrays are scheduled
+    together into HANDOFF-026. The residue is bounded — every candidate wording is
+    a translation of the same source sentence — but the `origin` that rides along
+    is not, so a machine may end up locked out of a position a person never wrote.
+    `Carryover.align` also has a work budget (`store.ALIGN_BUDGET`): over it the
+    diff is skipped entirely and every segment falls back, because
+    `SequenceMatcher` is quadratic on a sequence that is one element repeated —
+    measured 2026-08-17: 2.0 s at five thousand identical paragraphs, 14.2 s at
+    twelve thousand, against 8 ms for a realistic novel.
+27. **A memory hit answers over wording this document was already holding.**
+    `cli.do_extract` offers two proposals in order — this document's own stored
+    target, then a translation-memory hit — and takes the first the acceptance
+    path accepts. So a stored target that no longer fits *with a banked wording
+    behind it that does* is replaced rather than kept: (24)'s rule covers the
+    case where every proposal is refused, and this is the case where one is not.
+    The sentence is gone and its `origin` with it — a `human` segment comes back
+    as `tm`, which is a provenance nobody claimed and, more to the point, is not
+    the one *Origin precedence* protects, so the next unattended run may
+    overwrite it. Needs no collision and no race. It is **reported** since
+    2026-08-17 (`lx extract` names the ids; the endpoint does not) and otherwise
+    unchanged, because which of the two should win is a decision — and the
+    argument on record for the memory, "a good banked wording should not be lost
+    to a stale one sitting in front of it", was written when the refused wording
+    was going to be deleted either way, which stopped being true the same day.
+
+    **Decided 2026-08-17, implementation scheduled as HANDOFF-031:** only a
+    *machine draft* gives way. A stored target whose `origin` is `llm:*`, `tm` or
+    `tm:legacy` may be replaced by a memory hit the acceptance path accepts;
+    wording written by a person or an agent is kept, and reported at `lx check`
+    like any other kept wording. That is invariant 9's line — a machine draft is
+    regenerable and a person's sentence is not — applied to an ordering question
+    rather than to a storage one. The entry stays open until it ships.
 
 ## What is not frozen
 

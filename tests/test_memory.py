@@ -17,9 +17,19 @@ import sys
 
 import pytest
 
+import statedb
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from scriptorium.cli import UnusableTarget, do_apply, do_extract, do_render  # noqa: E402
+from scriptorium import store as store_mod  # noqa: E402
+from scriptorium.cli import (  # noqa: E402
+    UnusableTarget,
+    do_apply,
+    do_check,
+    do_extract,
+    do_hold,
+    do_render,
+)
 from scriptorium.config import DEFAULT_CONFIG, DEFAULT_TONE  # noqa: E402
 from scriptorium.mdparse import parse  # noqa: E402
 from scriptorium.normalize import reseat_outer_blanks  # noqa: E402
@@ -178,14 +188,14 @@ def test_tone_in_memory_key_keeps_two_registers_apart(tmp_path, monkeypatch):
     _project(tmp_path, monkeypatch, doc=LEAVING)
     (tmp_path / "novel.md").write_bytes(LEAVING)
 
-    doc, _reused, _rejected, _dropped = do_extract("d.md", "zh-TW", CFG)
+    doc, _reused, _rejected, _notes = do_extract("d.md", "zh-TW", CFG)
     do_apply("d.md", "zh-TW", CFG, {_only(doc)["id"]: AS_DOCUMENTATION})
     append_tm("zh-TW", tm_records(load_doc("d.md", "zh-TW"), load_tm("zh-TW")))
 
     # The documentation wording is not offered to the novel at all: not as a hit
     # that `accept` then refuses — it never reaches `accept`, because the key
     # does not match.
-    doc, reused, rejected, _dropped = do_extract("novel.md", "zh-TW", CFG, tone="literary")
+    doc, reused, rejected, _notes = do_extract("novel.md", "zh-TW", CFG, tone="literary")
     assert (reused, rejected) == (0, 0)
     assert _only(doc)["status"] == "pending"
 
@@ -244,10 +254,10 @@ def test_a_register_change_does_not_carry_the_old_wording_forward(tmp_path, monk
     `lx commit` banks all of it under the literary key.
     """
     _project(tmp_path, monkeypatch, doc=LEAVING)
-    doc, _reused, _rejected, _dropped = do_extract("d.md", "zh-TW", CFG)
+    doc, _reused, _rejected, _notes = do_extract("d.md", "zh-TW", CFG)
     do_apply("d.md", "zh-TW", CFG, {_only(doc)["id"]: AS_DOCUMENTATION})
 
-    doc, reused, rejected, _dropped = do_extract("d.md", "zh-TW", CFG, tone="literary")
+    doc, reused, rejected, _notes = do_extract("d.md", "zh-TW", CFG, tone="literary")
     assert (reused, rejected) == (0, 0)
     assert (doc["tone"], _only(doc)["status"]) == ("literary", "pending")
     assert tm_records(load_doc("d.md", "zh-TW"), load_tm("zh-TW")) == []
@@ -259,16 +269,16 @@ def test_the_register_is_frozen_on_the_document_and_a_later_extract_keeps_it(
     default. It was harmless while the register only reached the `Tone:` line;
     now it would take every carryover and every memory hit with it."""
     _project(tmp_path, monkeypatch, doc=LEAVING)
-    doc, _reused, _rejected, _dropped = do_extract("d.md", "zh-TW", CFG, tone="literary")
+    doc, _reused, _rejected, _notes = do_extract("d.md", "zh-TW", CFG, tone="literary")
     do_apply("d.md", "zh-TW", CFG, {_only(doc)["id"]: AS_PROSE})
 
-    doc, reused, rejected, _dropped = do_extract("d.md", "zh-TW", CFG)
+    doc, reused, rejected, _notes = do_extract("d.md", "zh-TW", CFG)
     assert (doc["tone"], reused, rejected) == ("literary", 1, 0)
     assert _only(doc)["target"] == AS_PROSE
 
     # `--reset` is the exception, and deliberately so: it does not read the state
     # file at all, because it has to work on one this build cannot read.
-    doc, _reused, _rejected, _dropped = do_extract("d.md", "zh-TW", CFG, reset=True)
+    doc, _reused, _rejected, _notes = do_extract("d.md", "zh-TW", CFG, reset=True)
     assert doc["tone"] == DEFAULT_TONE
 
 
@@ -330,7 +340,7 @@ def test_legacy_tm_survives_tone_for_a_document_in_the_default_register(
     assert tm_lookup(bare, segs[0], DEFAULT_TONE) == (LEGACY["target"], "tm:legacy")
 
     # End to end, because that is where a whole-memory invalidation would show.
-    doc, reused, rejected, _dropped = do_extract("d.md", "zh-TW", CFG)
+    doc, reused, rejected, _notes = do_extract("d.md", "zh-TW", CFG)
     assert (reused, rejected) == (1, 0)
     assert _only(doc)["target"] == LEGACY["target"]
 
@@ -364,7 +374,7 @@ def test_committing_upgrades_an_unversioned_record_instead_of_reusing_it_forever
     _project(tmp_path, monkeypatch, doc=b"A shared sentence.\n")
     append_tm("zh-TW", [LEGACY])
 
-    doc, reused, rejected, _dropped = do_extract("d.md", "zh-TW", CFG)
+    doc, reused, rejected, _notes = do_extract("d.md", "zh-TW", CFG)
     assert (reused, rejected) == (1, 0)
     assert _only(doc)["origin"] == "tm:legacy"
 
@@ -413,12 +423,13 @@ def test_a_memory_hit_is_refused_when_the_mask_configuration_moved_under_it(
     stays put. Written straight to target, as reuse used to be, the extra ⟦2⟧ has
     no slot to restore from and reaches the rendered document verbatim.
 
-    Asserted on the rendered bytes, not on the memory: the entry is supposed to
-    survive. Refusing a hit is not the same as discarding one, and the last third
-    of this test is that difference.
+    Asserted on the memory and on the check, not on a deletion: the entry is
+    supposed to survive, and so — since 2026-08-17 — is the wording the document
+    was already holding. Refusing a proposal is not the same as discarding one,
+    and the last third of this test is that difference.
     """
     _project(tmp_path, monkeypatch, dnt="Celurion\nAcme\n", doc=DNT_DOC)
-    doc, _reused, _rejected, _dropped = do_extract("d.md", "zh-TW", CFG)
+    doc, _reused, _rejected, _notes = do_extract("d.md", "zh-TW", CFG)
     assert _only(doc)["masked"] == "⟦1⟧ and ⟦2⟧ ship together."
     do_apply("d.md", "zh-TW", CFG, {_only(doc)["id"]: "⟦1⟧ 與 ⟦2⟧ 一同出貨。"})
     append_tm("zh-TW", tm_records(load_doc("d.md", "zh-TW"), load_tm("zh-TW")))
@@ -426,21 +437,40 @@ def test_a_memory_hit_is_refused_when_the_mask_configuration_moved_under_it(
     # Drop one term. The sentence is unchanged, so the key still matches — the
     # banked wording no longer does.
     (tmp_path / "config" / "dnt.txt").write_text("Celurion\n", encoding="utf-8")
-    doc, reused, rejected, _dropped = do_extract("d.md", "zh-TW", CFG)
+    doc, reused, rejected, notes = do_extract("d.md", "zh-TW", CFG)
     assert (reused, rejected) == (0, 1)
-    assert _only(doc)["status"] == "pending"
     assert "⟦2⟧" in list(load_tm("zh-TW").values())[0]     # the entry is still there
 
-    text, missing = do_render("d.md", "zh-TW", CFG, fallback=True)
-    assert missing == 1
-    assert "⟦" not in text
-    assert text == DNT_DOC.decode("utf-8")
+    # **Refused, and kept.** `docs/contracts/workbench-http.md` divergence (24):
+    # the acceptance path decides whether wording may be *written into* a
+    # segment, and until 2026-08-17 `lx extract` read that as licence to delete
+    # what the segment already held. The sentence is somebody's; it stays, the
+    # ids are named, and the check is what reports it.
+    assert _only(doc)["status"] == "translated"
+    assert _only(doc)["target"] == "⟦1⟧ 與 ⟦2⟧ 一同出貨。"
+    assert _only(doc)["origin"] == "agent", "the wording changed hands"
+    assert notes["kept"] == [_only(doc)["id"]]
 
-    # Put the term back and the same entry answers again, restored through both
-    # slots. Nothing was lost by refusing it.
+    report, _ = do_check("d.md", "zh-TW", CFG)
+    assert report["errors"] == 1 and report["by_rule"]["tags"] == 1, \
+        "the deletion was the old defence; this is the new one"
+
+    # The cost of keeping it, measured rather than left to be discovered: `lx
+    # render` renders what the document holds and runs no check, so the stale
+    # placeholder reaches the file. `lx run` never gets there — `cmd_run`
+    # refuses to render while `lx check` reports an error — and a person's
+    # `lx apply` could already produce this exact target. Teaching `render` to
+    # treat a target whose placeholders do not match as missing is HANDOFF-031.
+    text, missing = do_render("d.md", "zh-TW", CFG, fallback=True)
+    assert (missing, text) == (0, "Celurion 與 ⟦2⟧ 一同出貨。\n")
+
+    # Put the term back and the wording is accepted again, restored through both
+    # slots. It comes back through the document's own state rather than the
+    # memory now, which is why `origin` is still `agent`.
     (tmp_path / "config" / "dnt.txt").write_text("Celurion\nAcme\n", encoding="utf-8")
-    doc, reused, rejected, _dropped = do_extract("d.md", "zh-TW", CFG)
+    doc, reused, rejected, _notes = do_extract("d.md", "zh-TW", CFG)
     assert (reused, rejected) == (1, 0)
+    assert _only(doc)["origin"] == "agent"
     text, missing = do_render("d.md", "zh-TW", CFG)
     assert (missing, text) == (0, "Celurion 與 Acme 一同出貨。\n")
 
@@ -457,17 +487,24 @@ def test_adding_a_term_refuses_the_hit_that_was_banked_without_it(tmp_path, monk
     reading the output. The gate refuses both, and this asserts the quiet one.
     """
     _project(tmp_path, monkeypatch, dnt="Celurion\n", doc=DNT_DOC)
-    doc, _reused, _rejected, _dropped = do_extract("d.md", "zh-TW", CFG)
+    doc, _reused, _rejected, _notes = do_extract("d.md", "zh-TW", CFG)
     assert _only(doc)["masked"] == "⟦1⟧ and Acme ship together."
     do_apply("d.md", "zh-TW", CFG, {_only(doc)["id"]: "⟦1⟧ 與 Acme 一同出貨。"})
     append_tm("zh-TW", tm_records(load_doc("d.md", "zh-TW"), load_tm("zh-TW")))
 
     (tmp_path / "config" / "dnt.txt").write_text("Celurion\nAcme\n", encoding="utf-8")
-    doc, reused, rejected, _dropped = do_extract("d.md", "zh-TW", CFG)
+    doc, reused, rejected, notes = do_extract("d.md", "zh-TW", CFG)
     assert (reused, rejected) == (0, 1)
+    assert notes["kept"] == [_only(doc)["id"]], "divergence (24): the wording stays"
 
+    # And this is the quiet direction the docstring above is about. The kept
+    # wording renders as perfectly ordinary prose — the new term is simply
+    # unprotected inside it — so nothing in the output tells a reader anything
+    # is wrong, and the `tags` error is the only thing that does.
+    report, _ = do_check("d.md", "zh-TW", CFG)
+    assert report["by_rule"]["tags"] == 1
     text, missing = do_render("d.md", "zh-TW", CFG, fallback=True)
-    assert (missing, text) == (1, DNT_DOC.decode("utf-8"))
+    assert (missing, text) == (0, "Celurion 與 Acme 一同出貨。\n")
 
 
 def test_reuse_and_model_output_are_refused_by_the_same_gate(tmp_path, monkeypatch):
@@ -481,7 +518,7 @@ def test_reuse_and_model_output_are_refused_by_the_same_gate(tmp_path, monkeypat
     append_tm("zh-TW", [{"hash": seg_hash("Plain text."), "context": "para",
                          "segmentation_version": SEGMENTATION_VERSION,
                          "source": "Plain text.", "target": "   "}])
-    doc, reused, rejected, _dropped = do_extract("d.md", "zh-TW", CFG)
+    doc, reused, rejected, _notes = do_extract("d.md", "zh-TW", CFG)
     assert (reused, rejected) == (0, 1)
     assert _only(doc)["status"] == "pending"
 
@@ -493,10 +530,18 @@ def test_the_memory_is_still_tried_when_this_document_holds_a_stale_target(
     The old code took the document's own target whenever it had one and never
     looked further. Now a refused carryover falls through, so a good banked
     wording is not lost behind a stale one sitting in front of it.
+
+    ⚠️ **This is the one path divergence (24) does not cover, and it is open as
+    (27).** The wording this document held is replaced rather than kept, and its
+    `origin` goes with it: a `human` segment comes back as `tm` and stops being
+    covered by origin precedence, so the next unattended run may overwrite it.
+    Which of the two should win is a decision, so the behaviour is unchanged
+    here and only the silence is fixed — `notes["replaced"]` names the ids and
+    `lx extract` prints them.
     """
     _project(tmp_path, monkeypatch, dnt="Celurion\n", doc=b"Celurion ships.\n")
-    doc, _reused, _rejected, _dropped = do_extract("d.md", "zh-TW", CFG)
-    do_apply("d.md", "zh-TW", CFG, {_only(doc)["id"]: "⟦1⟧ 出貨。"})
+    doc, _reused, _rejected, _notes = do_extract("d.md", "zh-TW", CFG)
+    do_apply("d.md", "zh-TW", CFG, {_only(doc)["id"]: "⟦1⟧ 出貨。"}, origin="human")
     append_tm("zh-TW", tm_records(load_doc("d.md", "zh-TW"), load_tm("zh-TW")))
 
     # Damage only the document's copy, leaving the memory's intact.
@@ -504,9 +549,294 @@ def test_the_memory_is_still_tried_when_this_document_holds_a_stale_target(
     state["segments"][0]["target"] = "⟦1⟧ 與 ⟦2⟧ 出貨。"
     save_doc("d.md", "zh-TW", state)
 
-    doc, reused, rejected, _dropped = do_extract("d.md", "zh-TW", CFG)
+    doc, reused, rejected, notes = do_extract("d.md", "zh-TW", CFG)
     assert (reused, rejected) == (1, 0)
     assert (_only(doc)["origin"], _only(doc)["target"]) == ("tm", "⟦1⟧ 出貨。")
+    assert notes["replaced"] == [_only(doc)["id"]], "the swap must not be silent"
+    assert notes["kept"] == [], "nothing was kept: the memory took the segment"
+
+
+# ── what a re-parse may do to wording the document already holds ────────────
+#
+# `docs/contracts/workbench-http.md` divergences (24) and (25), both closed
+# 2026-08-17, and the two things left open beside them — (26), a run of
+# identical paragraphs that changed size, and (27), the memory answering over
+# wording this document was holding.
+
+
+def test_a_refused_carryover_keeps_the_wording_it_could_not_carry(tmp_path, monkeypatch):
+    """Divergence (24), reproduced and closed.
+
+    An ordinary mid-edit state: a person's target that does not carry the
+    placeholder its source does. `lx apply` stores it deliberately — a person's
+    words are reported at `lx check`, not rejected at the door — and until
+    2026-08-17 the next `lx extract` deleted it, because `translate.accept`
+    refused to re-write it and the segment was then left as parsed. `rejected`
+    counted it; nothing said which sentence had gone.
+
+    Nothing is deleted now. The refusal still happens, so the counts are what
+    they were, and the wording stays where the person put it with its `origin`
+    and its status — which `store._segment` derives from the text, so a kept
+    target is `translated` and the draft queue does not select it again.
+    """
+    _project(tmp_path, monkeypatch, dnt="Celurion\n", doc=b"Celurion ships today.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    sid = _only(doc)["id"]
+    assert _only(doc)["masked"] == "⟦1⟧ ships today."
+    do_apply("d.md", "zh-TW", CFG, {sid: "⟦1⟧ 今天出貨。"}, origin="human")
+
+    # The mask configuration moves out from under the wording. The sentence is
+    # untouched, so the key still matches and the target is still offered — it
+    # is the placeholder set that no longer does.
+    (tmp_path / "config" / "dnt.txt").write_text("", encoding="utf-8")
+    doc, reused, rejected, notes = do_extract("d.md", "zh-TW", CFG)
+    assert (reused, rejected) == (0, 1), "the acceptance path still refuses it"
+    assert notes["kept"] == [sid]
+    kept = _only(doc)
+    assert kept["target"] == "⟦1⟧ 今天出貨。", "a sentence a person wrote was deleted"
+    assert (kept["origin"], kept["status"]) == ("human", "translated")
+
+    # The report that replaces the deletion, and the reason it is safe to keep:
+    # `lx check` fails, so `lx run` will not render the document.
+    report, _ = do_check("d.md", "zh-TW", CFG)
+    assert report["errors"] == 1 and report["by_rule"]["tags"] == 1
+
+
+@pytest.mark.parametrize("first,third", [("human", "llm:draft"), ("llm:draft", "human")])
+def test_two_positions_holding_one_sentence_keep_their_own_wording(
+        tmp_path, monkeypatch, first, third):
+    """Divergence (25), reproduced in both directions and closed.
+
+    `store.prior_targets` grouped rows under `tm_key`, which is deliberately
+    blind to position, so a document holding one sentence twice held one entry
+    for two positions and the last row read filled both. Measured with
+    `Yes. / Middle. / Yes.`: the person's wording at the first paragraph was
+    replaced by the model's draft from the third **and its `origin` with it**, so
+    the guard in `store.save_targets` — which compares the origin on disk — was
+    evadable with no race and no second process. The other order launders a
+    machine draft into `human` and locks the model out of that position for good.
+
+    Read through `tests/statedb.py` rather than `load_doc`, deliberately:
+    `store._segment` recomputes `status` on read, and a reader that recomputes
+    has already hidden two defects from two tests in this repository.
+    """
+    _project(tmp_path, monkeypatch, doc=b"Yes.\n\nMiddle.\n\nYes.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    ids = [s["id"] for s in doc["segments"]]
+    assert len(ids) == 3
+    do_apply("d.md", "zh-TW", CFG, {ids[0]: "好。"}, origin=first)
+    do_apply("d.md", "zh-TW", CFG, {ids[1]: "中間。"}, origin="agent")
+    do_apply("d.md", "zh-TW", CFG, {ids[2]: "是的。"}, origin=third)
+
+    doc, reused, rejected, notes = do_extract("d.md", "zh-TW", CFG)
+    assert (reused, rejected) == (3, 0)
+    rows = {s["id"]: s for s in statedb.segments(tmp_path)}
+    assert (rows[ids[0]]["target"], rows[ids[0]]["origin"]) == ("好。", first)
+    assert (rows[ids[2]]["target"], rows[ids[2]]["origin"]) == ("是的。", third)
+    assert (rows[ids[1]]["target"], rows[ids[1]]["origin"]) == ("中間。", "agent")
+    assert notes["ambiguous"] == [], "nothing about this document is ambiguous"
+
+
+def test_a_run_of_identical_paragraphs_survives_an_insertion_earlier_in_the_file(
+        tmp_path, monkeypatch):
+    """The half a by-id rule cannot reach, and the reason `align` has a second tier.
+
+    Segment ids are sequential over translatable blocks, so inserting one
+    paragraph in chapter one shifts every id after it: on a five-thousand-segment
+    novel an id-only carryover answers for the three segments before the
+    insertion and nothing else, and every duplicate in the book falls back to the
+    rule (25) exists to remove. Matching each member of a key's class to the one
+    at the same place in the stored class carries all of them, because an
+    insertion outside the class leaves its membership and its order alone.
+    """
+    _project(tmp_path, monkeypatch, doc=b"Yes.\n\nMiddle.\n\nYes.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    ids = [s["id"] for s in doc["segments"]]
+    do_apply("d.md", "zh-TW", CFG, {ids[0]: "好。"}, origin="human")
+    do_apply("d.md", "zh-TW", CFG, {ids[2]: "是的。"}, origin="llm:draft")
+
+    (tmp_path / "d.md").write_bytes(b"A new opening.\n\nYes.\n\nMiddle.\n\nYes.\n")
+    doc, reused, rejected, notes = do_extract("d.md", "zh-TW", CFG)
+    rows = {s["id"]: s for s in statedb.segments(tmp_path)}
+    assert rows["s0001"]["target"] is None, "the inserted paragraph is new work"
+    assert (rows["s0002"]["target"], rows["s0002"]["origin"]) == ("好。", "human")
+    assert (rows["s0004"]["target"], rows["s0004"]["origin"]) == ("是的。", "llm:draft")
+    assert (reused, notes["ambiguous"]) == (2, []), "`Middle.` was never translated here"
+
+
+def test_a_new_occurrence_of_an_old_sentence_is_named_and_carries_no_hold(
+        tmp_path, monkeypatch):
+    """Divergence (26), open and reported rather than hidden.
+
+    The author writes a line of dialogue the book already has. Every stored
+    paragraph is still in the document, so the diff carries all three to their
+    new positions — that part is not a guess. The *new* paragraph is: it matches
+    the key of a sentence that already exists, nothing establishes which of them
+    it is, and the pre-2026-08-17 rule handed it the last stored wording.
+
+    It still does, because refusing to answer would delete wording to avoid
+    mislabelling it and the other half of this package exists to stop that. Two
+    things are new. `lx extract` **names** it, since its run changed size and it
+    was not placed by the alignment. And the **hold does not ride the fallback**:
+    a hold is one reviewer's statement about a position, and this is the branch
+    that could not establish one — carrying it would take a paragraph nobody has
+    ever read out of every queue, leaving `lx check` green because a hold is a
+    warning, and render it into the book.
+    """
+    _project(tmp_path, monkeypatch, doc=b"Yes.\n\nMiddle.\n\nYes.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    ids = [s["id"] for s in doc["segments"]]
+    do_apply("d.md", "zh-TW", CFG, {ids[0]: "好。"}, origin="human")
+    do_apply("d.md", "zh-TW", CFG, {ids[1]: "中間。"}, origin="agent")
+    do_apply("d.md", "zh-TW", CFG, {ids[2]: "是的。"}, origin="llm:draft")
+    do_hold("d.md", "zh-TW", CFG, [ids[2]])
+
+    (tmp_path / "d.md").write_bytes(b"Yes.\n\nYes.\n\nMiddle.\n\nYes.\n")
+    doc, _reused, _rejected, notes = do_extract("d.md", "zh-TW", CFG)
+    rows = {s["id"]: s for s in statedb.segments(tmp_path)}
+    # The three that existed, each still holding its own wording, origin and hold.
+    assert (rows["s0002"]["target"], rows["s0002"]["origin"]) == ("好。", "human")
+    assert (rows["s0003"]["target"], rows["s0003"]["origin"]) == ("中間。", "agent")
+    assert (rows["s0004"]["target"], rows["s0004"]["origin"]) == ("是的。", "llm:draft")
+    assert rows["s0004"].get("review") == "held", "the hold left the wording it was on"
+    # And the one the author just wrote.
+    assert notes["ambiguous"] == ["s0001"]
+    assert rows["s0001"]["target"] == "是的。", "the old rule's answer, still given"
+    assert rows["s0001"].get("review") is None, "a hold rode a guess"
+
+
+def test_a_deletion_earlier_in_the_file_leaves_a_run_holding_its_own_wording(
+        tmp_path, monkeypatch):
+    """The direction an id-keyed carryover gets *backwards*, and the reason this
+    is a diff rather than a rule about ids or ordinals.
+
+    Deleting a paragraph shifts every later id down by one, so the row that sat
+    at `s0001` now names a different sentence — and if that row happens to hold
+    the same text, an id-keyed rule hands its wording to the wrong position with
+    complete confidence. Measured by the adversarial pass over the first version
+    of this change: it moved a person's wording onto a machine's position and
+    `origin: human` with it, which the guard in `store.save_targets` then honours
+    for good. The version before this package got that case right by accident.
+    """
+    _project(tmp_path, monkeypatch, doc=b"Middle.\n\nYes.\n\nYes.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    ids = [s["id"] for s in doc["segments"]]
+    do_apply("d.md", "zh-TW", CFG, {ids[0]: "中間。"}, origin="agent")
+    do_apply("d.md", "zh-TW", CFG, {ids[1]: "好。"}, origin="human")
+    do_apply("d.md", "zh-TW", CFG, {ids[2]: "是的。"}, origin="llm:draft")
+
+    (tmp_path / "d.md").write_bytes(b"Yes.\n\nYes.\n")
+    doc, reused, _rejected, notes = do_extract("d.md", "zh-TW", CFG)
+    rows = {s["id"]: s for s in statedb.segments(tmp_path)}
+    assert (rows["s0001"]["target"], rows["s0001"]["origin"]) == ("好。", "human")
+    assert (rows["s0002"]["target"], rows["s0002"]["origin"]) == ("是的。", "llm:draft")
+    assert (reused, notes["ambiguous"]) == (2, [])
+
+
+def test_a_run_that_lost_a_member_hands_no_ones_origin_to_another_position(
+        tmp_path, monkeypatch):
+    """Four byte-identical paragraphs and nothing else: the document that cannot
+    be aligned, because there is no unique prose anywhere to anchor a match.
+
+    Every rule is guessing here, so the one thing that must hold is that guessing
+    is not *upgraded*. The first version of this change matched the run against
+    itself at the first offset that fitted and handed the person's wording — and
+    `origin: human` — to a position the model had drafted, where origin
+    precedence then locks every later run out of it. A matching block whose
+    elements all share one key is refused when that key's run changed size, so
+    the answer degrades to the one this build gave before, and every segment is
+    named.
+    """
+    _project(tmp_path, monkeypatch, doc=b"Yes.\n\nYes.\n\nYes.\n\nYes.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    ids = [s["id"] for s in doc["segments"]]
+    do_apply("d.md", "zh-TW", CFG, {ids[0]: "甲。"}, origin="human")
+    do_apply("d.md", "zh-TW", CFG, {ids[1]: "乙。"}, origin="llm:draft")
+    do_apply("d.md", "zh-TW", CFG, {ids[2]: "丙。"}, origin="llm:draft")
+    # `ids[3]` is left untranslated on purpose: it is what made the first
+    # version's ordinal test compare a count of translated rows against a count
+    # of parsed segments, two different populations.
+
+    (tmp_path / "d.md").write_bytes(b"Yes.\n\nYes.\n\nYes.\n")
+    doc, _reused, _rejected, notes = do_extract("d.md", "zh-TW", CFG)
+    rows = statedb.segments(tmp_path)
+    assert [s["origin"] for s in rows] == ["llm:draft"] * 3, "a person's origin moved"
+    assert [s["target"] for s in rows] == ["丙。"] * 3, "the answer this build gave before"
+    assert notes["ambiguous"] == ["s0001", "s0002", "s0003"], "and it says so"
+
+
+def test_a_run_carries_across_an_insertion_with_no_unique_text_to_anchor_it(
+        tmp_path, monkeypatch):
+    """The other side of the rule above, and where the whole gain is.
+
+    Nothing in this document is unique either, but the run did not change size,
+    so the offset is not a coin toss: three paragraphs went in and three came
+    out, in order, and each keeps its own wording, origin and hold. On a novel
+    this is forty identical lines of dialogue surviving a paragraph inserted in
+    chapter one — measured 41/41 against 2/41 for the rule this replaces.
+    """
+    _project(tmp_path, monkeypatch, doc=b"Yes.\n\nYes.\n\nYes.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    ids = [s["id"] for s in doc["segments"]]
+    do_apply("d.md", "zh-TW", CFG, {ids[0]: "甲。"}, origin="human")
+    do_apply("d.md", "zh-TW", CFG, {ids[1]: "乙。"}, origin="llm:draft")
+    do_apply("d.md", "zh-TW", CFG, {ids[2]: "丙。"}, origin="agent")
+    do_hold("d.md", "zh-TW", CFG, [ids[1]])
+
+    (tmp_path / "d.md").write_bytes(b"A new opening.\n\nYes.\n\nYes.\n\nYes.\n")
+    doc, _reused, _rejected, notes = do_extract("d.md", "zh-TW", CFG)
+    rows = statedb.segments(tmp_path)
+    assert [s["target"] for s in rows] == [None, "甲。", "乙。", "丙。"]
+    assert [s["origin"] for s in rows] == [None, "human", "llm:draft", "agent"]
+    assert rows[2].get("review") == "held", "the hold left the wording it was on"
+    assert notes["ambiguous"] == []
+
+
+def test_the_alignment_has_a_budget_and_degrades_to_the_old_rule_over_it(
+        tmp_path, monkeypatch):
+    """`SequenceMatcher` is near-linear on mostly-distinct sequences and
+    quadratic on ones that are not, and a document is allowed to be
+    pathological: measured 2026-08-17, five thousand byte-identical paragraphs
+    take 2.0 s and twelve thousand take 14.2 s, against 8 ms for a realistic
+    five-thousand-segment novel. Over the budget the diff is skipped and every
+    segment resolves the way it did before — a worse answer, not a hung command.
+
+    Driven by lowering the budget rather than by building a pathological
+    document, so the test costs nothing and still asserts the thing that matters:
+    which answer comes out on the other side.
+    """
+    _project(tmp_path, monkeypatch, doc=b"Yes.\n\nYes.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    ids = [s["id"] for s in doc["segments"]]
+    do_apply("d.md", "zh-TW", CFG, {ids[0]: "甲。"}, origin="human")
+    do_apply("d.md", "zh-TW", CFG, {ids[1]: "乙。"}, origin="llm:draft")
+
+    monkeypatch.setattr(store_mod, "ALIGN_BUDGET", 0)
+    do_extract("d.md", "zh-TW", CFG)
+    rows = statedb.segments(tmp_path)
+    assert [s["target"] for s in rows] == ["乙。", "乙。"], "the pre-2026-08-17 answer"
+    assert [s["origin"] for s in rows] == ["llm:draft", "llm:draft"]
+
+
+def test_a_register_change_says_what_it_left_behind(tmp_path, monkeypatch):
+    """A re-extract into another register carries nothing over — deliberately,
+    because the alternative banks a documentation voice under the literary key
+    and poisons the memory permanently. It said nothing at all while doing it:
+    `reused 0`, no refusal counted, and a reviewed book emptied.
+
+    The behaviour is unchanged and only the silence is fixed. `lx extract` is a
+    person's command, and the contract tells a client to send `tone` on a
+    re-extract button — both need to be told what a register move costs.
+    """
+    _project(tmp_path, monkeypatch, doc=b"He left without a word.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    do_apply("d.md", "zh-TW", CFG, {_only(doc)["id"]: "他一言不發地走了。"}, origin="human")
+
+    doc, reused, rejected, notes = do_extract("d.md", "zh-TW", CFG, tone="literary")
+    assert (reused, rejected) == (0, 0), "nothing was even offered"
+    assert notes["register"] == (DEFAULT_TONE, "literary", 1)
+    assert _only(doc)["status"] == "pending"
+    assert notes["kept"] == [], "there was no proposal to refuse and nothing to keep"
 
 
 @pytest.mark.parametrize("field", ["context", "variant"])
@@ -552,7 +882,7 @@ def test_an_indented_code_block_survives_a_state_rebuilt_from_the_memory(
     list, because bytes are what the defect changed.
     """
     _project(tmp_path, monkeypatch, doc=CODE_DOC)
-    doc, _reused, _rejected, _dropped = do_extract("d.md", "zh-TW", CFG)
+    doc, _reused, _rejected, _notes = do_extract("d.md", "zh-TW", CFG)
     assert [s["source"] for s in doc["segments"]] == [
         "Introducing an indented code block.", "Closing paragraph."]
     do_apply("d.md", "zh-TW", CFG,
@@ -606,7 +936,7 @@ def test_an_indent_a_segment_owns_survives_a_state_rebuilt_from_the_memory(
     are what the defect changed and what a reader would have had to notice.
     """
     _project(tmp_path, monkeypatch, doc=INDENTED_ITEM_DOC)
-    doc, _reused, _rejected, _dropped = do_extract("d.md", "zh-TW", CFG)
+    doc, _reused, _rejected, _notes = do_extract("d.md", "zh-TW", CFG)
     indented = [s for s in doc["segments"] if s["source"][:1].isspace()]
     assert [s["source"] for s in indented] == [
         "    A second paragraph of the item.",

@@ -201,11 +201,16 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    cannot drift apart again. (22) and (23) were appended on 2026-08-16, both
    closed: `POST /api/check` had carried a whole stale snapshot back over newer
    text, and nothing on the surface could say "leave this segment to me". (24)
-   and (25) were appended beside them and are **open** — `POST /api/extract`
-   deletes a stored target the acceptance path refuses, and two segments whose
-   source text is byte-identical collapse onto one carryover entry and launder
-   each other's `origin`. Read the second before relying on origin precedence:
-   it is the path that rewrites the field the rule compares.
+   and (25) were appended beside them and both **closed on 2026-08-17**, in
+   `POST /api/extract`: a stored target the acceptance path refuses is kept
+   rather than deleted, and two segments whose source text is byte-identical are
+   told apart by position instead of collapsing onto one carryover entry and
+   laundering each other's `origin`. (26) and (27) were appended by that work and
+   are **open** — a run of identical paragraphs that changed size is still told
+   apart by nothing, and a memory hit still answers over wording the document was
+   holding, taking its `origin` with it. Read the second before relying on origin
+   precedence: it is the remaining path that rewrites the field the rule
+   compares, and `lx extract` names the segments it happened to.
    `contract_version` moved to **2** on 2026-08-14, once, carrying five items: the `candidates` → `untracked` rename,
    the identity label normalized, `status` derived from the target text, an empty
    target refused, and a lost-update token. It closed (13)'s wire half, (14), (17)
@@ -288,7 +293,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 1132 tests; no network (one is POSIX-only,
+python -m pytest -q                 # 1143 tests; no network (one is POSIX-only,
                                     #   one runs only where the filesystem folds case)
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
@@ -469,6 +474,36 @@ own.
   keeps one wording one entry across machines — so `translate.accept` is what
   makes the blindness safe. Carryover from a document's own prior state is a
   proposal on the same terms, and the memory is tried when it is refused.
+
+  **A refusal does not delete what the segment already held.** Since 2026-08-17,
+  and this is the line between the two: the gate answers whether wording may be
+  *written into* a segment as a translation, and `lx extract` had been reading it
+  as licence to delete what was there. The refused wording stays with its
+  `origin` and its `review`, the segment comes back `translated` and failing, and
+  `lx check` reports it — the rule below for a person's words, applied to the
+  path that was destroying them. The cost is that `lx render` on a document
+  `lx check` has failed writes the stale `⟦n⟧` into the output; `lx run` refuses
+  to render at all. `docs/decisions.md`, 2026-08-17, and
+  `docs/contracts/workbench-http.md` divergence (24).
+
+  **Which stored entry a re-parsed segment inherits is decided by position**, in
+  the one place that has one — the document's own prior state, never the memory
+  key. `store.Carryover.align` **diffs the stored key sequence against the fresh
+  one** and takes the matching blocks; what it cannot place falls back to the
+  last stored wording under that key, without its hold, and is named by
+  `lx extract`. Without this a document holding one sentence twice held one entry
+  for two positions and the last row read filled both, carrying its `origin`:
+  divergence (25), and the hole under origin precedence that needed no race.
+
+  Two simpler spellings were built and both were wrong — by segment id, which a
+  single insertion defeats and a deletion turns into laundering, and by ordinal
+  within a key's run, whose size check compared translated rows against parsed
+  segments. If a third is ever proposed, the measurement is in
+  `docs/decisions.md`, 2026-08-17: twelve edit shapes, scored position by
+  position. What the diff still cannot do is recorded as (26), the memory
+  answering over the document's own wording as (27), and both are reported rather
+  than silent.
+
   `lx apply` is the deliberate exception, and only for *refusal*: a person's words
   are reported at `lx check`, not rejected at the door. **An empty target is not
   words.** Since 2026-08-14 `do_apply` refuses one, for the whole request, and

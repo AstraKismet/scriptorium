@@ -3,6 +3,190 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-08-17 · A re-parse may not delete a sentence, and two positions holding one sentence are told apart by where they are
+
+`docs/contracts/workbench-http.md` divergences **(24)** and **(25)**, both closed,
+both inside `cli.do_extract`'s carryover. Both were found by the adversarial pass
+over PR #51 — the fifth consecutive package whose real defects landed on an axis
+the change had listed as held constant — and both were reproduced live before
+anything was written: a `human` target deleted by a re-extract, and a document
+whose first and third paragraphs are `Yes.` swapping their wording *and their
+`origin`* in both directions.
+
+### `lx extract` does not delete wording this document already holds
+
+`translate.accept` answers one question: **may this wording be written into a
+segment as a translation?** `do_extract` was reading it as two, and the second —
+*and if not, delete what is there* — is not the gate's to answer. The measured
+cause is an edit to `config/dnt.txt`, which changes how many `⟦n⟧` a segment has
+while leaving its memory key untouched; the wording is still a translation of the
+same sentence, and it was being destroyed for bookkeeping.
+
+So a refused carryover is **kept**, with its `origin` and its `review`. The
+segment comes back `translated`, `lx check` reports the placeholder mismatch on
+the `tags` rule at *error* severity, `lx run` refuses to render, and `lx repair`
+names it rather than paying a model for a write it would refuse. That is the rule
+`AGENTS.md` already states for wording somebody wrote — reported at `lx check`,
+not rejected at the door — and `lx apply` is the path that has always been allowed
+to store what the validators reject.
+
+**Deleting was itself a hole under origin precedence**, which nobody had named:
+the target and the `origin` go together, so a deleted `human` target left a
+segment with `origin: None`, and `cmd_run`'s very next statement is the draft
+pass, which then paid a model to overwrite a person's sentence with no refusal
+and no message. Keeping the wording closes that by construction, because the
+origin travels with it.
+
+*Lost:* **narrowing the rule by origin** — keep `human` and `agent`, delete
+`llm:*` and `tm` as before. It was argued that the gate exists precisely for
+machine wording, and that narrowing bounds the population that can render a stale
+placeholder. It loses on three counts: `tm` wording is `lx commit`-approved and
+invariant 9 calls the memory a source of truth, so deleting it destroys something
+regenerable only by asking a person; a hold placed on a machine draft a reviewer
+means to rewrite is legal and ordinary, and deleting that draft drops the hold and
+hands the segment back to the queue the reviewer took it out of; and it puts an
+origin taxonomy in a third place, where the enumeration and not the rule becomes
+what a reader trusts — the failure this repository has recorded three times.
+
+*Lost:* **keep it and mark it** with a new `review` value. It spends a vocabulary
+the contract advertises as closed on a state `lx check` already reports, and the
+new value would have to be excluded from `checks.workable` or it is a second hold
+under another name.
+
+*Lost:* **park it** — store the un-carried wording in the segment's `body` and
+leave the target empty. It is the only option under which no bare `⟦n⟧` can reach
+a rendered file and nothing new can be banked by `lx commit`, and it was argued
+carefully. It loses because parked wording has no surface: no command shows it, no
+endpoint carries it, and `/api/doc` is a field whitelist. A sentence nobody can
+read is not a sentence that was kept, and the segment goes back to `pending`, so
+the next run pays to translate it again anyway.
+
+**The cost is real, is larger than the first draft of this entry said, and is
+written into the contract rather than argued away.** `mask.unmask` leaves an
+unknown placeholder verbatim and `cli.do_render` runs no check, so `lx render` on
+a failing document writes the kept target where it used to write the untranslated
+source. The draft called that "a visible `⟦2⟧`". The adversarial pass measured
+what it actually is: **dropping a do-not-translate term renumbers the terms that
+survive it**, so the kept target's remaining placeholders resolve against a
+different slot map and the sentence can name the wrong entity — `Gamma、Beta`
+where the person wrote `Gamma、Alpha` — with nothing about the output looking
+wrong, and `missing` falling from 1 to 0. Both are broken output for a document
+`lx check` has failed and `lx run` will not render at all; invariant 10 is what
+stands behind the difference. Making `render` treat a target whose placeholders
+do not match as *missing* is the repair, and is HANDOFF-031 rather than this
+package, because `missing` is documented as a count of segments with no target and
+changing what it counts bumps `contract_version`.
+
+### Two positions holding one sentence are told apart by where they are
+
+`store.prior_targets` returned one entry per `tm_key`, and `tm_key` is
+deliberately blind to position. A document holding one sentence twice therefore
+held one entry for two positions, and the last row read filled both — carrying its
+`origin` with it. That is what made *Origin precedence* evadable with no race and
+no second process: the guard compares the origin on disk, and this is the path
+that rewrites the origin on disk.
+
+The fix stays out of the memory entirely. `prior_targets` now reads the whole key
+sequence of the stored document — **including the segments that hold no
+translation**, because they occupy positions — and `store.Carryover.align`
+**diffs it against the freshly parsed one**, taking `difflib.SequenceMatcher`'s
+matching blocks as the answer. Two positions holding the same sentence are told
+apart by the unique prose around them, which is the only thing that can tell them
+apart. What the diff cannot place — a sentence that moved, a *new* occurrence of
+one the document already had — falls back to the last stored wording under that
+key, which is the rule that carried everything before, and is reported.
+
+Three details are load-bearing and each was measured rather than reasoned:
+
+- `autojunk=False`. The default discards any element occurring in more than 1% of
+  a sequence longer than 200 — every repeated line of dialogue in a novel, which
+  is exactly the population this exists for.
+- **A matching block whose elements all carry one key is not evidence.** It
+  matched a run against a run at the first offset that fitted; if that run also
+  changed size, the offset is a coin toss. Those blocks are refused, so the
+  degenerate document degrades to the answer this build already gave rather than
+  becoming newly wrong.
+- **A work budget** (`store.ALIGN_BUDGET`). `SequenceMatcher` is near-linear on
+  mostly-distinct sequences and quadratic on ones that are not: a realistic
+  five-thousand-segment novel takes 8 ms, a third of it repeated takes 80 ms, and
+  five thousand byte-identical paragraphs take 2.0 s — twelve thousand, 14.2 s.
+  Over the budget the diff is skipped and everything falls back.
+
+**Two simpler rules were built first, and both were wrong in a way the tests
+written for them could not see.** Carrying by **segment id** is what the package
+proposed: ids are sequential over translatable blocks, so one inserted paragraph
+shifts every later id and it answers for three segments of a five-thousand-segment
+novel — and on a *deletion* it is actively worse than the rule it replaces,
+because the row that used to sit at an id is handed to whatever sentence sits
+there now, moving a person's wording and `origin: human` onto a machine's
+position. Carrying by a member's **ordinal within its key's run** fixes the
+insertion and was guarded by a size check that compared the *translated* rows on
+one side against *every parsed segment* on the other — two different populations,
+so a run holding one untranslated duplicate slid every wording by one.
+
+Measured across twelve edit shapes, position by position, against the rule all
+three replace: a forty-line dialogue run with one insertion before it carries
+2/41 under the old rule, 4/41 under the id rule meant to fix it, and 41/41 under
+the diff; ten lines of dialogue interleaved with narration carry 12/21 to 15/24
+under the old rule and 21/21 to 24/24 under the diff, for one to four inserted
+paragraphs. On the deletion shapes the id rule scored *below* the rule it
+replaced. The diff is at or above the old rule on every shape, and equal on the
+two nothing can align.
+
+*Lost:* **position in `tm_key`**, which invalidates every memory file on every
+machine. *Lost:* **refusing a document with a collision**, which is safe and
+useless on a novel. *Lost:* **a unanimity gate** — carry nothing when a run's rows
+disagree. It was this session's own first answer and it is worse than what it
+replaces: on the forty-`Yes.` novel one insertion turns a laundered `origin` into
+forty deleted wordings, which is the defect the other half of this package exists
+to stop, at forty times the count.
+
+**A hold does not ride the fallback.** It rides a placed match, and nothing else:
+a hold is one reviewer's statement about a position, and the fallback is the
+branch that could not establish one. Without that rule a line of dialogue written
+a second time came back `held` — out of every queue, `lx check` green because a
+hold is a warning, and rendered into the book — on a paragraph nobody had ever
+read.
+
+### Three silences, and why a report is not a consolation prize
+
+Each of these was a destructive act with nothing printed. None of the behaviour
+changed; the silence did.
+
+- **A memory hit answering over wording this document held** (divergence (27), and
+  the path (24) does not cover). The two proposals are tried in order and the
+  first accepted one wins, so a stored target that no longer fits *with a banked
+  wording behind it that does* is replaced — and a `human` origin becomes `tm`,
+  which is not what *Origin precedence* protects. Which of the two should win is a
+  decision, and the argument on record for the memory — "a good banked wording
+  should not be lost to a stale one sitting in front of it" — was written when the
+  refused wording was going to be deleted either way. It goes to the maintainer
+  rather than being taken here.
+- **A sentence the document already had, written again** (divergence (26)). The
+  old answer is still given, without the hold, and the segments it was given for
+  are named.
+- **A register change.** `prior_targets` builds its keys with the *stored*
+  register, so `lx extract --tone literary` on a reviewed technical document
+  matches nothing at all: no proposal, no refusal, `reused 0`, and a book emptied
+  in silence. That is the intended behaviour — the alternative banks a
+  documentation voice under the literary key and poisons the memory permanently —
+  but it was the third path by which a re-parse deleted every sentence in a
+  document without saying so, and the contract tells a client to send `tone` on a
+  re-extract button.
+
+`lx extract`'s counter line also stopped calling every refusal a "stale memory
+hit", which was wrong half the time and sent a reader to the wrong file.
+
+**And the reporting is one function called by two commands**, which it was not
+for the first afternoon of its life. `cmd_extract` printed the four lines and
+`cmd_run` dropped them — while carrying the same `--tone`, being the command
+`AGENTS.md` puts in front of a whole book, and beginning with `do_extract`. So
+`lx run d.md --tone literary` emptied a reviewed book and printed
+`0 reused · 2 to translate`, which is what a first run on an untranslated
+document prints. Found by the adversarial pass, on the axis the change had not
+varied: not *what* is reported but *which surface reports it* — the same shape as
+divergence (2), one commit later.
+
 ## 2026-08-14 · `contract_version = 2`, and the four divergences it was the only cheap moment to decide
 
 HANDOFF-204's M0 floor. The version moves **once** and carries five items, because

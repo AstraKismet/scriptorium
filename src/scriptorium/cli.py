@@ -57,6 +57,7 @@ from .store import (
     doc_label,
     load_doc,
     load_tm,
+    no_carryover,
     prior_doc,
     prior_targets,
     report_path,
@@ -65,7 +66,6 @@ from .store import (
     save_review,
     save_segments,
     save_targets,
-    segment_key,
     target_token,
     tm_lookup,
     tm_records,
@@ -404,10 +404,29 @@ def do_extract(src, lang, cfg, tone=None, reset=False):
     # does not read the state file at all, because it has to work on one this
     # build cannot read.
     tone = tone or stored.get("tone") or cfg.get("tone", DEFAULT_TONE)
-    prior = {} if reset else prior_targets(src, lang)
+    prior = no_carryover() if reset else prior_targets(src, lang)
 
     tm = load_tm(lang)
-    reused, rejected, dropped = 0, 0, []
+    reused, rejected = 0, 0
+    #: What the carryover did that a person has to be told about. Segment ids,
+    #: except `register`, which is a document-level fact. A dict rather than four
+    #: more elements of the return tuple: the callers that ignore it — `cmd_run`
+    #: and `POST /api/extract` — keep ignoring one thing, and the next entry
+    #: costs a key rather than an arity change at every call site.
+    notes = {"kept": [], "ambiguous": [], "replaced": [], "register": None}
+    # Which stored entry each segment inherits, decided for the document at once:
+    # two positions holding the same sentence can only be told apart by looking
+    # at both, which is what a map of one entry per key could not do.
+    # Divergence (25).
+    inherited = prior.align(segments, tone)
+    if stored.get("tone") and canonical_tone(stored["tone"]) != canonical_tone(tone) \
+            and len(prior):
+        # Said out loud because it is a silent destructive act otherwise, and the
+        # contract tells a client to send `tone` on a re-extract button. Nothing
+        # carries across a register change — deliberately, see
+        # `store.prior_targets` — so this is the count of translations the
+        # document is about to stop holding.
+        notes["register"] = (stored["tone"], tone, len(prior))
     for seg in segments:
         # This document's own state first, then the memory. Both are proposals,
         # not results: reuse goes through `accept` for the same reason model
@@ -415,9 +434,11 @@ def do_extract(src, lang, cfg, tone=None, reset=False):
         # nor a reviewer can reconstruct, and a stale entry that keeps its key
         # while the mask configuration moves under it is the measured case.
         candidates = []
-        key = segment_key(seg, tone)
-        if key in prior:
-            candidates.append(prior[key])
+        carried, ambiguous = inherited[seg["id"]]
+        if carried is not None:
+            candidates.append(carried)
+            if ambiguous:
+                notes["ambiguous"].append(seg["id"])
         hit, hit_origin = tm_lookup(tm, seg, tone)
         if hit is not None:
             # No review state on a memory hit, and that is the design: the memory
@@ -425,35 +446,64 @@ def do_extract(src, lang, cfg, tone=None, reset=False):
             # saying this segment is theirs to finish. Carrying a hold in would
             # hold a segment nobody has looked at.
             candidates.append((hit, hit_origin, None))
-        for proposal, origin, review in candidates:
+        for rank, (proposal, origin, review) in enumerate(candidates):
             # The memory is tried even when this document's own target was
             # refused: the two can differ, and a good banked wording should not be
             # lost to a stale one sitting in front of it.
             target, _why = accept(seg, proposal, lang, cfg)
             if target is not None:
                 seg["target"], seg["origin"], seg["status"] = target, origin, "translated"
-                # A hold rides with the wording it was placed on. Only when the
-                # wording itself carried over — a refused proposal leaves nothing
-                # to hold, and `--reset` reads no prior state at all, so it drops
-                # holds with everything else, which is what "start over" means.
+                # A hold rides with the wording it was placed on. Dropped only
+                # when another proposal took the segment — the wording the hold
+                # was placed on is gone then — and by `--reset`, which reads no
+                # prior state at all, which is what "start over" means.
                 if review:
                     seg["review"] = review
+                if carried is not None and rank:
+                    # The carried entry is always the first candidate, so a later
+                    # one winning means the memory answered over wording this
+                    # document was already holding. That wording is gone and its
+                    # `origin` with it — a `human` segment comes back as `tm` and
+                    # stops being covered by origin precedence. Kept as it was,
+                    # because which of the two should win is a decision this
+                    # package did not list; reported, because until 2026-08-17
+                    # nothing counted it at all. Divergence (27).
+                    notes["replaced"].append(seg["id"])
                 reused += 1
                 break
         else:
             if candidates:
                 rejected += 1
-                # Which of the two kinds of refusal this was. A memory hit that
-                # no longer fits is routine; **this document's own stored target
-                # being refused means a sentence somebody wrote is gone**, and
-                # until 2026-08-15 both were reported as "stale memory hit(s)
-                # refused", which names the memory rather than the wording it
-                # just deleted. Counting them apart is a message fix and nothing
-                # more — what *should* happen to a refused human target instead
-                # of deleting it is `docs/contracts/workbench-http.md`
-                # divergence (24), and a decision.
-                if key in prior:
-                    dropped.append(seg["id"])
+                if carried is not None:
+                    # **`lx extract` does not delete wording this document
+                    # already holds.** Every proposal was refused — the measured
+                    # cause is a `config/dnt.txt` edit moving the mask
+                    # configuration out from under banked wording, so the
+                    # placeholder set no longer matches — and until 2026-08-17
+                    # the segment came back with no target at all: a sentence
+                    # somebody wrote, deleted by a re-parse.
+                    #
+                    # The rule it is judged by is the one `lx apply` already
+                    # states. A person's, an agent's or a model's stored wording
+                    # enters through a path that deliberately does not refuse,
+                    # and is reported at `lx check` — where this one is an error
+                    # on the `tags` rule — rather than rejected at the door. The
+                    # acceptance gate exists to stop wording banked *elsewhere*
+                    # from being written into a segment sight unseen; this
+                    # wording is not elsewhere, it is what the document was
+                    # already holding. Divergence (24).
+                    #
+                    # *Lost:* marking it with a second `review` value, which
+                    # spends a vocabulary the contract advertises as closed on a
+                    # state `lx check` already reports. *Lost:* deleting it and
+                    # naming the ids on both surfaces, which is cheaper and
+                    # answers "which sentence did I lose" with a list instead of
+                    # with the sentence.
+                    target, origin, review = carried
+                    seg["target"], seg["origin"], seg["status"] = target, origin, "translated"
+                    if review:
+                        seg["review"] = review
+                    notes["kept"].append(seg["id"])
 
     doc = {
         # `doc_label`, not `os.path.relpath`: one spelling of one identity, on
@@ -482,35 +532,78 @@ def do_extract(src, lang, cfg, tone=None, reset=False):
     # colliding with one above is the format's bug, and there are two formats.
     doc.update(facts)
     save_doc(src, lang, doc)
-    return doc, reused, rejected, dropped
+    return doc, reused, rejected, notes
+
+
+def report_extract(src, lang, notes):
+    """What the carryover did that a person has to be told about.
+
+    One function, called by `lx extract` **and** by `lx run`, because `lx run`
+    begins with `do_extract` and carries the same `--tone`. It lived inside
+    `cmd_extract` for one afternoon, which was long enough for `lx run` to empty
+    a reviewed book on a register change and print `0 reused · 2 to translate` —
+    indistinguishable from a document being translated for the first time. Two
+    surfaces of one product, each with its own idea of what is worth saying, is
+    the shape `AGENTS.md` keeps naming.
+    """
+    if notes["kept"]:
+        # Its own line rather than a field in the counts, because this one is not
+        # a memory problem: these segments held a stored target that no longer
+        # fits the document they were re-parsed from. Said loudly, because it is
+        # wording somebody wrote — and until 2026-08-17 the wording was deleted
+        # here rather than kept, with nothing printed but "stale memory hit(s)
+        # refused", which names the memory rather than the sentence.
+        ids = ", ".join(notes["kept"])
+        _out(f"  {len(notes['kept'])} segment(s) kept a stored target whose placeholders no "
+             f"longer match this document: {ids}. Nothing was lost — `lx check` reports them "
+             f"as errors, and a bare `lx render` will write the stale placeholder or the "
+             f"wrong term into the output. Fix the wording, or re-translate with "
+             f"`lx translate {src} --lang {lang} --ids {','.join(notes['kept'])}` "
+             f"(--overwrite-human if a person wrote it).")
+    if notes["replaced"]:
+        # The path (24) does not cover: a refused carryover with a memory hit
+        # behind it that fits. The banked wording wins, as it always has, and the
+        # sentence this document was holding is gone with its `origin`.
+        _out(f"  {len(notes['replaced'])} segment(s) had a stored target the memory replaced "
+             f"because it no longer fits this document: {', '.join(notes['replaced'])}. Their "
+             f"`origin` is now `tm`, so a model run may overwrite them.")
+    if notes["ambiguous"]:
+        # The half no alignment can fix: a run of identical paragraphs that
+        # gained or lost a member has no evidence left about which wording
+        # belongs where. Named rather than guessed at in silence. Divergence (26).
+        _out(f"  {len(notes['ambiguous'])} segment(s) repeat a sentence this document holds "
+             f"elsewhere, and that run changed size, so which stored wording belongs to which "
+             f"position is not established: {', '.join(notes['ambiguous'])}. Check their "
+             f"wording and `origin`.")
+    if notes["register"]:
+        was, now, held = notes["register"]
+        # A register change carries nothing over, deliberately — and until
+        # 2026-08-17 it said nothing at all while emptying a reviewed book.
+        _out(f"  the register moved from {was} to {now}, and translations do not cross "
+             f"registers: the {held} this document held are not in it any more. They are in "
+             f"the last render, and in `.lx/tm.{lang}.jsonl` if it was committed.")
 
 
 def cmd_extract(args, cfg):
-    doc, reused, rejected, dropped = do_extract(
+    doc, reused, rejected, notes = do_extract(
         args.src, args.lang, cfg, args.tone, args.reset)
     pending = sum(1 for s in doc["segments"] if s["status"] == "pending")
     _out(f"{args.src} [{args.lang}] -> {db_path()}")
     line = f"  segments {len(doc['segments'])} | reused {reused} | pending {pending}"
-    # Only when it happened, and named as the memory's problem rather than the
-    # document's: a rejected reuse means a banked entry no longer fits the
-    # segment it matched, and the segment went back to pending because of it.
+    # Only when it happened. "Proposal" rather than "memory hit", which is what
+    # this said until 2026-08-17 and was wrong half the time: the count is what
+    # the acceptance path refused, and a refusal is as often this document's own
+    # stored wording as a banked entry — which is the line below, and is why
+    # naming the memory here sent a reader to the wrong file.
     if rejected:
-        line += f" | {rejected} stale memory hit(s) refused"
+        line += f" | {rejected} stale proposal(s) refused"
     # Likewise only when it is not the default: the register decides both the
     # brief and which half of the memory answers, so a document that is in one
     # should say so on the line that reports what carried over.
     if canonical_tone(doc["tone"]) != DEFAULT_TONE:
         line += f" | tone {doc['tone']}"
     _out(line)
-    if dropped:
-        # Its own line rather than a field in the count above, because this one
-        # is not a memory problem: these segments held a stored target and it did
-        # not survive re-parsing. Said loudly, because it is wording somebody
-        # wrote. Until 2026-08-15 the only thing printed was "stale memory hit(s)
-        # refused", which names the memory rather than the sentence it deleted.
-        _out(f"  {len(dropped)} segment(s) lost a stored target that no longer fits "
-             f"this document: {', '.join(dropped)}. Their wording is in the last "
-             f"render, or in `.lx/tm.{args.lang}.jsonl` if it was committed.")
+    report_extract(args.src, args.lang, notes)
     # Everything the parse decided rather than read. Printed only when it is not
     # the ordinary answer, so a Markdown project's output does not change at all
     # — but printed *always* for a document whose encoding or paragraph shape was
@@ -2482,13 +2575,17 @@ def cmd_repair(args, cfg):
 
 def cmd_run(args, cfg):
     """extract → translate → check → repair* → render, in one command."""
-    doc, reused, rejected, _dropped = do_extract(args.src, args.lang, cfg, args.tone)
+    doc, reused, rejected, notes = do_extract(args.src, args.lang, cfg, args.tone)
     # Through `do_select` rather than inline, so this is not a fourth spelling of
     # the draft queue's predicate. It was one until 2026-08-15.
     pending = do_select(doc, cfg, "draft", over_human=args.overwrite_human)
     _out(f"{args.src} [{args.lang}] · {len(doc['segments'])} segments · "
          f"{reused} reused · {len(pending)} to translate"
-         + (f" · {rejected} stale memory hit(s) refused" if rejected else ""))
+         + (f" · {rejected} stale proposal(s) refused" if rejected else ""))
+    # The same four lines `lx extract` prints. This command takes `--tone` too,
+    # and without this a register change emptied a reviewed book here while
+    # printing a line indistinguishable from a first run.
+    report_extract(args.src, args.lang, notes)
 
     if pending:
         _run_translate(args.src, args.lang, cfg, pending, "draft", args)

@@ -333,6 +333,40 @@ def test_extract_names_a_non_default_register_and_stays_quiet_about_the_default(
     assert "tone" not in r.stdout.decode("utf-8")
 
 
+def test_run_says_what_extract_says_about_the_wording_it_stopped_holding(tmp_path):
+    """`lx run` begins with `do_extract` and carries the same `--tone`.
+
+    The four lines the carryover prints lived inside `cmd_extract` for one
+    afternoon, and in that state `lx run d.md --tone literary` emptied a reviewed
+    book and printed `0 reused · 2 to translate` — a line indistinguishable from
+    a first run on a document nobody had translated. A register change is the one
+    of the four with no downstream check behind it: kept wording turns `lx check`
+    red, and a register change just returns the document to `pending`, where
+    everything looks normal.
+
+    Found by the adversarial pass over the change that added the reporting, on
+    the axis that change had not varied: which commands do the reporting.
+    """
+    (tmp_path / "d.md").write_bytes(b"He left without a word.\n\nShe did not answer.\n")
+    env = {**os.environ, "PYTHONPATH": SRC}
+    assert _lx(["init"], tmp_path, env).returncode == 0
+    assert _lx(["extract", "d.md", "--lang", "zh-TW"], tmp_path, env).returncode == 0
+    ids = [s["id"] for s in statedb.segments(tmp_path)]
+    (tmp_path / "t.json").write_bytes(json.dumps(
+        {ids[0]: "他一言不發地走了。", ids[1]: "她沒有回答。"}, ensure_ascii=False).encode())
+    assert _lx(["apply", "d.md", "--lang", "zh-TW", "--file", "t.json",
+                "--origin", "human"], tmp_path, env).returncode == 0
+
+    # `--dry-run` so nothing reaches a provider; the register move happens in
+    # `do_extract`, before any of that. `lx run` exits 1 because the document it
+    # just emptied fails `lx check`, which is itself the point.
+    r = _lx(["run", "d.md", "--lang", "zh-TW", "--tone", "literary", "--dry-run"],
+            tmp_path, env)
+    said = r.stdout.decode("utf-8")
+    assert "the register moved from technical to literary" in said, said
+    assert "the 2 this document held are not in it any more" in said
+
+
 def test_hold_and_unhold_report_what_they_did_and_refuse_an_empty_segment(tmp_path):
     """`lx hold` / `lx unhold` end to end, including the exit code of a refusal.
 

@@ -456,28 +456,32 @@ def test_reset_drops_a_hold_with_everything_else(book):
     assert not after[ids["heading"]].get("target"), "reset kept a target"
 
 
-def test_a_hold_whose_wording_is_refused_is_dropped_with_it(book):
-    """There is nothing left to hold once the wording it was placed on is gone.
+def test_a_hold_rides_with_wording_the_acceptance_path_refused(book):
+    """A hold is about *this wording*, and the wording is still there.
 
     No monkeypatching: `broken`'s target dropped the placeholder its masked
-    source carries, so `translate.accept` refuses that carryover for real. The
-    hold has to go with the target, or the segment comes back held,
-    untranslated, and out of the queue that would fix it — the deadlock shape
-    this feature exists to make unreachable.
+    source carries, so `translate.accept` refuses that carryover for real. Until
+    2026-08-17 the refusal deleted the target and the hold went with it, on the
+    argument that there was nothing left to hold — and that argument was true
+    only because the deletion made it true. `lx extract` keeps the wording now
+    (`docs/contracts/workbench-http.md` divergence (24), closed), so the hold has
+    a subject and stays with it. This test asserted the deletion before that
+    date; its docstring said it would change when the decision was taken.
 
-    ⚠️ **This test also pins a defect, deliberately.** The refused carryover
-    takes the *human target with it* and `lx extract` says only "1 stale memory
-    hit(s) refused", which names the memory rather than the sentence it just
-    deleted. That is `docs/contracts/workbench-http.md` divergence (24), recorded
-    and not fixed here because what should happen instead is a decision. When it
-    is taken, this test changes with it — the hold half stays true either way.
+    The deadlock the hold exclusion exists to make unreachable still is, in a
+    new shape: the segment comes back held *and translated*, `lx check` reports
+    its placeholder error, no queue may select it, and `cmd_repair` names it with
+    the way out — asserted in
+    `test_repair_names_the_failing_segments_it_declined_to_select`.
     """
     doc, ids = book
     _hold([ids["broken"]])
     do_extract("d.md", "zh-TW", CFG)
     after = {s["id"]: s for s in load_doc("d.md", "zh-TW")["segments"]}
-    assert after[ids["broken"]].get("review") is None
-    assert not after[ids["broken"]].get("target"), "divergence (24) has changed"
+    assert after[ids["broken"]].get("target") == "請見指南。", "divergence (24) has changed"
+    assert after[ids["broken"]].get("review") == "held", "the hold left its wording behind"
+    assert after[ids["broken"]].get("origin") == "agent", "the wording changed hands"
+    assert after[ids["broken"]]["status"] == "translated"
 
 
 def test_repair_names_the_failing_segments_it_declined_to_select(book, capsys):
