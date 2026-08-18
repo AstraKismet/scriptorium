@@ -413,6 +413,48 @@ def test_a_hand_damaged_line_is_skipped_rather_than_taking_the_memory_down(
 # --- reuse takes the same acceptance path as model output --------------------
 
 
+def test_protecting_the_other_name_does_not_rename_the_person_in_the_sentence(
+        tmp_path, monkeypatch):
+    """The measurement HANDOFF-033 was written from, end to end.
+
+    An author renaming a character, or deciding to protect the surname instead of
+    the given name, is a routine mid-book act. It leaves the segment's
+    *placeholder count* alone, so the id-set comparison that gated every reuse
+    had nothing to object to: the stored wording was accepted, `lx check` exited
+    0, and the rendered sentence named the wrong person twice —
+
+        config/dnt.txt  Brian   ->  render  Brian 在門口迎接了 Wendy。
+        config/dnt.txt  Wendy   ->  render  Wendy 在門口迎接了 Wendy。
+
+    The wording knows which map its ⟦n⟧ referred to, so it is moved into the new
+    one instead: `Brian` stops being a placeholder because it stops being
+    protected, `Wendy` becomes one because it starts, and the sentence says what
+    the reviewer wrote. Asserted on the rendered bytes, because that is where the
+    defect was visible and the counts were not.
+    """
+    _project(tmp_path, monkeypatch, dnt="Brian\n",
+             doc=b"Brian greeted Wendy at the gate.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    assert _only(doc)["masked"] == "⟦1⟧ greeted Wendy at the gate."
+    do_apply("d.md", "zh-TW", CFG, {_only(doc)["id"]: "⟦1⟧ 在門口迎接了 Wendy。"},
+             origin="human")
+    text, _missing = do_render("d.md", "zh-TW", CFG)
+    assert text == "Brian 在門口迎接了 Wendy。\n"
+
+    (tmp_path / "config" / "dnt.txt").write_text("Wendy\n", encoding="utf-8")
+    doc, reused, rejected, notes = do_extract("d.md", "zh-TW", CFG)
+    assert _only(doc)["masked"] == "Brian greeted ⟦1⟧ at the gate."
+    assert (reused, rejected) == (1, 0)
+    assert _only(doc)["target"] == "Brian 在門口迎接了 ⟦1⟧。"
+    assert _only(doc)["origin"] == "human", "a person's wording changed hands"
+
+    report, _ = do_check("d.md", "zh-TW", CFG)
+    assert report["errors"] == 0
+    text, missing = do_render("d.md", "zh-TW", CFG)
+    assert (missing, text) == (0, "Brian 在門口迎接了 Wendy。\n"), \
+        "the sentence renamed the person it is about"
+
+
 def test_wording_survives_the_mask_configuration_moving_under_it(
         tmp_path, monkeypatch):
     """Measured 2026-07-27, repaired 2026-08-17, and the shape has changed twice.
