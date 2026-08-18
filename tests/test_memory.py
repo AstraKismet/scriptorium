@@ -413,20 +413,24 @@ def test_a_hand_damaged_line_is_skipped_rather_than_taking_the_memory_down(
 # --- reuse takes the same acceptance path as model output --------------------
 
 
-def test_a_memory_hit_is_refused_when_the_mask_configuration_moved_under_it(
+def test_wording_survives_the_mask_configuration_moving_under_it(
         tmp_path, monkeypatch):
-    """Measured 2026-07-27, and the reason reuse is now gated.
+    """Measured 2026-07-27, repaired 2026-08-17, and the shape has changed twice.
 
     The key is deliberately blind to the do-not-translate list — so that the same
-    wording banked on two machines with different lists is still one entry — which
-    means editing that list changes a segment's placeholder count while its key
-    stays put. Written straight to target, as reuse used to be, the extra ⟦2⟧ has
-    no slot to restore from and reaches the rendered document verbatim.
+    wording banked on two machines with different lists is still one entry —
+    which means editing that list changes a segment's placeholder count while its
+    key stays put. Written straight to target, as reuse used to be, the extra ⟦2⟧
+    had no slot to restore from and reached the rendered document verbatim. The
+    answer was to *refuse* such a proposal, and this test asserted the refusal.
 
-    Asserted on the memory and on the check, not on a deletion: the entry is
-    supposed to survive, and so — since 2026-08-17 — is the wording the document
-    was already holding. Refusing a proposal is not the same as discarding one,
-    and the last third of this test is that difference.
+    A refusal is the wrong answer when the repair is deterministic, which
+    invariant 5 says plainly. The document's own stored wording knows the map its
+    placeholders were written against, so `translate.accept` unmasks it against
+    that map and seats the current one back in by content: the wording is
+    **repaired**, the render is correct, and nothing is refused or kept or
+    reported. What still refuses is a proposal that cannot be seated — the test
+    below this one — and a memory hit, which carries no map at all.
     """
     _project(tmp_path, monkeypatch, dnt="Celurion\nAcme\n", doc=DNT_DOC)
     doc, _reused, _rejected, _notes = do_extract("d.md", "zh-TW", CFG)
@@ -434,57 +438,83 @@ def test_a_memory_hit_is_refused_when_the_mask_configuration_moved_under_it(
     do_apply("d.md", "zh-TW", CFG, {_only(doc)["id"]: "⟦1⟧ 與 ⟦2⟧ 一同出貨。"})
     append_tm("zh-TW", tm_records(load_doc("d.md", "zh-TW"), load_tm("zh-TW")))
 
-    # Drop one term. The sentence is unchanged, so the key still matches — the
-    # banked wording no longer does.
+    # Drop one term. The sentence is unchanged, so the key still matches and the
+    # segment now has one slot where the wording names two.
     (tmp_path / "config" / "dnt.txt").write_text("Celurion\n", encoding="utf-8")
     doc, reused, rejected, notes = do_extract("d.md", "zh-TW", CFG)
-    assert (reused, rejected) == (0, 1)
-    assert "⟦2⟧" in list(load_tm("zh-TW").values())[0]     # the entry is still there
-
-    # **Refused, and kept.** `docs/contracts/workbench-http.md` divergence (24):
-    # the acceptance path decides whether wording may be *written into* a
-    # segment, and until 2026-08-17 `lx extract` read that as licence to delete
-    # what the segment already held. The sentence is somebody's; it stays, the
-    # ids are named, and the check is what reports it.
-    assert _only(doc)["status"] == "translated"
-    assert _only(doc)["target"] == "⟦1⟧ 與 ⟦2⟧ 一同出貨。"
+    assert (reused, rejected) == (1, 0), "the wording was repaired, not refused"
+    assert _only(doc)["target"] == "⟦1⟧ 與 Acme 一同出貨。"
     assert _only(doc)["origin"] == "agent", "the wording changed hands"
-    assert notes["kept"] == [_only(doc)["id"]]
+    assert notes["kept"] == [], "nothing had to be kept: nothing was refused"
+    assert "⟦2⟧" in list(load_tm("zh-TW").values())[0], "the entry is still there"
 
     report, _ = do_check("d.md", "zh-TW", CFG)
-    assert report["errors"] == 1 and report["by_rule"]["tags"] == 1, \
-        "the deletion was the old defence; this is the new one"
+    assert report["errors"] == 0
+    text, missing = do_render("d.md", "zh-TW", CFG)
+    assert (missing, text) == (0, "Celurion 與 Acme 一同出貨。\n"), \
+        "the sentence the reviewer wrote, rendered under the new configuration"
 
-    # The cost of keeping it, measured rather than left to be discovered: `lx
-    # render` renders what the document holds and runs no check, so the stale
-    # placeholder reaches the file. `lx run` never gets there — `cmd_run`
-    # refuses to render while `lx check` reports an error — and a person's
-    # `lx apply` could already produce this exact target. Teaching `render` to
-    # treat a target whose placeholders do not match as missing is HANDOFF-031.
-    text, missing = do_render("d.md", "zh-TW", CFG, fallback=True)
-    assert (missing, text) == (0, "Celurion 與 ⟦2⟧ 一同出貨。\n")
-
-    # Put the term back and the wording is accepted again, restored through both
-    # slots. It comes back through the document's own state rather than the
-    # memory now, which is why `origin` is still `agent`.
+    # And back again. The wording is now stored in the *new* numbering, so this
+    # is the same repair in the other direction rather than an undo.
     (tmp_path / "config" / "dnt.txt").write_text("Celurion\nAcme\n", encoding="utf-8")
     doc, reused, rejected, _notes = do_extract("d.md", "zh-TW", CFG)
     assert (reused, rejected) == (1, 0)
-    assert _only(doc)["origin"] == "agent"
+    assert _only(doc)["target"] == "⟦1⟧ 與 ⟦2⟧ 一同出貨。"
     text, missing = do_render("d.md", "zh-TW", CFG)
     assert (missing, text) == (0, "Celurion 與 Acme 一同出貨。\n")
 
 
-def test_adding_a_term_refuses_the_hit_that_was_banked_without_it(tmp_path, monkeypatch):
+def test_a_memory_hit_carries_no_map_so_it_is_still_refused_when_it_no_longer_fits(
+        tmp_path, monkeypatch):
+    """The half the repair cannot reach, and the 2026-07-27 property that
+    survives it.
+
+    A memory hit is a target and nothing else: `store.tm_record` writes `hash`,
+    `context`, `segmentation_version`, `source` and `target`, so what its
+    placeholders meant when it was banked is not on the line and cannot be
+    inferred from it. The id comparison is therefore the whole of the gate for
+    that path, and this asserts that it still is — a bare ⟦2⟧ does not reach a
+    rendered document.
+
+    The document's own copy is cleared first, deliberately: with it in place the
+    carryover repairs and the memory is never consulted, which is what the test
+    above measures. Giving the memory a map of its own is scheduled — see
+    HANDOFF-033 — and this test is what will change when it lands.
+    """
+    _project(tmp_path, monkeypatch, dnt="Celurion\nAcme\n", doc=DNT_DOC)
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    do_apply("d.md", "zh-TW", CFG, {_only(doc)["id"]: "⟦1⟧ 與 ⟦2⟧ 一同出貨。"})
+    append_tm("zh-TW", tm_records(load_doc("d.md", "zh-TW"), load_tm("zh-TW")))
+
+    state = load_doc("d.md", "zh-TW")
+    state["segments"][0]["target"] = ""
+    save_doc("d.md", "zh-TW", state)
+
+    (tmp_path / "config" / "dnt.txt").write_text("Celurion\n", encoding="utf-8")
+    doc, reused, rejected, notes = do_extract("d.md", "zh-TW", CFG)
+    assert (reused, rejected) == (0, 1)
+    assert _only(doc)["status"] == "pending", "there was no stored wording to keep"
+    assert notes["kept"] == []
+
+    text, missing = do_render("d.md", "zh-TW", CFG, fallback=True)
+    assert (missing, text) == (1, DNT_DOC.decode("utf-8"))
+    assert "⟦" not in text, "a bare placeholder reached the rendered document"
+
+
+def test_adding_a_term_repairs_the_wording_that_was_written_without_it(
+        tmp_path, monkeypatch):
     """The other edit to the same list, and the direction HANDOFF-007 wrote down.
 
-    It is worth separating from the removal above, because the two fail
-    differently and only one of them was ever visible in a rendered document. Drop
-    a term and the banked target keeps a placeholder the new slot map cannot
-    restore, so a bare ⟦2⟧ reaches the file. Add one and the target is short a
-    placeholder instead: the reused wording renders as ordinary text with the new
-    term left unprotected — wrong, reported by `check`, and impossible to see by
-    reading the output. The gate refuses both, and this asserts the quiet one.
+    Drop a term and the stored wording keeps a placeholder the new slot map
+    cannot restore; add one and the wording is short a placeholder instead, so
+    the new term reaches the rendered document unprotected — wrong, and
+    impossible to see by reading the output, which is why this direction has its
+    own test. Both were refused until 2026-08-17.
+
+    Both are repaired now, and this is the direction that shows the repair is not
+    merely a renumbering: the wording never had a placeholder for `Acme` at all,
+    and it comes back with one, because the term is seated by content into the
+    prose the old map unmasks.
     """
     _project(tmp_path, monkeypatch, dnt="Celurion\n", doc=DNT_DOC)
     doc, _reused, _rejected, _notes = do_extract("d.md", "zh-TW", CFG)
@@ -494,16 +524,13 @@ def test_adding_a_term_refuses_the_hit_that_was_banked_without_it(tmp_path, monk
 
     (tmp_path / "config" / "dnt.txt").write_text("Celurion\nAcme\n", encoding="utf-8")
     doc, reused, rejected, notes = do_extract("d.md", "zh-TW", CFG)
-    assert (reused, rejected) == (0, 1)
-    assert notes["kept"] == [_only(doc)["id"]], "divergence (24): the wording stays"
+    assert (reused, rejected) == (1, 0)
+    assert _only(doc)["target"] == "⟦1⟧ 與 ⟦2⟧ 一同出貨。", "the new term was not seated"
+    assert notes["kept"] == []
 
-    # And this is the quiet direction the docstring above is about. The kept
-    # wording renders as perfectly ordinary prose — the new term is simply
-    # unprotected inside it — so nothing in the output tells a reader anything
-    # is wrong, and the `tags` error is the only thing that does.
     report, _ = do_check("d.md", "zh-TW", CFG)
-    assert report["by_rule"]["tags"] == 1
-    text, missing = do_render("d.md", "zh-TW", CFG, fallback=True)
+    assert report["errors"] == 0
+    text, missing = do_render("d.md", "zh-TW", CFG)
     assert (missing, text) == (0, "Celurion 與 Acme 一同出貨。\n")
 
 
@@ -564,40 +591,38 @@ def test_the_memory_is_still_tried_when_this_document_holds_a_stale_target(
 # wording this document was holding.
 
 
-def test_a_refused_carryover_keeps_the_wording_it_could_not_carry(tmp_path, monkeypatch):
-    """Divergence (24), reproduced and closed.
+def test_a_carryover_that_cannot_be_seated_keeps_the_wording_it_could_not_carry(
+        tmp_path, monkeypatch):
+    """Divergence (24), reproduced and closed — on the case that still refuses.
 
-    An ordinary mid-edit state: a person's target that does not carry the
-    placeholder its source does. `lx apply` stores it deliberately — a person's
-    words are reported at `lx check`, not rejected at the door — and until
-    2026-08-17 the next `lx extract` deleted it, because `translate.accept`
-    refused to re-write it and the segment was then left as parsed. `rejected`
-    counted it; nothing said which sentence had gone.
+    The repair takes the deterministic half: a term renumbered, dropped or added
+    is seated by content. What is left is genuinely ambiguous, and this is its
+    smallest shape — a translation that names a protected term twice where the
+    source names it once. Two occurrences, one slot: no rule can say which of them
+    the placeholder belongs to, so the seating refuses rather than guessing, and
+    a guess there is what puts one character's name where another's belongs.
 
-    Nothing is deleted now. The refusal still happens, so the counts are what
-    they were, and the wording stays where the person put it with its `origin`
-    and its status — which `store._segment` derives from the text, so a kept
-    target is `translated` and the draft queue does not select it again.
+    A refusal is where divergence (24) begins. Until 2026-08-17 the segment then
+    came back with **no target at all** — a sentence a person wrote, deleted by a
+    re-parse, with `rejected` counting it and nothing naming it. It stays now,
+    with its `origin` and its status, and `lx check` reports it.
     """
     _project(tmp_path, monkeypatch, dnt="Celurion\n", doc=b"Celurion ships today.\n")
     doc, *_ = do_extract("d.md", "zh-TW", CFG)
     sid = _only(doc)["id"]
     assert _only(doc)["masked"] == "⟦1⟧ ships today."
-    do_apply("d.md", "zh-TW", CFG, {sid: "⟦1⟧ 今天出貨。"}, origin="human")
+    # A person's wording that names the protected term a second time. `lx apply`
+    # stores it deliberately — a person's words are reported at `lx check`, not
+    # rejected at the door.
+    do_apply("d.md", "zh-TW", CFG, {sid: "⟦1⟧ 今天出貨，⟦1⟧ 準時。"}, origin="human")
 
-    # The mask configuration moves out from under the wording. The sentence is
-    # untouched, so the key still matches and the target is still offered — it
-    # is the placeholder set that no longer does.
-    (tmp_path / "config" / "dnt.txt").write_text("", encoding="utf-8")
     doc, reused, rejected, notes = do_extract("d.md", "zh-TW", CFG)
     assert (reused, rejected) == (0, 1), "the acceptance path still refuses it"
     assert notes["kept"] == [sid]
     kept = _only(doc)
-    assert kept["target"] == "⟦1⟧ 今天出貨。", "a sentence a person wrote was deleted"
+    assert kept["target"] == "⟦1⟧ 今天出貨，⟦1⟧ 準時。", "a sentence a person wrote was deleted"
     assert (kept["origin"], kept["status"]) == ("human", "translated")
 
-    # The report that replaces the deletion, and the reason it is safe to keep:
-    # `lx check` fails, so `lx run` will not render the document.
     report, _ = do_check("d.md", "zh-TW", CFG)
     assert report["errors"] == 1 and report["by_rule"]["tags"] == 1
 
@@ -816,6 +841,53 @@ def test_the_alignment_has_a_budget_and_degrades_to_the_old_rule_over_it(
     rows = statedb.segments(tmp_path)
     assert [s["target"] for s in rows] == ["乙。", "乙。"], "the pre-2026-08-17 answer"
     assert [s["origin"] for s in rows] == ["llm:draft", "llm:draft"]
+
+
+def test_a_kept_wording_remembers_which_numbering_it_was_written_in(
+        tmp_path, monkeypatch):
+    """The guard that fires once is not a guard, and this is the case that
+    proves it.
+
+    `store.save_doc` rewrites a segment's `slots` from the fresh parse on every
+    `lx extract`, and the divergence (24) keep path writes the *old* target onto
+    the *fresh* segment. So a rule that reads provenance off the segment sees the
+    new map from the second extract onward and accepts the stale wording in
+    silence — measured 2026-08-17, before `target_slots` existed:
+
+        after apply        target='⟦1⟧ …'   slots={'1': 'Brian'}
+        after extract #1   target='⟦1⟧ …'   slots={'1': 'Wendy'}
+        after extract #2   target='⟦1⟧ …'   slots={'1': 'Wendy'}
+
+    So the map a target was written against is pinned beside the target, written
+    only when it differs from the segment's own — which is why the ordinary
+    segment carries nothing and this one does. Asserted twice over, because once
+    is what the defect looked like.
+    """
+    _project(tmp_path, monkeypatch, dnt="Celurion\nAcme\n",
+             doc=b"Celurion and Acme ship together.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    sid = _only(doc)["id"]
+    # Names one protected term twice, so no seating can place it once `Acme`
+    # stops being protected: two occurrences of `Celurion`, one slot.
+    do_apply("d.md", "zh-TW", CFG, {sid: "⟦1⟧ 與 ⟦2⟧ 一同出貨，⟦1⟧ 準時。"},
+             origin="human")
+    assert statedb.segments(tmp_path)[0].get("target_slots") is None, \
+        "a target written against its own segment carries no provenance"
+
+    (tmp_path / "config" / "dnt.txt").write_text("Celurion\n", encoding="utf-8")
+    first = None
+    for _extract in (1, 2):
+        doc, reused, rejected, notes = do_extract("d.md", "zh-TW", CFG)
+        row = statedb.segments(tmp_path)[0]
+        state = (reused, rejected, notes["kept"], row["target"], row["origin"])
+        if first is None:
+            first = state
+            assert notes["kept"] == [sid]
+            assert row["target"] == "⟦1⟧ 與 ⟦2⟧ 一同出貨，⟦1⟧ 準時。"
+            assert {k: v["original"] for k, v in row["target_slots"].items()} == \
+                {"1": "Celurion", "2": "Acme"}, "the map it was written against"
+        else:
+            assert state == first, "the second extract accepted what the first refused"
 
 
 def test_a_register_change_says_what_it_left_behind(tmp_path, monkeypatch):

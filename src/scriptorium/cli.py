@@ -445,12 +445,15 @@ def do_extract(src, lang, cfg, tone=None, reset=False):
             # is wording banked from somewhere else, and a hold is one reviewer
             # saying this segment is theirs to finish. Carrying a hold in would
             # hold a segment nobody has looked at.
-            candidates.append((hit, hit_origin, None))
-        for rank, (proposal, origin, review) in enumerate(candidates):
+            candidates.append((hit, hit_origin, None, None))
+        for rank, (proposal, origin, review, written_against) in enumerate(candidates):
             # The memory is tried even when this document's own target was
             # refused: the two can differ, and a good banked wording should not be
             # lost to a stale one sitting in front of it.
-            target, _why = accept(seg, proposal, lang, cfg)
+            # `slots=` is the map this wording's placeholders were written
+            # against. A carryover knows it; a memory hit does not, and passing
+            # `None` there is what says so rather than what forgets it.
+            target, _why = accept(seg, proposal, lang, cfg, slots=written_against)
             if target is not None:
                 seg["target"], seg["origin"], seg["status"] = target, origin, "translated"
                 # A hold rides with the wording it was placed on. Dropped only
@@ -499,10 +502,19 @@ def do_extract(src, lang, cfg, tone=None, reset=False):
                     # naming the ids on both surfaces, which is cheaper and
                     # answers "which sentence did I lose" with a list instead of
                     # with the sentence.
-                    target, origin, review = carried
+                    target, origin, review, written_against = carried
                     seg["target"], seg["origin"], seg["status"] = target, origin, "translated"
                     if review:
                         seg["review"] = review
+                    # **The kept wording keeps its provenance.** `save_doc` is
+                    # about to write this segment with the *fresh* parse's
+                    # `slots`, so without this the next extract would compare the
+                    # new map against itself and accept the stale wording in
+                    # silence — measured: the guard fires once and never again.
+                    # Written only when the two differ, so the ordinary segment
+                    # costs nothing.
+                    if written_against and written_against != seg.get("slots"):
+                        seg["target_slots"] = written_against
                     notes["kept"].append(seg["id"])
 
     doc = {

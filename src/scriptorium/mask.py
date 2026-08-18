@@ -159,11 +159,9 @@ def mask(text, dnt=()):
     for term in dnt:
         if not term or term not in out:
             continue
-        if _ASCII_RE.fullmatch(term):
-            pat = re.compile(rf"(?<![A-Za-z0-9]){re.escape(term)}(?![A-Za-z0-9])")
-            out = pat.sub(lambda _m, t=term: take(t), out)
-        else:
-            out = out.replace(term, take(term))
+        # `term_pattern` rather than the rule inline, because `reseat` has to
+        # decide "does this term occur here" exactly the way this does.
+        out = term_pattern(term).sub(lambda _m, t=term: take(t), out)
     return out, slots
 
 
@@ -208,3 +206,64 @@ def strip_placeholders(text):
 
 def placeholder_ids(text):
     return PH_RE.findall(text)
+
+
+def term_pattern(term):
+    """How :func:`mask` decides a term occurs here, as a compiled pattern.
+
+    One rule, two callers: masking a source, and re-seating a wording that was
+    masked against a different map. A plain substring search reads `API` inside
+    `APIs` and refuses an ordinary sentence for having two occurrences where the
+    source had one — measured 2026-08-17.
+    """
+    if _ASCII_RE.fullmatch(term):
+        return re.compile(rf"(?<![A-Za-z0-9]){re.escape(term)}(?![A-Za-z0-9])")
+    return re.compile(re.escape(term))
+
+
+def reseat(text, was, now):
+    """Move a wording from the numbering it was written in into another. ``(text, why)``.
+
+    ``was`` is the slot map the wording's ``⟦n⟧`` refer to and ``now`` is the map
+    it has to speak in. The wording is unmasked against ``was`` — exact, no
+    inference, because that map is what its ids meant — and then every original
+    ``now`` holds is seated back into the prose **by content**.
+
+    **By content, and never by a second call to** :func:`mask`. Re-masking looks
+    like the same operation and is not: `mask` numbers by position in the text it
+    is given, so a translation that legitimately reordered two code spans comes
+    back with them swapped, silently, with an id set that matches. Measured
+    2026-08-17 on ``Run `alpha` then `beta` to finish.`` and a target that put
+    them the other way round. Seating by content cannot do that: mask-then-unmask
+    is the identity for the spans it seats, so the rendered bytes always equal the
+    wording that went in, and the only thing a wrong answer can change is the id
+    multiset — which the acceptance path already compares.
+
+    Originals are seated longest first and never into a span already claimed,
+    which is `mask`'s own precedence: it masks the longer term first, so ``York``
+    finds nothing left inside ``New York``. When an original occurs a different
+    number of times than the map has ids for it, the seating is refused rather
+    than guessed — that is the ambiguous case, and a guess there is what puts one
+    character's name where another's belongs.
+    """
+    literal = unmask(text, was)
+    ids_by_original = {}
+    for pid, rec in (now or {}).items():
+        ids_by_original.setdefault(rec["original"], []).append(pid)
+
+    claimed, seats = [], []
+    for original in sorted(ids_by_original, key=len, reverse=True):
+        ids = sorted(ids_by_original[original], key=int)
+        spans = [m.span() for m in term_pattern(original).finditer(literal)
+                 if not any(m.start() < end and start < m.end() for start, end in claimed)]
+        if len(spans) != len(ids):
+            return None, (f"cannot place {original!r}: this segment has "
+                          f"{len(ids)} of it and the wording has {len(spans)}")
+        claimed.extend(spans)
+        seats.extend(zip(spans, ids))
+
+    out = literal
+    for (start, end), pid in sorted(seats, reverse=True):
+        out = f"{out[:start]}{PH_OPEN}{pid}{PH_CLOSE}{out[end:]}"
+    return out, None
+

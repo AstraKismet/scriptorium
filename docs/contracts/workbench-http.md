@@ -1304,6 +1304,15 @@ it is the only one that rebuilds a document rather than editing it.
     is rewriting this endpoint's section anyway, for a client that wants them
     without a second call.
 
+    **Narrowed the same day.** A stored wording whose placeholders were merely
+    *renumbered* — by an edit to `config/dnt.txt`, or by the numbering fix of
+    2026-08-17 — is now **repaired** rather than refused: the map it was written
+    against is pinned beside it, and `mask.reseat` moves it into the segment's
+    current numbering. So this entry's population is what is left after that: a
+    wording no seating can place, the ambiguous case, where a term occurs a
+    different number of times in the wording than the segment has slots for it.
+    Those are kept, exactly as below.
+
     **The cost, measured and worse than it first looked.** `mask.unmask` leaves
     an unknown `⟦n⟧` verbatim and `cli.do_render` runs no check, so `lx render` on
     a document that fails `lx check` writes the kept target into the output where

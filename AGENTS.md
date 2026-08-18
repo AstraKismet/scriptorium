@@ -293,7 +293,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 1144 tests; no network (one is POSIX-only,
+python -m pytest -q                 # 1151 tests; no network (one is POSIX-only,
                                     #   one runs only where the filesystem folds case)
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
@@ -474,6 +474,17 @@ own.
   keeps one wording one entry across machines — so `translate.accept` is what
   makes the blindness safe. Carryover from a document's own prior state is a
   proposal on the same terms, and the memory is tried when it is refused.
+
+  **A wording is repaired into the numbering it has to speak in, before it is
+  judged.** `mask.reseat` unmasks a proposal against the map its placeholders
+  were written in and seats the segment's current originals back in **by
+  content** — never by a second call to `mask`, which numbers by position and so
+  silently swaps two code spans a translation reordered. `translate.accept` takes
+  that map as `slots=`. The map itself is pinned to the *wording*, in the
+  segment's `body` as `target_slots`, because `save_doc` rewrites `slots` from
+  the fresh parse on every extract and a rule that reads provenance off the
+  segment is a guard that fires exactly once. A memory hit carries no map and is
+  still gated on its id set alone. `docs/decisions.md`, 2026-08-17.
 
   **A refusal does not delete what the segment already held.** Since 2026-08-17,
   and this is the line between the two: the gate answers whether wording may be

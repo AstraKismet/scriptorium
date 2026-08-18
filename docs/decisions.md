@@ -3,6 +3,96 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-08-17 · A placeholder is repaired into the numbering it has to speak in, and the map it was written in is pinned to the wording
+
+`translate.accept` compared the *set* of placeholder ids and nothing else, so a
+wholesale renumbering satisfied it. The ordering fix earlier the same day closed
+the case that needed no edit; this closes the case that needs one, on the path
+where the evidence exists — the document's own stored wording.
+
+```
+config/dnt.txt   Brian          d.md   Brian greeted Wendy at the gate.
+lx apply         ⟦1⟧ 在門口迎接了 Wendy。        render  Brian 在門口迎接了 Wendy。
+config/dnt.txt   Wendy          # the author protects the other name instead
+lx extract       reused 1 · rejected 0 · lx check errors 0
+render           Wendy 在門口迎接了 Wendy。
+```
+
+### Repaired, not refused
+
+`mask.reseat` moves a wording from the numbering it was written in into the one
+it has to speak in: it unmasks against the map its ids referred to — exact, no
+inference — and seats every original the segment now holds back into the prose
+**by content**. `accept` takes that map as `slots=` and runs it before comparing
+anything. Refusing was the first answer and invariant 5 overrules it: a
+renumbering is deterministically correctable, and reporting a fixable defect
+wastes the reviewer's attention. Measured on the four shapes an edit to
+`config/dnt.txt` produces — a term renumbered, dropped, added, or swapped for
+another — the wording now survives all four and renders what the reviewer wrote.
+The two tests that asserted the refusals are rewritten around the repair, and
+each says in its docstring what the old defence was.
+
+**By content, and never by a second call to `mask`.** They look like the same
+operation. `mask` numbers by position in the text it is given, so re-masking a
+translation numbers the slots in the *translation's* order: a translation that
+legitimately put the second code span first comes back with the two swapped,
+silently, with an id set that matches so nothing downstream can see it. Measured
+on ``Run `alpha` then `beta` to finish.`` Seating by content cannot do it — the
+ids follow the originals wherever the translator put them, mask-then-unmask is
+the identity for the spans it seats, and the rendered bytes therefore always
+equal the wording that went in. The only thing a wrong seating can change is the
+id multiset, which `accept` already compares. Every failure is a refusal.
+
+Three rules make it sound rather than merely useful, and each has a test:
+occurrence counts must agree per original or the seating is refused rather than
+guessed; the matching rule is `mask`'s own, so `API` does not seat inside `APIs`;
+and the longer original is seated first, because `mask` masks it first and `York`
+finds nothing left inside `New York`.
+
+### The map is pinned to the wording, not read off the segment
+
+The first version read the map off the stored segment's `slots`, and it was a
+guard that fires **once**. `store.save_doc` rewrites a segment's `slots` from the
+fresh parse on every `lx extract`, and the divergence (24) keep path writes the
+*old* target onto the *fresh* segment:
+
+```
+after apply        target='⟦1⟧ 在門口迎接了 Wendy。'   slots={'1': 'Brian'}
+after extract #1   target='⟦1⟧ 在門口迎接了 Wendy。'   slots={'1': 'Wendy'}
+after extract #2   target='⟦1⟧ 在門口迎接了 Wendy。'   slots={'1': 'Wendy'}
+```
+
+So from the second extract on, the comparison is the new map against itself. A
+`target_slots` key inside the segment's `body` carries the map the *target* was
+written against, written only where it differs from the segment's own — so an
+ordinary segment costs nothing — cleared by `store.save_targets` when new wording
+replaces it, and read in preference to `slots` by `store.prior_targets`. `body`
+already holds `origin`, `review` and `issues`, so it costs no `SCHEMA_VERSION`
+and no `STATE_VERSION`; a row without the key means "written against this
+segment's own map", which is true of every row an earlier build wrote.
+
+*Lost:* storing a fingerprint of the map instead. It detects and cannot repair,
+and it cannot say which placeholder moved, so the reviewer's message degrades to
+"something changed". *Lost:* changing `mask`'s numbering so that ids carry their
+own meaning — first-appearance order, or an id derived from a digest of the
+original. Both renumber every stored target and every banked line at once, with
+no version number that catches it, and the digest form additionally breaks tag
+pairing and asks the model to copy six-digit tokens.
+
+### What is still open
+
+The **translation memory** carries no map — `store.tm_record` writes `hash`,
+`context`, `segmentation_version`, `source` and `target`, and the key is
+deliberately blind to the mask configuration — so a hit is gated on its id set
+exactly as before. Giving the record its own map, and the transition rule for the
+lines everyone already has, is the second half of this work.
+
+And a **legacy state file** whose `slots` are plain strings rather than records
+has no usable provenance: it reads as absent, all or nothing, because half a map
+would seat some placeholders and silently drop the rest. `lx extract` is what
+migrates such a file, so reading one must not raise — which it did, until the
+test that exists for exactly that migration caught it.
+
 ## 2026-08-17 · A placeholder number has to mean the same term twice, and it did not
 
 `config.load_dnt` returned `sorted(set(terms), key=len, reverse=True)`. Python's

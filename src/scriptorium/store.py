@@ -521,6 +521,23 @@ def prior_doc(src, lang):
 ALIGN_BUDGET = 8_000_000
 
 
+def _slot_map(value):
+    """A stored ``slots`` value, if it is the record map, else ``None``.
+
+    All or nothing. A state file written before slots became records holds
+    ``{id: "original"}`` — `lx extract` is what migrates such a file, so reading
+    one must not raise, and half a map is worse than none: a re-seat that trusted
+    the entries it understood would place some placeholders and silently drop the
+    rest. ``None`` means "no provenance", which is exactly what an untyped map
+    is.
+    """
+    if not isinstance(value, dict) or not value:
+        return None
+    if all(isinstance(v, dict) and "original" in v for v in value.values()):
+        return value
+    return None
+
+
 class Carryover:
     """What a document already holds, and which entry a re-parsed segment inherits.
 
@@ -555,7 +572,9 @@ class Carryover:
         #: where that segment held no translation.
         self.entries = entries
         #: ``{key: [entry, ...]}`` — the *translated* entries under a key, in
-        #: document order. The fallback, and the old rule's whole world.
+        #: document order. The fallback, and the old rule's whole world. An entry
+        #: is ``(target, origin, review, slots)``, where ``slots`` is the map the
+        #: target's placeholders were written against.
         self.by_key = by_key
 
     def __len__(self):
@@ -631,8 +650,9 @@ class Carryover:
             rows = self.by_key.get(key)
             # `review` does not survive the fallback: a hold is one reviewer's
             # statement about a position, and this is the branch that could not
-            # establish one.
-            entry = (rows[-1][0], rows[-1][1], None) if rows else None
+            # establish one. The provenance map travels with the wording, because
+            # it describes the wording rather than the position.
+            entry = (rows[-1][0], rows[-1][1], None, rows[-1][3]) if rows else None
             out[sid] = (entry, entry is not None)
         return out
 
@@ -736,7 +756,15 @@ def prior_targets(src, lang):
             entry = None
             if key is not None and target:
                 held = json.loads(body)
-                entry = (target, held.get("origin") or "carryover", held.get("review"))
+                # The fourth field is the map this *target* was written against,
+                # which is not the segment's own `slots` whenever a re-parse has
+                # moved under it: `save_doc` rewrites `slots` from the fresh
+                # parse on every extract, and the divergence (24) keep path puts
+                # an old target on a fresh segment. `target_slots` is written
+                # only when the two differ, so its absence means "the segment's
+                # own map", which is true of every row an earlier build wrote.
+                entry = (target, held.get("origin") or "carryover", held.get("review"),
+                         _slot_map(held.get("target_slots")) or _slot_map(held.get("slots")))
                 by_key.setdefault(key, []).append(entry)
             keys.append(key)
             entries.append(entry)
@@ -983,6 +1011,12 @@ def save_targets(src, lang, targets, origin, over_human=False):
                     continue
                 body["origin"] = origin
                 body.pop("issues", None)
+                # This wording is being written against the segment as it stands,
+                # so whatever map an *earlier* target was written against is not
+                # its provenance any more. Left behind, it would make `accept`
+                # re-seat a wording that never needed it. See `target_slots` in
+                # `cli.do_extract`.
+                body.pop("target_slots", None)
                 written += conn.execute(
                     "UPDATE segments SET status=?, target=?, body=? "
                     "WHERE doc_id=? AND lang=? AND seg_id=?",

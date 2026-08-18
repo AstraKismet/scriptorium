@@ -20,7 +20,7 @@ from .config import (
     load_style,
     resolve_route,
 )
-from .mask import placeholder_ids, repair_placeholders
+from .mask import placeholder_ids, repair_placeholders, reseat
 from .normalize import normalize, reseat_outer_blanks
 from .providers import build as build_provider
 
@@ -456,7 +456,7 @@ def _chunks(items, size):
 
 # ── driver ─────────────────────────────────────────────────────────────────
 
-def accept(seg, text, lang, cfg):
+def accept(seg, text, lang, cfg, slots=None):
     """Take a proposed target only if its placeholders survived. ``(text, why)``.
 
     Model output and a translation-memory hit both arrive here, because they fail
@@ -482,6 +482,22 @@ def accept(seg, text, lang, cfg):
     ends is put back from the source rather than dropped.
     """
     text = repair_placeholders(text).strip()
+    # **What a placeholder means, not what it is numbered.** `slots` is the map
+    # this wording's ids referred to when it was written; when it differs from
+    # the segment's own, the wording is moved into the segment's numbering before
+    # anything is compared. Without it the test below is satisfied by a wholesale
+    # renumbering: measured 2026-08-17, protecting `Wendy` instead of `Brian`
+    # left `⟦1⟧ 在門口迎接了 Wendy。` accepted, `lx check` green, and the rendered
+    # sentence naming the wrong person twice.
+    #
+    # Repaired rather than refused, because `mask.reseat` is deterministic and
+    # invariant 5 says a correctable defect is corrected rather than reported. It
+    # refuses only what it cannot place, and a refusal here reaches `lx check` as
+    # a placeholder mismatch, which is the error that was missing.
+    if slots is not None and slots != seg.get("slots"):
+        text, why = reseat(text, slots, seg.get("slots") or {})
+        if text is None:
+            return None, why
     want, got = sorted(placeholder_ids(seg["masked"])), sorted(placeholder_ids(text))
     if want != got:
         return None, f"placeholder mismatch (expected {want}, got {got})"

@@ -10,7 +10,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from scriptorium.checks import check_segment, containment_problems  # noqa: E402
 from scriptorium.config import DEFAULT_CONFIG, load_dnt  # noqa: E402
-from scriptorium.mask import mask, repair_placeholders, unmask  # noqa: E402
+from scriptorium.mask import (  # noqa: E402
+    mask,
+    placeholder_ids,
+    repair_placeholders,
+    reseat,
+    unmask,
+)
 from scriptorium.mdparse import parse, render  # noqa: E402
 from scriptorium.normalize import normalize, reseat_outer_blanks  # noqa: E402
 from scriptorium.translate import _LANG_TERMS, _system_prompt, accept, parse_reply  # noqa: E402
@@ -1523,6 +1529,77 @@ def test_the_do_not_translate_order_is_total_so_a_slot_number_means_one_thing(tm
     assert order == ["Alexander", "Alice", "Brian", "Helen", "Zoe"]
     assert order == sorted(order, key=lambda t: (-len(t), t)), \
         "longest first is what stops `Go` masking inside `Google`"
+
+# ── moving a wording from one numbering into another ────────────────────────
+#
+# `mask.reseat` is what lets a stored translation survive an edit to
+# `config/dnt.txt`. Its whole correctness argument is that it seats by *content*
+# and never by re-running `mask`, so the four rules below are the ones that make
+# it sound rather than merely useful.
+
+
+def test_reseat_moves_a_wording_into_the_current_numbering():
+    """The ordinary case: the same terms, numbered differently."""
+    _src = "Alice met Brian."
+    _was_masked, was = mask(_src, ["Alice", "Brian"])
+    _now_masked, now = mask(_src, ["Brian", "Alice"])
+    moved, why = reseat("⟦1⟧ 遇見了 ⟦2⟧。", was, now)
+    assert (moved, why) == ("⟦2⟧ 遇見了 ⟦1⟧。", None)
+    assert unmask(moved, now) == "Alice 遇見了 Brian。", "the wording changed meaning"
+
+
+def test_reseat_keeps_an_order_the_translator_chose():
+    """**Why it is not a second call to `mask`.**
+
+    `mask` numbers by position in the text it is given, so re-masking a
+    translation numbers the slots in the *translation's* order. A translation
+    that legitimately put the second code span first therefore comes back with
+    the two swapped — silently, with an id set that matches, so nothing
+    downstream can see it. Measured 2026-08-17. Seating by content cannot do
+    that: the ids follow the originals, wherever the translator put them.
+    """
+    _src = "Run `alpha` then `beta` for Acme."
+    _was_masked, was = mask(_src, [])
+    _now_masked, now = mask(_src, ["Acme"])
+    moved, why = reseat("先執行 ⟦2⟧ 再執行 ⟦1⟧，給 Acme。", was, now)
+    assert why is None
+    assert unmask(moved, now) == "先執行 `beta` 再執行 `alpha`，給 Acme。"
+    assert sorted(placeholder_ids(moved)) == sorted(placeholder_ids(_now_masked))
+
+
+def test_reseat_refuses_rather_than_guessing_which_occurrence_is_the_slot():
+    """Two of a term in the wording and one in the source: no rule can say which
+    of them the placeholder belongs to, and a guess there is what puts one
+    character's name where another's belongs."""
+    _src = "Brian waited."
+    _was_masked, was = mask(_src, ["Brian"])
+    _now_masked, now = mask("Brian waited.", ["Brian"])
+    moved, why = reseat("⟦1⟧ 等待著，Brian 很累。", was, now)
+    assert moved is None
+    assert "Brian" in why and "1" in why
+
+
+def test_reseat_uses_masks_own_word_boundary():
+    """`API` does not seat inside `APIs`, for the same reason `Go` does not mask
+    inside `Google` — one rule, `mask.term_pattern`, shared by both. A plain
+    substring search reads two occurrences here, refuses on the count, and turns
+    an ordinary sentence into a refusal."""
+    _src = "The API is ready."
+    _was_masked, was = mask(_src, ["API"])
+    _now_masked, now = mask(_src, ["API"])
+    moved, why = reseat("⟦1⟧ 已就緒（參見 APIs 文件）。", was, {"2": now["1"]})
+    assert (moved, why) == ("⟦2⟧ 已就緒（參見 APIs 文件）。", None)
+
+
+def test_reseat_seats_the_longer_term_first():
+    """`mask` masks the longer term first, so `York` finds nothing left inside
+    `New York`; seating has to reproduce that precedence or the two collide."""
+    _src = "New York and York differ."
+    _was_masked, was = mask(_src, ["New York", "York"])
+    assert _was_masked == "⟦1⟧ and ⟦2⟧ differ."
+    moved, why = reseat("⟦1⟧ 與 ⟦2⟧ 不同。", was, was)
+    assert (moved, why) == ("⟦1⟧ 與 ⟦2⟧ 不同。", None)
+    assert unmask(moved, was) == "New York 與 York 不同。"
 
 
 def test_slots_are_records_and_html_tags_pair():
