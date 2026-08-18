@@ -79,19 +79,81 @@ original. Both renumber every stored target and every banked line at once, with
 no version number that catches it, and the digest form additionally breaks tag
 pairing and asks the model to copy six-digit tokens.
 
+### And the memory line carries its own map
+
+A hit was a target and nothing else: `store.tm_record` wrote `hash`, `context`,
+`segmentation_version`, `source` and `target`, so what its placeholders stood for
+was not on the line and could not be inferred from it. The line carries `slots`
+now — the originals in id order, which is the whole of the information, because
+`mask` numbers from 1 with a single counter — and `store.tm_lookup` hands it back
+so the same `mask.reseat` repairs a hit and a carryover alike.
+
+An **array** rather than an object or the full slot records: it is the smallest
+spelling, it reads in a diff, and `role` / `pair_id` / `can_reorder` are
+re-derivable by masking the same source. Measured, a representative line grows
+165 → 185 bytes. Nothing on disk is reinterpreted, an older build ignores the
+field (`load_tm` requires only `hash` and `target`), and no version number moves:
+`SEGMENTATION_VERSION` guards segment *text*, `STATE_VERSION` guards what an
+older reader would get *wrong* rather than incomplete, and the memory file is
+inside `.lx/`, which the HTTP contract explicitly does not freeze.
+
+`store.load_tm` returns the record rather than the target — the widening that
+made all of this reachable, and one HANDOFF-030's fuzzy panel needs anyway for
+each line's `source`. `store.tm_records` now compares the whole record rather
+than the target, which is also the backfill: a line holding this wording but no
+map is not the line this build writes, so the first `lx commit` after the change
+re-banks the segments that need one, once, visibly, in a file whose contract is
+that it only grows.
+
+**The transition rule for a line that has no map** — every line anyone already
+has. It is offered wherever a renumbering could not have moved it, and that is
+decidable rather than a guess: `mask.mask` numbers every inline match first and
+the do-not-translate terms after, so a markup slot's id is a pure function of the
+source text, which the content hash has already fixed. Only the term tail was
+ever exposed. Measured on this repository when it landed: 0.6% of segments carry
+a do-not-translate slot against 34.8% carrying any slot, so refusing every
+placeholder-bearing line instead would have discarded reuse that was never at
+risk — which is why the blunt form of this rule lost.
+
+*Lost:* **banking the target unmasked**, as prose, and seating the current map
+into it at reuse. Identical repair power — measured, the two differ in nothing
+but where the prose comes from — a smaller file, a memory that reads as
+translation rather than as tokens, and it fixes one thing the map form does not:
+`tm_records` dedupes on the stored string, so one wording banked under two
+different lists is two lines today. It loses because it changes what the `target`
+field *means* in an append-only, hand-editable, git-tracked file, and that is the
+change such a file absorbs least well. *Lost:* a **fingerprint** of the map,
+which detects and cannot repair, and cannot say which placeholder moved. *Lost:*
+a fingerprint of the **do-not-translate list**, which orphans every entry in the
+language when one character name is added — including the third that has no term
+slot at all.
+
+### And one rule that looks at the text
+
+`checks.py` gains `bare_term` at *warn*: a term this configuration protects,
+standing in the target as plain text. It is the only thing that can see wording
+whose placeholders stopped meaning what they meant — every gate compares ids, so
+a wholesale renumbering satisfies all of them — and in particular it is the only
+thing that can see the damage already stored in documents extracted before the
+numbering became deterministic, which no gate can reach backwards.
+
+Warn, and it cannot be anything else: at the level of the text the defect and a
+legitimate repeat are the same string, since a translation may perfectly well
+name a protected term once through its placeholder and once in prose. A severity
+that failed the build would make clearing those the only way to finish a book,
+which is the argument `held` is a warning by.
+
 ### What is still open
 
-The **translation memory** carries no map — `store.tm_record` writes `hash`,
-`context`, `segmentation_version`, `source` and `target`, and the key is
-deliberately blind to the mask configuration — so a hit is gated on its id set
-exactly as before. Giving the record its own map, and the transition rule for the
-lines everyone already has, is the second half of this work.
+A **legacy state file** whose `slots` are plain strings rather than records has no
+usable provenance: it reads as absent, all or nothing, because half a map would
+seat some placeholders and silently drop the rest. `lx extract` is what migrates
+such a file, so reading one must not raise — which it did, until the test that
+exists for exactly that migration caught it.
 
-And a **legacy state file** whose `slots` are plain strings rather than records
-has no usable provenance: it reads as absent, all or nothing, because half a map
-would seat some placeholders and silently drop the rest. `lx extract` is what
-migrates such a file, so reading one must not raise — which it did, until the
-test that exists for exactly that migration caught it.
+And nothing repairs a **document** extracted before the numbering became
+deterministic: its stored wording may already refer to ids that meant something
+else, and only `bare_term` can point at it.
 
 ## 2026-08-17 · A placeholder number has to mean the same term twice, and it did not
 

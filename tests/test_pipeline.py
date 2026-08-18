@@ -1538,6 +1538,49 @@ def test_the_do_not_translate_order_is_total_so_a_slot_number_means_one_thing(tm
 # it sound rather than merely useful.
 
 
+def test_a_protected_term_standing_bare_in_the_target_is_reported_at_warn():
+    """The only rule that can see wording whose placeholders stopped meaning what
+    they meant.
+
+    Every gate compares ids — `translate.accept` and the `tags` rule alike — so a
+    wholesale renumbering satisfies all of them, and the damage already stored in
+    documents extracted before placeholder numbering became deterministic
+    (2026-08-17) is reachable by nothing else. What is decidable without
+    judgement, and therefore allowed here by invariant 4, is narrower than the
+    defect: a term this configuration protects, appearing in the target as plain
+    text.
+
+    **Warn, and it cannot be anything else.** At the level of the text the defect
+    and a legitimate repeat are the same string — a translation may name a
+    protected term once through its placeholder and once in prose — so a severity
+    that failed the build would make clearing those the only way to finish a
+    book. That is the argument `held` is a warning by.
+    """
+    clean = _rules("⟦1⟧ ships today.", "⟦1⟧ 今天出貨。", dnt=["Celurion"],
+                   slots={"1": {"original": "Celurion", "role": "standalone",
+                                "pair_id": None, "can_reorder": True}})
+    assert "bare_term" not in clean
+
+    bare = _rules("⟦1⟧ ships today.", "⟦1⟧ 今天出貨，Celurion 準時。", dnt=["Celurion"],
+                  slots={"1": {"original": "Celurion", "role": "standalone",
+                               "pair_id": None, "can_reorder": True}})
+    assert "bare_term" in bare
+    issues = check_segment(
+        _seg("⟦1⟧ ships today.", "⟦1⟧ 今天出貨，Celurion 準時。",
+             {"1": {"original": "Celurion", "role": "standalone",
+                    "pair_id": None, "can_reorder": True}}),
+        "zh-TW", CFG, [], ["Celurion"])
+    warned = [i["severity"] for i in issues if i["rule"] == "bare_term"]
+    assert warned == ["warn"], "an error here would make clearing these the only way to finish"
+
+    # And it reads `mask`'s own boundary rule rather than a substring search, or
+    # every mention of `Celurions` would be one of these.
+    plural = _rules("⟦1⟧ ships today.", "⟦1⟧ 今天出貨，Celurions 準時。", dnt=["Celurion"],
+                    slots={"1": {"original": "Celurion", "role": "standalone",
+                                 "pair_id": None, "can_reorder": True}})
+    assert "bare_term" not in plural
+
+
 def test_reseat_moves_a_wording_into_the_current_numbering():
     """The ordinary case: the same terms, numbered differently."""
     _src = "Alice met Brian."

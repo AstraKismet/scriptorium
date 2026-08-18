@@ -13,7 +13,7 @@ containment, host escaping, and the carriage return a segment may not invent.
 import re
 from collections import Counter
 
-from .mask import CJK, CJK_RE, PH_RE, strip_placeholders, unmask
+from .mask import CJK, CJK_RE, PH_RE, strip_placeholders, term_pattern, unmask
 from .mdparse import (
     FENCE_RE,
     HEADING_RE,
@@ -512,6 +512,27 @@ def check_segment(seg, lang, cfg, glossary, dnt):
         add("tags", "error", f"placeholder mismatch lost={lost} extra={extra}")
     for msg in pair_problems(tgt, seg.get("slots") or {}):
         add("tags", "error", msg)
+
+    # 1b. a protected term standing bare in the target
+    #
+    # The one thing that can see wording whose placeholders stopped meaning what
+    # they meant. Every gate compares ids — `translate.accept` and rule 1 above
+    # both — so a wholesale renumbering satisfies them, and the damage already
+    # sitting in documents extracted before the numbering became deterministic
+    # (2026-08-17) is reachable by nothing else.
+    #
+    # **Warn, and it cannot be anything else.** At the level of the text a defect
+    # and a legitimate repeat are the same string: a translation may perfectly
+    # well name a protected term once through its placeholder and once in prose.
+    # A severity that failed the build would make clearing those the only way to
+    # finish a book, which is the argument `held` is warn by.
+    protected = {rec["original"] for rec in (seg.get("slots") or {}).values()
+                 if rec.get("original") in set(dnt)}
+    for term in sorted(protected):
+        if term_pattern(term).search(strip_placeholders(tgt)):
+            add("bare_term", "warn",
+                f"{term!r} is protected here and also stands in the target as "
+                f"plain text — check that each ⟦n⟧ still means what it meant")
 
     # 2. containment and escaping — what the target does to the block it lands in
     for msg in containment_problems(seg):

@@ -46,7 +46,7 @@ from .docio import (
     write_document_to_stdout,
 )
 from .formats import UnknownFormat
-from .mask import repair_placeholders
+from .mask import placeholder_ids, repair_placeholders
 from .normalize import normalize, polish_rendered, reseat_outer_blanks
 from .store import (
     HUMAN,
@@ -371,6 +371,31 @@ def language_tag(value, field="lang"):
 
 # ── extract ────────────────────────────────────────────────────────────────
 
+def _protected(seg, proposal, dnt):
+    """Whether a proposal's placeholders would resolve to a do-not-translate term.
+
+    The transition rule for a memory line that carries no slot map — every line
+    banked before 2026-08-17. Such a line cannot say what its ids meant, so the
+    only gate it has is the id set, which a wholesale renumbering satisfies. This
+    offers it anyway where a renumbering cannot have moved it, and that is
+    decidable: `mask.mask` numbers every inline match first and the terms after,
+    so a markup slot's id is a pure function of the source text — which the
+    content hash has already fixed — while a term's id depends on the list. A hit
+    whose placeholders are all markup was never exposed and is reused as it is.
+
+    Measured on this repository at the time: 0.6% of segments carry a
+    do-not-translate slot with the shipped list, against 34.8% carrying any slot,
+    so refusing the whole placeholder-bearing population instead would discard
+    reuse that was never at risk.
+    """
+    protected = {rec["original"] for rec in (seg.get("slots") or {}).values()
+                 if rec.get("original") in set(dnt)}
+    if not protected:
+        return False
+    return any((seg["slots"].get(pid) or {}).get("original") in protected
+               for pid in placeholder_ids(proposal))
+
+
 def do_extract(src, lang, cfg, tone=None, reset=False):
     # Lazy, like every other `.translate` import in this file: extract does not
     # talk to a model and should not pull the provider stack in to do so.
@@ -383,7 +408,8 @@ def do_extract(src, lang, cfg, tone=None, reset=False):
     text, encoding = read_document(src, formats.encodings(fmt, cfg))
     text, eol = split_terminator(text)
     facts = fmt.describe(text, opts)
-    nodes, segments = fmt.parse(text, load_dnt(cfg), opts)
+    dnt = load_dnt(cfg)
+    nodes, segments = fmt.parse(text, dnt, opts)
 
     # `prior_doc` rather than `load_doc`: extract is what migrates a state file
     # the current build refuses to read, so it must be able to read the
@@ -439,13 +465,16 @@ def do_extract(src, lang, cfg, tone=None, reset=False):
             candidates.append(carried)
             if ambiguous:
                 notes["ambiguous"].append(seg["id"])
-        hit, hit_origin = tm_lookup(tm, seg, tone)
-        if hit is not None:
+        hit, hit_origin, hit_slots = tm_lookup(tm, seg, tone)
+        if hit is not None and (hit_slots is not None or not _protected(seg, hit, dnt)):
             # No review state on a memory hit, and that is the design: the memory
             # is wording banked from somewhere else, and a hold is one reviewer
             # saying this segment is theirs to finish. Carrying a hold in would
             # hold a segment nobody has looked at.
-            candidates.append((hit, hit_origin, None, None))
+            #
+            # A line banked before the memory carried its own slot map is offered
+            # only where a renumbering could not have moved it — see `_protected`.
+            candidates.append((hit, hit_origin, None, hit_slots))
         for rank, (proposal, origin, review, written_against) in enumerate(candidates):
             # The memory is tried even when this document's own target was
             # refused: the two can differ, and a good banked wording should not be

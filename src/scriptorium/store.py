@@ -9,6 +9,7 @@ import sqlite3
 from collections import Counter
 
 from .config import DEFAULT_TONE, STATE, canonical_tone
+from .mask import placeholder_ids
 
 #: Shape of a document state file. Bumped when a reader of an older file would be
 #: wrong rather than merely incomplete. `__version__` cannot serve here: it moves
@@ -536,6 +537,48 @@ def _slot_map(value):
     if all(isinstance(v, dict) and "original" in v for v in value.values()):
         return value
     return None
+
+
+def slot_originals(slots):
+    """A slot map as the array a memory line carries, or ``None``.
+
+    ``mask.mask`` numbers from 1 with a single counter, so the ids of a segment
+    are contiguous and their order is the whole of the information — which makes
+    the array both the smallest spelling and the one that reads in a diff, and
+    the memory file is version-controlled precisely so that it can be read.
+    ``role`` / ``pair_id`` / ``can_reorder`` are not carried: they are
+    re-derivable by masking the same source, and what a reuse needs from a line
+    is only what each placeholder stood for.
+
+    ``None`` when the map is not contiguous from 1 — nothing this build writes
+    can be, and a line another tool wrote is not something to guess about.
+    """
+    if not slots:
+        return None
+    try:
+        ids = sorted(slots, key=int)
+    except (TypeError, ValueError):
+        return None
+    if [int(i) for i in ids] != list(range(1, len(ids) + 1)):
+        return None
+    return [slots[i]["original"] for i in ids]
+
+
+def slot_map(originals):
+    """The inverse of :func:`slot_originals`: an array back into a slot map.
+
+    Only ``original`` is restored, which is all a re-seat reads. A line whose
+    ``slots`` is not a list of strings is ignored rather than raised on, on the
+    same footing as :func:`load_tm`'s skip rule — the file is hand-editable by
+    design.
+    """
+    if not isinstance(originals, list) or not originals:
+        return None
+    if not all(isinstance(o, str) for o in originals):
+        return None
+    return {str(i): {"original": o, "role": "standalone",
+                     "pair_id": None, "can_reorder": True}
+            for i, o in enumerate(originals, 1)}
 
 
 class Carryover:
@@ -1166,12 +1209,19 @@ def tracked(lang=None):
 
 
 def load_tm(lang):
-    """``{key: target}``. Last write wins, so a correction supersedes its original.
+    """``{key: record}``. Last write wins, so a correction supersedes its original.
 
     A line that is not an object with a hash and a target is skipped rather than
     raised on. The file is append-only and hand-editable by design, and one bad
     line taking down every command that reads the memory is a poor trade for a
     diagnostic nobody asked for.
+
+    **The whole record, not the target.** It flattened to ``rec["target"]`` until
+    2026-08-17, which is a smaller thing to hold and made a line's own account of
+    what its placeholders meant unreachable — so a reuse could only compare id
+    sets, and a wholesale renumbering satisfies that. :func:`tm_lookup` returns
+    the map beside the target now, and `lx todo`'s fuzzy panel will want the
+    `source` off the same line.
     """
     tm = {}
     p = tm_path(lang)
@@ -1186,7 +1236,7 @@ def load_tm(lang):
                         continue
                     if not isinstance(rec, dict) or not rec.get("hash") or not rec.get("target"):
                         continue
-                    tm[record_key(rec)] = rec["target"]
+                    tm[record_key(rec)] = rec
     return tm
 
 
@@ -1219,12 +1269,12 @@ def tm_lookup(tm, seg, tone=None):
     """
     exact = tm.get(segment_key(seg, tone))
     if exact is not None:
-        return exact, "tm"
+        return exact["target"], "tm", slot_map(exact.get("slots"))
     if seg.get("variant") is None and key_tone(tone) is None:
         legacy = tm.get(tm_key(seg["hash"], None, 0, None, None))
         if legacy is not None:
-            return legacy, "tm:legacy"
-    return None, None
+            return legacy["target"], "tm:legacy", slot_map(legacy.get("slots"))
+    return None, None, None
 
 
 def tm_record(seg, tone=None):
@@ -1246,6 +1296,18 @@ def tm_record(seg, tone=None):
         rec["tone"] = key_tone(tone)
     rec["source"] = seg["source"]
     rec["target"] = seg["target"]
+    # **The map this wording's placeholders were written against**, written only
+    # when there are placeholders to explain. Without it a line is a target and
+    # nothing else, and a reuse can only compare id *sets* — which a wholesale
+    # renumbering satisfies, so wording banked under one `config/dnt.txt` renders
+    # the wrong term under another with `lx check` green. `target_slots` first,
+    # for the same reason `store.prior_targets` reads it first: a segment's own
+    # `slots` is the last parse's map, not necessarily its target's.
+    if placeholder_ids(seg.get("target") or ""):
+        originals = slot_originals(_slot_map(seg.get("target_slots"))
+                                   or _slot_map(seg.get("slots")))
+        if originals:
+            rec["slots"] = originals
     return rec
 
 
@@ -1270,9 +1332,16 @@ def tm_records(doc, tm):
     for seg in doc["segments"]:
         if not seg.get("target"):
             continue
-        if tm.get(segment_key(seg, tone)) == seg["target"]:
+        # The whole record, not the target: a line that holds this wording but
+        # not the map its placeholders were written against is not the line this
+        # build writes, and comparing targets alone is what would keep it from
+        # ever gaining one. So the first `lx commit` after that field arrived
+        # re-banks the segments that need it, once, visibly, in a file whose
+        # contract is that it only grows.
+        record = tm_record(seg, tone)
+        if tm.get(segment_key(seg, tone)) == record:
             continue
-        out.append(tm_record(seg, tone))
+        out.append(record)
     return out
 
 

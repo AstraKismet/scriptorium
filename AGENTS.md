@@ -293,7 +293,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 1151 tests; no network (one is POSIX-only,
+python -m pytest -q                 # 1153 tests; no network (one is POSIX-only,
                                     #   one runs only where the filesystem folds case)
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
@@ -483,8 +483,12 @@ own.
   that map as `slots=`. The map itself is pinned to the *wording*, in the
   segment's `body` as `target_slots`, because `save_doc` rewrites `slots` from
   the fresh parse on every extract and a rule that reads provenance off the
-  segment is a guard that fires exactly once. A memory hit carries no map and is
-  still gated on its id set alone. `docs/decisions.md`, 2026-08-17.
+  segment is a guard that fires exactly once. **A memory line carries its own map
+  too**, as `slots` — the originals in id order — so a hit is repaired by the same
+  function; a line banked before that field existed is offered only where a
+  renumbering could not have moved it, which is decidable because `mask` numbers
+  inline matches before terms and a markup slot's id is a pure function of the
+  source text. `docs/decisions.md`, 2026-08-17.
 
   **A refusal does not delete what the segment already held.** Since 2026-08-17,
   and this is the line between the two: the gate answers whether wording may be

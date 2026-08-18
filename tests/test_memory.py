@@ -207,8 +207,8 @@ def test_tone_in_memory_key_keeps_two_registers_apart(tmp_path, monkeypatch):
     tm = load_tm("zh-TW")
     assert len(tm) == 2
     _nodes, segs = parse(LEAVING.decode("utf-8"), [])
-    assert tm_lookup(tm, segs[0]) == (AS_DOCUMENTATION, "tm")
-    assert tm_lookup(tm, segs[0], "literary") == (AS_PROSE, "tm")
+    assert tm_lookup(tm, segs[0]) == (AS_DOCUMENTATION, "tm", None)
+    assert tm_lookup(tm, segs[0], "literary") == (AS_PROSE, "tm", None)
 
 
 def test_the_register_is_resolved_from_the_document_and_nowhere_else(monkeypatch):
@@ -295,9 +295,9 @@ def test_a_record_from_before_the_key_existed_is_still_reachable():
     version 0 is accepted. It is safe because such a hit goes through `accept`
     like every other, and refusing them would empty a user's memory on upgrade in
     exchange for nothing."""
-    tm = {record_key(LEGACY): LEGACY["target"]}
+    tm = {record_key(LEGACY): LEGACY}
     _nodes, segs = parse("A shared sentence.\n", [])
-    target, origin = tm_lookup(tm, segs[0])
+    target, origin, _slots = tm_lookup(tm, segs[0])
     assert target == LEGACY["target"]
     assert origin == "tm:legacy"
 
@@ -306,12 +306,12 @@ def test_an_unversioned_hit_is_marked_so_a_reviewer_can_see_it():
     """`tm:legacy` and not `tm`: a match on content alone is precisely the
     context-blind reuse the key was changed to stop, so which segments still rest
     on it has to be visible rather than inferred."""
-    tm = {record_key(LEGACY): LEGACY["target"]}
+    tm = {record_key(LEGACY): LEGACY}
     _nodes, segs = parse("A shared sentence.\n\n> A shared sentence.\n", [])
     assert [tm_lookup(tm, s)[1] for s in segs] == ["tm:legacy", "tm:legacy"]
 
     versioned = dict(LEGACY, context="para", segmentation_version=SEGMENTATION_VERSION)
-    tm = {record_key(versioned): versioned["target"]}
+    tm = {record_key(versioned): versioned}
     assert [tm_lookup(tm, s)[1] for s in segs] == ["tm", None]
 
 
@@ -332,12 +332,12 @@ def test_legacy_tm_survives_tone_for_a_document_in_the_default_register(
 
     # The fully-keyed tier, which carries no `tone` field because it predates one.
     tm = load_tm("zh-TW")
-    assert tm_lookup(tm, segs[0]) == (LEGACY["target"], "tm")
-    assert tm_lookup(tm, segs[0], DEFAULT_TONE) == (LEGACY["target"], "tm")
+    assert tm_lookup(tm, segs[0]) == (LEGACY["target"], "tm", None)
+    assert tm_lookup(tm, segs[0], DEFAULT_TONE) == (LEGACY["target"], "tm", None)
 
     # And the unversioned tier below it, reached only through the fallback.
-    bare = {record_key(LEGACY): LEGACY["target"]}
-    assert tm_lookup(bare, segs[0], DEFAULT_TONE) == (LEGACY["target"], "tm:legacy")
+    bare = {record_key(LEGACY): LEGACY}
+    assert tm_lookup(bare, segs[0], DEFAULT_TONE) == (LEGACY["target"], "tm:legacy", None)
 
     # End to end, because that is where a whole-memory invalidation would show.
     doc, reused, rejected, _notes = do_extract("d.md", "zh-TW", CFG)
@@ -353,10 +353,10 @@ def test_a_literary_document_is_not_offered_the_unversioned_tier():
     construction, because the build that wrote it ended every zh-TW brief with
     "Write technical documentation register" whatever `tone` said.
     """
-    tm = {record_key(LEGACY): LEGACY["target"]}
+    tm = {record_key(LEGACY): LEGACY}
     _nodes, segs = parse("A shared sentence.\n", [])
-    assert tm_lookup(tm, segs[0], "literary") == (None, None)
-    assert tm_lookup(tm, segs[0], DEFAULT_TONE) == (LEGACY["target"], "tm:legacy")
+    assert tm_lookup(tm, segs[0], "literary") == (None, None, None)
+    assert tm_lookup(tm, segs[0], DEFAULT_TONE) == (LEGACY["target"], "tm:legacy", None)
 
 
 def test_a_segment_with_a_variant_is_not_offered_a_pre_variant_record():
@@ -364,9 +364,9 @@ def test_a_segment_with_a_variant_is_not_offered_a_pre_variant_record():
     form, and guessing is how a plural becomes a singular somewhere nobody looks.
     Constructed by hand: no format emits a variant yet, which is the point of
     adding the field before one does."""
-    tm = {record_key(LEGACY): LEGACY["target"]}
+    tm = {record_key(LEGACY): LEGACY}
     _nodes, segs = parse("A shared sentence.\n", [])
-    assert tm_lookup(tm, dict(segs[0], variant="plural")) == (None, None)
+    assert tm_lookup(tm, dict(segs[0], variant="plural")) == (None, None, None)
 
 
 def test_committing_upgrades_an_unversioned_record_instead_of_reusing_it_forever(
@@ -407,7 +407,7 @@ def test_a_hand_damaged_line_is_skipped_rather_than_taking_the_memory_down(
     with open(path, "a", encoding="utf-8", newline="\n") as f:
         f.write("{not json at all\n")
         f.write(json.dumps({"source": "no hash here"}) + "\n")
-    assert list(load_tm("zh-TW").values()) == [LEGACY["target"]]
+    assert [r["target"] for r in load_tm("zh-TW").values()] == [LEGACY["target"]]
 
 
 # --- reuse takes the same acceptance path as model output --------------------
@@ -446,7 +446,7 @@ def test_wording_survives_the_mask_configuration_moving_under_it(
     assert _only(doc)["target"] == "⟦1⟧ 與 Acme 一同出貨。"
     assert _only(doc)["origin"] == "agent", "the wording changed hands"
     assert notes["kept"] == [], "nothing had to be kept: nothing was refused"
-    assert "⟦2⟧" in list(load_tm("zh-TW").values())[0], "the entry is still there"
+    assert "⟦2⟧" in list(load_tm("zh-TW").values())[0]["target"], "the entry is still there"
 
     report, _ = do_check("d.md", "zh-TW", CFG)
     assert report["errors"] == 0
@@ -464,27 +464,26 @@ def test_wording_survives_the_mask_configuration_moving_under_it(
     assert (missing, text) == (0, "Celurion 與 Acme 一同出貨。\n")
 
 
-def test_a_memory_hit_carries_no_map_so_it_is_still_refused_when_it_no_longer_fits(
+def test_a_memory_hit_carries_its_own_map_and_is_repaired_with_it(
         tmp_path, monkeypatch):
-    """The half the repair cannot reach, and the 2026-07-27 property that
-    survives it.
+    """The second half of the repair, and what the record grew a field for.
 
-    A memory hit is a target and nothing else: `store.tm_record` writes `hash`,
-    `context`, `segmentation_version`, `source` and `target`, so what its
-    placeholders meant when it was banked is not on the line and cannot be
-    inferred from it. The id comparison is therefore the whole of the gate for
-    that path, and this asserts that it still is — a bare ⟦2⟧ does not reach a
-    rendered document.
+    A hit is a target and nothing else until the line says what its placeholders
+    stood for. `store.tm_record` writes that as `slots` — the originals in id
+    order, which is the whole of the information, since `mask` numbers from 1
+    with one counter — and `store.tm_lookup` hands it back so the same
+    `mask.reseat` that repairs a carryover repairs a hit.
 
     The document's own copy is cleared first, deliberately: with it in place the
-    carryover repairs and the memory is never consulted, which is what the test
-    above measures. Giving the memory a map of its own is scheduled — see
-    HANDOFF-033 — and this test is what will change when it lands.
+    carryover answers and the memory is never consulted, which is a different
+    test.
     """
     _project(tmp_path, monkeypatch, dnt="Celurion\nAcme\n", doc=DNT_DOC)
     doc, *_ = do_extract("d.md", "zh-TW", CFG)
     do_apply("d.md", "zh-TW", CFG, {_only(doc)["id"]: "⟦1⟧ 與 ⟦2⟧ 一同出貨。"})
     append_tm("zh-TW", tm_records(load_doc("d.md", "zh-TW"), load_tm("zh-TW")))
+    assert list(load_tm("zh-TW").values())[0]["slots"] == ["Celurion", "Acme"], \
+        "the line does not say what its placeholders stood for"
 
     state = load_doc("d.md", "zh-TW")
     state["segments"][0]["target"] = ""
@@ -492,13 +491,56 @@ def test_a_memory_hit_carries_no_map_so_it_is_still_refused_when_it_no_longer_fi
 
     (tmp_path / "config" / "dnt.txt").write_text("Celurion\n", encoding="utf-8")
     doc, reused, rejected, notes = do_extract("d.md", "zh-TW", CFG)
-    assert (reused, rejected) == (0, 1)
-    assert _only(doc)["status"] == "pending", "there was no stored wording to keep"
-    assert notes["kept"] == []
+    assert (reused, rejected) == (1, 0)
+    assert _only(doc)["target"] == "⟦1⟧ 與 Acme 一同出貨。"
+    assert _only(doc)["origin"] == "tm"
+    text, missing = do_render("d.md", "zh-TW", CFG)
+    assert (missing, text) == (0, "Celurion 與 Acme 一同出貨。\n")
 
-    text, missing = do_render("d.md", "zh-TW", CFG, fallback=True)
-    assert (missing, text) == (1, DNT_DOC.decode("utf-8"))
-    assert "⟦" not in text, "a bare placeholder reached the rendered document"
+
+def test_a_memory_line_with_no_map_is_offered_only_where_a_renumbering_cannot_reach(
+        tmp_path, monkeypatch):
+    """The transition rule, for every line anyone already has.
+
+    A line banked before the map existed cannot say what its ids meant, so the
+    id-set comparison is the whole of its gate — and that is what a wholesale
+    renumbering satisfies. It is offered anyway wherever a renumbering could not
+    have moved it, and that is decidable rather than a guess: `mask.mask` numbers
+    every inline match first and the do-not-translate terms after, so a markup
+    slot's id is a pure function of the source text, which the content hash has
+    already fixed. Only the term tail was ever exposed.
+
+    Measured when this landed: 0.6% of this repository's segments carry a
+    do-not-translate slot against 34.8% carrying any slot, so refusing every
+    placeholder-bearing line instead would have discarded reuse that was never at
+    risk.
+    """
+    _project(tmp_path, monkeypatch, dnt="Celurion\n",
+             doc=b"Celurion ships today.\n\nSee [the guide](https://example.com/x).\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    term_seg, link_seg = doc["segments"]
+    assert term_seg["masked"] == "⟦1⟧ ships today."
+    assert "⟦1⟧" in link_seg["masked"], "the link was not masked"
+
+    # Two lines in the shape the memory held before 2026-08-17: a target, and no
+    # account of what its placeholder stood for.
+    append_tm("zh-TW", [
+        {"hash": term_seg["hash"], "context": term_seg["context"],
+         "segmentation_version": SEGMENTATION_VERSION,
+         "source": term_seg["source"], "target": "⟦1⟧ 今天出貨。"},
+        {"hash": link_seg["hash"], "context": link_seg["context"],
+         "segmentation_version": SEGMENTATION_VERSION,
+         "source": link_seg["source"], "target": "請見[指南]⟦1⟧。"},
+    ])
+    assert all("slots" not in r for r in load_tm("zh-TW").values())
+
+    doc, reused, rejected, notes = do_extract("d.md", "zh-TW", CFG, reset=True)
+    by_id = {s["id"]: s for s in doc["segments"]}
+    assert by_id[link_seg["id"]]["target"] == "請見[指南]⟦1⟧。", \
+        "a markup-only line was never at risk and should still answer"
+    assert not by_id[term_seg["id"]].get("target"), \
+        "a line with no map placed a placeholder on a protected term"
+    assert (reused, rejected) == (1, 0), "the refused line was not even offered"
 
 
 def test_adding_a_term_repairs_the_wording_that_was_written_without_it(
