@@ -19,6 +19,7 @@ from .config import (
     MISSING,
     PATH_VALUED_KEYS,
     ROUTING_STAGES,
+    STATE,
     ConfigError,
     StyleSheetError,
     canonical_tone,
@@ -1480,15 +1481,536 @@ def cmd_commit(args, cfg):
 
 
 def cmd_stats(args, cfg):
-    docs = tracked(args.lang)
-    if not docs:
+    """The progress bars, over `do_status`'s counts rather than a second set.
+
+    Kept rather than folded into `lx status`, because removing a command is a
+    break nobody asked for. Rewired because two commands counting one project's
+    segments two ways is how they come to disagree, and these two already did:
+    this one counted a target of three spaces as translated, where `store`
+    derives the status from a stripped target and so does every other counter
+    here. The bar moved on one document; the fix is that there is now one count.
+    """
+    project = do_status(cfg, lang=args.lang, detail=False)["projects"][0]
+    if project["error"]:
+        # **stderr and a failing exit code, both restored on purpose.**
+        # `do_status` turns an unreadable project into a *field* because a
+        # `--scan` has to list the rest of the library. This command has no such
+        # field and exactly one project, so inheriting that swallow made it exit
+        # 0 where it had exited 2 — and `.github/workflows/ci.yml`'s smoke step
+        # is a bare `lx stats` at the end of a `set -euo pipefail` block, where
+        # the exit code is the entire assertion. It went green on a database it
+        # could not open. Measured 2026-08-19 by the pass that scored this
+        # rewire against the command it replaced.
+        #
+        # stdout was the other half: `lx stats > coverage.txt` wrote the failure
+        # into the report and left the terminal silent.
+        print(f"lx: {project['error']}", file=sys.stderr)
+        sys.exit(2)
+    if not project["documents"]:
         _out("nothing tracked yet — run `lx extract`")
         return
-    for doc in docs:
-        total = len(doc["segments"])
-        done = sum(1 for s in doc["segments"] if s.get("target"))
-        pct = done * 100 // max(total, 1)
-        _out(f"{pct:3d}% [{'#' * (pct // 5):<20}] {done}/{total}  {doc['source']} [{doc['lang']}]")
+    for row in project["documents"]:
+        _out(f"{_bar(row['translated'], row['segments'])}  {row['source']} [{row['lang']}]")
+
+
+# ── status ─────────────────────────────────────────────────────────────────
+
+#: The version of `docs/contracts/status-json.md`, reported by `lx status --json`
+#: as `contract_version`. Additive changes — a new key, a new optional flag, a
+#: wider accepted value set — do not move it; a removal, a rename, a type change,
+#: a meaning change or a narrowed value set does.
+#:
+#: **Not `web.server.CONTRACT_VERSION`.** Two surfaces, two consumers, two red
+#: lines, and two numbers that move independently: a client reading one as the
+#: other would watch its contract jump for a change to a surface it never calls.
+STATUS_CONTRACT_VERSION = 1
+
+#: What makes a directory a project, for `lx status --scan`. Either marker alone
+#: is enough, and the *or* is the rule rather than a convenience. `lx init`
+#: writes both. A cold `lx extract` writes only `.lx/`, because `store._connect`
+#: creates it on the first write and `config.write_templates` never ran. A
+#: project configured by hand and not yet extracted has only `lx.config.json`.
+#: Requiring both would hide the second and third, which are exactly the two
+#: states a library is found in — one book underway, one book set up last night.
+#:
+#: *Lost:* `.lx/state.db`, the marker that would mean "has work in it". A project
+#: with no work is still a project a bookshelf has to show — showing it at 0% is
+#: the point — and that marker names a file one layer deeper inside the storage
+#: this contract exists to keep a consumer out of.
+PROJECT_MARKERS = (STATE, "lx.config.json")
+
+#: How far under `--scan`'s root a project may be found. Three, because a library
+#: is `root/<shelf>/<book>` about as often as it is `root/<book>`, and the levels
+#: cost nothing on a tree pruned at every project found. *Lost:* an unbounded
+#: walk, which pointed at a home directory is a filesystem crawl nobody asked
+#: for; and depth 1, which is all the acceptance criterion needed and which fails
+#: the first person who groups books by shelf.
+SCAN_DEPTH = 3
+
+
+def project_markers(path):
+    """Which of `PROJECT_MARKERS` `path` holds, in declaration order.
+
+    Each is type-checked rather than merely present: a *file* named `.lx` and a
+    *directory* named `lx.config.json` are neither of them a project, and on a
+    case-folding filesystem a book called `LX.CONFIG.JSON` would otherwise be
+    one. Returned rather than reduced to a boolean because the scan's own rule
+    is the thing most likely to be argued with later, and a listing that shows
+    which marker it matched can be argued with from evidence.
+    """
+    # Driven off `PROJECT_MARKERS` rather than repeating its two names, because
+    # the constant's only other use is the sentence `lx status` prints when a
+    # directory is not a project — so a third marker added there used to change
+    # the help text and nothing else. One list, and the test that a marker of the
+    # wrong type is not a project covers whatever is in it.
+    checks = {STATE: os.path.isdir, "lx.config.json": os.path.isfile}
+    return [name for name in PROJECT_MARKERS
+            if checks[name](os.path.join(path, name))]
+
+
+def find_projects(root, depth=SCAN_DEPTH):
+    """Every project directory at or under `root`, sorted, each identity once.
+
+    `root` itself is examined, at depth 0. Pointing `--scan` straight at a single
+    project is the first thing anyone tries, and answering that with an empty
+    list is a puzzle rather than a result.
+
+    Three rules keep this from becoming a filesystem crawl. A directory
+    identified as a project is **not descended into** — its `.lx/` and `config/`
+    hold nothing this is looking for, and a project inside a project is not
+    something this storage can express, since every document identity is
+    `relpath` against one cwd. A child whose name begins with `.` is skipped,
+    which covers `.git`, `.venv` and every dotted cache. And `depth` bounds the
+    rest.
+
+    Deduplicated on `os.path.realpath`, so a shelf of symlinks to one book
+    reports it once, under the first path that reached it. Symlinks are followed:
+    a library assembled out of them is an ordinary thing to build, and `depth` is
+    what makes a cycle finite rather than a refusal to follow one.
+
+    Not confined, and that is invariant 11 applied rather than skipped: `--scan`
+    is a CLI argument, the invariant's named exception, a person typing a
+    command. Nothing here opens a document — it stats two names per directory.
+    The day a *request* carries a scan root, it goes through `cli.confined_path`
+    at the surface that received it, and this function is not what changes.
+    """
+    root = os.path.abspath(root)
+    if not os.path.isdir(root):
+        raise FileNotFoundError(
+            f"{root} is not a directory, so there is nothing under it to scan. "
+            f"`lx status --scan` takes the directory your projects live in.")
+    found, seen, frontier = [], set(), [(root, 0)]
+    while frontier:
+        path, level = frontier.pop()
+        try:
+            real = os.path.realpath(path)
+        except OSError:
+            continue
+        if real in seen:
+            continue
+        seen.add(real)
+        if project_markers(path):
+            found.append(path)
+            # Pruned here, not before the marker test: the root of a library may
+            # itself be a project, and its children still are not searched.
+            continue
+        if level >= depth:
+            continue
+        try:
+            children = sorted(os.scandir(path), key=lambda e: e.name)
+        except OSError:
+            # A directory this process may not list is not an error worth ending
+            # a scan for — a library under a home directory has several.
+            continue
+        # Reversed onto a LIFO frontier, so siblings are *visited* in sorted
+        # order. Without this the first path to reach a target was the
+        # alphabetically last one, which is what decides the `realpath` dedupe's
+        # winner — three junctions `aaa`, `mmm`, `zzz` to one book reported it
+        # under `zzz`, and adding a `zzzz` later silently changed the `path` of a
+        # book nobody had touched. The contract calls `path` an identity.
+        for entry in reversed(children):
+            if entry.name.startswith("."):
+                continue
+            try:
+                if entry.is_dir():
+                    frontier.append((entry.path, level + 1))
+            except OSError:
+                continue
+    return sorted(found)
+
+
+def _int(value):
+    """An integer from a rebuildable artifact, or 0. `bool` is not an integer here."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _text(value):
+    """A configured value this contract types `string | null`, or `None`.
+
+    `lx.config.json` is hand-editable and nothing validates it on the way in, so
+    a type the contract declares has to be kept on the way *out* — the argument
+    `_int` makes for a check report, applied to the configuration. Measured
+    2026-08-19: `tone` set to a JSON object was emitted as an object against a
+    table saying `string | null`, and a consumer written to the table would have
+    crashed on a file somebody typed by hand.
+
+    **Not a masking function.** These fields are language tags and a register
+    name, not places a credential is configured, and what keeps this surface out
+    of invariant 6 is that it never reads the fields where one lives — not this.
+    """
+    return value if isinstance(value, str) else None
+
+
+def _counts(segments):
+    """`{segments, translated, pending, held}` for one document.
+
+    Counted from the **target text**, which is the same rule `store._segment`
+    derives `status` from. Read off the text rather than off `status` so that the
+    two cannot drift: the derived field is a convenience for a reader, and a
+    counter that depends on it would inherit any future change to it silently.
+
+    That makes the two spellings *equivalent today* and a mutation round says so
+    — swapping this for `s.get("status") == "translated"` survives every test,
+    because `_segment` recomputes the field on read from this very predicate.
+    Recorded rather than chased: the mutant is equivalent, not uncaught, and the
+    day `_segment` stops recomputing is the day it stops being.
+
+    **Not** the rule `cli.do_check`'s report or `/api/state`'s `done` use. Both
+    count any target at all; see `_check` and the contract's divergence (3).
+    """
+    translated = sum(1 for s in segments if (s.get("target") or "").strip())
+    return {
+        "segments": len(segments),
+        "translated": translated,
+        "pending": len(segments) - translated,
+        "held": sum(1 for s in segments if is_held(s)),
+    }
+
+
+def _as_report(segments):
+    """`do_check`'s own translated count, for comparing a report against itself.
+
+    Deliberately **not** `_counts`' predicate: this one has no `.strip()`,
+    because `cli.do_check` has none either and a staleness test between two
+    numbers counted two ways is a test that can never pass. See `_check`.
+    """
+    return sum(1 for s in segments if s.get("target"))
+
+
+def _check(src, lang, counts, as_report):
+    """The last `lx check`'s error and warning counts for one document, or `None`.
+
+    Read from `.lx/reports/`, which is a **rebuildable artifact** and not state
+    (invariant 9), so every value here is a projection of a file that may be
+    older than the document. `None` means no report exists — a document nobody
+    has checked, which a consumer must not draw as a clean one.
+
+    `stale` is a one-way signal and the contract says so: `true` means the report
+    definitely no longer describes this document, because the segment or
+    translated count has moved since it was written. `false` means only that
+    those two numbers still agree — a sentence rewritten in place moves neither.
+    A timestamp would settle it and there is none anywhere in the state; see
+    `docs/contracts/status-json.md`, *Deliberately not in the contract*.
+
+    Never raises. A corrupt or unreadable report is a missing one, because the
+    alternative is a project that cannot be listed on account of a file that can
+    be regenerated by running one command.
+    """
+    try:
+        report = load_json(report_path(src, lang), {})
+    except (OSError, ValueError):
+        return None
+    if not isinstance(report, dict) or not report:
+        return None
+    return {
+        "errors": _int(report.get("errors")),
+        "warnings": _int(report.get("warnings")),
+        # **Compared in the report's own arithmetic, not in this surface's.**
+        # `do_check` writes `translated` with a different predicate —
+        # `s.get("target")`, no strip, `cli.do_check` — and comparing it against
+        # the stripped count above made `stale` permanently true for any document
+        # holding a whitespace-only target: true on a report written one second
+        # earlier, and no amount of re-running `lx check` could clear it, because
+        # the two numbers never agree on such a row by construction. Staleness
+        # asks whether the document moved since the report was written, so both
+        # sides of it have to count the same way. Measured 2026-08-19.
+        "stale": (report.get("segments") != counts["segments"]
+                  or report.get("translated") != as_report),
+    }
+
+
+def _rollup(rows):
+    """The counters shared by a language rollup and a project total.
+
+    `checked` is here because summing `errors` over documents is misleading
+    without it: a document nobody has checked contributes zero and reads exactly
+    like a clean one. The pair — "3 errors across 5 of 7 checked" — is the
+    smallest honest statement of quality this surface can make.
+    """
+    out = {"documents": len(rows), "checked": 0, "segments": 0, "translated": 0,
+           "pending": 0, "held": 0, "errors": 0, "warnings": 0}
+    for row in rows:
+        for key in ("segments", "translated", "pending", "held"):
+            out[key] += row[key]
+        if row["check"] is not None:
+            out["checked"] += 1
+            out["errors"] += row["check"]["errors"]
+            out["warnings"] += row["check"]["warnings"]
+    return out
+
+
+def _output(src, lang, cfg):
+    """Where `lx render` would write this document, or `None`.
+
+    The one thing that closes the loop for the bookshelf, which is also the
+    reader: it gets a document's `source` and, without this, no supported way to
+    find the translated text. `output_pattern` is per-project configuration, so
+    hard-coding the default breaks silently on any project that changed it,
+    reading `lx.config.json` is the storage coupling the red line exists to
+    stop, and shelling out to `lx render` violates "this contract and nothing
+    else". All three were the consumer's only options until 2026-08-19.
+
+    `cli.default_output` rather than a second copy of the pattern: `lx render`
+    writes exactly where this says it will, or the two would disagree about a
+    path the consumer then opens.
+
+    `None` when the pattern cannot be formatted — an unknown `{placeholder}` is a
+    `KeyError`, `{0}` an `IndexError`, an unbalanced brace a `ValueError`. A
+    project whose pattern is mistyped still reports its counts; taking the whole
+    listing down over a string nobody has rendered with yet is the wrong trade.
+    """
+    try:
+        return default_output(src, lang, cfg)
+    except (KeyError, IndexError, ValueError, AttributeError, TypeError):
+        return None
+
+
+def _document(doc, cfg, detail=True):
+    # Refused rather than passed through, and refused *here* so that the sentence
+    # lands in the project's `error` and the rest of the library still lists.
+    # `store._meta` tolerates a row whose meta carries no `source` — it guards
+    # its own normalization with `if doc.get("source")` — and everything
+    # downstream of this point treats it as a path: `report_path(None, lang)`
+    # reached `os.path.relpath(None)` and ended the whole command in a
+    # `TypeError` that `main` does not catch, with no report produced at all.
+    # Found by the security-tier pass on 2026-08-19.
+    if not isinstance(doc.get("source"), str):
+        raise ValueError(
+            f"a stored document row carries no source path, so this build cannot name "
+            f"it. The state is rebuildable: delete {db_path()} and re-run `lx extract`.")
+    counts = _counts(doc["segments"])
+    return {
+        "source": doc.get("source"),
+        "lang": doc.get("lang"),
+        "format": doc.get("format"),
+        "tone": doc.get("tone"),
+        "state_version": doc.get("state_version"),
+        "output": _output(doc["source"], doc.get("lang"), cfg),
+        "segments": counts["segments"],
+        "translated": counts["translated"],
+        "pending": counts["pending"],
+        "held": counts["held"],
+        "check": (_check(doc.get("source"), doc.get("lang"), counts,
+                         _as_report(doc["segments"])) if detail else None),
+    }
+
+
+def _empty_project(path):
+    return {
+        "path": path,
+        "name": os.path.basename(path.rstrip(os.sep + (os.altsep or ""))) or path,
+        "markers": project_markers(path),
+        "source_lang": None,
+        "targets": [],
+        "tone": None,
+        "documents": [],
+        "untracked": [],
+        "languages": [],
+        "totals": _rollup([]),
+        "error": None,
+    }
+
+
+def _project(path, cfg=None, lang=None, detail=True):
+    """One project's entry. **Never raises.**
+
+    A project this build cannot read reports `error` and empty counts rather than
+    ending the command, which is the rule `/api/state` already follows for a
+    malformed routing stage: one bad entry must not take the listing down. Under
+    `--scan` that is the difference between a library that lists and a library
+    that does not, and the offending project is usually the one the person wants
+    to be told about.
+
+    Broad on purpose. The reachable failures are a `state.db` written by a newer
+    schema (`StateVersionError`), a `lx.config.json` that is not JSON
+    (`ValueError`), a database that is not a database (`sqlite3.DatabaseError`),
+    and a directory that has become unreadable between the scan and the read
+    (`OSError`) — four unrelated hierarchies, and the *next* one is what the
+    narrow spelling would miss. `KeyboardInterrupt` and `SystemExit` are not
+    `Exception` and still end the command.
+    """
+    entry = _empty_project(path)
+    try:
+        # Reloaded per project under `--scan`, never inherited: `main` loads the
+        # configuration of the directory `lx` was invoked in, and reporting one
+        # project's `targets` against another's config is how a listing comes to
+        # describe books nobody configured that way.
+        cfg = load_config() if cfg is None else cfg
+        entry["source_lang"] = _text(cfg.get("source_lang"))
+        entry["tone"] = _text(cfg.get("tone"))
+        # The container is type-checked before its elements, and that is the
+        # half that bites: `list("zh-TW")` is `['z', 'h', '-', 'T', 'W']`, so a
+        # hand-edited `"targets": "zh-TW"` — the likeliest typo there is —
+        # reported five target languages named after its own letters.
+        configured = cfg.get("targets")
+        entry["targets"] = ([t for t in configured if isinstance(t, str)]
+                            if isinstance(configured, list) else [])
+        # **Read once, unfiltered, and filtered here.** `do_untracked` subtracts
+        # what is already tracked, so handing it a `--lang`-filtered list would
+        # make it offer a document that is tracked in another language — the
+        # subtraction is over (identity, language) pairs and a missing pair is a
+        # false offer. `tracked(lang)` filters in Python anyway, so this is one
+        # database read either way.
+        stored = tracked()
+        entry["documents"] = [_document(d, cfg, detail) for d in stored
+                              if not lang or d.get("lang") == lang]
+        if detail:
+            # `cli.do_untracked` and nothing of its own: this key, `lx untracked`
+            # and `/api/state`'s `untracked` are required to spell one word and
+            # mean one thing, which is what the rename of 2026-08-14 was for.
+            rows, _collisions = do_untracked(cfg, stored)
+            entry["untracked"] = [r for r in rows if not lang or r.get("lang") == lang]
+        by_lang = {}
+        for row in entry["documents"]:
+            by_lang.setdefault(row["lang"], []).append(row)
+        # `lang` first in the object, because this is the key that says which
+        # rollup a reader is looking at and a listing is read top to bottom.
+        entry["languages"] = [
+            dict({"lang": name}, **_rollup(rows))
+            for name, rows in sorted(by_lang.items(), key=lambda kv: str(kv[0]))]
+        entry["totals"] = _rollup(entry["documents"])
+    except Exception as e:  # noqa: BLE001 — see the docstring
+        # **Rebuilt, not annotated.** The contract says an entry carrying an
+        # `error` has zero counts and empty lists, and a failure part-way through
+        # the projection above would otherwise leave half of one behind — a
+        # document list that stops wherever the exception happened, with totals
+        # that never ran. Returning a fresh entry is what makes that sentence
+        # true whichever line raised.
+        failed = _empty_project(path)
+        failed["error"] = str(e) or e.__class__.__name__
+        return failed
+    return entry
+
+
+def do_status(cfg, scan=None, depth=SCAN_DEPTH, lang=None, detail=True):
+    """The project-status projection. `docs/contracts/status-json.md` is the contract.
+
+    Without `scan`, `projects` holds exactly one entry — the working directory,
+    reported whether or not it carries a marker, because that is where the person
+    is standing. With `scan`, it holds one entry per project found under the root,
+    sorted by path, and an empty list is a real answer.
+
+    One shape either way. A consumer reads `projects` and never branches on which
+    flag produced it. *Lost:* a bare object for the single-project case, which
+    reads better in a terminal and forces every consumer to write the branch.
+
+    ``detail=False`` skips the two projections beyond the counts — the
+    per-document read of `.lx/reports/` and the `sources` glob behind
+    `untracked` — and is **not part of the contract**: `cmd_status` never passes
+    it and `lx status --json` always carries both. It exists for `lx stats`,
+    which prints neither. Measured 2026-08-19 on 2000 documents: `store.tracked`
+    alone is 117 ms and the report reads take that to 741 ms, so the incumbent
+    command would have paid six times its own read for output it discards, plus
+    a filesystem walk per project. What it does *not* do is compute the counts
+    twice — that is the whole reason `lx stats` was rewired through here, and it
+    stays one computation.
+
+    The cost of the flag, stated because it is a footgun: with it off, `check`
+    is `None` for every document and `untracked` is `[]`, which are the same
+    shapes as "nobody has checked this" and "nothing new matches `sources`".
+    Only a caller that reads neither may pass it.
+
+    **This changes the working directory and puts it back.** Every path in this
+    project is relative to `os.getcwd()` — `store.db_path`, `store.doc_id` and
+    `config.load_config` all are — so reading a project means standing in it.
+    The restore is in a `finally`, and the directory it restores to is captured
+    once, before the first move. *Lost:* threading a root through `store.py`,
+    which is the right shape and is a shared-seam edit this package is explicitly
+    scoped out of; it is recorded as the follow-up in `docs/decisions.md`.
+    """
+    here = os.getcwd()
+    roots = [here] if scan is None else find_projects(scan, depth)
+    projects = []
+    try:
+        for path in roots:
+            try:
+                os.chdir(path)
+            except OSError as e:
+                entry = _empty_project(path)
+                entry["error"] = str(e)
+                projects.append(entry)
+                continue
+            # `cfg` only for the working directory: it is the one whose config
+            # `main` already loaded, and the one whose `--config` the person
+            # meant. A scanned project loads its own.
+            projects.append(_project(path, cfg if scan is None else None, lang, detail))
+    finally:
+        os.chdir(here)
+    return {
+        "contract_version": STATUS_CONTRACT_VERSION,
+        "version": __version__,
+        "scanned": None if scan is None else scan,
+        "lang": lang,
+        "projects": projects,
+    }
+
+
+def _bar(done, total):
+    pct = done * 100 // max(total, 1)
+    return f"{pct:3d}% [{'#' * (pct // 5):<20}] {done}/{total}"
+
+
+def _print_project(project, indent=""):
+    for row in project["documents"]:
+        line = f"{indent}{_bar(row['translated'], row['segments'])}  {row['source']} [{row['lang']}]"
+        check = row["check"]
+        if check:
+            stale = ", stale" if check["stale"] else ""
+            line += f"  {check['errors']} error(s), {check['warnings']} warning(s){stale}"
+        else:
+            line += "  unchecked"
+        if row["held"]:
+            line += f", {row['held']} held"
+        _out(line)
+
+
+def cmd_status(args, cfg):
+    status = do_status(cfg, scan=args.scan, depth=args.depth, lang=args.lang)
+    if args.json:
+        _out(json.dumps(status, ensure_ascii=False, indent=2))
+        return
+    for project in status["projects"]:
+        totals = project["totals"]
+        head = f"{project['name']}  {project['path']}"
+        if project["error"]:
+            _out(f"{head}  — cannot be read: {project['error']}")
+            continue
+        _out(head)
+        _print_project(project, indent="  ")
+        if not project["documents"]:
+            # Which of the two nothings this is, because they need different
+            # answers: a directory nobody has set up, and a project set up and
+            # not yet extracted.
+            _out("  nothing tracked yet — run `lx extract`" if project["markers"]
+                 else "  not a project — no .lx/ and no lx.config.json")
+            continue
+        _out(f"  {totals['segments']} segments, {totals['translated']} translated, "
+             f"{totals['pending']} pending, {totals['held']} held — "
+             f"{totals['errors']} error(s), {totals['warnings']} warning(s) "
+             f"across {totals['checked']} of {totals['documents']} checked")
+    if status["scanned"] is not None and not status["projects"]:
+        _out(f"no project under {status['scanned']} — a project is a directory holding "
+             f"{' or '.join(PROJECT_MARKERS)}")
 
 
 def cmd_init(args, cfg):
@@ -2869,6 +3391,15 @@ def build_parser():
     s_.add_argument("--lang")
     s_.set_defaults(fn=cmd_stats)
 
+    st = sub.add_parser("status", help="the machine-readable project status contract")
+    st.add_argument("--json", action="store_true")
+    st.add_argument("--lang", help="report only this target language")
+    st.add_argument("--scan", metavar="ROOT",
+                    help="report every project under ROOT instead of the current directory")
+    st.add_argument("--depth", type=int, default=SCAN_DEPTH,
+                    help=f"how deep under --scan a project may be found (default {SCAN_DEPTH})")
+    st.set_defaults(fn=cmd_status)
+
     un = sub.add_parser("untracked", help="files matching `sources` with no state yet")
     un.add_argument("--json", action="store_true")
     # The same flag and the same default as `lx check`, deliberately: one number
@@ -2920,8 +3451,15 @@ def main(argv=None):
     force_utf8(sys.stdout)
     force_utf8(sys.stderr)
     args = build_parser().parse_args(argv)
-    cfg = load_config(args.config)
     try:
+        # Inside the `try`, not before it. Every command reads the configuration
+        # first, so a typo in `lx.config.json` was answered by all twenty of them
+        # with a traceback and exit 1 — where every other refusal in this CLI is
+        # one sentence and exit 2. `load_config` raises `ConfigError` now and
+        # this is the half that catches it. Found 2026-08-19 by the mutation pass
+        # over `lx status`, whose contract enumerates exit 0 and exit 2 and no
+        # third thing.
+        cfg = load_config(args.config)
         args.fn(args, cfg)
     except (FileNotFoundError, StateVersionError, UnsupportedSource,
             GlossaryWriteError, UnknownFormat, UndecodableDocument,

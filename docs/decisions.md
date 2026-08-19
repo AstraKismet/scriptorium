@@ -3,6 +3,234 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-08-19 · A project can say how far along it is, and the thing it cannot say is a timestamp
+
+Closing HANDOFF-203, which A7 scheduled on 2026-07-28 and D6 pushed to the back
+of the queue on 2026-07-29 because it serves the bookshelf project rather than
+translation. The artifact is `docs/contracts/status-json.md` at
+`contract_version = 1`, a sibling of the workbench contract in the same
+directory, and `tests/test_status_contract.py` fails when the document and the
+command disagree.
+
+**The command did not exist.** The package was written as "freeze
+`lx status --json`" and the tree held no `lx status` at all — only `lx stats`,
+eight lines printing a progress bar, with no test anywhere in the suite. Three
+places already named the surface as though it were built: `AGENTS.md`'s *Not in
+scope*, A7, and the workbench contract's own disambiguation paragraph. So the
+package was half again its estimate, and the estimate was not wrong about the
+half it described: a contract is cheap to freeze and a surface is not free to
+build.
+
+### The scan is ours, because the marker is not theirs to know
+
+The consumer may not read inside `.lx/`. A project-discovery convention that
+told it to look for `.lx/` would hand it exactly the thing the red line exists to
+withhold — and would break it on the day the directory is renamed, which is the
+freedom the red line is buying. So discovery is a flag on the command:
+`lx status --scan ROOT` returns the projects, and the marker stays this
+project's business.
+
+A directory is a project when it holds `.lx/` **or** `lx.config.json`. The *or*
+is the rule rather than a convenience, and each half is a real state: `lx init`
+writes both, a cold `lx extract` writes only `.lx/` because `write_templates`
+never ran, and a project configured by hand and not yet extracted has only
+`lx.config.json`. *Lost:* `.lx/state.db`, the marker meaning "has work in it" —
+a project with no work is still a book on the shelf, and showing it at 0% is the
+point.
+
+*Lost:* depth 1, which is all the acceptance criterion asked for and which fails
+the first person who groups books by shelf. *Also lost:* an unbounded walk, which
+pointed at a home directory is a filesystem crawl. The walk is bounded at
+`--depth 3`, pruned at every project found and at every dotted directory.
+
+### There is no timestamp, and every proxy for one is moved by reading it
+
+The package listed "last activity" among the fields worth having. It is not
+there, and the reason is worth the paragraph because the next person will ask.
+
+Nothing in the state records a time. Not a column in `documents`, `nodes` or
+`segments`; not a key written into a document's `meta` or a segment's `body` by
+any of the five writers; not a field of a translation-memory record. That was
+searched for rather than assumed.
+
+What defeats the obvious fallback is subtler. `.lx/state.db`'s mtime looks like
+a proxy — until you notice that opening it at all runs `PRAGMA journal_mode=WAL`,
+and that closing the last connection to a WAL database checkpoints it, which
+rewrites the main file. `lx status` would therefore advance the very mtime it
+reported, and a library scanned twice would show every book as worked on
+moments ago. **A field whose value is changed by the act of reading it is worse
+than an absent one**, because the absence is visible in the contract and the lie
+is not. The narrower proxies — `.lx/reports/` for "last checked",
+`.lx/tm.<lang>.jsonl` for "last banked" — are each true about one command and
+would be read as true about all of them.
+
+So version 1 says so, in *Deliberately not in the contract*, and a real
+`updated_at` is *Reserved*. It needs a `SCHEMA_VERSION` move and an edit to
+`store.py`, a shared seam this package was scoped out of while HANDOFF-204 is in
+it. Adding the field later is additive and does not bump.
+
+### Invariant 6 is held by carrying nothing, not by masking something
+
+This surface reports no provider, no `base_url`, no `api_key_env`, no headers and
+no routing. The three configuration values it does carry — `source_lang`,
+`targets`, `tone` — are language tags and a register name.
+
+That is a decision and not an omission, and it is written into the contract as
+one. The lesson of 2026-08-13 is that a display surface is any place a value can
+be read rather than the list of places that look like a report: two surfaces were
+found printing a raw `base_url` because the enumerated list in `AGENTS.md` had
+been read as the definition. A new surface that carries nothing readable cannot
+join that list. *Lost:* mirroring `/api/state`'s `providers` block here for
+symmetry, which would have made this the fourth place to remember
+`config.printable_url` and bought a consumer nothing — a bookshelf does not
+render a backend.
+
+The same argument, applied twice more: no segment text of any kind, so an
+unpublished translation cannot leave through a progress report; and no path
+inside `.lx/`.
+
+### Reading a project means standing in it
+
+Every path in this project resolves against `os.getcwd()` — `store.db_path`,
+`store.doc_id` and `config.load_config` all do. So `do_status` changes the
+working directory per project and restores it in a `finally`, from a value
+captured once before the first move.
+
+*Lost:* threading a root parameter through `store.py`, which is the right shape
+and is a shared-seam edit this package is explicitly scoped out of. It is
+recorded as divergence (1) rather than hidden: the current spelling is correct
+for a CLI command and is not thread-safe, and `lx web` does not call
+`do_status` today.
+
+### One unreadable project does not end the report
+
+A `state.db` from a newer schema, an `lx.config.json` that is not JSON, a file
+that is not a database, a directory that stopped being listable — each becomes
+that project's `error` field and the rest of the library still lists. Three
+unrelated exception hierarchies were reproduced, which is why the catch is broad
+rather than a tuple: the *next* one is what a narrow spelling misses.
+
+It is the rule `/api/state` already follows for a malformed routing stage, and it
+costs a real asymmetry, recorded as divergence (5): `lx extract` on such a
+project exits 2 with a sentence, and `lx status` exits 0 with that sentence in a
+field. `lx status` has no failing exit code of its own — it is a report, and
+"this project has 41 errors" is a successful one. The command that exits 1 on an
+unhealthy document is `lx check`, and invariant 10 keeps that exit code the
+evidence.
+
+### `lx stats` was counting differently, and now there is one count — and the rewire cost two things before it was scored
+
+It is kept — removing a command is a break nobody asked for — and rewired to read
+`do_status`. The two had already drifted: `lx stats` counted `s.get("target")`
+truthy, so a target of three spaces was translated, where `store._segment`
+derives the status from a stripped target and so does every other counter in the
+project. Two commands answering one question two ways is the shape this
+repository has repaired three times already, most recently when one matcher had
+become three copies.
+
+**And then it was scored against the command it replaced, which is the only
+reason the next two paragraphs exist.** A rewire that is right on the shape it
+was written for is not thereby never-worse; fifteen input shapes were run
+against both builds, and eleven were byte-identical stdout and identical exit
+code. Two were not.
+
+`lx stats` **lost its failing exit code and its stream.** `do_status` turns an
+unreadable project into an `error` *field*, because a `--scan` has to list the
+rest of the library — and `cmd_stats`, which has no such field and exactly one
+project, inherited the swallow. It printed the sentence to stdout and exited 0
+where it had exited 2 on a newer schema and 1 on a corrupt database. The caller
+that reads that code is `.github/workflows/ci.yml`, whose smoke step ends in a
+bare `lx stats` inside `set -euo pipefail`: the exit code is the entire
+assertion, and the step went green on a database it could not open. The stream
+was the other half — `lx stats > coverage.txt` captured the failure into the
+report file and left the terminal silent. Both restored, and both pinned by a
+test. This is the enumeration-read-as-definition failure in its exact shape:
+the contract's own divergence (5) argues the swallow for `lx status`, names
+`lx extract` as the contrast, and the third command — the incumbent whose
+behaviour had just changed — is in neither half of the list.
+
+`lx stats` was also **paying six times its own read for a projection it
+discards.** Measured on 2000 documents: `store.tracked` alone is 117 ms, and
+`do_status` reading a check report per document is 741 ms. `cmd_stats` prints
+none of it. It passes `checks=False` now, which keeps the one thing the rewire
+was for — a single count behind both commands — without buying the one thing it
+was not.
+
+### What the adversarial pass found, because this is the part worth keeping
+
+The contract was written, then attacked by five independent lanes — one deriving
+the surface from the code before reading the document, one at the security tier,
+one scoring the `lx stats` rewire against the command it replaced, one
+implementing a bookshelf against the document on paper, and a mutation round.
+Three returned NOT CLEARED. Every finding was reproduced before it was fixed,
+and the shape they share is the one this repository has now recorded four times:
+**a correctly stated rule whose enumeration was read as its definition.**
+
+*One defect that had nothing to do with the contract.* `_project`'s docstring
+said "Never raises" and its `try` stopped one line short of the projection it
+guards. A document row whose stored meta carries no `source` — which
+`store._meta` tolerates, guarding its own normalization with `if
+doc.get("source")` — reached `os.path.relpath(None)` and raised a `TypeError`
+that `cli.main` does not catch: **no report at all**, exit 1, and every healthy
+project in the `--scan` taken down with the one bad book. That is the exact
+promise `--scan` exists to make. The `try` covers the projection now, a failure
+rebuilds a clean entry rather than leaving half of one, and the missing source is
+refused with a sentence.
+
+*Four claims in the document were false, and each was refuted by running
+something rather than by reading.* "The three counters agree by construction" —
+they do not; `cli.do_check` and `web/server.py` both count an unstripped target
+and this surface strips, so one project answered `done: 1` and `translated: 0` at
+the same moment. That one also made `check.stale` **permanently true** for such a
+document, on a report one second old, with no re-check able to clear it, because
+the two sides of the comparison counted differently. "No path inside `.lx/`" —
+`error` names `state.db`, twice, and one `PRAGMA` showed it. "None of which can
+hold a secret" — one hand-edit put a key in `tone`. "Every list is empty when
+`error` is set" — `markers` is not, deliberately.
+
+*The rewire was worse than the command it replaced, in two places nobody had
+looked.* Scored across fifteen input shapes against a `git archive` of the
+parent: eleven byte-identical, one better, and two worse. `lx stats` had lost its
+failing exit code and its stream — and `.github/workflows/ci.yml` ends a
+`set -euo pipefail` step with a bare `lx stats`, so the smoke test went green on
+a database it could not open. **A replacement rule is not never-worse because it
+is right about the case it was written for**, and the only way to know is to run
+both builds over one probe set and put the answer in a table.
+
+*And the consumer could not reach the words.* The bookshelf is also the reader.
+It was given a document's `source` and no supported way to find the translated
+file, because the path comes from `output_pattern`, which is per-project
+configuration this surface did not report. Its three options were a hard-coded
+default that breaks silently, reading `lx.config.json` — the storage coupling the
+red line exists to stop — and shelling out to `lx render`, which violates "this
+contract and nothing else" outright. That is a hole in the completeness bar this
+document sets for itself in its own opening paragraph, and `documents[].output`
+closes it. **Writing down what a consumer may do is not the same as checking
+that it can**, and the check is cheap: build the five screens on paper and see
+which ones stop.
+
+*A process note, because it cost real confusion.* The lanes were dispatched
+read-only against the shared checkout while the coordinating worker went on
+committing to it. Two lanes caught a mutant resident in `cli.py` mid-measurement
+and re-derived against a `git archive` of their assigned commit, which is the
+only reason their numbers are trustworthy; one lane destroyed another's scratch
+library. `docs/conventions/delegated-work.md` §2a requires a worktree for a
+worker that **writes**; this is the neighbouring case it does not cover — a
+read-only worker is not safe from a *tree that moves under it*. Pin reviewers to
+an immutable revision, or stop committing while they run.
+
+### Two contracts, two integers
+
+`contract_version` here is `1` and the workbench's is `3`, and they move
+independently. Both documents now say so, and a test asserts the two constants
+have not become one. The pair were misread as a single contract during triage on
+2026-07-29; `docs/contracts/` exists as a directory rather than a flat pair of
+filenames for that reason.
+
+*Lost:* a `--contract-version` flag printing the integer alone so a consumer
+could gate before parsing. The consumer must run the command to learn anything
+at all, and the field is already the first key of the object it receives.
+
 ## 2026-08-19 · `contract_version = 3`: a reset that names no register is refused, and the three things `lx extract` could say that the endpoint could not
 
 The first bump through the gate `contract_version = 2` set up on 2026-08-14, and

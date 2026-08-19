@@ -591,8 +591,34 @@ def _merge(base, override):
 
 
 def load_config(path="lx.config.json"):
-    """User config layered over defaults, so new keys never break old projects."""
-    return _merge(DEFAULT_CONFIG, load_json(path, {}))
+    """User config layered over defaults, so new keys never break old projects.
+
+    A file that is not JSON is a `ConfigError`, which `cli.main` turns into one
+    sentence and exit 2 — the treatment every other refusal in this project gets.
+    It used to be a raw `JSONDecodeError`, and because `main` reads the
+    configuration *before* its own `try`, every one of the twenty commands
+    answered a typo in `lx.config.json` with a traceback and exit 1. Found on
+    2026-08-19 by the mutation pass over `lx status`, whose contract enumerates
+    exit 0 and exit 2 and no third thing.
+
+    The path is named because the message could otherwise be about any of four
+    files this project reads, and the decoder's own sentence names none of them.
+    """
+    try:
+        stored = load_json(path, {})
+    except json.JSONDecodeError as e:
+        raise ConfigError(
+            f"{path} is not valid JSON ({e.msg} at line {e.lineno} column {e.colno}). "
+            f"Fix it, or delete it to fall back to the defaults — `lx init` writes a "
+            f"fresh one.") from None
+    if not isinstance(stored, dict):
+        # A JSON array or a bare string parses fine and then fails inside `_merge`
+        # with `'list' object has no attribute 'items'`, which is a Python
+        # internal wearing the costume of a diagnostic.
+        raise ConfigError(
+            f"{path} holds a {type(stored).__name__} where this project expects a JSON "
+            f"object of settings, as in {{\"targets\": [\"zh-TW\"]}}.")
+    return _merge(DEFAULT_CONFIG, stored)
 
 
 def load_glossary(cfg):

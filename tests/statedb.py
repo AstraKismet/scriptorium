@@ -77,6 +77,25 @@ def set_state_version(root, version):
     _write(root, "UPDATE documents SET state_version=?", (version,))
 
 
+def set_target(root, seg_id, target):
+    """Write a target column directly, past every rule that guards the door.
+
+    `do_apply` refuses an empty target and `save_targets` refuses to overwrite a
+    person's words, so a test about what the *counters* do with a row that
+    already exists cannot get there through the CLI. This is the same doctoring
+    the version helpers above do, for the same reason: the refusal is not what is
+    under test.
+    """
+    # `status` moves with it, which is the half that makes the doctoring
+    # faithful. A row written by a build that let a whitespace target through
+    # holds `status='translated'` beside text that strips to nothing — that
+    # inconsistency *is* the population, and leaving `status` at `pending` made a
+    # status-based counter and a text-based one agree, so a test over it could
+    # not tell the two rules apart.
+    _write(root, "UPDATE segments SET target=?, status='translated' WHERE seg_id=?",
+           (target, seg_id))
+
+
 def edit_segments(root, change):
     """Apply `change(body_dict)` to each segment's JSON body and write it back."""
     for seg_id, body in _query(root, "SELECT seg_id, body FROM segments"):

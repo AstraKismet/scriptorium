@@ -232,6 +232,17 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    same section was being rewritten. Every further bump is gated behind a work
    package rather than a commit, and that gate is unchanged.
 
+   **A second contract froze on 2026-08-19, and it is this invariant's rather
+   than the workbench's**: `docs/contracts/status-json.md` covers
+   `lx status --json`, the surface the bookshelf-and-reader project consumes.
+   Its consumer may not read inside `.lx/` and may not call the Python API, so
+   the completeness bar is higher than the HTTP contract's — anything missing
+   from it is a reason for somebody to go around it. It freezes `cli.do_status`
+   as its seam the way each endpoint's *Backed by* line does, and its
+   `contract_version` is a **separate integer** from the workbench's, on a
+   separate schedule; a test asserts the two constants have not become one. The
+   gate is the same: a bump is a work package, not a commit.
+
 9. **Nothing regenerable is a source of truth.** Working state (SQLite) and
    approved wording (`.lx/tm.*.jsonl`) are sources of truth. JSON over HTTP is a
    projection. Rendered documents and any XLIFF export are rebuildable artifacts.
@@ -308,13 +319,15 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 1154 tests; no network (one is POSIX-only,
+python -m pytest -q                 # 1206 tests; no network (one is POSIX-only,
                                     #   one runs only where the filesystem folds case)
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
 
 lx run docs/guide.md --lang zh-TW   # extract -> translate -> check -> repair -> render
 lx web                              # review workbench on 127.0.0.1:8787
+lx status --json                    # the frozen project-status contract
+lx status --scan ~/books            # every project under a root
 ```
 
 Run tests before proposing a change as finished. They are fast and cover the
@@ -683,6 +696,17 @@ A graphical bookshelf and reader is a **separate project**. It consumes exported
 documents and the `lx status --json` contract, and nothing else — it may not read
 inside `.lx/` and may not call the Python API, so that this project stays free to
 change its storage layer or its language.
+
+That contract exists since 2026-08-19: `docs/contracts/status-json.md`, at
+`contract_version = 1`. **Project discovery is on this side of the line** —
+`lx status --scan ROOT` returns the projects under a root, because a consumer
+told to look for `.lx/` would have been handed the one thing the restriction
+withholds. What the surface deliberately does not carry is written down in it and
+is as load-bearing as the field tables: no timestamp of any kind, because none
+exists in the state and every filesystem proxy for one is moved by the act of
+reading it; no provider, `base_url` or `api_key_env`, so invariant 6 is held here
+by carrying nothing rather than by masking something; and no segment text at all.
+See `docs/decisions.md`, 2026-08-19.
 
 Proposals to reopen any of these belong in `docs/decisions.md` as a new entry,
 not in a branch.
