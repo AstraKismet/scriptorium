@@ -62,7 +62,14 @@ STATIC = os.path.join(os.path.dirname(__file__), "static")
 #:     lost-update token. Moving it per item would have spent the property the
 #:     freeze exists for, since a client is required to refuse a number it does
 #:     not know. See `docs/decisions.md`, 2026-08-14.
-CONTRACT_VERSION = 2
+#: 3 — `POST /api/extract` refuses `reset: true` with no `tone` and answers 400.
+#:     One item, because there was no additive spelling of it: the refusal
+#:     narrows an accepted value set, turns a documented 200 into a 400, and
+#:     changes what the request table's documented `tone` default means. The
+#:     three arrays that landed beside it — `kept`, `ambiguous`, `replaced` — are
+#:     new response keys and did not need the move; they rode along because the
+#:     same section was being rewritten. See `docs/decisions.md`, 2026-08-19.
+CONTRACT_VERSION = 3
 
 #: The three spellings of loopback. `serve()` binds one and the browser may be
 #: pointed at any of them, so the bound literal alone is not the answer.
@@ -493,19 +500,25 @@ class _Handler(BaseHTTPRequestHandler):
             lang = language_tag(lang)
         cfg = load_config()
         if path == "/api/extract":
-            # The fourth element names the segments whose stored wording the
-            # acceptance path refused and `do_extract` kept anyway, and those it
-            # could not tell apart from another position. Deliberately not
-            # projected: a new response key is additive and would not bump, but
-            # nothing is lost any more — `POST /api/doc` runs `do_check` and
-            # carries the placeholder error on the segment itself, which is where
-            # a client is already looking. See *Known divergences* (24) and (26).
-            doc, reused, rejected, _notes = do_extract(src, lang, cfg, body.get("tone"),
+            # Three of the fourth element's four keys, unconditionally — present
+            # and empty rather than conditional, or a client has to tell "none"
+            # from "an older server" and `tests/test_contract.py`'s exact-key
+            # comparison fails on a first extract. `replaced` is the one of the
+            # three that nothing else on this surface can reach: a `kept` segment
+            # comes back failing and `POST /api/doc` carries its error, while a
+            # replaced one is `translated`, passes every validator, and has had
+            # its `origin` laundered. `register` is the key deliberately left
+            # off — it would arrive after `save_doc` has already run, and the
+            # control it would serve has to ask before. See the contract's
+            # `POST /api/extract` section and *Known divergences* (24), (26), (27).
+            doc, reused, rejected, notes = do_extract(src, lang, cfg, body.get("tone"),
                                                body.get("reset", False))
-            return {"segments": len(doc["segments"]), "reused": reused, "rejected": rejected}
+            return {"segments": len(doc["segments"]), "reused": reused, "rejected": rejected,
+                    "kept": notes["kept"], "ambiguous": notes["ambiguous"],
+                    "replaced": notes["replaced"]}
         if path == "/api/save":
             # `base` is optional and per id, so a client that has not opted in
-            # writes exactly as it did. An empty target raises `EmptyTarget`,
+            # writes exactly as it did. An empty target raises `UnusableTarget`,
             # which reaches the 400 below like every other refusal — the rule
             # lives in `do_apply` so `lx apply` cannot walk around it.
             # The fifth element is `do_apply`'s origin-precedence refusals, and

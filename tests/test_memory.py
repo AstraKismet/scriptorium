@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from scriptorium import store as store_mod  # noqa: E402
 from scriptorium.cli import (  # noqa: E402
+    UnnamedRegister,
     UnusableTarget,
     do_apply,
     do_check,
@@ -277,9 +278,126 @@ def test_the_register_is_frozen_on_the_document_and_a_later_extract_keeps_it(
     assert _only(doc)["target"] == AS_PROSE
 
     # `--reset` is the exception, and deliberately so: it does not read the state
-    # file at all, because it has to work on one this build cannot read.
-    doc, _reused, _rejected, _notes = do_extract("d.md", "zh-TW", CFG, reset=True)
-    assert doc["tone"] == DEFAULT_TONE
+    # file at all, because it has to work on one this build cannot read. Until
+    # 2026-08-19 that made it invent a register from config, which this assertion
+    # pinned as intended behaviour; it is refused now.
+    with pytest.raises(UnnamedRegister) as e:
+        do_extract("d.md", "zh-TW", CFG, reset=True)
+    # The flag, not the prose: the wording of a refusal sentence is explicitly
+    # not frozen, and asserting a phrase out of it pins the one part that is free
+    # to change. `--tone` is what the reader has to be handed.
+    assert "--tone" in str(e.value), "the message has to name the flag that fixes it"
+
+    # Re-pinned through the carryover rather than through `tone`, and that is the
+    # whole point of these three lines: `tone or stored.get("tone") or cfg…` means
+    # an explicit `--tone` wins whether or not the stored row was read, so
+    # asserting `doc["tone"] == DEFAULT_TONE` after passing `tone=DEFAULT_TONE`
+    # is a tautology wearing the old assertion's clothes. What still proves the
+    # row went unread is that nothing came across it.
+    doc, reused, _rejected, _notes = do_extract("d.md", "zh-TW", CFG,
+                                                tone=DEFAULT_TONE, reset=True)
+    assert (doc["tone"], reused) == (DEFAULT_TONE, 0)
+    assert _only(doc)["status"] == "pending" and not _only(doc).get("target")
+
+
+@pytest.mark.parametrize("tone", [None, "", "   ", "\t\n"])
+def test_a_reset_that_names_no_register_is_refused_however_the_blank_is_spelled(
+        tone, tmp_path, monkeypatch):
+    """`is None` was the obvious guard and it leaves the defect reachable.
+
+    `config.canonical_tone` folds `None`, `""` and any run of blanks onto the
+    default register, and `do_extract` resolves `tone or stored… or cfg…`, so
+    `--tone ""` on the CLI and `{"tone": ""}` on the wire would both pass an
+    identity check and land on exactly the silent `technical` the refusal exists
+    to stop. `web/server.py` passes `body.get("tone")` through unvalidated, so
+    the wire is where a blank actually arrives.
+    """
+    _project(tmp_path, monkeypatch, doc=LEAVING)
+    do_extract("d.md", "zh-TW", CFG, tone="literary")
+    with pytest.raises(UnnamedRegister):
+        do_extract("d.md", "zh-TW", CFG, tone=tone, reset=True)
+
+
+def test_a_refused_reset_leaves_the_document_exactly_as_it_was(tmp_path, monkeypatch):
+    """The oracle is the state on disk, not the exception.
+
+    A guard placed anywhere in `do_extract` raises, so "it raised" cannot tell a
+    guard at the top from one below the line that rebinds `tone` — and below that
+    line it could never fire, which is the guard-fires-once shape this repository
+    has already paid for once. Asserting the register and the target are still
+    there is what pins that half.
+
+    Only that half. State on disk cannot see a guard sitting *below* the parse
+    and above the state read, which writes nothing either — measured by an
+    adversarial pass, which moved it there and left all 1168 tests green. The
+    other half is next door, where the oracle is which refusal wins.
+    """
+    _project(tmp_path, monkeypatch, doc=LEAVING)
+    doc, *_ = do_extract("d.md", "zh-TW", CFG, tone="literary")
+    do_apply("d.md", "zh-TW", CFG, {_only(doc)["id"]: AS_PROSE}, origin="human")
+
+    with pytest.raises(UnnamedRegister):
+        do_extract("d.md", "zh-TW", CFG, reset=True)
+
+    after = load_doc("d.md", "zh-TW")
+    assert after["tone"] == "literary", "the refusal moved the register it refused to guess"
+    assert _only(after)["target"] == AS_PROSE
+    assert _only(after)["origin"] == "human"
+
+
+def test_a_refused_reset_never_reads_the_document(tmp_path, monkeypatch):
+    """Which complaint wins, which is the only thing that can see this.
+
+    The refusal is decidable from two arguments, so it has to come before every
+    complaint the file itself could make. A guard below `read_document` and
+    `fmt.parse` still writes no state row, so the state-on-disk oracle next door
+    passes against it — and `lx extract missing.md --lang zh-TW --reset` then
+    reports the missing file instead of the missing register, which is the wrong
+    one: the absent `--tone` is a defect in the command as typed and will still
+    be there once the file exists.
+    """
+    _project(tmp_path, monkeypatch, doc=LEAVING)
+    with pytest.raises(UnnamedRegister):
+        do_extract("gone.md", "zh-TW", CFG, reset=True)
+    (tmp_path / "d.unknown").write_bytes(b"A sentence.\n")
+    with pytest.raises(UnnamedRegister):
+        do_extract("d.unknown", "zh-TW", CFG, reset=True)
+
+
+def test_an_unnamed_register_is_not_an_unusable_target():
+    """Its own class, and the docstring in `cli.py` argues why.
+
+    Folding the refusal into `UnusableTarget` would widen every existing
+    `pytest.raises(UnusableTarget)` in this suite onto an unrelated failure, so
+    the split is load-bearing and not a naming preference. One line, because
+    subclassing it back is a one-line change that nothing else would notice.
+    """
+    assert not issubclass(UnnamedRegister, UnusableTarget)
+    assert not issubclass(UnusableTarget, UnnamedRegister)
+
+
+def test_a_reset_that_names_a_register_still_starts_over(tmp_path, monkeypatch):
+    """The refusal narrows `--reset`; it does not take the escape hatch away.
+
+    Named separately from the register test above because that one is about
+    stickiness and this one is about the flag still doing its job — a refusal
+    that quietly made `--reset` unusable would be a worse defect than the one it
+    closes, and `store._refuse_if_newer` points a person at this exact command.
+    """
+    _project(tmp_path, monkeypatch, doc=LEAVING)
+    doc, *_ = do_extract("d.md", "zh-TW", CFG, tone="literary")
+    do_apply("d.md", "zh-TW", CFG, {_only(doc)["id"]: AS_PROSE}, origin="human")
+
+    doc, reused, rejected, notes = do_extract("d.md", "zh-TW", CFG,
+                                              tone="literary", reset=True)
+    assert (doc["tone"], reused, rejected) == ("literary", 0, 0)
+    assert not _only(doc).get("target"), "a reset that kept the target is not a reset"
+    # `notes["register"]` is `None` here by construction rather than by decision:
+    # its guard reads `stored`, which a reset never fills, so a register change
+    # is undetectable on this path. Said here rather than asserted — an assertion
+    # that cannot fail reads like a guarantee and is not one. The contract says
+    # the same to a client.
+    assert notes["register"] is None
 
 
 # --- what happens to a memory written before this key existed ----------------
@@ -576,7 +694,11 @@ def test_a_memory_line_with_no_map_is_offered_only_where_a_renumbering_cannot_re
     ])
     assert all("slots" not in r for r in load_tm("zh-TW").values())
 
-    doc, reused, rejected, notes = do_extract("d.md", "zh-TW", CFG, reset=True)
+    # `tone=` because a `--reset` has to name the register since 2026-08-19; the
+    # document was extracted in the default one above, so this changes nothing
+    # the test measures — `tm_lookup` gets the same value either way.
+    doc, reused, rejected, notes = do_extract("d.md", "zh-TW", CFG,
+                                              tone=DEFAULT_TONE, reset=True)
     by_id = {s["id"]: s for s in doc["segments"]}
     assert by_id[link_seg["id"]]["target"] == "請見[指南]⟦1⟧。", \
         "a markup-only line was never at risk and should still answer"

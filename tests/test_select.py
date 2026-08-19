@@ -32,7 +32,7 @@ from scriptorium.cli import (  # noqa: E402
     do_hold,
     do_select,
 )
-from scriptorium.config import DEFAULT_CONFIG  # noqa: E402
+from scriptorium.config import DEFAULT_CONFIG, DEFAULT_TONE  # noqa: E402
 from scriptorium.store import load_doc  # noqa: E402
 
 CFG = dict(DEFAULT_CONFIG)
@@ -450,7 +450,10 @@ def test_reset_drops_a_hold_with_everything_else(book):
     """
     doc, ids = book
     _hold([ids["heading"]])
-    do_extract("d.md", "zh-TW", CFG, reset=True)
+    # The register the `book` fixture froze, not another one: a different tone
+    # drops the carryover for a register reason, and the test would still pass
+    # while measuring the wrong rule.
+    do_extract("d.md", "zh-TW", CFG, tone=DEFAULT_TONE, reset=True)
     after = {s["id"]: s for s in load_doc("d.md", "zh-TW")["segments"]}
     assert after[ids["heading"]].get("review") is None
     assert not after[ids["heading"]].get("target"), "reset kept a target"

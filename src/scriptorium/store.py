@@ -353,11 +353,19 @@ def _refuse_if_newer(found, src, lang):
     includes the extract path, which does not go through :func:`load_doc` at all.
     """
     if found > STATE_VERSION:
+        # `--tone` is named because since 2026-08-19 the command without it is
+        # refused, and this message is the *only* route out of a row this build
+        # will not read — a sentence naming a command that exits 2 is a green
+        # suite over a false user-facing string. It says "name" rather than
+        # offering a value because the register that was frozen is inside the row
+        # just refused: nothing here can read it, so the person has to decide.
         raise StateVersionError(
             f"state for {src} [{lang}] is version {found}, newer than the {STATE_VERSION} "
             f"this build reads — upgrade scriptorium, or start over with "
-            f"`lx extract {src} --lang {lang} --reset`, which discards the newer state "
-            f"(anything in it and not in the translation memory is lost that way).")
+            f"`lx extract {src} --lang {lang} --reset --tone <technical|literary>`, which "
+            f"discards the newer state (anything in it and not in the translation memory "
+            f"is lost that way). The register has to be named because the reset does not "
+            f"read the row it would have come from.")
     return found
 
 

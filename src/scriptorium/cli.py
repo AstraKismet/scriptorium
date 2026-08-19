@@ -160,6 +160,29 @@ class UnusableTarget(ValueError):
     """
 
 
+class UnnamedRegister(ValueError):
+    """A `--reset` that does not say which register to refreeze.
+
+    Its own class rather than a fourth meaning for `UnusableTarget`, whose
+    docstring earns being one class by covering three refusals of a *save
+    payload* that share one remedy. A missing register is not a payload and the
+    remedy is to supply a value the request never carried, so folding it in would
+    generalize that docstring into "a request this build will not accept" and
+    widen five existing `pytest.raises(UnusableTarget)` assertions onto an
+    unrelated failure.
+
+    Why it is refused rather than guessed: `--reset` reads no prior state — that
+    is what it is for, since the state row may be one this build refuses to read
+    — so it cannot keep the register the document was frozen in. Until
+    2026-08-19 it silently refroze to the configured default, and because the
+    register is a field of the translation-memory key, a `literary` novel
+    re-extracted through a "start over" button came back `technical` and the next
+    `lx commit` banked the whole book under the wrong key. Measured 2026-08-13,
+    with nothing printed: `cmd_extract` names the register only when it differs
+    from the default, so the CLI's own output stayed silent about the loss.
+    """
+
+
 class GlossaryWriteError(OSError):
     """The glossary could not be replaced, and nothing in it was changed."""
 
@@ -397,6 +420,36 @@ def _protected(seg, proposal, dnt):
 
 
 def do_extract(src, lang, cfg, tone=None, reset=False):
+    # The first statement, above even the lazy import: this is decidable from two
+    # arguments, so nothing the document or the database could say changes the
+    # answer, and a refused request must not import the provider stack, read the
+    # user's file or open `.lx/state.db`. It has to sit above the `tone or ...`
+    # resolution below as well, which rebinds `tone` to a truthy value and would
+    # make a guard placed after it unreachable — the guard-fires-once shape.
+    # The cost, accepted: `lx extract missing.md --lang zh-TW --reset` now names
+    # the register before it names the missing file, which is the right order,
+    # since the missing `--tone` is a defect in the command as typed.
+    #
+    # Blank rather than `is None`: `canonical_tone` folds None, `""` and `"   "`
+    # onto the default register, so `--tone ""` on the CLI or `{"tone": ""}` on
+    # the wire would walk around this and land on exactly the silent `technical`
+    # it exists to stop. Truthiness on `reset` for the same reason — the endpoint
+    # passes `body.get("reset", False)` through unvalidated.
+    #
+    # No second remedy is offered, and "or drop --reset" is the one that must not
+    # be: `store._refuse_if_newer` sends a newer-state user *to* `--reset`, so the
+    # two sentences would form a loop with no exit. And the command is one word
+    # short of runnable on purpose — a paste-ready `--tone technical` makes
+    # reproducing this defect the path of least resistance.
+    if reset and not str(tone or "").strip():
+        raise UnnamedRegister(
+            f"--reset discards the register frozen on {src} [{lang}] along with the "
+            f"translations, and it reads no prior state, so it cannot put one back — "
+            f"name the register it should be in. `lx extract {src} --lang {lang} "
+            f"--reset --tone <technical|literary>`, or `tone` beside `reset` on the "
+            f"wire. Nothing was written. The register is part of the "
+            f"translation-memory key, so a book refrozen into the wrong one stops "
+            f"finding every wording banked in the right one.")
     # Lazy, like every other `.translate` import in this file: extract does not
     # talk to a model and should not pull the provider stack in to do so.
     from .translate import accept
@@ -2743,8 +2796,9 @@ def build_parser():
                                   "behind, so run `lx commit` first")
     e.add_argument("--reset", action="store_true",
                    help="discard the existing state instead of carrying its translations "
-                        "over. It does not read the old file at all, so the register goes "
-                        "back to --tone or config with everything else")
+                        "over. It does not read the old state at all, which is why it "
+                        "cannot recover the register: pass --tone with it, or the command "
+                        "is refused")
     e.set_defaults(fn=cmd_extract)
 
     t = sub.add_parser("todo", help="emit pending segments as JSON")
@@ -2871,7 +2925,7 @@ def main(argv=None):
         args.fn(args, cfg)
     except (FileNotFoundError, StateVersionError, UnsupportedSource,
             GlossaryWriteError, UnknownFormat, UndecodableDocument,
-            StyleSheetError, ConfigError, UnusableTarget) as e:
+            StyleSheetError, ConfigError, UnusableTarget, UnnamedRegister) as e:
         print(f"lx: {e}", file=sys.stderr)
         sys.exit(2)
     except BrokenPipeError:

@@ -253,6 +253,12 @@ def test_state_from_a_newer_build_is_not_silently_overwritten(tmp_path):
         r = _lx([cmd[0], "d.md", "--lang", "zh-TW", *cmd[1:]], tmp_path, env)
         assert r.returncode == 2, f"{cmd[0]} did not refuse: {r.stdout.decode('utf-8', 'replace')}"
         assert "--reset" in r.stderr.decode("utf-8")
+        # And `--tone`, since 2026-08-19: a `--reset` that names no register is
+        # refused, so a message naming the bare command would send the reader to
+        # something that exits 2. The register is inside the row this build just
+        # refused to read, so nothing but the person can supply it.
+        assert "--tone" in r.stderr.decode("utf-8"), \
+            "the escape hatch the message names must be the one that works"
 
     assert statedb.documents(tmp_path)[0]["state_version"] == 99
     assert "field_from_the_future" in statedb.segments(tmp_path)[0]
@@ -261,9 +267,36 @@ def test_state_from_a_newer_build_is_not_silently_overwritten(tmp_path):
     # It still can, which is the reason the content version stayed a per-document
     # column instead of collapsing into `PRAGMA user_version`: a database-wide
     # refusal would make this sentence false for everyone with two documents.
-    assert _lx(["extract", "d.md", "--lang", "zh-TW", "--reset"], tmp_path, env).returncode == 0
+    bare = _lx(["extract", "d.md", "--lang", "zh-TW", "--reset"], tmp_path, env)
+    assert bare.returncode == 2, "a reset that names no register is refused"
+    assert "Traceback" not in bare.stderr.decode("utf-8"), "one sentence, not a stack trace"
+    assert "--tone" in bare.stderr.decode("utf-8")
+    assert _lx(["extract", "d.md", "--lang", "zh-TW", "--reset", "--tone", "technical"],
+               tmp_path, env).returncode == 0
     assert statedb.documents(tmp_path)[0]["state_version"] == 3
     assert "field_from_the_future" not in statedb.segments(tmp_path)[0]
+
+
+def test_a_reset_that_names_no_register_is_refused_before_the_file_is_looked_for(tmp_path):
+    """Exit 2, one sentence, and *which* sentence.
+
+    Its own test rather than three lines inside the state-version scenario above,
+    where the property was reachable only after planting a row from the future —
+    restructure that test and "the CLI exits 2 rather than printing a traceback"
+    goes silent. Both halves are pinned here: the exit code and the traceback,
+    which is what `cli.main`'s handled tuple decides, and the ordering, which is
+    what the guard's placement decides. `missing.md` does not exist, so a guard
+    below `read_document` reports the file instead — still exit 2, still no
+    traceback, and about the wrong thing.
+    """
+    env = {**os.environ, "PYTHONPATH": SRC}
+    r = _lx(["extract", "missing.md", "--lang", "zh-TW", "--reset"], tmp_path, env)
+    err = r.stderr.decode("utf-8")
+    assert r.returncode == 2, err
+    assert "Traceback" not in err, "a handled refusal, not an escaped exception"
+    assert "--tone" in err
+    assert "No such file" not in err, \
+        "the absent --tone is the defect in the command as typed, and is named first"
 
 
 # --- what `lx init` scaffolds, and what the pipeline writes back -------------

@@ -320,6 +320,11 @@ def test_state_version_refuses_both_directions_and_names_the_way_out(tmp_path, m
         with pytest.raises(StateVersionError) as e:
             reader(src, "zh-TW")
         assert "--reset" in str(e.value)
+        # The command it names must be one that runs. Since 2026-08-19 a reset
+        # naming no register is refused, and this message is the only route out
+        # of a row nothing here can read — so it names `--tone` too, or the
+        # suite is green over a false user-facing string.
+        assert "--tone" in str(e.value)
 
     statedb.set_state_version(tmp_path, 1)
     with pytest.raises(StateVersionError) as e:

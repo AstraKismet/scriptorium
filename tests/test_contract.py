@@ -208,6 +208,16 @@ def test_the_document_declares_exactly_one_contract_version_and_the_module_agree
     assert declared == [str(CONTRACT_VERSION)], (
         f"{CONTRACT} declares {declared} and web.server.CONTRACT_VERSION is "
         f"{CONTRACT_VERSION}. There is one version and it is written in both places.")
+    # The document states the number **twice**, and the anchored regex above sees
+    # only one of them. The other is `/api/state`'s response-table cell, which is
+    # what a client implementer reads to learn which number the running server
+    # will send — so it is a second declaration, not prose about one. Measured by
+    # an adversarial pass on 2026-08-19: reverting that cell alone left the whole
+    # suite green while the document disagreed with itself and with the server.
+    cell = re.findall(r"^\| `contract_version` \| integer \|[^|]*?`(\d+)`", _read(CONTRACT), re.M)
+    assert cell == [str(CONTRACT_VERSION)], (
+        f"{CONTRACT}'s `/api/state` response table says {cell}; the fenced declaration "
+        f"and web.server.CONTRACT_VERSION say {CONTRACT_VERSION}.")
 
 
 def test_the_running_server_reports_the_contract_version(base, project):

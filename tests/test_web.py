@@ -21,7 +21,13 @@ import statedb  # noqa: E402
 from scriptorium import translate as translate_mod  # noqa: E402
 from scriptorium.cli import UnsafePath, confined_path  # noqa: E402
 from scriptorium.config import DEFAULT_CONFIG  # noqa: E402
-from scriptorium.store import target_token  # noqa: E402
+from scriptorium.store import (  # noqa: E402
+    SEGMENTATION_VERSION,
+    append_tm,
+    load_doc,
+    slot_originals,
+    target_token,
+)
 from scriptorium.web import server as web_server  # noqa: E402
 from scriptorium.web.server import _Handler, _own_hosts, _own_origins  # noqa: E402
 
@@ -1222,3 +1228,138 @@ def test_a_job_reports_the_segments_it_left_alone(base, tmp_path, monkeypatch, j
             json.loads(_get(base, "/api/doc?src=d.md&lang=zh-TW")[1])["segments"]}
     assert segs[ids[1]]["target"] == "請見指南。"
     assert segs[ids[1]]["origin"] == "human"
+
+
+# ── the register a reset has to name, and what the reply reports ────────────
+
+def _extract(base, **body):
+    """`POST /api/extract`, decoded. Raises `HTTPError` on a refusal, as `_post` does."""
+    return json.loads(_post(base, "/api/extract",
+                            {"src": "d.md", "lang": "zh-TW", **body})[1])
+
+
+def _doc_project(base, tmp_path, monkeypatch, text):
+    root = tmp_path / "nest" / "proj"
+    root.mkdir(parents=True)
+    monkeypatch.chdir(root)
+    (root / "d.md").write_bytes(text)
+    return root
+
+
+def test_a_reset_that_names_no_register_is_a_400_naming_the_field(
+        base, tmp_path, monkeypatch):
+    """Version 3's one item, on the wire.
+
+    The status code is half of it; the sentence is the other half. A client
+    shown "missing field" sends the field, and the field it will guess is the
+    configured default — which is the defect. The body carries `error` and
+    nothing else, the way every refusal on this surface does.
+    """
+    _doc_project(base, tmp_path, monkeypatch, b"One short sentence.\n")
+    _extract(base, tone="literary")
+
+    with pytest.raises(urllib.error.HTTPError) as e:
+        _extract(base, reset=True)
+    assert e.value.code == 400
+    body = json.loads(e.value.read())
+    assert set(body) == {"error"}
+    assert "tone" in body["error"] and "register" in body["error"]
+
+    # And the register is still what it was: a refused request writes nothing.
+    assert json.loads(_get(base, "/api/doc?src=d.md&lang=zh-TW")[1])["tone"] == "literary"
+    assert _extract(base, reset=True, tone="literary")["segments"] == 1
+
+
+@pytest.mark.parametrize("reset", [True, 1, "yes", [0]])
+def test_anything_truthy_is_a_reset_and_still_has_to_name_the_register(
+        reset, base, tmp_path, monkeypatch):
+    """`body.get("reset", False)` is passed through unvalidated, so the guard
+    reads truthiness rather than identity. Written `if reset is True`, every one
+    of these walks around the refusal and lands on the silent default."""
+    _doc_project(base, tmp_path, monkeypatch, b"One short sentence.\n")
+    _extract(base, tone="literary")
+    with pytest.raises(urllib.error.HTTPError) as e:
+        _extract(base, reset=reset)
+    assert e.value.code == 400
+
+
+def test_the_three_arrays_are_present_and_empty_on_a_first_extract(
+        base, tmp_path, monkeypatch):
+    """Present, not conditional: a client must never have to tell "none" from
+    "an older server". `collisions` on `/api/state` already sets that rule."""
+    _doc_project(base, tmp_path, monkeypatch, b"One short sentence.\n")
+    r = _extract(base)
+    assert (r["kept"], r["ambiguous"], r["replaced"]) == ([], [], [])
+
+
+def test_the_reply_names_a_stored_wording_it_kept_but_could_not_accept(
+        base, tmp_path, monkeypatch):
+    """`kept` — divergence (24)'s population, projected.
+
+    The segment comes back `translated` and failing, which `POST /api/doc`
+    already shows; this array is what saves the second call.
+    """
+    _doc_project(base, tmp_path, monkeypatch,
+                 b"See [the guide](https://example.com/here) for details.\n")
+    sid = _extract(base) and json.loads(
+        _get(base, "/api/doc?src=d.md&lang=zh-TW")[1])["segments"][0]["id"]
+    # One slot in the source, two in the wording: no seating can say which of the
+    # two the placeholder belongs to, so the acceptance path refuses it.
+    _post(base, "/api/save", {"src": "d.md", "lang": "zh-TW",
+                              "targets": {sid: "請見 ⟦1⟧ 與 ⟦1⟧。"}})
+
+    r = _extract(base)
+    assert (r["kept"], r["rejected"], r["reused"]) == ([sid], 1, 0)
+    assert r["replaced"] == [] and r["ambiguous"] == []
+    seg = json.loads(_get(base, "/api/doc?src=d.md&lang=zh-TW")[1])["segments"][0]
+    assert seg["target"] == "請見 ⟦1⟧ 與 ⟦1⟧。" and seg["origin"] == "human"
+
+
+def test_the_reply_names_a_segment_the_carryover_could_not_place(
+        base, tmp_path, monkeypatch):
+    """`ambiguous` — divergence (26)'s population, projected.
+
+    A sentence the document already held, written again: it matches the key of
+    one that exists, nothing establishes which, and the fallback hands it the
+    last stored wording under that key. Named rather than guessed at in silence.
+    """
+    root = _doc_project(base, tmp_path, monkeypatch, b"Yes.\n\nMiddle.\n\nYes.\n")
+    _extract(base)
+    ids = [s["id"] for s in
+           json.loads(_get(base, "/api/doc?src=d.md&lang=zh-TW")[1])["segments"]]
+    _post(base, "/api/save", {"src": "d.md", "lang": "zh-TW",
+                              "targets": {ids[0]: "好。", ids[1]: "中間。", ids[2]: "是的。"}})
+
+    (root / "d.md").write_bytes(b"Yes.\n\nYes.\n\nMiddle.\n\nYes.\n")
+    r = _extract(base)
+    assert r["ambiguous"] == ["s0001"], "the new occurrence is the one nothing places"
+    assert r["kept"] == [] and r["replaced"] == []
+
+
+def test_the_reply_names_a_wording_the_memory_answered_over(
+        base, tmp_path, monkeypatch):
+    """`replaced` — divergence (27)'s population, and the only one invisible
+    without it.
+
+    The segment comes back `translated`, passes every validator, and its
+    `origin` has rolled from `human` to `tm`. Unlike `kept` there is no error on
+    `POST /api/doc` to find it by, which is why this array is the one that
+    matters most on this reply.
+    """
+    _doc_project(base, tmp_path, monkeypatch,
+                 b"See [the guide](https://example.com/here) for details.\n")
+    _extract(base)
+    seg = load_doc("d.md", "zh-TW")["segments"][0]
+    # A banked wording that fits, sitting behind a stored one that does not.
+    append_tm("zh-TW", [{"hash": seg["hash"], "context": seg["context"],
+                         "segmentation_version": SEGMENTATION_VERSION,
+                         "source": seg["source"], "target": "請見 ⟦1⟧。",
+                         "slots": slot_originals(seg["slots"])}])
+    _post(base, "/api/save", {"src": "d.md", "lang": "zh-TW",
+                              "targets": {seg["id"]: "請見 ⟦1⟧ 與 ⟦1⟧。"}})
+
+    r = _extract(base)
+    assert r["replaced"] == [seg["id"]]
+    assert r["kept"] == [], "the memory answered, so nothing had to be kept"
+    after = json.loads(_get(base, "/api/doc?src=d.md&lang=zh-TW")[1])["segments"][0]
+    assert after["target"] == "請見 ⟦1⟧。" and after["origin"] == "tm"

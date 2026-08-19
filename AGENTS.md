@@ -210,12 +210,27 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    apart by nothing, and a memory hit still answers over wording the document was
    holding, taking its `origin` with it. Read the second before relying on origin
    precedence: it is the remaining path that rewrites the field the rule
-   compares, and `lx extract` names the segments it happened to.
+   compares. Both are **named on both surfaces** since 2026-08-19 — `lx extract`
+   prints the segments it happened to and `POST /api/extract` returns them —
+   which closes their reporting half and neither of the entries. (28) was
+   appended the same day by the adversarial pass over that work and is **open**:
+   `POST /api/extract` type-checks neither `reset` nor `tone`, so the *string*
+   `"false"` is a reset that discards a document's translations. It is recorded
+   rather than repaired because refusing it narrows an accepted value set, and
+   that bumps.
    `contract_version` moved to **2** on 2026-08-14, once, carrying five items: the `candidates` → `untracked` rename,
    the identity label normalized, `status` derived from the target text, an empty
    target refused, and a lost-update token. It closed (13)'s wire half, (14), (17)
-   for a client that opts in, (19) and (21), and decided (18) and (20). Every
-   further bump is gated behind a work package rather than a commit.
+   for a client that opts in, (19) and (21), and decided (18) and (20). It moved
+   to **3** on 2026-08-19, the first bump through the gate and scheduled as a work
+   package, carrying **one** item and no more: `POST /api/extract` refuses
+   `reset: true` with no `tone` and answers 400, because a reset reads no prior
+   row and so cannot keep the register the document was frozen in — it refroze
+   silently to the configured default, and the register is a field of the memory
+   key. The three arrays that landed beside it — `kept`, `ambiguous`, `replaced`
+   — are new response keys and did not need the move; they rode along because the
+   same section was being rewritten. Every further bump is gated behind a work
+   package rather than a commit, and that gate is unchanged.
 
 9. **Nothing regenerable is a source of truth.** Working state (SQLite) and
    approved wording (`.lx/tm.*.jsonl`) are sources of truth. JSON over HTTP is a
@@ -614,8 +629,10 @@ own.
   document row carries `state_version`, which `store.py` refuses to read when it
   is older than the build. That is the *content* version, and it is separate from
   `PRAGMA user_version` (`SCHEMA_VERSION`), the database's own shape: a newer
-  content version is escapable with `lx extract --reset` on the one document, a
-  newer schema is not escapable at all and is refused at the connection. See
+  content version is escapable with `lx extract --reset --tone <register>` on the
+  one document — the register has to be named because the reset does not read the
+  row it would have come from — and a newer schema is not escapable at all and is
+  refused at the connection. See
   `docs/decisions.md`, 2026-08-02. A format whose markup pairs must emit those
   records from its own masking step; entering a segment without them is what
   multiplies the "green but broken" rate with every format added. The model still

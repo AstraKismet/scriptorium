@@ -1,7 +1,7 @@
 # The workbench HTTP contract
 
 ```text
-contract_version = 2
+contract_version = 3
 ```
 
 The request and response surface `lx web` speaks. It is frozen here so that a
@@ -32,6 +32,18 @@ every move is a hard stop. A contract that moves five times during the build it
 was frozen for has spent the property it was frozen for. Everything after this
 that would bump is gated: it becomes a work package, not a commit. See
 `docs/decisions.md`, 2026-08-14.
+
+**Version 3** is the first bump through that gate, scheduled as HANDOFF-026, and
+it carries **one** item: `POST /api/extract` refuses `reset: true` with no `tone`
+and answers `400`. There is no additive spelling of it — the refusal narrows an
+accepted value set, turns a documented `200` into a `400`, and the alternative
+(keeping the frozen register under `reset`) changes what the request table's
+documented default means, so it is on the bump list three ways at once. Three new
+response keys landed with it — `kept`, `ambiguous` and `replaced` — and **none of
+them needed the move**: a new response key is additive. They ride here because the
+same section was being rewritten, and two packages editing one section is how they
+collide. The gate is unchanged and still stands: the next bump is the next work
+package. See `docs/decisions.md`, 2026-08-19.
 
 > **Provenance.** *Request admission*, *Path and language confinement* and the
 > security half of *Deliberately not in the contract* state a trust boundary,
@@ -231,7 +243,7 @@ then discarded.
 
 | Key | Type | Meaning |
 |---|---|---|
-| `contract_version` | integer | The version of *this document*. `2`. |
+| `contract_version` | integer | The version of *this document*. `3`. |
 | `version` | string | Package version. Not the contract version. |
 | `cwd` | string | `os.getcwd()`. The confinement root is `os.path.realpath` of it, which is **not always the same string** — under a junction or an 8.3 short name they differ. Treat `cwd` as a label to show a person, never as an input to a path comparison. |
 | `targets` | array of string | Configured target language tags. |
@@ -325,7 +337,8 @@ Parse a source document into skeleton and segments, carrying over what can be
 carried over.
 
 Backed by: `cli.do_extract`. Equivalent to
-`lx extract <src> --lang <lang> [--tone T] [--reset]`.
+`lx extract <src> --lang <lang> [--tone T] [--reset]`, where `--tone` stops being
+optional as soon as `--reset` is present — see the warning below.
 
 **Request**
 
@@ -333,18 +346,35 @@ Backed by: `cli.do_extract`. Equivalent to
 |---|---|---|---|---|
 | `src` | yes | string | — | confined |
 | `lang` | yes | string | — | whitelisted |
-| `tone` | no | string \| null | the document's frozen register, **unless `reset` is true** | See the warning below. |
-| `reset` | no | boolean | `false` | Discards carryover, the existing state row, **and the frozen register**. |
+| `tone` | **when `reset` is true** | string \| null | the document's frozen register | Required, non-blank, with `reset`. See the warning below. |
+| `reset` | no | boolean | `false` | Discards carryover, the existing state row, **and the frozen register**. ⚠️ **Any truthy JSON value is a reset** — not only `true`. That is the rule, and the examples below it are not the definition: `1`, `"yes"`, `[]`-with-a-member, `{}`-with-a-key **and the string `"false"`** are every one of them a reset that discards this document's translations, because a non-empty string is truthy. Only `false`, `null`, `0` and the empty string, array and object are not. See *Known divergences* (28). |
 
-⚠️ **`reset` and `tone` interact, and getting it wrong poisons the translation
-memory.** A re-extract that names no `tone` keeps the register frozen onto the
-document — *except* under `reset: true`, which does not read the old row at all
-and therefore refreezes the register to `tone` if given, else the configured
-`tone`, else `technical`. The register is a field of the translation-memory key,
-so a `literary` novel re-extracted with `{"reset": true}` and no `tone` comes back
-as `technical`, and the next `POST /api/commit` banks the whole book under the
-wrong register. Measured 2026-08-13. **A client offering "re-extract from source"
-must send the document's current `tone` alongside `reset`, or ask first.**
+⚠️ **`reset: true` with no `tone` is refused with a `400`, and that refusal is the
+whole of version 3.** A re-extract that names no `tone` keeps the register frozen
+onto the document; `reset: true` reads no prior row at all — by design, since the
+row may be one this build cannot read — so it has no register to keep. Until
+version 3 it refroze silently to the configured `tone`, else `technical`. The
+register is a field of the translation-memory key, so a `literary` novel
+re-extracted with `{"reset": true}` and no `tone` came back as `technical` and the
+next `POST /api/commit` banked the whole book under the wrong register, with
+nothing in the reply to say so. Measured 2026-08-13; refused since 2026-08-19.
+Blank counts as absent — `""` and `"   "` are refused too, because the register
+normalizer folds them onto the default and they would land on the same defect.
+
+**A client offering "re-extract from source" must decide the register and send
+it.** The instruction this paragraph carried until version 3 — "send the
+document's current `tone`" — is withdrawn rather than softened, on two grounds.
+Nothing validates a register value: an unrecognized one is accepted and silently
+selects the default brief, so a client that guesses is not refused, it is given
+the wrong register. And the two surfaces carrying the current register,
+`GET /api/doc` and `lx todo`, both refuse a state row from a newer build — which
+is precisely the case `reset` exists for, so in that case the current register
+cannot be read at all. Where the row *is* readable, `GET /api/doc`'s `tone` is
+still the right thing to show the person choosing.
+
+The refusal is `cli.do_extract`'s, not this endpoint's, so `lx`, an agent and
+every future client are covered by one sentence rather than by a rule saying a
+client must remember something.
 
 **Response**
 
@@ -352,7 +382,10 @@ must send the document's current `tone` alongside `reset`, or ask first.**
 |---|---|---|
 | `segments` | integer | Segments the parse produced. |
 | `reused` | integer | Targets carried over from prior state or the memory **and accepted**. A stored target the acceptance path refused is carried over too, since 2026-08-17, and counts in `rejected` rather than here. |
-| `rejected` | integer | Carryover or memory hits **refused** by the acceptance path — a banked wording no longer fits the segment it matched. Unchanged in value and in meaning since 2026-08-17; what changed is that a refusal no longer **deletes** this document's own stored target. See below. |
+| `rejected` | integer | Segments where **every** proposal was refused by the acceptance path — a banked wording no longer fits the segment it matched. It counts **segments, not refusals**, and a refusal with an accepted proposal behind it is not one: that segment counts in `reused` and is named in `replaced`. Corrected here on 2026-08-19 — the value has never changed, but this row said "carryover or memory hits refused", which reads as a count of refusals and is `0` on the very case `replaced` was added to report. What *did* change, on 2026-08-17, is that a refusal no longer **deletes** this document's own stored target. See below. |
+| `kept` | array of string | Segment ids whose stored target the acceptance path refused and this endpoint **kept anyway**, with its `origin` and its `review`. They come back `status: "translated"` holding wording that fails validation, and `POST /api/doc` carries the error on the segment itself — so this array is a convenience, not the only way to find them. *Known divergences* (24), closed. |
+| `ambiguous` | array of string | Segment ids the position diff could not place, which took the last stored wording under their key instead: a new occurrence of a sentence the document already had, a paragraph that moved, or a member of a run of identical paragraphs that changed size. **Which stored wording belongs to which position is not established for these** — check their `origin`. Nothing else on this surface reports it. **Not capped:** past the alignment work budget the diff is skipped for the whole document and every carried segment lands here, which on a novel that is one sentence repeated is every segment in it. *Known divergences* (26), open. |
+| `replaced` | array of string | Segment ids where a translation-memory hit was accepted **over wording this document was already holding** — the stored target no longer fit the re-parsed segment, a banked one did, and the sentence is gone with its provenance: `origin` comes back `tm`, so the next unattended run may overwrite it. Nothing else on this surface reports it, and unlike `kept` there is no error to find it by: the segment is `translated` and passes every validator. *Known divergences* (27), open and decided — when the fix ships, only a machine draft gives way and fewer segments qualify. That is a change to what this endpoint **does**; this key means what the run did and does not move with it, exactly as `rejected` did not on 2026-08-17. |
 
 **Carrying over is position-aware, and a refusal does not delete.** Two rules
 landed on 2026-08-17 and neither moves a key:
@@ -363,8 +396,9 @@ landed on 2026-08-17 and neither moves a key:
   the segment itself — which is where a client is already looking.
   ⚠️ **The counts do not distinguish this from a refusal that carried nothing.**
   `rejected` covers both, and `reused` deliberately does not count a kept target,
-  so a client that wants to know which segments came back holding wording that
-  fails must read `POST /api/doc`. *Known divergences* (24), closed.
+  so the two integers cannot be told apart. `kept` names the ids, and
+  `POST /api/doc` carries the error on the segment. *Known divergences* (24),
+  closed.
 - Two segments whose source text, kind, variant and register are identical are
   told apart by **where they sit in the document** rather than sharing one entry.
   The prior document's key sequence and the fresh one are diffed, and the
@@ -373,7 +407,32 @@ landed on 2026-08-17 and neither moves a key:
   stored wording under that key, without its hold. *Known divergences* (25),
   closed. What is still open is (26), a run of identical paragraphs that changed
   size, and (27), a memory hit answering over wording this document was already
-  holding.
+  holding. Both are **named** on this reply since version 3, in `ambiguous` and
+  `replaced`.
+
+**The three arrays are segment ids, and they are present and empty when nothing
+happened** — a client never has to tell "none" from "an older server", which is
+the rule `collisions` already follows on `GET /api/state`. `kept` and `replaced`
+are mutually exclusive: one is what happens when every proposal was refused, the
+other when a later one was accepted. `ambiguous` is orthogonal to both — it says
+the diff could not place the wording, not what became of it — so a segment can
+appear in it *and* in one of the other two, and a client that renders them as
+three disjoint buckets will double-count. All three name something `lx extract`
+has printed since 2026-08-17 and this surface could not say; none of them is new
+behaviour.
+
+**What a register change costs is deliberately not on this reply.**
+`cli.do_extract` counts it too — the register the document was in, the one it is
+in now, and how many translations do not cross — and `lx extract` prints it. It
+is not projected because it would arrive too late to be of use: the document's
+row is already written by the time a client reads this body, while a control that
+changes the register has to **ask first and say what is lost**. Both numbers that
+question needs are on the wire before the call — `GET /api/doc` carries the
+document's frozen `tone`, and `GET /api/state`'s `docs[].done` counts the targets
+a register change drops. It would also be absent on every `reset: true` request,
+since `reset` reads no prior row and so detects no change, which is the one
+spelling of "start over in another register". Adding it later is additive if that
+ever stops being the right answer.
 
 Side effects: writes the document's row in `.lx/state.db`.
 
@@ -1300,9 +1359,10 @@ it is the only one that rebuilds a document rather than editing it.
     *Versioning* — so it never needed a version decision, and the sentence
     claiming it did was steering the choice. It is unnecessary rather than
     forbidden: nothing is deleted, and the segments that came back failing carry
-    their errors on `POST /api/doc`. It is scheduled into **HANDOFF-026**, which
-    is rewriting this endpoint's section anyway, for a client that wants them
-    without a second call.
+    their errors on `POST /api/doc`. **Landed at version 3**, 2026-08-19, for a
+    client that wants them without a second call — additively, as this paragraph
+    says, and only because that bump was rewriting this endpoint's section
+    anyway.
 
     **Narrowed the same day.** A stored wording whose placeholders were merely
     *renumbered* — by an edit to `config/dnt.txt`, or by the numbering fix of
@@ -1385,9 +1445,9 @@ cannot reach and (27) predates all of this.
     matching block carries the same key, has no anchor at all: the diff would
     place it at the first offset that fits, which is a coin toss, so those blocks
     are refused and their members fall to the same fallback. Both are named by
-    `lx extract`; `POST /api/extract` does not name them, which is the reporting
-    gap (24) had, and is why the `kept` and `ambiguous` arrays are scheduled
-    together into HANDOFF-026. The residue is bounded — every candidate wording is
+    `lx extract`, and by `POST /api/extract`'s `ambiguous` since version 3 —
+    which closed the reporting gap (24) had, without closing this entry: naming
+    a segment nothing can place is not placing it. The residue is bounded — every candidate wording is
     a translation of the same source sentence — but the `origin` that rides along
     is not, so a machine may end up locked out of a position a person never wrote.
     `Carryover.align` also has a work budget (`store.ALIGN_BUDGET`): over it the
@@ -1405,8 +1465,11 @@ cannot reach and (27) predates all of this.
     as `tm`, which is a provenance nobody claimed and, more to the point, is not
     the one *Origin precedence* protects, so the next unattended run may
     overwrite it. Needs no collision and no race. It is **reported** since
-    2026-08-17 (`lx extract` names the ids; the endpoint does not) and otherwise
-    unchanged, because which of the two should win is a decision — and the
+    2026-08-17 — `lx extract` names the ids, and `POST /api/extract`'s `replaced`
+    does since version 3, which is the only way to see this one at all: the
+    segment comes back `translated` and passes every validator, so unlike (24)
+    there is no error to find it by. Otherwise unchanged, because which of the
+    two should win is a decision — and the
     argument on record for the memory, "a good banked wording should not be lost
     to a stale one sitting in front of it", was written when the refused wording
     was going to be deleted either way, which stopped being true the same day.
@@ -1418,6 +1481,36 @@ cannot reach and (27) predates all of this.
     like any other kept wording. That is invariant 9's line — a machine draft is
     regenerable and a person's sentence is not — applied to an ordering question
     rather than to a storage one. The entry stays open until it ships.
+
+Appended 2026-08-19 by the adversarial pass over `contract_version = 3`. Open,
+and older than that change — both halves are identical at its parent commit.
+
+28. **`POST /api/extract` type-checks neither `reset` nor `tone`, and one of
+    them destroys work.** `reset` is read for truthiness, so **`{"reset":
+    "false"}` is a reset**: a non-empty string is truthy, the document's
+    translations go, and nothing in the request looked wrong. `{"reset": 1}` and
+    `{"reset": "no"}` are the same. This surface already refuses exactly this
+    shape one endpoint over — `POST /api/hold` rejects a non-boolean `held`
+    because "`null` would read as false and *release* a hold, which is the
+    opposite of the default" — so the rule exists here and this endpoint is not
+    holding it. The other half is quieter: a truthy non-string `tone` is frozen
+    onto the document verbatim, so `{"tone": {"a": 1}}` makes `GET /api/doc`
+    answer a `tone` this document's own *Response* table declares to be a
+    `string`, and it selects the default register's brief, since an unrecognized
+    register silently falls back. The blank spellings are covered — `""` and
+    `"   "` are refused by the version 3 rule — and the falsy non-strings are
+    covered incidentally, because `{}`, `[]`, `0` and `false` are all blank once
+    the guard stringifies them. What is left is the truthy end of both fields.
+
+    **Not fixed here, and the reason is the gate rather than the cost.**
+    Refusing a value the endpoint accepts today narrows an accepted value set and
+    turns a documented `200` into a `400`, which bumps — and `contract_version 3`
+    was a scheduled package whose scope was one item, with an explicit rule that
+    an item arriving mid-flight goes into the next one. So this is written down
+    rather than quietly repaired, which is what this section is for. The repair,
+    when it is scheduled: `do_extract` refuses a `reset` that is not a boolean
+    and a `tone` that is not a string or `null`, in `do_extract` rather than at
+    the endpoint, for the reason the version 3 refusal lives there.
 
 ## What is not frozen
 

@@ -23,7 +23,7 @@ the second, third, and seventh translation of a document nearly free.
 |---|---|
 | `lx init` | write config templates and state dirs |
 | `lx extract SRC --lang L` | parse to segments, mask markup, fill from prior state then TM |
-| `lx extract SRC --lang L --reset` | discard prior targets for this document |
+| `lx extract SRC --lang L --reset --tone T` | discard prior targets for this document. `--tone` is required with `--reset`: the reset reads no prior state, so it cannot recover the register |
 | `lx todo SRC --lang L` | emit pending segments as JSON |
 | `lx todo SRC --lang L --all` | emit every segment, with `fix` notes on failing ones |
 | `lx todo SRC --lang L --limit N` | first N pending segments, for batching |

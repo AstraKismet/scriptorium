@@ -3,6 +3,202 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-08-19 · `contract_version = 3`: a reset that names no register is refused, and the three things `lx extract` could say that the endpoint could not
+
+The first bump through the gate `contract_version = 2` set up on 2026-08-14, and
+it carries **one** item, because one item is what was scheduled into it.
+
+```
+lx extract novel.md --lang zh-TW --tone literary      tone literary
+lx extract novel.md --lang zh-TW --reset              segments 431 | reused 0
+lx check                                              0 errors
+                                                      # and the book is now technical
+```
+
+`--reset` sets `stored = {}` before the register is resolved, so `stored.get("tone")`
+was always `None` and the next line fell through to the configured default. The
+register is a field of the translation-memory key, so the whole book was banked
+under the wrong one at the next `lx commit`, and every later lookup in the right
+one missed. Nothing was printed: `cmd_extract` names the register only when it
+differs from the default, so the CLI's own output stayed silent about the loss.
+Measured 2026-08-13 while freezing the HTTP contract, which is the argument for
+having frozen it — three reviews of `web/server.py` had not produced it.
+
+### Refused, and not by the endpoint
+
+`cli.do_extract` refuses. Not `cmd_extract`, and not `POST /api/extract`: the
+rule would then live on one surface and the other would walk around it, which is
+the shape already rejected for `do_apply`'s empty-target refusal. One sentence
+covers `lx`, an agent and every future client, rather than a rule saying a client
+must remember something.
+
+*Lost:* **preserving** the frozen register under `reset` instead of refusing. It
+requires reading `doc["tone"]` out of the state row on every reset, including the
+one this build cannot read, and it quietly changes what `--reset` means from
+"start over" to "start over except for one field".
+
+*Lost:* a **conditional** refusal — raise only when the document has a stored
+register to lose. It has to read the row `--reset` exists to skip. `prior_doc`
+refuses a row from a newer build, and its own docstring records that reading such
+a row and letting the write proceed was the first shape of that function and
+silently downgraded the document with a green exit code. The conditional rule is
+therefore either identical to the unconditional one in the case that matters, or
+a deliberate bypass of that guard. It also collapses in practice: `do_extract`
+writes a non-empty `tone` onto every document, so the condition is true for
+everything already extracted, and its only real effect is to permit `--reset` on
+a document with no state to reset — where the flag is a no-op. And it would make
+a frozen contract cell answer `400` or `200` for byte-identical requests
+depending on server-side state the client cannot read, since the two surfaces
+carrying the current register both refuse that same newer row.
+
+The predicate is **blankness, not `is None`**. `canonical_tone` folds `None`,
+`""` and any run of blanks onto the default register, and the endpoint passes
+`body.get("tone")` through unvalidated, so a guard written `tone is None` leaves
+`{"tone": ""}` and `{"tone": "   "}` landing on exactly the silent `technical` it
+exists to stop. `reset` is read for truthiness for the same reason: `{"reset": 1}`
+is a reset.
+
+It is the **first statement of the function**, above even the lazy `translate`
+import. It is decidable from two arguments, so a refused request must not import
+the provider stack, read the user's document or open the state database — and it
+has to sit above the line that rebinds `tone` to a truthy value, below which it
+could never fire at all. The accepted cost is that
+`lx extract missing.md --lang zh-TW --reset` now names the register before it
+names the missing file, which is the right order: the missing `--tone` is a
+defect in the command as typed and will still be there once the file exists.
+
+### The message offers one remedy, and leaves one word unfilled
+
+*Lost:* "or drop `--reset`" as a second remedy. On a state row from a newer build
+the un-reset run is refused by a message that sends the reader **to** `--reset`,
+so the two sentences form a loop with no exit. Where dropping it genuinely is
+right, `load_doc` already says "do not pass --reset" itself, from code that has
+read the row and can tell.
+
+*Lost:* a paste-ready `lx extract … --reset --tone technical`, which is how every
+other command in a message in this project is written. The fastest thing a reader
+does with a runnable command is run it, and running that one on a literary novel
+reproduces the defect. The command is one word short of runnable on purpose:
+`--tone <technical|literary>`.
+
+**And the message that points at the escape hatch had to move with it.**
+`store._refuse_if_newer` is the only route out of a state row this build will not
+read, and it named the bare `--reset` — a sentence naming a command that now
+exits 2, which is a green suite over a false user-facing string. It names
+`--tone` now, and says why the register has to come from the person: it is inside
+the row that was just refused.
+
+**A correction to the package's own premise, recorded because the next reader
+will inherit it.** HANDOFF-026 argued that a client cannot be told "send the
+current tone" because "it will be refused for a *different* reason if it sends
+the wrong one". Nothing validates a register value — `canonical_tone` accepts any
+string and an unrecognized one silently selects the default brief — so a wrong
+tone is not refused, it is *accepted*, which is this defect displaced by one
+step. The conclusion stands and the reason is a better one: the two surfaces
+carrying a document's current register both refuse a newer state row, so in
+exactly the case `--reset` exists for, the current register cannot be read at all.
+The contract's instruction to send it is withdrawn rather than softened.
+
+### Three arrays rode along, and one key did not
+
+`kept`, `ambiguous` and `replaced` on `POST /api/extract` — the three lists
+`lx extract` has printed since 2026-08-17 and the endpoint could not say. **None
+of them needed the bump**; a new response key is additive. They are here because
+this package was rewriting that section and two packages editing one section is
+how they collide.
+
+`replaced` was the contested one, and the package's own default reading was to
+leave it out because divergence (27) is a decision waiting on HANDOFF-031. That
+conflates the *ordering* decision with the *reporting* gap. It is the only silent
+loss on this endpoint: a `kept` segment comes back failing and `POST /api/doc`
+carries its error, while a replaced one is `translated`, passes every validator,
+and has had its `origin` rolled from `human` to `tm` — nothing on the surface can
+see it. It is written as a report of **what the run did**, so HANDOFF-031's
+narrowing changes which segments qualify without touching the sentence, exactly
+as `rejected`'s meaning survived the 2026-08-17 change on the same reply. Written
+as a *population* instead, it would have handed HANDOFF-031 a meaning change —
+and that package's own scope forbids anything that bumps, so it would have
+stalled or walked around the gate.
+
+*Not carried:* `register`, the fourth key, which counts what a register change
+costs. It arrives after the row is written, while the control it would serve has
+to **ask first and say what is lost**; and it is absent on every `reset: true`
+request, since a reset reads no prior row and so detects no change — so it would
+be silent on one of the two spellings of the act. Both numbers the question needs
+are already on the wire before the call: `GET /api/doc` carries the frozen `tone`
+and `/api/state`'s `docs[].done` counts the targets a register change drops.
+*Lost with it:* inventing a pre-flight endpoint to compute a number two existing
+endpoints already answer, which is behaviour living only in the server.
+*Also lost:* a flat `tone` readback on the reply — genuinely attractive, and the
+pattern divergence (3) established on 2026-08-15 — refused as an unscheduled
+item, which is what the gate is for. It is additive whenever someone wants it.
+
+*Not carried:* HANDOFF-031's option B(1), teaching `render` to treat a target
+whose placeholders do not match as missing, which would change what `missing`
+counts and therefore bumps. It is not merely unscheduled but **undecided** —
+HANDOFF-031 offers it as a recommendation, not a settled choice — so carrying it
+would have put a maintainer decision inside a claimed package. It needs a bump
+package of its own, and HANDOFF-031 now says so instead of pointing at this one.
+
+### The finding: a test documented the defect as intended behaviour
+
+`test_the_register_is_frozen_on_the_document_and_a_later_extract_keeps_it` ended
+with `do_extract(..., reset=True)` and `assert doc["tone"] == DEFAULT_TONE`, under
+a comment reading "`--reset` is the exception, and deliberately so". It did not
+merely rely on the silent reset; it pinned it.
+
+The obvious repair is a weakening that looks like a restatement. That assertion
+was the only place in the suite proving `--reset` reads **no prior row at all**,
+and `tone = tone or stored… or cfg…` means an explicit `--tone` wins whether or
+not the row was read — so passing `tone=DEFAULT_TONE` and keeping the assertion
+leaves a tautology wearing the old control's clothes. It is re-pinned through the
+carryover instead: after a reset that names the register, nothing came across.
+
+The same shape decided the other three: `tests/test_memory.py`'s memory-map test
+and `tests/test_select.py`'s hold test take a `tone=` and lose nothing, while
+`tests/test_cli.py`'s newer-state escape hatch could not simply gain `--tone`,
+because its whole subject is that the command **the message names** works. It
+asserts the message names both flags now, and runs what it names.
+
+### What the adversarial pass found, and it was not the code
+
+Three independent lenses over the finished commit — a mutation pass, a claim
+refutation and a test-portability audit — returned NOT CLEARED, and every one of
+them confirmed the shipped behaviour. What they found was two guards that were
+not guarding and two sentences that were not true.
+
+**Two properties this change claims were pinned by nothing.** Moving the refusal
+from the top of `do_extract` to below `read_document` and `fmt.parse` left the
+whole suite green — it still writes no state row, so the test whose oracle is
+state-on-disk passes against it, while `lx extract missing.md --lang zh-TW
+--reset` starts reporting the missing file instead of the missing register. And
+reverting the contract's `/api/state` response-table cell to `2` left the suite
+green too: the version test's regex is anchored on the fenced declaration and
+cannot see the second statement of the number, which is the one a client
+implementer actually reads. Both now have a test, and the second one is a
+permanent improvement to the freeze rather than a fix for this bump. The
+mutation table was 10 of 11 killed before those two; it is 14 of 14 after.
+
+**And the pass falsified two sentences, one of them written by this commit.**
+The `rejected` row said "carryover or memory hits refused", which reads as a
+count of refusals — and the `replaced` case this same commit added reports
+`rejected: 0` while the acceptance path refused the carryover, because the
+counter increments once per segment where *every* proposal was refused. The
+value has never changed; the description was wrong, and it took writing the
+example that contradicts it to see. Corrected in place.
+
+The other is older and is now **divergence (28)**: `reset` is read for
+truthiness, so `{"reset": "false"}` is a reset that discards a document's
+translations, and the contract's own new sentence listed `1` and `"yes"` as
+examples in a way that reads as the definition — the enumeration-as-definition
+shape this project has recorded three times. `POST /api/hold` already refuses a
+non-boolean `held` for exactly this reason, so the rule exists on this surface
+and this endpoint is not holding it. It is **recorded rather than repaired**:
+refusing a value the endpoint accepts narrows an accepted value set and bumps,
+and a scheduled package whose scope is one item does not get to grow a second in
+flight. The same applies to the quieter half beside it, a truthy non-string
+`tone` frozen onto the document as its register.
+
 ## 2026-08-17 · A placeholder is repaired into the numbering it has to speak in, and the map it was written in is pinned to the wording
 
 `translate.accept` compared the *set* of placeholder ids and nothing else, so a
@@ -1490,6 +1686,12 @@ same day.
   of the translation-memory key, so a `literary` novel re-extracted through a
   "start over" button comes back as documentation prose and the next
   `lx commit` banks the whole book under the wrong key.
+
+  *Closed 2026-08-19, at `contract_version = 3`.* The combination is refused —
+  `cli.do_extract` raises, the CLI exits 2 and the endpoint answers 400. The
+  paragraph above is left as it was measured, because what it is doing here is
+  carrying the argument two paragraphs down: this is one of the two defects that
+  writing the surface down cell by cell found.
 
 Neither is fixed here — behaviour changes were out of scope, deliberately, and
 both are recorded in the contract, which is tracked and outlives the package.
