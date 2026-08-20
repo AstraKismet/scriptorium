@@ -3,6 +3,222 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-08-20 · Configuration becomes writable over HTTP, and the allowlist is closed by arithmetic rather than by vigilance
+
+Closing HANDOFF-029. `POST /api/config` writes one configuration key from a
+closed allowlist of thirteen patterns, standing in front of `cli.do_config_set`,
+`cli.do_config_unset` and `cli.do_routing_set`. A new endpoint is additive, so
+`contract_version` stays at 3.
+
+The shape of the decision was settled on 2026-08-14 and is not re-argued here.
+What this entry records is the half that could only be decided against the code:
+*how* the deny is applied, which refusal gets which status, and the three things
+the work found that nobody had written down.
+
+### The allowlist is a literal, and every entry has its own single-value rule
+
+Both halves are load-bearing and they are separate decisions.
+
+**A literal, not `set(_CONFIG_FIELDS) - _WHOLE_BLOCK`** — which is exactly what it
+equals today, and a test asserts the subset so it can never exceed it. The two
+spellings differ only in which way they fail. Derived, a field added to the table
+for an unrelated reason is writable over HTTP the same afternoon with nobody
+deciding it, and `config.PATH_VALUED_KEYS`' own comment already names that
+failure: "a fifth path key added anywhere else is the one that confinement
+misses." A literal fails the other way — the new field is writable from a
+terminal, and reaching the wire takes an edit to a list whose whole purpose is
+being read.
+
+**Every admitted key has its own rule in `_CONFIG_FIELDS`, and that is what makes
+an allowlist keyed on the string somebody sent sufficient here** when the same
+thing would not do on the CLI. `config_value` short-circuits the moment a rule
+fires, so `_decode`'s type guessing and `_validated`'s descent into a block are
+both unreachable for an admitted key, and a value cannot land anywhere except the
+key that was addressed. The two bypasses measured on 2026-08-12 —
+`providers.new.api_key_env.x` and `batch.size.x` — are refused here by arithmetic
+rather than by a walk: `_pattern_matches` compares segment counts, and neither
+has a pattern of its own length. So on this surface the where-it-lands class is
+*unreachable* rather than guarded, and `_addressable` and `_validated` stay behind
+it as the authority on the CLI's own block writes rather than as this surface's
+only defence.
+
+That property is why the long tail of the configuration is not on the list —
+`targets`, `tone`, `source_lang`, `formats.map`, `lexicon_extra`,
+`checks_disabled`, and the `roots` key reserved on 2026-08-14. None has a rule,
+so admitting one is not a line of plumbing; it is the decision to give that
+paragraph up. The test that pins the subset is what makes giving it up
+deliberate.
+
+*Lost:* an endpoint-level allowlist with no structural property behind it, which
+is what "closed allowlist" would have meant if the block form had stayed
+writable. *Lost:* a batch form taking several keys per request, which is a block
+write wearing a different hat.
+
+### The gate lives in `cli.py`, and it is a third instance of a shape this project already has
+
+`confined_path` and `language_tag` are rules that exist for the HTTP surface,
+live in `cli.py` under invariant 8, and are called only from the surface that
+receives the request — never by the CLI, because `lx config set output_pattern …`
+is a person typing a command and invariant 11's named exception is exactly that.
+`writable_key` is the third. The alternative put it in `web/server.py`, which
+needs either five private names exported across the seam
+(`_CONFIG_FIELDS`, `_WHOLE_BLOCK`, `_pattern_matches`, `_exact_rule`,
+`_field_rule`) or a second copy of the pattern list — and a second list is how
+the two surfaces come to disagree about what is writable, which is the defect
+this endpoint was scheduled *after* rather than before.
+
+### Two refusals, two classes, two statuses — and the reason is that a client may not read the sentence
+
+`UnwritableKey` is a new class and answers `403`; the missing acknowledgement is
+a `ConfigError` and answers `400`.
+
+The first draft of this made both `403`, on the reading that both are controls
+refusing. **The security-tier pass overturned it**, and the argument is the
+contract's own: a client distinguishes causes by status and by the endpoint it
+called, never by parsing the sentence. With one status a settings screen cannot
+tell "this key is never writable, give up" from "ask the person and send it
+again" — which is the entire difference between the two. So `403` means no value
+would help, and everything the caller can fix by changing the payload is a `400`.
+
+`UnwritableKey` is also deliberately not a second meaning for `UnsafePath`.
+That class says "a caller-supplied **path** this project will not open", and a
+configuration key is not a path; a refusal wearing a name that describes
+something else is the axis a security pass caught this contract's own draft on,
+on 2026-08-13. Two mechanical reasons came with it: `UnsafePath`'s message
+convention is `{field} = {value!r}`, which repeats what it refused — right for a
+path somebody typed, wrong for a field a credential gets pasted into — and
+`tests/test_contract.py` keys its parametrized confinement assertions on the
+`"src ="` sentinel that convention produces.
+
+### The acknowledgement is keyed on where the write lands, not on the verb — and that was measured
+
+`providers.*.base_url` needs `confirm_base_url: true`. The decision of 2026-08-14
+said "changing `base_url` confirms rather than saving silently" and, read
+literally, covers a write. It is not enough, and the gap is not theoretical:
+**`do_config_unset` consults no rule at all** — `split_key`, `unset_in`, write —
+so on this surface the allowlist is the only thing in front of a removal.
+
+Removing a `base_url` changes where the document goes twice over. Dropping a key
+that shadowed a shipped provider's restores the factory URL. Dropping a
+*user-created* provider's leaves the spec without the key, and
+`providers/openai_compat.py` then falls back to a hardcoded
+`http://localhost:11434/v1` — so the `Authorization` header built from that
+provider's `api_key_env` goes to whatever is listening on that port. Both
+measured 2026-08-20. `api_key_env` deliberately needs no acknowledgement:
+removing it stops a credential being sent at all, which is the convergent
+direction.
+
+It is also a `true` and not a truthy value, for the reason divergence (28)
+records one endpoint over: `bool("false")` is `True`, and a form body sends the
+string.
+
+### Divergence (15) was not the optional tidy-up its package called it, and its entry was understating it
+
+HANDOFF-029 offered (15) as "close it while here, if it is cheap". It is a
+precondition. The reply carries the `providers` projection, so an `available()`
+that still raised would have failed **after** the write had landed —
+`do_config_set` writes, then the reply is assembled, then a broken neighbour
+raises and the caller is told `400` about a change that is on disk. The endpoint
+whose reason for existing is repairing a broken configuration would have been the
+one endpoint that could not run on one.
+
+The entry also credited `_routing_state` with degrading where `available` raised.
+It degrades for the errors `route_entry` raises, and a **truthy non-block**
+`providers` — one hand-edited `"providers": ["local"]` — reached
+`resolve_route`'s `.get` and raised `AttributeError`, which is not the
+`ConfigError` the projection catches. Both projections fell together on that
+shape. The falsy spellings were always absorbed by the `or {}` beside it, which
+is why it survived being written down at all.
+
+Closed on both sides by reporting rather than raising, per provider, in the shape
+the routing projection already had. One rule came out of it that is worth keeping
+in view: **a spec whose credential field cannot be read is never green.**
+`needs_key: false` with `key_present: true` is how a local runtime that wants no
+credential looks, and folding an unreadable `api_key_env` to `""` produces
+exactly that pair — a person told their backend is ready when nothing has been
+decided.
+
+### The concurrency test found a real defect, and it only fails with a second request in flight
+
+Two requests arriving together each read `lx.config.json`, set one key and write
+it back, so without a lock the second silently reverts the first — which is a
+settings form saving six fields at once, not a race anybody has to contrive. A
+module-level `_CONFIG_LOCK`, on `_JOB_LOCK`'s precedent, covers the read the
+rules are checked against as well as the write.
+
+What the test then found is that the lock around the *write* was not enough.
+Every request reads the configuration before dispatch, and on Windows
+`os.replace` refuses to replace a destination anybody has open — so an unrelated
+request in flight turned a perfectly legal write into
+`[Errno 13] Permission denied`. The per-request read goes through the same lock
+now. Nothing was ever corrupted, since `dump_json` writes through a temporary
+file and `os.replace` is atomic, so the failure direction was noise rather than
+loss — but it passed when the test ran alone and failed inside its own file,
+which is worth recording as the signature of this class.
+
+Not closed, and not closable from here: `lx config set` in a terminal beside a
+running workbench is a second *process*. That race exists today between two
+terminals, this endpoint neither widens nor narrows it, and its failure is the
+same honest refusal.
+
+### What was recorded rather than repaired
+
+Divergence (29): outside `api_key_env` and `base_url`, a mispasted credential is
+repeated back or written down. `_field_kind`, `_as_number` and `_field_route`'s
+unknown-provider branch all quote the value they refuse, and
+`providers.*.model` does not refuse at all — `_as_text` accepts any non-empty
+string, so a key typed into the model box is written into a file `lx init`
+scaffolds into a repository. Every path is reachable from `lx config set` today;
+what this endpoint changes is that the audience for those sentences is now a page
+rather than a terminal.
+
+Recorded rather than repaired because the repair is a decision. This project's
+no-echo doctrine is scoped in writing to the two fields a key lands in —
+`_field_base_url`'s own docstring says so — and widening it means either dropping
+the value from refusals that are more useful with it (`kind` has three legal
+values and naming the rejected one is most of the message) or teaching those
+fields the key-shape heuristic, which refuses "long and lower-case" and would
+therefore refuse `mradermacher/translategemma-12b-it-i1-GGUF:Q4_K_M`, a real
+model id on the maintainer's own backend. The narrower half — `model` accepting
+and storing a key — has no such tension and is the part to schedule first.
+
+Also recorded and not closed: a provider whose *name* contains a dot cannot be
+edited through this endpoint, because no dotted key spells it and the block form
+that would is refused. The escape is `lx` or the file. And there is no way to
+*delete* a provider over HTTP, because deleting one is a block removal: a
+settings screen can create a backend and not remove it.
+
+### Not built
+
+*Lost, and it was already lost on 2026-08-14:* making `output_pattern` writable
+by confining the formatted result inside `/api/render`. It is the largest new
+trust surface of the three and buys one configuration key. Divergence (10)
+therefore stands, and stands for the reason it always did — `output_pattern` is
+hand-edited only.
+
+*Lost:* `GET /api/config`. `/api/state` already projects what a settings screen
+draws, and a second read surface is a second thing to keep in step. The cost is
+that `timeout`, `temperature`, `max_tokens` and `retries` are readable only as
+this endpoint's `value` after a write; a screen prefilling them has to widen
+`providers.available` instead, which is additive and is HANDOFF-035's call.
+
+### Tier
+
+Security work, and it went to the security tier as `docs/conventions/delegated-work.md`
+§4 requires: the allowlist, the refusal statuses, the readback and the (15)
+degradation were derived by two independent security-tier lanes from the code and
+the invariants before anything was written, and the coordinating session
+synthesized and implemented against that. Two of its own conclusions were
+overturned there — the `403` for a missing acknowledgement, and the assumption
+that the acknowledgement was about a write. No downgrade row is owed.
+
+One process note worth keeping, because it cost a run: the first dispatch framed
+the lanes as "enumerate every way this endpoint could be turned into an arbitrary
+file write", and two of three lanes were stopped by the content filter before
+they finished, with the third dying on a rate limit. The work is defensive — it
+is a refusal list for a local tool — and the brief has to say so and ask for the
+refusal table rather than for the attacks. Reframed, the same lanes ran clean.
+
 ## 2026-08-20 · The local llama.cpp server is a router, and a base_url that cannot work is named rather than repaired
 
 Closing HANDOFF-034, whose whole reason for existing was that the pass before it

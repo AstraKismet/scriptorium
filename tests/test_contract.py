@@ -377,6 +377,11 @@ def test_every_endpoint_returns_exactly_the_keys_the_contract_documents(base, pr
     job = record("POST", "/api/translate", {"ids": ["no-such-segment"]})
     assert job["total"] == 0, "the run must select nothing, or this test needs a network"
     record("POST", "/api/job", {"id": job["id"]})
+    # `batch.size` because it is the shortest admitted key that needs no provider
+    # to exist first, and because the payload `record` builds carries `src` and
+    # `lang` — which this endpoint ignores and the confinement check above does
+    # not, which is the point of leaving them in.
+    record("POST", "/api/config", {"key": "batch.size", "value": 12})
     record("GET", "/api/state", {})
 
     documented = _documented_response_keys()

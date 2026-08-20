@@ -651,7 +651,20 @@ def resolve_route(cfg, stage, provider=None, model=None):
     name, routed = route_entry(cfg, stage)
     if provider and provider != name:
         name, routed = provider, ""
-    spec = (cfg.get("providers") or {}).get(name)
+    specs = cfg.get("providers") or {}
+    if not isinstance(specs, dict):
+        # `ConfigError`, not the `AttributeError` this used to raise, and the
+        # class is the whole point: `web/server.py:_stage_route` catches
+        # `ConfigError` so that one malformed entry is reported *inside* the
+        # routing projection rather than taking `/api/state` down. A truthy
+        # non-dict — `"providers": ["local"]` out of a hand-edited file — walked
+        # straight past that catch, so the endpoint that draws the whole page
+        # answered 400 with nothing in it. The falsy spellings were always safe,
+        # which is why this survived: `[]`, `{}` and `null` are absorbed by the
+        # `or {}` above and only a *populated* wrong shape reaches here.
+        # `docs/contracts/workbench-http.md`, Known divergences (15).
+        raise ConfigError("`providers` is a block of provider name → settings.")
+    spec = specs.get(name)
     if not isinstance(spec, dict):
         spec = {}
     return name, str(model or routed or spec.get("model") or "")

@@ -44,6 +44,7 @@ from scriptorium import cli  # noqa: E402
 from scriptorium.config import (  # noqa: E402
     DEFAULT_CONFIG,
     MISSING,
+    PATH_VALUED_KEYS,
     ROUTING_STAGES,
     ConfigError,
     dump_json,
@@ -1067,3 +1068,219 @@ def test_a_router_model_id_round_trips_byte_identically(tmp_path):
         assert result.returncode == 0
         assert _out(result).strip() == model, "the id came back changed"
         assert _config(tmp_path)["providers"]["llamacpp"]["model"] == model
+
+
+# ── what an untrusted caller may write ─────────────────────────────────────
+#
+# `cli.writable_key` is the gate `POST /api/config` stands behind. It is tested
+# here rather than in `test_web.py` because it is a `cli.py` rule — the shape
+# `confined_path` and `language_tag` already have — and because the property that
+# makes it sufficient is a property of the field table, not of the wire.
+
+
+def test_the_http_allowlist_holds_only_keys_the_field_table_decides_by_itself():
+    """The structural property the endpoint's safety rests on, in one assertion.
+
+    `config_value` short-circuits the moment a field rule fires, so `_decode`'s
+    type guessing and `_validated`'s descent into a block are both unreachable
+    for a key that has its own rule. That is what makes a value unable to land
+    anywhere except the key that was addressed — and it stops being true the day
+    a key with no rule joins the list.
+
+    A subset, deliberately not equality. Equality would make the list *derived*
+    in all but spelling, so a field added to `_CONFIG_FIELDS` for an unrelated
+    reason — the `cert_path` that `config.PATH_VALUED_KEYS`' own comment predicts
+    as "a fifth path key added anywhere else" — would become writable over HTTP
+    the same afternoon with nobody deciding it. This way that field is writable
+    from a terminal and reaching the wire takes an edit here.
+    """
+    decided_alone = set(cli._CONFIG_FIELDS) - cli._WHOLE_BLOCK
+    surplus = set(cli.HTTP_WRITABLE_KEYS) - decided_alone
+    assert not surplus, (
+        f"{sorted(surplus)} are writable over HTTP and are not keys the field table "
+        f"decides on its own. A key with no rule of its own reaches `_validated`, "
+        f"which descends into a block — the whole class this gate closes.")
+    for pattern in cli.HTTP_WRITABLE_KEYS:
+        parts = ["mine" if part == "*" else part for part in pattern.split(".")]
+        found, rule = cli._exact_rule(parts)
+        assert rule is not None and found == pattern, (
+            f"{pattern} is on the allowlist and `_exact_rule` answers {found!r} for it")
+
+
+@pytest.mark.parametrize("pattern",
+                         [p for p in cli.HTTP_WRITABLE_KEYS if p != "routing.*"])
+def test_no_admitted_key_accepts_a_block_as_its_value(pattern):
+    """The other half of that property, from the value's side.
+
+    `routing.*` is excluded because it is the one rule that legitimately takes an
+    object — and the test below covers what it does with one.
+    """
+    with pytest.raises(ConfigError):
+        cli.config_value(DEFAULT_CONFIG, pattern.replace("*", "mine"), {"a": 1})
+
+
+def test_a_routing_object_is_rebuilt_rather_than_stored():
+    """The one admitted key that takes an object reads two fields and writes two.
+
+    So a block cannot ride in under it either: anything else in the object is
+    dropped, and an object naming no model comes back as the bare string every
+    configuration on disk uses — which is what keeps a screen that always emits
+    the object form from migrating the file.
+    """
+    _, value = cli.config_value(
+        DEFAULT_CONFIG, "routing.draft",
+        {"provider": "local", "model": "m", "headers": {"Authorization": "Bearer x"}})
+    assert value == {"provider": "local", "model": "m"}
+    _, bare = cli.config_value(DEFAULT_CONFIG, "routing.draft", {"provider": "local"})
+    assert bare == "local"
+
+
+@pytest.mark.parametrize("key", [
+    "glossary", "dnt", "style", "output_pattern", "sources",
+    "providers.x.headers", "providers.x.headers.Authorization",
+    "providers", "providers.openai", "routing", "routing.draft.model",
+    "batch", "batch.size.x", "targets", "tone", "formats.map", "lexicon_extra",
+])
+def test_a_key_off_the_http_allowlist_is_refused_before_its_value_is_looked_at(key):
+    """One case per key, not one per class, because the classes differ.
+
+    `output_pattern` is a file write outside the project through `/api/render`'s
+    default output; `providers.openai` is the block spelling an allowlist keyed
+    on what somebody typed would miss; `batch.size.x` is one of the two bypasses
+    measured on 2026-08-12. They are refused by the same mechanism for different
+    reasons, and a list is what keeps a future widening from dropping one.
+    """
+    with pytest.raises(cli.UnwritableKey):
+        cli.writable_key(key)
+
+
+def test_no_path_valued_key_can_ever_reach_the_http_allowlist():
+    """Stated over the constant rather than over a list of today's four.
+
+    `config.PATH_VALUED_KEYS` exists to be added to, and its own comment says the
+    fifth entry is the one confinement misses. This fails the day one is added
+    and admitted, which is the only moment anybody could notice.
+    """
+    for key in PATH_VALUED_KEYS + ("sources",):
+        assert not any(cli._pattern_matches(pattern, [key])
+                       for pattern in cli.HTTP_WRITABLE_KEYS), f"{key} became writable"
+
+
+def test_the_gate_never_sees_the_value_it_refuses():
+    """A refusal that quoted the value would publish a mispasted credential.
+
+    The strongest form of that promise is arithmetic rather than careful wording:
+    membership is decided from the key alone, so `writable_key` is not given a
+    value at all and has nothing to leak.
+    """
+    import inspect
+    assert list(inspect.signature(cli.writable_key).parameters) == [
+        "key", "confirm_base_url"]
+    with pytest.raises(cli.UnwritableKey) as caught:
+        cli.writable_key("providers.x.headers.Authorization")
+    assert PASTED not in str(caught.value)
+
+
+@pytest.mark.parametrize("confirm", [False, None, "true", 1])
+def test_a_base_url_is_not_writable_without_the_acknowledgement(confirm):
+    """And the acknowledgement is the JSON boolean, not anything truthy.
+
+    `confirm_base_url is not True` rather than a truthiness test, because the
+    string "true" arrives from a form body and would otherwise satisfy a guard
+    whose failure direction is a credential going somewhere nobody chose.
+    """
+    with pytest.raises(ConfigError) as caught:
+        cli.writable_key("providers.x.base_url", confirm_base_url=confirm)
+    assert "confirm_base_url" in str(caught.value)
+    assert cli.writable_key("providers.x.base_url", confirm_base_url=True) == [
+        "providers", "x", "base_url"]
+
+
+def test_the_two_refusals_are_different_classes_because_the_statuses_differ():
+    """403 says "never writable"; 400 says "fix the payload and send it again".
+
+    The contract forbids a client reading the sentence, so if both answered 403 a
+    settings screen could not tell asking the person from giving up.
+    `UnwritableKey` is also deliberately not an `UnsafePath`: that one names a
+    *path*, and its `{field} = {value!r}` convention repeats what it refused.
+    """
+    assert not issubclass(cli.UnwritableKey, cli.UnsafePath)
+    assert not issubclass(cli.UnsafePath, cli.UnwritableKey)
+    assert issubclass(cli.UnwritableKey, ValueError)
+
+
+# ── a configuration nobody can read is reported, not raised ────────────────
+
+
+@pytest.mark.parametrize("block", [["local"], "local", 5])
+def test_a_providers_value_that_is_not_a_block_reports_instead_of_raising(block):
+    """Contract divergence (15), on the axis its own entry did not name.
+
+    A *truthy* non-block reached `resolve_route`'s `.get` and raised
+    `AttributeError`, which is not the `ConfigError` the workbench's routing
+    projection catches — so both projections fell together, not only the provider
+    list. The falsy spellings were always absorbed by the `or {}` beside it,
+    which is why this survived being written down.
+    """
+    from scriptorium.providers import available
+    cfg = {**DEFAULT_CONFIG, "providers": block}
+    assert available(cfg) == []
+    with pytest.raises(ConfigError):
+        resolve_route(cfg, "draft")
+
+
+def test_one_unreadable_provider_does_not_cost_the_others():
+    from scriptorium.providers import available
+    rows = {r["name"]: r for r in available(
+        {"providers": {"good": {"kind": "openai", "model": "m"}, "bad": "oops"}})}
+    assert "error" not in rows["good"] and rows["good"]["model"] == "m"
+    assert "providers.bad" in rows["bad"]["error"]
+
+
+@pytest.mark.parametrize("spec,why", [
+    ({"api_key_env": 5}, "api_key_env"),
+    ("not a block", "block"),
+])
+def test_a_spec_whose_credential_field_is_unreadable_is_never_green(spec, why):
+    """`needs_key: false` with `key_present: true` is how "no key needed" looks.
+
+    Folding an unreadable `api_key_env` to `""` produces exactly that pair, which
+    would tell a person their backend is ready when nothing has been decided.
+    """
+    from scriptorium.providers import available
+    row = available({"providers": {"x": spec}})[0]
+    assert why in row["error"]
+    assert row["needs_key"] is True and row["key_present"] is False
+
+
+def test_a_readable_credential_field_keeps_its_answer_when_a_neighbour_is_broken():
+    """A malformed `model` does not make "this backend wants no key" untrue."""
+    from scriptorium.providers import available
+    row = available({"providers": {"x": {"model": 5, "api_key_env": ""}}})[0]
+    assert "model" in row["error"]
+    assert row["needs_key"] is False and row["key_present"] is True
+
+
+def test_the_typed_readback_masks_exactly_what_the_printed_one_masks():
+    """`do_config_value` is `do_config_get` with the type kept, not with the rules dropped.
+
+    A reply body is a display surface, and this is the function that fills one.
+    It is tested here rather than through the endpoint because the endpoint
+    cannot reach the masking on its success path — the validator that runs just
+    before refuses exactly what the projection would mask — so a test written
+    over the wire proves nothing about this function. A mutation run is what said
+    so: the projection came out and every endpoint test went on passing.
+    """
+    cfg = {"providers": {"gw": {"base_url": "https://gw.example.com/v1?key=SEKRIT",
+                                "api_key_env": "sk-not-a-name",
+                                "headers": {"Authorization": "Bearer SEKRIT"}}},
+           "batch": {"size": 12}}
+    assert "SEKRIT" not in str(cli.do_config_value(cfg, "providers.gw.base_url"))
+    assert "gw.example.com" in cli.do_config_value(cfg, "providers.gw.base_url")
+    assert "SEKRIT" not in str(cli.do_config_value(cfg, "providers.gw.headers"))
+    assert cli.do_config_value(cfg, "providers.gw.api_key_env") == cli._NOT_A_NAME
+    # The type is the whole reason this exists beside `do_config_get`, which
+    # would answer the string "12" and make every client parse a number back out
+    # of one.
+    assert cli.do_config_value(cfg, "batch.size") == 12
+    assert cli.do_config_value(cfg, "batch.nothing") is None

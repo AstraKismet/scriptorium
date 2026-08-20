@@ -20,7 +20,7 @@ import scriptorium.cli as cli  # noqa: E402
 import statedb  # noqa: E402
 from scriptorium import translate as translate_mod  # noqa: E402
 from scriptorium.cli import UnsafePath, confined_path  # noqa: E402
-from scriptorium.config import DEFAULT_CONFIG  # noqa: E402
+from scriptorium.config import DEFAULT_CONFIG, get_in, load_config  # noqa: E402
 from scriptorium.store import (  # noqa: E402
     SEGMENTATION_VERSION,
     append_tm,
@@ -1363,3 +1363,314 @@ def test_the_reply_names_a_wording_the_memory_answered_over(
     assert r["kept"] == [], "the memory answered, so nothing had to be kept"
     after = json.loads(_get(base, "/api/doc?src=d.md&lang=zh-TW")[1])["segments"][0]
     assert after["target"] == "請見 ⟦1⟧。" and after["origin"] == "tm"
+
+
+# ── configuration over the wire ────────────────────────────────────────────
+#
+# The gate itself — which keys, and the acknowledgement — is `cli.writable_key`
+# and is tested in `test_config.py`. What is left here is the shell: that the
+# refusals reach the wire as the statuses the contract documents, that a refused
+# request writes nothing, and that the reply carries what a settings screen
+# redraws from without carrying anything invariant 6 keeps off this surface.
+
+
+def _config_project(tmp_path, monkeypatch):
+    """An empty project root, two levels inside `tmp_path`, and the cwd moved in.
+
+    Nested for `_project`'s reason: nothing here escapes, but a sibling test in
+    this file points paths at the parent, and a root at `tmp_path` puts those in
+    pytest's shared base, which it rotates and never sweeps.
+    """
+    root = tmp_path / "nest" / "proj"
+    root.mkdir(parents=True)
+    monkeypatch.chdir(root)
+    return root
+
+
+def _bytes(root):
+    path = root / "lx.config.json"
+    return path.read_bytes() if path.exists() else None
+
+
+def test_config_writes_a_key_and_the_cli_reads_the_same_value_back(
+        base, tmp_path, monkeypatch):
+    """Invariant 8 on this endpoint: one writer, and both surfaces see one file."""
+    _config_project(tmp_path, monkeypatch)
+    code, body = _post(base, "/api/config", {"key": "batch.size", "value": 12})
+    assert code == 200
+    assert json.loads(body)["value"] == 12
+    assert cli.do_config_get(load_config(), "batch.size") == "12"
+
+
+@pytest.mark.parametrize("key", [
+    "glossary", "dnt", "style", "output_pattern", "sources",
+    "providers.local.headers", "providers.local.headers.Authorization",
+    "providers", "providers.local", "routing", "routing.draft.model",
+    "batch.size.x",
+])
+def test_a_key_not_writable_over_http_is_a_403_that_writes_nothing(
+        base, tmp_path, monkeypatch, key):
+    """403 rather than 400: a control refused it, and no value would help.
+
+    The file is compared byte for byte afterwards rather than parsed, because
+    "nothing changed" has to include the formatting and the trailing newline —
+    `dump_json` rewrites the whole file, so a write that reached it and then
+    failed would still show as a diff.
+    """
+    root = _config_project(tmp_path, monkeypatch)
+    assert _post(base, "/api/config", {"key": "batch.size", "value": 8})[0] == 200
+    before = _bytes(root)
+    code, body = _try_post(base, "/api/config", {"key": key, "value": "anything"})
+    assert code == 403, f"{key} was not refused"
+    assert "not writable over HTTP" in json.loads(body)["error"]
+    assert _bytes(root) == before
+
+
+@pytest.mark.parametrize("block", [
+    {"api_key_env": "sk-REDACTED-LOOKING-VALUE"},
+    {"headers": {"Authorization": "Bearer sk-REDACTED-LOOKING-VALUE"}},
+])
+def test_a_provider_block_is_refused_by_its_key_before_its_contents_matter(
+        base, tmp_path, monkeypatch, block):
+    """The where-it-lands case, and on this surface it is unreachable.
+
+    `lx config set providers.local '{"api_key_env": …}'` reaches
+    `_field_api_key_env` through `_validated`'s descent, which is what makes the
+    CLI safe. Here the block form never gets that far: `providers.local` is two
+    segments and every admitted provider pattern is three, so the request is
+    refused without the value being looked at — and the credential in it is
+    therefore not in the reply either.
+    """
+    root = _config_project(tmp_path, monkeypatch)
+    before = _bytes(root)
+    code, body = _try_post(base, "/api/config", {"key": "providers.local", "value": block})
+    assert code == 403
+    assert "sk-REDACTED-LOOKING-VALUE" not in body.decode("utf-8")
+    assert _bytes(root) == before
+
+
+def test_a_key_shaped_api_key_env_is_refused_and_is_nowhere_in_the_reply(
+        base, tmp_path, monkeypatch):
+    """400, not 403: the key is writable and this value is not.
+
+    The second assertion is the one that matters. `api_key_env` is the field a
+    pasted credential lands in, and a refusal that quoted it would have published
+    it to whatever renders the sentence — which, since this endpoint exists, is a
+    browser rather than a terminal.
+    """
+    root = _config_project(tmp_path, monkeypatch)
+    pasted = "sk-REDACTED-LOOKING-VALUE-0123456789"
+    code, body = _try_post(base, "/api/config",
+                           {"key": "providers.local.api_key_env", "value": pasted})
+    assert code == 400
+    assert pasted not in body.decode("utf-8")
+    assert "NAME of an environment variable" in json.loads(body)["error"]
+    assert _bytes(root) is None
+
+
+def test_a_bare_routing_string_is_written_bare_over_the_wire_too(
+        base, tmp_path, monkeypatch):
+    """`lx routing set draft local` writes a bare string and so does this.
+
+    Every configuration on disk uses the bare form and `AGENTS.md` records that
+    it is never migrated, so a screen that always emitted the object form would
+    rewrite every one of them. It does not have to know: an object naming no
+    model comes back bare from the same validator.
+    """
+    root = _config_project(tmp_path, monkeypatch)
+    assert _post(base, "/api/config", {"key": "routing.draft", "value": "local"})[0] == 200
+    assert json.loads((root / "lx.config.json").read_text())["routing"]["draft"] == "local"
+    assert _post(base, "/api/config",
+                 {"key": "routing.polish", "value": {"provider": "local"}})[0] == 200
+    assert json.loads((root / "lx.config.json").read_text())["routing"]["polish"] == "local"
+    code, body = _post(base, "/api/config",
+                       {"key": "routing.repair", "value": {"provider": "local", "model": "m"}})
+    assert json.loads(body)["value"] == {"provider": "local", "model": "m"}
+
+
+@pytest.mark.parametrize("payload", [
+    {"value": "http://127.0.0.1:9/v1"},
+    {"unset": True},
+])
+def test_a_base_url_is_not_changed_without_the_acknowledgement(
+        base, tmp_path, monkeypatch, payload):
+    """A removal changes it too, which is why the rule is keyed on the landing.
+
+    Dropping a key that shadowed a shipped provider's `base_url` restores the
+    factory URL; dropping a user-created provider's leaves the spec without one
+    and the request falls back to a hardcoded `localhost:11434`. Both are "the
+    document now goes somewhere else" with the provider's credential attached.
+    """
+    root = _config_project(tmp_path, monkeypatch)
+    assert _post(base, "/api/config", {"key": "providers.local.base_url",
+                                       "value": "http://127.0.0.1:8088/v1",
+                                       "confirm_base_url": True})[0] == 200
+    before = _bytes(root)
+    code, body = _try_post(base, "/api/config",
+                           {"key": "providers.local.base_url", **payload})
+    assert code == 400, "a missing acknowledgement is fixable by resending, so it is not 403"
+    assert "confirm_base_url" in json.loads(body)["error"]
+    assert _bytes(root) == before
+    assert _post(base, "/api/config",
+                 {"key": "providers.local.base_url", **payload,
+                  "confirm_base_url": True})[0] == 200
+    assert _bytes(root) != before
+
+
+def test_the_reply_never_carries_a_hand_edited_base_url_in_full(base, tmp_path, monkeypatch):
+    """The reply is a display surface, so every projection in it is masked.
+
+    `lx config set` refuses to write a `?key=`, but a file somebody edited can
+    hold one — and two surfaces over one value must not disagree about what is
+    printable. Measured on 2026-08-13 as the defect that made `lx providers` mask
+    what `lx translate` printed in full.
+
+    This exercises the `providers` projection specifically, which is where the
+    secret would surface here: the *readback* is of `model`, and the readback
+    could not carry one anyway, because the validator that just ran refuses
+    exactly what the projection masks. `do_config_value`'s own masking is
+    therefore belt and braces on this path and is tested at its own level, in
+    `test_config.py` — a mutation run is what said so, by leaving the projection
+    in `do_config_value` unkilled while this test went on passing.
+    """
+    root = _config_project(tmp_path, monkeypatch)
+    (root / "lx.config.json").write_text(json.dumps(
+        {"providers": {"gw": {"kind": "openai",
+                              "base_url": "https://gw.example.com/v1?key=SEKRIT"}}}),
+        encoding="utf-8")
+    code, body = _post(base, "/api/config", {"key": "providers.gw.model", "value": "m"})
+    assert code == 200
+    assert "SEKRIT" not in body.decode("utf-8")
+    assert "gw.example.com" in body.decode("utf-8")
+
+
+@pytest.mark.parametrize("field", ["unset", "confirm_base_url"])
+@pytest.mark.parametrize("bad", ["false", "true", 1, [], {}])
+def test_a_boolean_sent_as_anything_else_is_refused_rather_than_read(
+        base, tmp_path, monkeypatch, field, bad):
+    """`bool("false")` is `True`, and one of these two removes a key.
+
+    Contract divergence (28) records the same shape one endpoint over, where
+    `{"reset": "false"}` discards a document's translations. This endpoint does
+    not repeat it.
+    """
+    root = _config_project(tmp_path, monkeypatch)
+    assert _post(base, "/api/config", {"key": "batch.size", "value": 8})[0] == 200
+    before = _bytes(root)
+    code, body = _try_post(base, "/api/config",
+                           {"key": "batch.size", "value": 9, field: bad})
+    assert code == 400
+    assert field in json.loads(body)["error"]
+    assert _bytes(root) == before
+
+
+def test_a_write_and_a_removal_in_one_request_is_refused_rather_than_ordered(
+        base, tmp_path, monkeypatch):
+    """Two instructions, no defensible order, so neither is guessed at.
+
+    Reading the `unset` and dropping the value would delete a key the caller had
+    just asked to set — the destructive branch of an ambiguity, chosen silently.
+    """
+    root = _config_project(tmp_path, monkeypatch)
+    assert _post(base, "/api/config", {"key": "batch.size", "value": 8})[0] == 200
+    before = _bytes(root)
+    code, body = _try_post(base, "/api/config",
+                           {"key": "batch.size", "value": 9, "unset": True})
+    assert code == 400
+    assert "not both" in json.loads(body)["error"]
+    assert _bytes(root) == before
+
+
+def test_a_present_null_is_a_value_and_an_absent_one_is_a_refusal(
+        base, tmp_path, monkeypatch):
+    """`dict.get` cannot tell them apart and this surface has been bitten before.
+
+    A JSON `null` is a real value for `api_key_env` — it means this backend needs
+    no key — so it has to reach the validator, while a request that simply left
+    the field out has said nothing and must be refused rather than read as one.
+    """
+    _config_project(tmp_path, monkeypatch)
+    code, body = _post(base, "/api/config",
+                       {"key": "providers.local.api_key_env", "value": None})
+    assert code == 200 and json.loads(body)["value"] == ""
+    code, body = _try_post(base, "/api/config", {"key": "providers.local.api_key_env"})
+    assert code == 400
+    assert "unset: true" in json.loads(body)["error"]
+
+
+def test_the_reply_carries_the_resolved_routing_a_screen_has_to_render(
+        base, tmp_path, monkeypatch):
+    """Never `cfg["routing"]`, which is two shapes.
+
+    A page assigning the object form to a `<select>` value gets
+    `[object Object]`, shows nothing, and the run goes to whichever backend
+    happened to be first. The reply carries `/api/state`'s own projection so the
+    screen never has to choose — and carries it at all so that redrawing a form
+    does not cost a `/api/state`, which loads every segment of every document.
+    """
+    _config_project(tmp_path, monkeypatch)
+    code, body = _post(base, "/api/config",
+                       {"key": "routing.draft", "value": {"provider": "local", "model": "m"}})
+    reply = json.loads(body)
+    assert code == 200
+    assert reply["routing"]["draft"] == {"provider": "local", "model": "m"}
+    assert {"name", "kind", "model", "base_url", "needs_key", "key_present", "key_env"} <= set(
+        reply["providers"][0])
+
+
+@pytest.mark.parametrize("providers", [["local"], "local", {"local": "oops"}])
+def test_a_malformed_providers_block_no_longer_empties_the_bootstrap_endpoint(
+        base, tmp_path, monkeypatch, providers):
+    """Contract divergence (15), closed — and this is why it had to be.
+
+    `/api/state` is the endpoint a client calls before it can do anything, and it
+    was answering `400` with nothing in it on a configuration that could only be
+    repaired by opening the file. Now that it can be repaired over HTTP, the
+    repair runs through this same projection: an `available()` that still raised
+    would have failed *after* the write landed.
+    """
+    root = _config_project(tmp_path, monkeypatch)
+    (root / "lx.config.json").write_text(json.dumps({"providers": providers}),
+                                         encoding="utf-8")
+    code, body = _get(base, "/api/state")
+    assert code == 200
+    state = json.loads(body)
+    assert isinstance(state["providers"], list)
+    reported = [p.get("error") for p in state["providers"]] or [
+        stage.get("error") for stage in state["routing"].values()]
+    assert any(reported), "a broken configuration must say so somewhere on this reply"
+    code, body = _post(base, "/api/config", {"key": "batch.size", "value": 4})
+    assert code == 200, "the endpoint that repairs configuration must run on a broken one"
+
+
+def test_two_writes_at_once_do_not_lose_each_other(base, tmp_path, monkeypatch):
+    """A settings form saving several fields is the default case, not a race.
+
+    Each request reads the file, sets one key and writes it back, so without
+    `_CONFIG_LOCK` the last writer wins and the others revert silently. This is
+    the weaker kind of test and says so: under the GIL the interleaving is not
+    guaranteed, and it is kept because the failure it guards is silent. Removing
+    the lock reds it.
+    """
+    _config_project(tmp_path, monkeypatch)
+    keys = ["batch.size", "batch.concurrency", "batch.max_repair_rounds",
+            "batch.context", "providers.local.model", "providers.local.timeout",
+            "providers.local.retries", "providers.local.temperature"]
+    values = [3, 4, 5, 6, "m", 90, 2, 1]
+    ready = threading.Barrier(len(keys))
+    results = {}
+
+    def write(key, value):
+        ready.wait(timeout=10)
+        code, body = _try_post(base, "/api/config", {"key": key, "value": value})
+        results[key] = code if code == 200 else json.loads(body)["error"]
+
+    threads = [threading.Thread(target=write, args=pair) for pair in zip(keys, values)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=20)
+    assert set(results.values()) == {200}, results
+    stored = load_config()
+    for key, value in zip(keys, values):
+        assert get_in(stored, key.split(".")) == value, f"{key} was lost"

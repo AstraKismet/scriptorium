@@ -149,7 +149,14 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    a hand-edited `https://user:SECRET@host/v1` was masked by `lx providers` and
    printed in full by the run beside it. Both go through `printable_url` now. The
    enumerated list is a symptom of the rule and never its definition — when a new
-   surface can show a configured value, it joins the list.
+   surface can show a configured value, it joins the list. It did so again on
+   2026-08-20: `POST /api/config` answers with the effective value it wrote, so
+   the reply is a display surface and goes through `cli.do_config_value`, which
+   is `lx config get`'s own projection kept typed for a wire. The endpoint's
+   *refusals* are the other half — the two fields a mispasted key lands in still
+   never repeat what they refused, and the gate in front of them is handed no
+   value at all, so it has none to leak. What the fields *beside* those two do
+   with one is `docs/contracts/workbench-http.md` divergence (29), open.
 
    A rule is enforced where a field **lands**. A key may not be addressed *inside*
    something that holds one value, whether the field table says so or the merged
@@ -286,10 +293,14 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
     This is a rule about where a path *came from*, not about which module is
     reading it. Three places it already binds and one of them is not written yet:
     every endpoint in `web/server.py`; an EPUB entry name, where the same defect
-    is called zip-slip; and `output_pattern`, which is trusted today only because
-    configuration is written by hand — the moment anything writes configuration
-    over HTTP, that trust is gone and the pattern is confined at render time or
-    it is not writable over HTTP.
+    is called zip-slip; and `output_pattern`, which was trusted only because
+    configuration was written by hand. **That moment arrived on 2026-08-20**, and
+    of the two branches this invariant offered — confine the pattern at render
+    time, or do not make it writable — the second was taken: `POST /api/config`
+    admits thirteen key patterns and no path-valued key is among them.
+    `config.PATH_VALUED_KEYS` therefore still inherits the terminal-trust
+    exception through `lx config set` and through nothing else, and the first
+    branch stays available at the price its own decision entry records.
 
     *Why it is an invariant rather than a note about the workbench:* the version
     scoped to the web surface would have expired the day HANDOFF-204 rewrote it,
@@ -335,7 +346,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 1329 tests; no network (one is POSIX-only,
+python -m pytest -q                 # 1414 tests; no network (one is POSIX-only,
                                     #   one runs only where the filesystem folds case)
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`

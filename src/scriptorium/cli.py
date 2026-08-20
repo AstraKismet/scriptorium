@@ -144,6 +144,26 @@ class UnsafePath(ValueError):
     """A caller-supplied path this project will not open. The message says why."""
 
 
+class UnwritableKey(ValueError):
+    """A configuration key an untrusted caller may not write. See `writable_key`.
+
+    Its own class rather than a second meaning for `UnsafePath`, which the
+    surface beside it turns into the same `403`. Three reasons, and the first is
+    the one that matters: `UnsafePath` says "a caller-supplied *path* this
+    project will not open", and a configuration key is not a path. A refusal
+    wearing a name that describes something else is the axis a security-tier
+    pass caught this project's own contract draft on — `docs/decisions.md`,
+    2026-08-13, and the ledger row in `docs/conventions/delegated-work.md` §7.
+
+    The other two are mechanical. `UnsafePath`'s message convention is
+    `{field} = {value!r}`, which *repeats* what it refused — right for a path a
+    person typed, wrong for a field that may hold a credential. And
+    `tests/test_contract.py` keys its parametrized confinement assertions on the
+    `"src ="` sentinel that convention produces, so a second meaning would make
+    a passing assertion ambiguous about which control had fired.
+    """
+
+
 class UnsupportedSource(ValueError):
     """A command that only works on one kind of source was given another.
 
@@ -2726,6 +2746,132 @@ def config_value(cfg, key, raw):
     return parts, _validated(cfg, parts, _decode(cfg, parts, raw))
 
 
+# -- what an untrusted caller may write ------------------------------------
+
+#: Every configuration key writable by something that is **not** a person typing
+#: at a terminal — today that is `POST /api/config` and nothing else. Invariant
+#: 11's named exception is a command somebody typed, and `do_config_set` inherits
+#: it; this list is what does *not* inherit it. It sits beside the field table
+#: rather than in `web/server.py` for the reason `confined_path` and
+#: `language_tag` do: a rule that exists for the HTTP surface still belongs to
+#: the CLI (invariant 8), and a second copy in the server is how two surfaces
+#: come to disagree about what is writable.
+#:
+#: **A literal, not `set(_CONFIG_FIELDS) - _WHOLE_BLOCK`** — which is what it
+#: happens to equal today, and a test asserts the subset so it can never exceed
+#: it. The two spellings differ in which way they fail. Derived, the day somebody
+#: adds a field to `_CONFIG_FIELDS` for an unrelated reason — a `cert_path`, say
+#: — that field is writable over HTTP the same afternoon, with nobody deciding
+#: it. That is exactly the failure `config.PATH_VALUED_KEYS`' own comment
+#: predicts as "a fifth path key added anywhere else". A literal fails the other
+#: way: the new field is writable from the command line, and reaching this
+#: surface takes an edit here.
+#:
+#: **What the absences do.** `config.PATH_VALUED_KEYS` — `glossary`, `dnt`,
+#: `style`, `output_pattern` — is refused by not appearing, and so is `sources`,
+#: which feeds a glob directly and is the fifth path key. `output_pattern` is the
+#: one with teeth: `POST /api/render` given no `out` writes to a path formatted
+#: from it with confinement deliberately skipped, so a writable `output_pattern`
+#: turns a cross-site-reachable endpoint into a file write outside the project.
+#: `providers.*.headers` is absent because a header value reaches the backend
+#: verbatim. And a long tail with no rule at all — `targets`, `tone`,
+#: `source_lang`, `formats.map`, `lexicon_extra`, `checks_disabled`, the `roots`
+#: key `docs/decisions.md` reserves — is absent because of the property below.
+#:
+#: **Every entry has its own single-value rule in `_CONFIG_FIELDS`, and that is
+#: load-bearing rather than a coincidence.** `config_value` short-circuits on a
+#: rule hit, so for an admitted key `_decode`'s type guessing and `_validated`'s
+#: descent into a block are both unreachable — which means the value cannot land
+#: anywhere except the key that was addressed. The two bypasses measured on
+#: 2026-08-12, `providers.new.api_key_env.x` and `batch.size.x`, are refused here
+#: by arithmetic instead: `_pattern_matches` compares segment counts, and neither
+#: has a pattern of its own length. So on this surface the where-it-lands class
+#: is *unreachable*, not guarded — and `_addressable` and `_validated` stay
+#: behind it as the authority on the CLI's own block writes rather than as this
+#: surface's only defence. Admitting a key with no rule would end that; the
+#: subset test is what makes ending it deliberate.
+HTTP_WRITABLE_KEYS = (
+    "providers.*.kind",
+    "providers.*.base_url",
+    "providers.*.api_key_env",
+    "providers.*.model",
+    "providers.*.timeout",
+    "providers.*.temperature",
+    "providers.*.max_tokens",
+    "providers.*.retries",
+    "batch.size",
+    "batch.concurrency",
+    "batch.max_repair_rounds",
+    "batch.context",
+    "routing.*",
+)
+
+#: The one admitted key a caller must acknowledge by name before the write lands.
+#:
+#: `base_url` decides where the document under translation is sent — and with it
+#: the `Authorization` header built from `api_key_env`, which is read from the
+#: environment and handed to whatever this names. Changing it silently is
+#: therefore a credential redirect, not a preference, and a confirmation that
+#: lived only in a settings screen would be no control at all: the frontend is
+#: scheduled to be rebuilt, and this contract anticipates clients this repository
+#: did not write.
+#:
+#: **Removal is a change too**, and that half was measured rather than assumed.
+#: `do_config_unset` consults no rule whatsoever — `split_key`, `unset_in`, write
+#: — so the gate is the only thing in front of it. Unsetting a key that shadowed
+#: a shipped provider's `base_url` restores the factory URL; unsetting a
+#: *user-created* provider's leaves the spec without the key at all, and
+#: `providers/openai_compat.py` then falls back to a hardcoded
+#: `http://localhost:11434/v1`, so the header goes to whatever is listening on
+#: that port. Both are "the document now goes somewhere else", which is what the
+#: acknowledgement is for, so it is keyed on where the write **lands** rather
+#: than on the verb.
+#:
+#: `api_key_env` deliberately does not need one: removing it stops a credential
+#: being sent at all, which is the convergent direction.
+_HTTP_CONFIRM_KEY = "providers.*.base_url"
+
+
+def writable_key(key, confirm_base_url=False):
+    """`key` as its segments, or refuse it on behalf of a caller we do not trust.
+
+    Called from the surface that receives the request and never from the CLI —
+    the shape `confined_path` and `language_tag` already have, and for the same
+    reason: `lx config set output_pattern …` is a person typing a command and
+    must go on working.
+
+    The two refusals are deliberately **different exception classes, because the
+    status codes have to differ.** The contract says a client distinguishes
+    causes by status and by the endpoint it called, never by reading the
+    sentence — so if both answered `403`, a settings screen could not tell "this
+    key is never writable, give up" from "ask the person and send it again".
+    Membership is the first: `UnwritableKey`, which the server answers `403` with
+    as a control refusing. The acknowledgement is the second: a `ConfigError`,
+    which is a `400` and says what to add to the payload, exactly like every
+    other malformed request on that surface.
+
+    No refusal here repeats the value. The gate never looks at one — membership
+    is decided from the key alone — and the acknowledgement names only the field
+    to send. This matters because the caller may have pasted a credential into
+    the wrong box, and a refusal that quotes it has published it to whatever
+    renders the sentence.
+    """
+    parts = split_key(key)
+    if not any(_pattern_matches(pattern, parts) for pattern in HTTP_WRITABLE_KEYS):
+        raise UnwritableKey(
+            f"{'.'.join(parts)} is not writable over HTTP. This surface writes "
+            f"{', '.join(HTTP_WRITABLE_KEYS)} and nothing else — a path-valued key, a "
+            f"provider's headers, and any key written as a whole block are refused here "
+            f"whatever their value. Use `lx config set` in a terminal for the rest.")
+    if _pattern_matches(_HTTP_CONFIRM_KEY, parts) and confirm_base_url is not True:
+        raise ConfigError(
+            f"{'.'.join(parts)} is where the document under translation is sent, and the "
+            f"key named by api_key_env goes with it — so this one is not changed on the "
+            f"strength of a request alone. Ask first, then send confirm_base_url: true. "
+            f"It is the JSON boolean; the string \"true\" is refused.")
+    return parts
+
+
 # -- what may be printed ---------------------------------------------------
 
 def _is_env_name(value):
@@ -2807,6 +2953,28 @@ def do_config_get(cfg, key=None):
         state = "set" if os.environ.get(value) else "not set"
         return f"{value} ({state} in this environment)"
     return _rendered(parts, value)
+
+
+def do_config_value(cfg, key):
+    """The effective value at `key`, keeping its type, as it may be read.
+
+    `do_config_get`'s sibling rather than its replacement, and the difference is
+    the audience. That one renders for a terminal — a string bare, everything
+    else as JSON text — which is right there and wrong on a wire, where a client
+    handed `"12"` for a number has to parse the value back out of a string it was
+    given as one.
+
+    Both project through `_printable`, which decides by where a value *sits*
+    rather than by who is asking, so a `base_url` that a hand-edited file carries
+    a `?key=` in is masked here exactly as `lx config get` masks it. `None` means
+    the key has no value at all — which after a removal is the honest answer for
+    a key this build ships no default for.
+    """
+    parts = split_key(key)
+    try:
+        return _printable(parts, get_in(cfg, parts))
+    except KeyError:
+        return None
 
 
 def _write_config(path, data):
@@ -3004,6 +3172,12 @@ def cmd_providers(args, cfg):
         key = "no key needed" if not p["needs_key"] else (
             f"{p['key_env']} set" if p["key_present"] else f"{p['key_env']} MISSING")
         _out(f"{p['name']:12} {p['kind']:10} {p['model']:28} {p['base_url']:34} {key}")
+        if p.get("error"):
+            # A row whose fields are blank because the block could not be read.
+            # Without this the command answers a hand-edited mistake with a line
+            # of padding and a plausible "no key needed", which is the silence
+            # the projection was changed to stop.
+            _out(f"  ← {p['error']}")
     _out("\nrouting: " + "  ".join(_route_word(cfg, s) for s in ROUTING_STAGES))
 
 

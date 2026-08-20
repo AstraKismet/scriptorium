@@ -24,17 +24,23 @@ from .. import __version__
 from ..cli import (
     UnsafePath,
     UnusableTarget,
+    UnwritableKey,
     confined_path,
     default_output,
     do_apply,
     do_check,
+    do_config_set,
+    do_config_unset,
+    do_config_value,
     do_extract,
     do_hold,
     do_render,
+    do_routing_set,
     do_select,
     do_translate,
     do_untracked,
     language_tag,
+    writable_key,
 )
 from ..config import ROUTING_STAGES, ConfigError, load_config, resolve_route
 from ..docio import write_document
@@ -76,6 +82,33 @@ CONTRACT_VERSION = 3
 _LOOPBACK_BINDS = ("127.0.0.1", "::1", "localhost")
 _LOOPBACK_NAMES = ("127.0.0.1", "localhost", "[::1]")
 
+#: The refusals the contract answers `403` with — "a control refused the
+#: request" — as against the `400` that means the request was malformed or the
+#: work failed. One tuple rather than a clause per verb, so a refusal class added
+#: later cannot reach `403` on one method and `400` on the other; both are listed
+#: **before** the catch-all, because every member subclasses `ValueError` and a
+#: later clause would never run.
+_REFUSED = (UnsafePath, UnwritableKey)
+
+#: Serializes writes to `lx.config.json`, for the reason `_JOB_LOCK` exists: this
+#: is a threading server, and two requests that arrive together otherwise read
+#: the file, each set one key, and write it back — so the second silently
+#: reverts the first, which is a settings form saving six fields at once. The
+#: window is not only a lost update: `config.dump_json` writes through a *fixed*
+#: `lx.config.json.tmp` and removes a stale one first, so two writers can also
+#: take each other's temporary file.
+#:
+#: It holds the read as well as the write. The merged configuration is what the
+#: field rules are checked against, so validating against one snapshot and
+#: writing into another is the shape the lost-update token was rewritten to
+#: avoid on 2026-08-14.
+#:
+#: What it does not close, and cannot: `lx config set` in a terminal beside a
+#: running workbench is a second *process*. That race exists today between two
+#: terminals and this endpoint neither widens nor narrows it. What holds either
+#: way is that `os.replace` is atomic, so no reader ever sees half a file.
+_CONFIG_LOCK = threading.Lock()
+
 
 def _stage_route(cfg, stage, provider=None, model=None):
     """One stage resolved to the backend and the model it will actually use.
@@ -105,6 +138,31 @@ def _stage_route(cfg, stage, provider=None, model=None):
 def _routing_state(cfg):
     """Every stage resolved, in `_stage_route`'s shape."""
     return {stage: _stage_route(cfg, stage) for stage in ROUTING_STAGES}
+
+
+def _config():
+    """`load_config()`, serialized against this server's own configuration writes.
+
+    Every request reads the configuration before it is dispatched, and that read
+    holds an open handle on `lx.config.json` for as long as it takes to parse a
+    small file. On Windows `os.replace` refuses to replace a destination anybody
+    has open, so a request arriving while `POST /api/config` was finishing
+    answered `[Errno 13] Permission denied` — a spurious `400` on a write that
+    was perfectly legal, with nothing written.
+
+    Measured 2026-08-20 by the concurrency test beside it, which passed on its
+    own and failed inside the file: the collision needs a *second* request in
+    flight, and only a test that supplies one has any. Nothing was ever corrupted
+    — `dump_json` writes through a temporary file and `os.replace` is atomic — so
+    the failure direction was noise rather than loss.
+
+    What this does not close: `lx config set` in a terminal beside a running
+    workbench is a second process, and no lock in here reaches it. That race
+    exists today between two terminals, this endpoint neither widens nor narrows
+    it, and its failure is the same honest refusal.
+    """
+    with _CONFIG_LOCK:
+        return load_config()
 
 
 def _own_hosts(port):
@@ -152,6 +210,29 @@ def _require(path, **fields):
     missing = [name for name, value in fields.items() if value is None]
     if missing:
         raise ValueError(f"{path} needs {' and '.join(sorted(missing))}")
+
+
+def _flag(body, name, consequence):
+    """A request field that must be the JSON boolean, never something truthy.
+
+    One rule with three callers, because it had two and the shape it guards
+    against is recorded on this very surface as a defect: `POST /api/extract`
+    reads `reset` for truthiness, so the *string* `"false"` discards a document's
+    translations — `docs/contracts/workbench-http.md`, Known divergences (28).
+    `bool("false")` is `True`, and a form or a `URLSearchParams` body sends the
+    string. Every field guarded here has a failure direction that is destructive
+    and silent, so none of them is guessed at.
+
+    `consequence` says what the field does, because a refusal that only says
+    "expected a boolean" leaves the caller unsure whether it matters.
+    """
+    value = body.get(name, False)
+    if not isinstance(value, bool):
+        raise UnusableTarget(
+            f"`{name}` is true or false, and this request sent "
+            f"{type(value).__name__}. {consequence} — so it is not guessed at: the "
+            f"string \"false\" would read as true.")
+    return value
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -295,11 +376,12 @@ class _Handler(BaseHTTPRequestHandler):
             if url.path.startswith("/api/"):
                 return self._send(200, self._get(url.path, q))
             return self._static(url.path)
-        except UnsafePath as e:
+        except _REFUSED as e:
             # Before `except Exception`, and before any handler for ValueError:
-            # UnsafePath subclasses ValueError, so a clause below would never
-            # run. 403 says a control refused this, where 400 says the request
-            # was malformed — and `_static` already answers 403 for this class.
+            # every member of `_REFUSED` subclasses ValueError, so a clause below
+            # would never run. 403 says a control refused this, where 400 says
+            # the request was malformed — and `_static` already answers 403 for
+            # `UnsafePath`.
             return self._send(403, {"error": str(e)})
         except Exception as e:  # noqa: BLE001 - surface to the UI
             return self._send(400, {"error": str(e)})
@@ -333,7 +415,7 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(403, {"error": refusal})
         try:
             return self._send(200, self._post(url.path, self._body()))
-        except UnsafePath as e:  # before `except Exception`; see do_GET
+        except _REFUSED as e:  # before `except Exception`; see do_GET
             return self._send(403, {"error": str(e)})
         except Exception as e:  # noqa: BLE001
             return self._send(400, {"error": str(e)})
@@ -407,7 +489,7 @@ class _Handler(BaseHTTPRequestHandler):
         lang = q.get("lang")
         if lang is not None:
             lang = language_tag(lang)
-        cfg = load_config()
+        cfg = _config()
         if path == "/api/state":
             # Read once and handed on. `tracked()` loads every segment of every
             # document in the project, and the candidate scan used to make the
@@ -498,7 +580,7 @@ class _Handler(BaseHTTPRequestHandler):
         lang = body.get("lang")
         if "lang" in body:
             lang = language_tag(lang)
-        cfg = load_config()
+        cfg = _config()
         if path == "/api/extract":
             # Three of the fourth element's four keys, unconditionally — present
             # and empty rather than conditional, or a client has to tell "none"
@@ -565,7 +647,78 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/commit":
             doc = load_doc(src, lang)
             return {"committed": append_tm(lang, tm_records(doc, load_tm(lang)))}
+        if path == "/api/config":
+            # `cfg` above is deliberately not passed on. The merged configuration
+            # is what the field rules are checked against, and this endpoint has
+            # to read it *inside* the lock or it validates against one snapshot
+            # and writes into another.
+            return _config_write(body)
         raise ValueError(f"unknown endpoint {path}")
+
+
+# ── configuration ──────────────────────────────────────────────────────────
+
+def _config_write(body):
+    """One configuration key written or removed, and the state a screen redraws from.
+
+    What is *left* here is the shape of the request and nothing else. Which keys
+    may be written is `cli.writable_key`, and what a value may be is the field
+    table behind `cli.do_config_set` — a second copy of either in this file is
+    how the two surfaces come to disagree about what is writable, which is the
+    defect this endpoint was scheduled after rather than before.
+
+    **One key per request, and no block writes.** That is not an ergonomic
+    choice: it is what makes the where-it-lands class unreachable here instead of
+    guarded. Every key the allowlist admits has its own single-value rule, so
+    `config_value` short-circuits and nothing can land at a key other than the
+    one addressed. A payload of several keys, or a JSON block as a value, would
+    put that property back in the hands of a walk. A settings form sends one
+    request per field, and `_CONFIG_LOCK` is what makes six of them at once
+    behave.
+
+    The reply carries no readback of what the caller sent. `value` is the
+    *effective* value afterwards, through the same projection `lx config get`
+    prints — so a `base_url` a hand-edited file carries a `?key=` in is masked
+    here as it is there. `providers` and `routing` are `/api/state`'s own
+    projections, and they are here rather than left to a second request because
+    `/api/state` loads every segment of every document in the project to answer,
+    which is a strange price for redrawing one form.
+    """
+    _require("/api/config", key=body.get("key"))
+    unset = _flag(body, "unset", "It removes the key rather than writing it")
+    confirm = _flag(body, "confirm_base_url",
+                    "It acknowledges that this changes where the document under "
+                    "translation is sent, and the key that goes with it")
+    with _CONFIG_LOCK:
+        cfg = load_config()
+        parts = writable_key(body["key"], confirm_base_url=confirm)
+        key = ".".join(parts)
+        if unset:
+            if "value" in body:
+                raise UnusableTarget(
+                    f"/api/config was asked both to write {key} and to remove it. Send a "
+                    f"value, or unset: true, and not both.")
+            do_config_unset(key)
+        elif "value" not in body:
+            raise ValueError(
+                f"/api/config needs a value for {key}, or unset: true to remove it. A "
+                f"JSON null is a value here — `providers.<name>.api_key_env` takes one "
+                f"to mean this backend needs no key — so leaving the field out is not "
+                f"the same thing and is not read as one.")
+        elif parts[0] == "routing":
+            # The routing writer owns this key, the way `do_select` owns which
+            # segments a run works on. It reaches the same validator that
+            # `do_config_set` would, so nothing about the write differs — what
+            # differs is that a change to what routing a stage means lands in one
+            # function and both surfaces inherit it. `parts[1]` is a single
+            # segment by construction: the allowlist admits `routing.*` and
+            # nothing longer.
+            do_routing_set(cfg, parts[1], body["value"])
+        else:
+            do_config_set(cfg, key, body["value"])
+        fresh = load_config()
+        return {"key": key, "value": do_config_value(fresh, key),
+                "providers": available(fresh), "routing": _routing_state(fresh)}
 
 
 # ── background translation jobs ────────────────────────────────────────────
@@ -681,13 +834,9 @@ def _translate_job(src, lang, cfg, body):
     # opt-out for a rule whose failure direction is destructive and silent —
     # a form or a `URLSearchParams` body sends the string. `do_apply` sets
     # the precedent for a mis-shaped field on this surface: refuse it.
-    over_human = body.get("overwrite_human", False)
-    if not isinstance(over_human, bool):
-        raise UnusableTarget(
-            f"`overwrite_human` is true or false, and this request sent "
-            f"{type(over_human).__name__}. It turns off the rule that keeps a "
-            f"model run from replacing a person's wording, so it is not "
-            f"guessed at: the string \"false\" would switch the guard off.")
+    over_human = _flag(body, "overwrite_human",
+                       "It turns off the rule that keeps a model run from replacing a "
+                       "person's wording")
     # Selection is given the same flag as the write, or the run pays a model
     # for every segment the write will refuse. See `cli._model_writable`.
     segments = do_select(doc, cfg, mode, ids=body.get("ids"), over_human=over_human)

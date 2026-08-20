@@ -188,7 +188,7 @@ one is not.
 
 ## Endpoints
 
-Eleven. Every one is listed here; a test walks the dispatch chain in
+Twelve. Every one is listed here; a test walks the dispatch chain in
 `web/server.py` and fails if the two lists disagree in either direction.
 
 Common to all of them:
@@ -800,6 +800,110 @@ construction. Equivalent to `lx commit`.
 
 Side effects: appends to `.lx/tm.<lang>.jsonl`. Never overwrites.
 
+---
+
+### POST /api/config
+
+Write or remove **one** configuration key, from a closed allowlist.
+
+Backed by: `cli.writable_key` for which keys this surface may write at all,
+`cli.do_config_set` and `cli.do_routing_set` for a write, `cli.do_config_unset`
+for a removal, and `cli.do_config_value` for the readback. Equivalent to
+`lx config set` / `lx config unset` / `lx routing set`, **narrowed** — the CLI
+writes every key and this writes thirteen patterns.
+
+**Request**
+
+| Key | Required | Type | Default | Notes |
+|---|---|---|---|---|
+| `key` | yes | string | — | A dotted key. Must match one of the patterns below, or the request is `403`. |
+| `value` | for a write | any | — | Presence is `"value" in body`, so a JSON `null` **is** a value — `providers.<name>.api_key_env` takes one to mean this backend needs no key. Leaving the field out is a different thing and is `400`. |
+| `unset` | no | boolean | `false` | Removes the key. Must be the JSON boolean; sending it together with `value` is `400`. |
+| `confirm_base_url` | for `providers.*.base_url` | boolean | `false` | Must be `true` to write **or remove** a `base_url`. Must be the JSON boolean. |
+
+**Response**
+
+| Key | Type | Meaning |
+|---|---|---|
+| `key` | string | The key that was written or removed. Echoed; a key name is not a value. |
+| `value` | any \| null | The **effective** value afterwards — the merged configuration, not the file — through the same projection `lx config get` prints. `null` means the key now has no value at all. **For a `routing.*` key this is the raw entry**, which is a provider name *or* `{"provider", "model"}`; render `routing` below instead, which is resolved. |
+| `providers` | array of *provider* | As `GET /api/state`. |
+| `routing` | object | As `GET /api/state`: every stage **resolved**. |
+
+Side effects: rewrites `lx.config.json` in the directory `lx web` was started in.
+A refused request writes nothing and leaves the file byte for byte.
+
+**What may be written.** Thirteen patterns, where `*` stands for exactly one
+segment:
+
+```text
+providers.*.kind          providers.*.timeout        batch.size
+providers.*.base_url      providers.*.temperature    batch.concurrency
+providers.*.api_key_env   providers.*.max_tokens     batch.max_repair_rounds
+providers.*.model         providers.*.retries        batch.context
+routing.*
+```
+
+Everything else is `403`, and the list is closed rather than filtered: a key is
+refused by **not being on it**, so nothing has to be foreseen to be excluded.
+Four consequences worth stating, because each is a question somebody will ask:
+
+- **Every path-valued key is refused** — `glossary`, `dnt`, `style`,
+  `output_pattern` — and so is `sources`, which is not in
+  `config.PATH_VALUED_KEYS` but feeds a glob directly. `output_pattern` is the
+  one with teeth: see divergence (10), where `POST /api/render` given no `out`
+  writes to a path formatted from it with confinement deliberately skipped.
+- **`providers.*.headers` is refused at any depth**, including
+  `providers.x.headers.Authorization`. A header value reaches the backend
+  verbatim.
+- **A whole block is never writable.** `providers`, `providers.<name>`,
+  `routing` and `batch` are all `403`, so a value can never land at a key other
+  than the one addressed. This is what makes an allowlist keyed on the string
+  somebody sent sufficient here, where on the CLI it would not be: every
+  admitted key has its own single-value rule, so the descent into a block that
+  `lx config set providers.x '{"api_key_env": …}'` needs is never reached. A
+  consequence: a provider whose *name* contains a dot cannot be edited through
+  this endpoint at all, because no dotted key spells it and the block form that
+  would is refused. Use `lx` or edit the file.
+- **A key with no field rule is not on the list**, which is most of the
+  configuration — `targets`, `tone`, `source_lang`, `formats.map`,
+  `lexicon_extra`, `checks_disabled` and the `roots` key the *Reserved* section
+  schedules. Adding one is not a line of plumbing: it is the decision to give up
+  the paragraph above.
+
+**One key per request.** There is no batch form, for the same reason: a payload
+carrying several keys is a block write wearing a different hat. A settings form
+sends one request per field, and the server serializes them — two requests
+arriving together would otherwise each read the file, set one key and write it
+back, so the second would silently revert the first.
+
+⚠️ **`providers.*.base_url` needs `confirm_base_url: true`, on a write and on a
+removal alike.** It decides where the document under translation is sent, and
+the credential named by that provider's `api_key_env` is read from the server's
+environment and sent with it — so changing it silently is a credential redirect
+rather than a preference. Removal counts because removal changes it too:
+dropping a key that shadowed a shipped provider's `base_url` restores the
+factory URL, and dropping a *user-created* provider's leaves the spec without
+one, at which point the request falls back to a hardcoded
+`http://localhost:11434/v1`. The acknowledgement is keyed on where the write
+**lands**, not on the verb.
+
+It is a `400` and not a `403`, deliberately: `403` on this endpoint means "this
+key is never writable, whatever you send", and a client that could not tell the
+two apart could not decide between asking the person and giving up. See *Errors*
+— the sentence is for a person, and the status is what a client switches on.
+
+**No credential is writable, and none is readable.** `api_key_env` takes the
+**name** of an environment variable; a value shaped like a key is `400` and the
+refusal does not repeat it. `providers[].key_env` and `key_present` are how a
+client shows what is configured and whether the variable is set.
+
+**There is no `GET /api/config`.** `/api/state` already projects what a settings
+screen draws — `providers` and the resolved `routing` — and a second read
+surface is a second thing to keep in step. The one thing it does not project is
+`timeout`, `temperature`, `max_tokens` and `retries`, which this endpoint's
+`value` answers only after a write.
+
 ## Shared shapes
 
 **segment** — an element of `GET /api/doc`'s `segments`.
@@ -843,6 +947,7 @@ way to finish a book.
 | `needs_key` | boolean | Whether an `api_key_env` is configured. |
 | `key_present` | boolean | Whether that variable is set in the server's environment. `true` when no key is needed. |
 | `key_env` | string | The variable's **name**. Never its value. |
+| `error` | string | **Present only when this provider's block cannot be read** — the shape the *routing stage* below already had. The other seven keys are still there and still hold values of the type above, so a client can render the row either way; what it must not do is treat a row carrying `error` as configured. A spec whose `api_key_env` is unreadable reports `needs_key: true` and `key_present: false` rather than the "no key needed" pair, which would be a green light nobody earned. Added by the change that closed (15). |
 
 **routing stage** — a value of `GET /api/state`'s `routing`.
 
@@ -881,7 +986,7 @@ HTML error page.
 | Status | Meaning |
 |---|---|
 | `400` | The request was malformed, or the work failed. This is the catch-all: a JSON parse failure, a missing mandatory field, an unknown endpoint under `/api/`, no state for the document, a state file this build refuses to read, a provider misconfiguration met synchronously. |
-| `403` | A control refused the request: the admission gate, `confined_path`, or `language_tag`. |
+| `403` | A control refused the request: the admission gate, `confined_path`, `language_tag`, or — on `POST /api/config` only — the configuration allowlist. On that endpoint `403` means the key is never writable over HTTP whatever the value, and everything a caller can fix by changing the payload is a `400`, the acknowledgement `providers.*.base_url` needs included. |
 | `404` | A missing **static** file. `/api/*` never produces a 404 — an unknown `/api/` path is a `400`. |
 | `501` | Any method other than GET or POST. Not JSON — see *Transport*. |
 
@@ -1030,19 +1135,28 @@ lands nobody has to re-derive whether it was a break.
   Stated at this length because this contract makes the admission gate normative,
   and a second implementation written from this document has nothing else to go
   on.
-- **Configuration over HTTP.** `lx config set` and `lx routing set` exist
-  (`cli.do_config_get`, `cli.do_config_set`, `cli.do_config_unset`,
-  `cli.do_routing_set`) and no endpoint calls them. The settings surface belongs
-  to HANDOFF-204. Three conditions bind whatever adds it, and all three are
-  invariant 6:
-  1. no field may ever accept an API key;
-  2. **`providers.*.headers` is not writable at all** — a header value reaches the
-     backend verbatim, so a form that exposes it re-opens exactly what the CLI's
-     refusal closes, including under a deeper key such as
-     `providers.x.headers.Authorization`;
-  3. `config.PATH_VALUED_KEYS` must **either** be confined at use time —
-     `output_pattern` on the *result* of formatting it, never on the pattern —
-     **or** not be writable over HTTP at all.
+- **Configuration over HTTP. Landed 2026-08-20 as `POST /api/config`** — read
+  that section rather than this entry, which is kept for the three conditions it
+  set and how each was met. All three are invariant 6, and the endpoint answers
+  each by *refusing* rather than by guarding:
+  1. no field may ever accept an API key — `api_key_env` takes a name, and the
+     validator that refuses a key-shaped value is `cli.py`'s, reached rather than
+     restated;
+  2. **`providers.*.headers` is not writable at all**, at any depth — it is not
+     on the allowlist, and neither is the block form that would carry it;
+  3. `config.PATH_VALUED_KEYS` had to be **either** confined at use time
+     — `output_pattern` on the *result* of formatting it, never on the pattern —
+     **or** not writable at all. It is not writable. Confining the formatted
+     result inside `/api/render` was the larger of the two trust surfaces and
+     bought one configuration key; `docs/decisions.md`, 2026-08-20, records it
+     as the losing option, so reopening it is an entry there rather than a
+     branch. Divergence (10) therefore stands, and stands for the reason it
+     always did: `output_pattern` is still hand-edited only.
+
+  What the entry did **not** foresee, and what the endpoint's section states, is
+  that the three conditions are all about a *write*: `cli.do_config_unset`
+  consults no rule at all, so the allowlist governs removal as well, and a
+  removal is how `base_url` changes without anyone setting it.
 
 ## Known divergences
 
@@ -1173,12 +1287,40 @@ were decided at version 2 and each entry says how.
     recomputed from the target on **read** as well, the way the identity label
     beside it already was. Found by the adversarial pass over the first version of
     this fix, which had made one of the two self-healing and not the other.
-15. **A malformed `providers` block takes the whole bootstrap endpoint down.**
-    `_routing_state` degrades per stage and reports the error inside the
-    projection; `providers.available` has no equivalent and raises, so
-    `/api/state` becomes a `400` with nothing in it. Since configuration is not
-    writable over HTTP, a client in that state has no way to recover and nothing
-    to draw.
+15. **Closed 2026-08-20, and the entry was understating it.** *A malformed
+    `providers` block takes the whole bootstrap endpoint down.* `_routing_state`
+    degraded per stage and reported the error inside the projection;
+    `providers.available` had no equivalent and raised, so `/api/state` became a
+    `400` with nothing in it — and since configuration was not writable over
+    HTTP, a client in that state had no way to recover and nothing to draw.
+
+    **What the entry got wrong is the "`_routing_state` degrades" half.** It does
+    — per *stage* — but only for the errors `config.route_entry` raises. A
+    `providers` value that is a **truthy non-block**, which one hand-edited
+    `"providers": ["local"]` produces, reached `config.resolve_route`'s
+    `(cfg.get("providers") or {}).get(name)` and raised `AttributeError`, which
+    is not the `ConfigError` `_stage_route` catches. So both projections fell
+    together on that shape and the entry named only one of them. The falsy
+    spellings — `[]`, `{}`, `null` — were always absorbed by the `or {}`, which
+    is why this survived being written down.
+
+    Closed on both sides, and reported rather than raised in each: `resolve_route`
+    refuses a non-block `providers` by name, so every stage carries the sentence
+    the way a malformed entry already did; and `available()` degrades **per
+    provider**, adding `error` to the row it cannot read — see the *provider*
+    shape. A `providers` value that is not a block at all lists nothing, because
+    there is no row to hang a sentence on and the routing projection beside it is
+    already carrying three copies of the explanation. `lx providers` prints the
+    same sentence under the row, or the CLI would answer a hand-edited mistake
+    with a line of padding and a plausible "no key needed".
+
+    **It was not the optional tidy-up its work package called it.**
+    `POST /api/config`'s reply carries the `providers` projection, so an
+    unrepaired `available()` would have failed *after* the write had landed —
+    `do_config_set` writes, then the reply is assembled, then a broken neighbour
+    raises and the caller is told `400` about a change that is on disk. The
+    endpoint that exists to repair a broken configuration would have been the one
+    endpoint that could not run on one.
 16. **`/api/doc` reads the document twice and discards the first read.**
     `load_doc(src, lang)` is called and its result is immediately shadowed by
     `do_check`'s own return, which loaded the same row again. Harmless and
@@ -1511,6 +1653,46 @@ and older than that change — both halves are identical at its parent commit.
     when it is scheduled: `do_extract` refuses a `reset` that is not a boolean
     and a `tone` that is not a string or `null`, in `do_extract` rather than at
     the endpoint, for the reason the version 3 refusal lives there.
+
+Appended 2026-08-20 by the security-tier pass over `POST /api/config`. Open, and
+older than that endpoint — every path below is reachable from `lx config set`
+today. What the endpoint changes is who can reach them.
+
+29. **Outside `api_key_env` and `base_url`, a mispasted credential is repeated
+    back or written down.** This project's no-echo doctrine is scoped, in writing
+    and on purpose, to the two fields a key lands in — `_field_base_url`'s own
+    docstring says "this field sits directly above `api_key_env` in every
+    provider block, so it is one of the two a mispasted key lands in". The fields
+    *beside* those two have the ordinary treatment, and three of them are on this
+    endpoint's allowlist. Measured 2026-08-20 against a key-shaped string:
+
+    - `providers.*.kind` answers ``providers.x.kind = 'sk-…' is not a backend
+      this build has``;
+    - `providers.*.timeout`, `.temperature`, `.max_tokens`, `.retries` and every
+      `batch.*` key answer ``… — got 'sk-…'`` out of `_as_number`;
+    - `routing.*` answers ``unknown provider 'sk-…'`` for the segment before the
+      first colon;
+    - and `providers.*.model` does not refuse at all. `_as_text` accepts any
+      non-empty string, so a key typed into the model box is **written into
+      `lx.config.json`**, which is a file `lx init` scaffolds into a repository.
+
+    Before this endpoint the audience for those sentences was a terminal, which
+    invariant 11 calls the trusted case. Now a page renders them, so the string
+    reaches the DOM of whatever a person has open. The exposure is bounded — the
+    value goes back to the caller that sent it, over loopback, and request bodies
+    are never logged — but "the value appears nowhere in the response body" is
+    true of `api_key_env` and false of these.
+
+    **Recorded rather than repaired, because the repair is a decision and not a
+    patch.** Widening the doctrine to every field means either dropping the value
+    from refusals that are more useful with it — `kind` has three legal values
+    and naming the rejected one is most of the message — or teaching those fields
+    the key-shape heuristic, which `_field_api_key_env` documents as refusing
+    "long and lower-case" and which would therefore refuse
+    `mradermacher/translategemma-12b-it-i1-GGUF:Q4_K_M`, a real model id on the
+    maintainer's own backend. Both are `docs/decisions.md` entries. The narrower
+    half — `model` accepting and storing a key — has no such tension and is the
+    part to schedule first.
 
 ## What is not frozen
 
