@@ -136,9 +136,29 @@ lx providers
 lx run examples\sample.md --lang zh-TW --dry-run
 ```
 
+With llama.cpp instead, the shipped `llamacpp` provider points at
+`http://localhost:8080/v1`, which is `llama-server`'s own default. The one extra
+step is the model id, because `llama-server` in **router mode** selects on it and
+refuses anything inexact with a 400:
+
+```powershell
+lx config set providers.llamacpp.base_url http://127.0.0.1:8088/v1   # if not 8080
+lx models --provider llamacpp
+lx config set providers.llamacpp.model "one-of-the-ids-it-printed"
+lx routing set draft llamacpp
+```
+
+`lx models` prints each model's `unloaded` / `sleeping` / `loaded` state beside
+its id, so it doubles as a check that the server is answering at all.
+
 CPU inference is slow. If requests time out, raise `providers.local.timeout` and
 lower `batch.size` in `lx.config.json` — smaller batches finish sooner and a
-failure costs less.
+failure costs less. A router needs more than a slow CPU does and for a different
+reason: with `models_autoload: true` the first request for a model that is not
+resident loads it — and, the first time, downloads it — while **blocking the
+caller for the whole wait rather than answering something retryable**. Measured
+at 104.9 s for a 2.5 GB first fetch, which is why `providers.llamacpp.timeout`
+ships at 600 rather than 300.
 
 ## Claude Code
 

@@ -148,6 +148,7 @@ It does not mean the translation is good; that is what review is for.
 | `lx routing show\|set STAGE PROVIDER[:MODEL]` | which backend, and which model, serves each stage |
 | `lx untracked` | files matching `sources` with no state yet, one row per target language |
 | `lx status [--json] [--scan ROOT]` | project status; `--json` is the frozen contract in `docs/contracts/status-json.md` |
+| `lx models [--provider P]` | ask a backend which models it serves |
 | `lx providers` / `lx stats` | backends / coverage |
 
 `--overwrite-human` on `translate`, `repair`, `run` and `apply` lets a model
@@ -289,17 +290,79 @@ serves it.
 
 Any OpenAI-compatible endpoint works, including fully local ones:
 
-| Runtime | `base_url` |
-|---|---|
-| Ollama | `http://localhost:11434/v1` |
-| LM Studio | `http://localhost:1234/v1` |
-| llama.cpp server | `http://localhost:8080/v1` |
-| vLLM | `http://localhost:8000/v1` |
-| LiteLLM proxy | `http://localhost:4000/v1` |
+| Runtime | `base_url` | scaffolded as |
+|---|---|---|
+| Ollama | `http://localhost:11434/v1` | `local` |
+| LM Studio | `http://localhost:1234/v1` | `lmstudio` |
+| llama.cpp `llama-server` | `http://localhost:8080/v1` | `llamacpp` |
+| vLLM | `http://localhost:8000/v1` | — |
+| LiteLLM proxy | `http://localhost:4000/v1` | — |
 
 The request itself is deliberately plain: no `response_format`, no tools, no
 streaming unless you opt in, because self-hosted runtimes tend to reject unknown
 fields rather than ignore them.
+
+`lx models` asks a backend what it serves, so a model id can be copied rather
+than typed:
+
+```bash
+lx models                                  # whatever routing.draft points at
+lx models --provider llamacpp
+lx models --json                           # {"provider", "configured", "models"}
+```
+
+## llama.cpp, and what a router changes
+
+`llama-server` needs no special handling — it is `kind: "openai"` like every
+other OpenAI-compatible endpoint, and `lx init` scaffolds it as `llamacpp` on
+port 8080. Running it in **router mode** does change four things, and all four
+are measured rather than assumed. The numbers below are from build
+`b9892-ee445f93d` on 2026-08-20, against a router serving sixteen models with
+`max_instances: 1` and `--sleep-idle-seconds 60` on every preset.
+
+**The `model` field selects which model runs, and the id must be exact.** A
+single-model `llama-server` ignores the field; a router refuses anything it does
+not know with `400 model '…' not found`. The ids are long —
+`mradermacher/translategemma-12b-it-i1-GGUF:Q4_K_M` — so copy one from
+`lx models` rather than typing it. A whole setup, from nothing:
+
+```bash
+lx init
+lx config set providers.llamacpp.base_url http://127.0.0.1:8088/v1   # if not 8080
+lx models --provider llamacpp                                        # copy an id
+lx config set providers.llamacpp.model mradermacher/translategemma-12b-it-i1-GGUF:Q4_K_M
+lx routing set draft llamacpp
+lx routing set polish llamacpp
+lx routing set repair llamacpp
+lx run book/ch1.md --lang zh-TW
+```
+
+**A load blocks the caller; it is not a retryable status.** With
+`models_autoload: true` the first request for a model that is not resident loads
+it — and, the first time, downloads it. A second request fired 1.5 s into a
+104.9 s cold start also waited 103.1 s and then answered `200`. Nothing answers
+`503` or `425`, so `retries` buys nothing here and **`timeout` is the only knob**.
+That is why the scaffolded `llamacpp` entry gets 600 seconds where Ollama and LM
+Studio get 300. Raise it for a first run that has to fetch a large model.
+
+**Switching models costs a reload, but less than you would expect.** Under
+`max_instances: 1` only one model is resident, so pointing two stages at two
+models means an unload and a load between them — measured over three rounds at
+**4.8–5.0 s** for a 2.5 GB model and **6.4–6.9 s** for a 7 GB one, both already
+on disk, and **5.2 s** to
+wake one that had gone to sleep. That is per *stage transition*, not per batch,
+so a draft/polish split costs seconds per run and is worth having. The number
+scales with the file, though: two 15 GB models alternating is a different
+proposition, and there one model for the whole run is the better trade.
+
+**`batch.concurrency: 2` is right, and 4 is worse than 2.** One instance still
+serves several requests at once. Four realistic batches took 4.64 s serially,
+**2.85 s with two in flight** (1.63×), and 4.28 s with four — the default is the
+measured optimum, not a guess. A preset carrying `--parallel 1` serializes
+regardless, so check the model's own preset before raising it.
+
+The first-ever request for a model is the outlier and it is worth stating plainly:
+104.9 s, of which nearly all was a 2.5 GB HuggingFace download, not a load.
 
 API keys are read from the environment variable named in `api_key_env` and are
 never written to config, state or logs. Local servers usually need no key — leave
@@ -445,7 +508,7 @@ that lost.
 ## Development
 
 ```bash
-python -m pytest -q                # 972 tests, no network
+python -m pytest -q                # 1329 tests, no network
 python -m ruff check src tests
 ```
 

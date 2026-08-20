@@ -265,6 +265,44 @@ DEFAULT_CONFIG = {
             "timeout": 300,
             "temperature": 0.2,
         },
+        # llama.cpp's own `llama-server`. Scaffolded on **8080, upstream's default
+        # port**, not the 8088 the development machine happens to use: `local` and
+        # `lmstudio` above ship Ollama's and LM Studio's documented ports, and a
+        # machine-specific number here would be the one entry that means nothing
+        # anywhere else. The worked walkthrough in `README.md` uses 8088 and says
+        # it is a choice.
+        #
+        # `timeout` is **600 where the other two local runtimes get 300**, and the
+        # number comes from a measurement rather than from caution. `llama-server`
+        # can run in *router* mode — `GET /props` reports `role: "router"` — where
+        # `models_autoload: true` means the first request for a model that is not
+        # resident **loads it, and may first download it**. Measured 2026-08-20
+        # against build b9892-ee445f93d: switching between two models already on
+        # disk cost 4.8–6.9 s and waking one from `sleeping` cost 5.2 s, but the
+        # first-ever request for a 2.5 GB model fetched it from HuggingFace and
+        # took **104.9 s**. A 15 GB model on the same link is roughly ten minutes,
+        # which is the number 600 is chosen against.
+        #
+        # And `timeout` is the only knob that helps, which is the other half of
+        # the measurement: **the router blocks the caller for the whole load.** A
+        # second request fired 1.5 s into a 104.9 s load also waited 103.1 s and
+        # then answered 200 — it was never told `503` or `425`, so nothing in
+        # `providers/base.py::_RETRYABLE` is reachable and `retries` buys nothing.
+        #
+        # `model` is `"local-model"`, the placeholder `lmstudio` uses, and it is a
+        # placeholder in a stronger sense here. A **single-model** `llama-server`
+        # ignores the field, so this works unchanged. A **router** selects on it,
+        # and answers `400 model 'local-model' not found` — every id must be
+        # exact, and they are long (`mradermacher/translategemma-12b-it-i1-GGUF:Q4_K_M`).
+        # `lx models` exists for that: it asks the backend what it serves.
+        "llamacpp": {
+            "kind": "openai",
+            "base_url": "http://localhost:8080/v1",
+            "model": "local-model",
+            "api_key_env": "",
+            "timeout": 600,
+            "temperature": 0.2,
+        },
         "openai": {
             "kind": "openai",
             "base_url": "https://api.openai.com/v1",
@@ -439,6 +477,45 @@ def printable_url(url):
         host = f"{host}:{parsed.port}"
     return urllib.parse.urlunsplit(
         (parsed.scheme, host, parsed.path, "…" if parsed.query else "", ""))
+
+
+#: An API version segment inside a URL *path*: `/v1`, `/v2`, `/v1beta`,
+#: `/v1beta2`. Matched against the path alone, so `https://v1.example.com/` does
+#: not count and a `?version=` does not either. The trailing `\d*` is for
+#: Google's `/v1beta2` and `/v1alpha1`, which the shape without it called
+#: unversioned — a false accusation is the one failure this whole helper exists
+#: to avoid.
+#: `[0-9]`, never `\d`: Python's `\d` is Unicode-aware, so `/v١` (Arabic-Indic
+#: one) and `/v１` (fullwidth one) counted as version segments and silenced a
+#: note that should have fired.
+_VERSION_SEGMENT_RE = re.compile(r"/v[0-9]+(?:(?:alpha|beta)[0-9]*)?(?:/|$)",
+                                 re.IGNORECASE)
+
+
+def has_version_segment(url):
+    """Whether a base URL's path carries an API version segment.
+
+    **Decidable, which is the whole of why it may exist** (invariant 4): "does
+    this path contain a version segment" is a property of the string, while
+    "which version should it be" is a property of somebody's deployment. Nothing
+    here refuses on the answer and nothing repairs it — the two callers *mention*
+    the absence, and that is all.
+
+    Written after surveying what thirty real clients, gateways and servers do
+    with a `base_url` that omits `/v1`, on 2026-08-20. The reason it is a version
+    *segment* rather than `endswith("/v1")` is the survey's clearest lesson:
+    Continue.dev told a user whose endpoint was `/v2` that they had forgotten
+    `/v1` (issue #7682), and `/api/v1`, `/openai/v1/` and `/v1beta` are all
+    ordinary shapes. The regex is Cherry Studio's, which is the one implementation
+    that got this part right even while the rest of its repair logic was
+    producing `/v1/v1` bugs. See `docs/decisions.md`, 2026-08-20.
+    """
+    if not isinstance(url, str):
+        return False
+    try:
+        return bool(_VERSION_SEGMENT_RE.search(urllib.parse.urlsplit(url).path))
+    except ValueError:
+        return False
 
 
 # ── addressing ─────────────────────────────────────────────────────────────

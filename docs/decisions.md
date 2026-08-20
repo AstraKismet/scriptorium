@@ -3,6 +3,237 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-08-20 · The local llama.cpp server is a router, and a base_url that cannot work is named rather than repaired
+
+Closing HANDOFF-034, whose whole reason for existing was that the pass before it
+reasoned where it should have measured. That pass had no live server; this one
+ran against `llama-server` build `b9892-ee445f93d` on `127.0.0.1:8088`, and
+`GET /props` answers `role: "router"`, `max_instances: 1`,
+`models_autoload: true`. **The one fact the previous pass got wrong is that it
+assumed a single-model server**, where a router selects on the `model` field and
+refuses anything else with a 400.
+
+It also got a gap wrong, and finding that out is the argument for the package.
+Gap (2) said `http://localhost:8088` becomes `/chat/completions` and 404s, and
+said it had been reproduced. **It does not.** `llama-server` registers
+`/chat/completions` and `/v1/chat/completions` against the same handler and has
+since 2024-02-28 (`b2284`, commit `efc72253f7`); both answer 200, and so does
+`GET /models` either way. A bare `http://127.0.0.1:8088` is a working
+configuration on this backend, which is what took a refusal off the table below.
+
+### What the router is, and what the numbers decided
+
+```
+first-ever request for a model not yet on disk   104.9 s   (2.5 GB HuggingFace fetch, not a load)
+switch to a 2.5 GB model already on disk       4.8-5.0 s   (3 rounds, 4.82 / 5.03 / 5.01)
+switch to a 7 GB model already on disk         6.4-6.9 s   (3 rounds, 6.93 / 6.40 / 6.44)
+wake one that had gone to sleep                    5.2 s
+4 realistic batches, 1 / 2 / 4 in flight        4.64 s / 2.85 s / 4.28 s
+second request fired 1.5 s into a 104.9 s load   103.1 s, then 200 — never 503, never 425
+```
+
+Four consequences, each a decision.
+
+**`timeout` is the knob and `retries` is not.** The router blocks the caller for
+the whole load rather than answering a retryable status, so nothing in
+`_RETRYABLE` is reachable on this path. The scaffolded `llamacpp` entry gets
+**600 s** where `local` and `lmstudio` get 300 — a 15 GB model over the measured
+link is about ten minutes, and that is the number 600 is chosen against.
+
+**Port 8080, not 8088.** `DEFAULT_CONFIG` ships upstream's documented default,
+because the two local entries above it ship Ollama's 11434 and LM Studio's 1234
+and a machine-specific number would be the one entry that means nothing anywhere
+else. The walkthrough uses 8088 and says it is a choice.
+
+**`model` ships as `"local-model"`, the placeholder `lmstudio` uses**, and the
+asymmetry it relies on was measured on both sides rather than read: against the
+*single-model* `llama-server` on `127.0.0.1:8089`, `model` values of
+`"local-model"`, `"totally-made-up"` and `""` all answered 200 and echoed the
+value back, while the router answers `400 model 'local-model' not found`. So the
+shipped placeholder works untouched on the common case and fails informatively on
+the one where `lx models` is standing by.
+
+**`batch.concurrency: 2` stays, and it is now measured rather than assumed.** One
+instance still serves several requests at once: 2 is 1.63x over serial, and **4 is
+worse than 2**. A model whose preset carries `--parallel 1` serializes regardless,
+which is a property of the preset and not of the router.
+
+**The README does not advise one model for every stage.** That was the question
+the switch measurement was for, and the answer is no: 4.8–6.9 s is paid per
+*stage transition*, not per batch, so a draft/polish split costs seconds per run.
+The number scales with the file, so the advice is stated as a threshold rather
+than as a rule.
+
+### A base_url that cannot work is named twice and refused never
+
+Put to the maintainer with a survey of what thirty real clients, gateways,
+servers and desktop apps do — the question they asked for before deciding. The
+centre of gravity is overwhelmingly **strict**: every first-party SDK
+(`openai-python`'s `_prepare_url` is pure concatenation with no validation at
+all), every framework, every gateway's OpenAI chat path. The spec agrees —
+`openai-openapi` puts `/v1` in `servers.url` and never in a path. **No tool in the
+survey refuses a write for a missing `/v1`**, and the two that repair on the chat
+path are both consumer GUIs.
+
+So: **refuse what is decidably not a URL, which `_field_base_url` already did;
+say the rest, twice; repair nothing.**
+
+- `lx config set` prints a non-blocking note when the path carries no version
+  segment, and it now fires **wherever a `base_url` lands** rather than only when
+  one is the last segment of the key — `lx config set providers.x '{"base_url":
+  …}'` was validated by the rule and then printed nothing at all.
+- The transport says the same thing on **404**, which is the branch the mistake
+  actually takes. The advice had lived only on the `URLError` branch — *cannot
+  connect* — so the one person who needed it was the one person who never saw it.
+
+Both are conditioned on `config.has_version_segment`, a path-only regex, and not
+on `endswith("/v1")`. That distinction is not fastidiousness: Continue.dev told a
+user whose endpoint was `/v2` that they had forgotten `/v1` (issue #7682), and
+`/api/v1`, `/openai/v1/` and `/v1beta` are all ordinary shapes. The note names the
+key and not the value, because the line above it already printed the value and a
+second display surface for a `base_url` is a thing to add deliberately or not at
+all — invariant 6, and the two surfaces found missing from that list on
+2026-08-13.
+
+*Lost: appending `/v1` at request time.* Cheapest for the person who typos, and
+the survey is a catalogue of what it costs afterwards: `huggingface_hub` added it
+to fix a `/v1/v1` bug (#2414) and its `else` branch now breaks Azure deployment
+paths; `mem0` (#4693), `spring-ai` (#2255) and Cherry Studio (#14808) all produce
+doubled prefixes; AnythingLLM's LM Studio branch takes `new URL(x).origin` and
+silently deletes a reverse-proxy prefix; LiteLLM was forced to add
+`LITELLM_ANTHROPIC_DISABLE_URL_SUFFIX` as an escape hatch and Portkey ships a
+`replace('/v1/v1/', '/v1/')` patch — those two patches are the evidence, not the
+argument. The decisive case is Continue.dev, which shipped repair and **removed it
+five weeks later** (commit `de8ccb0ac8`, 2024-01-31) in favour of `/v1` in the
+defaults plus a conditional 404 hint, which is exactly what this entry chose.
+Invariant 5 does not cover it either: its scope is `normalize.py` repairing
+*document content* on ingest, and "deterministically" fails here because fixing a
+URL means guessing a server's routing table.
+
+*Also lost: refusing a `base_url` with no version segment at write time.* Nobody
+in the survey does it; Reactive-Resume tried and a user objected in #2161 because
+they run `/api/v1`, `/api` and `/ollama/v1` as three access levels; and it would
+refuse the maintainer's own measured-working `http://127.0.0.1:8088`. Invariant
+11's rule is *rejected rather than clamped* for paths that arrive untrusted — this
+one is typed at a terminal, which is that invariant's named exception.
+
+⚠️ **The fact that would flip this.** The recommendation rests on the failure
+being loud and immediate: a 404 on the first request, before any tokens are
+spent. **If this project ever adds a text-completion or an embeddings call** — the
+likeliest trigger is embedding-based fuzzy memory matching, for which a `bge-m3`
+model is already running on `127.0.0.1:8089` — that premise dies on this very
+backend. llama.cpp's `/completions` and `/v1/completions` are **different
+handlers**, and `/embeddings` likewise; a missing version segment there is not a
+404 but a **200 carrying a different schema**, which no 404-conditioned hint can
+see. OpenRouter's bare host answering 200 with 131 KB of HTML is the same class of
+failure. The day a call path exists that can silently answer 200 with the wrong
+shape, that provider kind's `base_url` becomes a refusal — because the cost stops
+being one failed run and starts being a batch of plausible bad data.
+
+### An empty completion is a provider failure, not an empty translation
+
+`openai_compat` checked `content is None` only. Reproduced: `complete()` returned
+`''` with no error, and the failure surfaced two hops later as
+`no JSON object in reply: ''` out of `parse_reply` — a message that reads as a
+protocol fault and sends the reader to the prompt. `""`, `"   "` and any
+whitespace-only reply now raise, which is what `providers/anthropic.py` has always
+done, so this is the two backends agreeing rather than a new policy. A
+`message.content` that is not a string — the content-parts shape a gateway may
+answer — joins the existing shape error, because a bare `.strip()` on a list would
+have been an `AttributeError`, worse than either.
+
+The three refusals now line up at three layers: the transport refuses an empty
+*completion*, `translate.accept` refuses an empty *proposal*, and `cli.do_apply`
+refuses an empty *target* at the door.
+
+### `lx models`, because a router serves sixteen of them
+
+Added on the maintainer's requirement of the same day — that choosing an LLM
+service and model be a first-class act on both surfaces. The CLI could already
+*configure* (`lx config set`, `lx routing set`, `lx providers`) and could not
+*discover*: nothing anywhere called `GET {base_url}/models`. On a router whose ids
+are `mradermacher/translategemma-12b-it-i1-GGUF:Q4_K_M`, that is the difference
+between the feature working and the feature existing, because every id must be
+exact and a typo is a 400.
+
+It is **advisory and gates nothing**: a single-model `llama-server` ignores the
+`model` field entirely and still answers, so a list that became a check would
+refuse a working configuration on the strength of an optional endpoint. Its one
+subtlety is that the router's `status` is an **object**,
+`{"value": "sleeping", "args": [...], "preset": "..."}` — `args` is the whole
+`llama-server` argv, carrying absolute paths off the operator's disk, so `value`
+is read and the rest stays behind.
+
+`ProviderError` joined `cli.main`'s exit-2 tuple with it. Every other command
+reaches a backend through `run_batch` or `retry_one`, which swallow it into a
+per-segment reason; the two paths that never did — `providers.build` refusing an
+unknown provider name, and this command — answered a traceback and exit 1 where
+every other refusal in this CLI is one sentence and exit 2.
+
+The GUI half is **not** here. `web/server.py` is HANDOFF-204's file and the HTTP
+surface is frozen at `contract_version = 3`; it is scheduled as HANDOFF-035, which
+`GET /api/models` (additive, no bump) and HANDOFF-029's config endpoint together
+unblock.
+
+*A process note.* The docstring in `openai_compat.py` claimed the shape was
+"verified against Ollama, LM Studio, llama.cpp server, vLLM, LiteLLM, and OpenAI
+itself". One of those six is now a standing measurement with a date and a build
+behind it; the other five are read from documentation, and the file says so. The
+previous sentence was the same kind of claim this package was written to stop
+making.
+
+### What the adversarial pass over this work found, and it found the same defect this entry was written about
+
+The change above was reviewed by an adversarial pass before it was committed, on
+the standing rule in `docs/conventions/delegated-work.md` §6.7 that a sweep is
+blind to the axis it does not vary. It returned **two blockers**, and the first
+of them is worth recording rather than quietly fixing.
+
+**Both new `list_models` methods interpolated the raw `base_url` into their
+failure message.** A hand-edited `http://user:SECRET@host/v1?key=abc` was masked
+by `lx providers` and printed in full by `lx models` beside it — the *same*
+defect closed for `Provider.describe()` on 2026-08-13, reintroduced by two new
+surfaces on the same day this entry's own paragraph said that "a second display
+surface for a `base_url` is a thing to add deliberately or not at all". The
+author's own invariant-6 check had run eleven commands against a poisoned config
+and found nothing, because it exercised the *success* path and the transport's
+error paths and not the two new shape-error messages. That is what invariant 6
+means by "the enumerated list is a symptom of the rule and never its definition",
+and the gatekeeper test `test_a_base_url_is_masked_everywhere_it_can_be_read` now
+grows a case per surface rather than standing still.
+
+**`json.loads` sat outside the transport's three exception handlers**, so a 200
+that is not JSON — a proxy or a web UI answering HTML at the root, which is
+precisely the misconfiguration `_url_hint` was added for — escaped as a
+`JSONDecodeError` through a `cli.main` whose exit-2 tuple has no `ValueError`.
+A traceback and exit 1, on the one command this change had just claimed to have
+closed that class for. Every other caller was shielded by
+`translate.run_batch`'s blanket `except Exception`; `do_models` is not.
+
+Six more, each real and each measured: the control-character filter was written
+private to `openai_compat.py`, so the anthropic listing — reachable, since
+LiteLLM serves the Messages API — could still forge terminal rows;
+`json.dumps(ensure_ascii=False)` was assumed to protect `--json` and does not,
+passing C1, `Cf` and `U+2028`/`U+2029` through unescaped, so the **drop** is the
+only defence and now covers `Zl`/`Zp` and an over-long field too; `_get` inherited
+the completion's budget, making a black-holed listing take **40 minutes** against
+the shipped `llamacpp` entry, for a command `docs/windows-setup.md` sells as the
+quick way to check the server is up; `cmd_models` named
+`providers.<name>.model` as the remedy even when the value came from a routing
+entry, so following the printed advice changed nothing; a module-scope
+`from .providers import ProviderError` pulled `urllib`, `ssl`, `http.client`,
+`socket` and fifteen `email` submodules into every command and roughly doubled
+`scriptorium.cli`'s import time, 41 ms to 77 ms — the type now lives in
+`providers/errors.py`, which imports nothing; and `has_version_segment` used
+`\d`, which is Unicode-aware, so `/v١` counted as a version segment.
+
+*And one claim in this very entry was false and is corrected above:* it said the
+block spelling of `lx config set` "is the spelling the README's own example
+uses". No README example uses it — all six are the leaf spelling. `_landed_at` is
+right for the reason it now gives, which is that a rule is about where a field
+lands; the citation was decoration, and decoration is where an unchecked claim
+hides.
+
 ## 2026-08-19 · A project can say how far along it is, and the thing it cannot say is a timestamp
 
 Closing HANDOFF-203, which A7 scheduled on 2026-07-28 and D6 pushed to the back

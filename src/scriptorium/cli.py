@@ -25,6 +25,7 @@ from .config import (
     canonical_tone,
     dump_json,
     get_in,
+    has_version_segment,
     load_config,
     load_dnt,
     load_glossary,
@@ -49,6 +50,15 @@ from .docio import (
 from .formats import UnknownFormat
 from .mask import placeholder_ids, repair_placeholders
 from .normalize import normalize, polish_rendered, reseat_outer_blanks
+
+# `main`'s `except` tuple needs this name at module scope. It comes from
+# `providers.errors`, which imports nothing, rather than from `providers` —
+# importing the package pulls `urllib.request` and with it `ssl`, `http.client`,
+# `socket` and fifteen `email` submodules into every command. Measured
+# 2026-08-20: that roughly doubles the cost of importing `scriptorium.cli`,
+# 41 ms to 77 ms, which `lx --help` on a bare interpreter should not pay. The
+# rest of `providers` stays behind a function-local import, with `translate`.
+from .providers.errors import ProviderError
 from .store import (
     HUMAN,
     StateVersionError,
@@ -2877,14 +2887,60 @@ def cmd_config_get(args, cfg):
     _out(do_config_get(cfg, args.key))
 
 
+def _landed_at(pattern, parts, value):
+    """Every ``(dotted key, value)`` this write put at a position matching `pattern`.
+
+    **Because a rule is about where a field lands, not where it was addressed**,
+    and a *note* about a field is worth no less than a rule about it. The
+    validators already reach inside a JSON block — `lx config set providers.x
+    '{"base_url": …}'` is checked by `_field_base_url` — while the advisory lines
+    below were keyed on `parts[-1]` and so fired for the leaf spelling and stayed
+    silent for the block. Measured 2026-08-20: `lx config set providers.x
+    '{"base_url": …}'` was validated and then printed nothing at all.
+    """
+    found, want = [], pattern.split(".")
+
+    def walk(path, node):
+        if _pattern_matches(pattern, path):
+            found.append((list(path), node))
+            return
+        if isinstance(node, dict) and len(path) < len(want):
+            for name, below in node.items():
+                walk(path + [name], below)
+
+    walk(list(parts), value)
+    return found
+
+
 def cmd_config_set(args, cfg):
     old, new = do_config_set(cfg, args.key, args.value, args.config)
     parts = split_key(args.key)
     was = "unset" if old is MISSING else _rendered(parts, old)
     _out(f"{args.key}: {was} → {_rendered(parts, new)}")
-    if parts[-1] == "base_url":
-        _out("that is where the document under translation is sent — "
+    for path, url in _landed_at("providers.*.base_url", parts, new):
+        # `path[1]`, never `key.split(".")[1]`. A provider may be named with a
+        # dot in it — `lx config set providers '{"a.b": {…}}'` writes one — and
+        # splitting the joined key back apart pointed `--provider` at "a".
+        _out(f"{'.'.join(path)} is where the document under translation is sent — "
              "check it before the next run")
+        # Said, never enforced, and the condition is "no version segment" rather
+        # than "does not end in /v1". Both halves were decided on 2026-08-20
+        # against a survey of what thirty real clients do, and both have a named
+        # failure behind them. *Not enforced*, because a bare
+        # `http://127.0.0.1:8088` is a working llama.cpp chat endpoint — measured
+        # — and every tool that repaired or refused this has a bug list to show
+        # for it. *Not `/v1`*, because Continue.dev told a `/v2` user they had
+        # forgotten `/v1` (#7682), and `/api/v1` and `/v1beta` are ordinary.
+        #
+        # It names the key and not the value: the line above already printed the
+        # value, and a second display surface for a `base_url` is a thing to add
+        # deliberately or not at all — invariant 6, and the two surfaces that
+        # were found missing from that list on 2026-08-13.
+        if not has_version_segment(url):
+            _out(f"  note: its path carries no API version segment, where a hosted "
+                 f"endpoint usually has one. Not an error — a local runtime or a "
+                 f"proxy behind a prefix may be exactly this. "
+                 f"`lx models --provider {path[1]}` asks it directly.")
     if parts[-1] == "api_key_env" and new and not os.environ.get(new):
         _out(f"{new} is not set in this environment yet; export it before running")
     if args.key in PATH_VALUED_KEYS and _escapes_project(new):
@@ -2949,6 +3005,81 @@ def cmd_providers(args, cfg):
             f"{p['key_env']} set" if p["key_present"] else f"{p['key_env']} MISSING")
         _out(f"{p['name']:12} {p['kind']:10} {p['model']:28} {p['base_url']:34} {key}")
     _out("\nrouting: " + "  ".join(_route_word(cfg, s) for s in ROUTING_STAGES))
+
+
+def do_models(cfg, provider=None):
+    """What a backend says it serves: ``(name, configured_model, rows)``.
+
+    `rows` is a list of ``{"id", "status"}`` from `Provider.list_models`, sorted
+    by id. `configured_model` is what this project would send today, resolved
+    through `config.resolve_route` exactly as a run would resolve it — so the
+    two answers can be compared, which is the only reason to print them
+    together.
+
+    **The stage is `draft`.** Not a parameter, because a listing is a property of
+    a *backend* and every stage that reaches one reaches the same endpoint;
+    `--provider` is how you ask a different backend, and that is the axis that
+    exists. A `--stage` flag would let two spellings of "ask llamacpp what it
+    has" disagree.
+
+    **Advisory, and it does not gate anything.** Nothing checks a configured
+    `model` against this list. A backend may serve a model it does not
+    enumerate — a single-model `llama-server` ignores the field entirely and
+    still answers — and a list that became a gate would refuse a working
+    configuration on the strength of an endpoint the OpenAI-compatible world
+    treats as optional.
+    """
+    from .providers import build
+    name, configured = resolve_route(cfg, "draft", provider)
+    return name, configured, build(name, cfg, configured).list_models()
+
+
+def cmd_models(args, cfg):
+    from .providers import available
+    name, configured, rows = do_models(cfg, args.provider)
+    if args.json:
+        _out(json.dumps({"provider": name, "configured": configured, "models": rows},
+                        ensure_ascii=False, indent=2))
+        return
+    # `printable_url` rather than the raw `base_url`, for the reason invariant 6
+    # gives: this is a display surface, and the enumerated list of them is a
+    # symptom of the rule rather than its definition. Taken from `available`,
+    # which already masks, so there is no second answer about what is printable.
+    spec = next((p for p in available(cfg) if p["name"] == name), {})
+    _out(f"{name} ({spec.get('kind', '')} @ {spec.get('base_url', '')}) · "
+         f"{len(rows)} model(s)")
+    if not rows:
+        _out("  the backend answered an empty list")
+    # Capped, because the column is padded to the widest row and the rows came
+    # from the backend. `Provider._sane` already refuses a field longer than
+    # `_MAX_FIELD`, so this is the second of two — but the first is in a class a
+    # future backend might not use, and a padding width is the kind of arithmetic
+    # that turns an untrusted number into 400 MB of stdout.
+    width = min(max((len(m["status"]) for m in rows), default=0), 12)
+    for m in rows:
+        # The marker is on the *configured* model, not on a loaded one. Which
+        # model is resident is the backend's business and changes by itself;
+        # which one this project would send is the answer the reader came for.
+        mark = "  ← configured" if m["id"] == configured else ""
+        _out(f"  {m['status']:{width}}  {m['id']}{mark}" if width else
+             f"  {m['id']}{mark}")
+    # **Name the key the value actually came from.** `configured` is resolved
+    # most-specific-first, so a `routing.draft` of `{"provider": …, "model": …}`
+    # supplies it and `providers.<name>.model` does not — and both lines below
+    # used to say `providers.<name>.model` regardless. The result was a note
+    # quoting a value that `lx config get providers.<name>.model` did not return,
+    # and a remedy that changed nothing when followed. Found by the adversarial
+    # pass, 2026-08-20.
+    _, from_entry = route_entry(cfg, "draft")
+    if from_entry and not args.provider:
+        holder, remedy = "routing.draft", f"lx routing set draft {name}:<id>"
+    else:
+        holder, remedy = f"providers.{name}.model", f"lx config set providers.{name}.model <id>"
+    if configured and not any(m["id"] == configured for m in rows):
+        _out(f"\nnote: {holder} is {configured!r}, which this backend did not list. "
+             f"A single-model server ignores the field and will still answer; a "
+             f"router will refuse with 400.")
+    _out(f"\nto use one: {remedy}")
 
 
 def _route_word(cfg, stage):
@@ -3276,6 +3407,17 @@ def build_parser():
     sub.add_parser("init", help="scaffold config and state").set_defaults(fn=cmd_init)
     sub.add_parser("providers", help="list configured backends").set_defaults(fn=cmd_providers)
 
+    md = sub.add_parser(
+        "models", help="ask a backend which models it serves",
+        description="Ask a configured backend what it serves, so a model id can be "
+                    "copied rather than typed. A llama.cpp server in router mode "
+                    "selects on an exact id and answers 400 for anything else, and "
+                    "its ids are long; this is how you find them.")
+    md.add_argument("--provider", help="provider name from lx.config.json; "
+                                       "default is whatever routing.draft names")
+    md.add_argument("--json", action="store_true", help="machine-readable output")
+    md.set_defaults(fn=cmd_models)
+
     cf = sub.add_parser("config", help="read and write lx.config.json")
     cf_sub = cf.add_subparsers(dest="action", required=True)
     cf_get = cf_sub.add_parser(
@@ -3461,9 +3603,18 @@ def main(argv=None):
         # third thing.
         cfg = load_config(args.config)
         args.fn(args, cfg)
+    # `ProviderError` joined this tuple on 2026-08-20, with `lx models` — the
+    # first command whose whole job is a call to a backend, so the first one that
+    # can fail with nothing translated and nothing to report but the failure.
+    # Every other command reaches a provider through `translate.run_batch` or
+    # `retry_one`, which swallow it into a per-segment reason; the two paths that
+    # never did are `providers.build` refusing an unknown provider name, and this
+    # command. Both answered a traceback and exit 1 where every other refusal in
+    # this CLI is one sentence and exit 2.
     except (FileNotFoundError, StateVersionError, UnsupportedSource,
             GlossaryWriteError, UnknownFormat, UndecodableDocument,
-            StyleSheetError, ConfigError, UnusableTarget, UnnamedRegister) as e:
+            StyleSheetError, ConfigError, UnusableTarget, UnnamedRegister,
+            ProviderError) as e:
         print(f"lx: {e}", file=sys.stderr)
         sys.exit(2)
     except BrokenPipeError:

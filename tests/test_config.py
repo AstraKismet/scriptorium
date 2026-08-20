@@ -873,3 +873,197 @@ def test_an_argparse_namespace_from_the_parser_carries_every_flag_translate_read
         for flag in ("provider", "model", "batch", "concurrency", "dry_run"):
             assert hasattr(args, flag), f"{command} is missing --{flag}"
         assert isinstance(args, argparse.Namespace)
+
+
+# ── the local runtimes a fresh project is offered ──────────────────────────
+
+def test_a_fresh_project_is_scaffolded_with_a_llamacpp_entry(tmp_path):
+    """`lx init` offers llama.cpp beside Ollama and LM Studio.
+
+    Membership, not an exact set: `DEFAULT_CONFIG` gaining an entry is additive
+    — `config.load_config` layers a user's file over it, so an existing project
+    gains the entry without losing anything — and a test that pinned the whole
+    set would turn every future addition into a red suite for no defect.
+    """
+    env = _project(tmp_path)
+    written = _config(tmp_path)["providers"]
+    for name in ("local", "lmstudio", "llamacpp", "openai", "claude"):
+        assert name in written, f"{name} is not scaffolded"
+
+    entry = written["llamacpp"]
+    assert entry["kind"] == "openai", "llama.cpp is OpenAI-compatible; not a third kind"
+    assert entry["api_key_env"] == "", "a local runtime wants no Authorization header"
+    # 8080 is llama.cpp's own documented default, not the port any one machine
+    # happens to use — the two entries above it ship Ollama's 11434 and LM
+    # Studio's 1234 for the same reason.
+    assert entry["base_url"] == "http://localhost:8080/v1"
+    # Longer than the 300 the other two local runtimes get, and the number comes
+    # from a measurement: `llama-server` in router mode autoloads on demand and
+    # **blocks the caller** for the whole load rather than answering a retryable
+    # status, so `timeout` is the only knob that helps. See `config.py`.
+    assert entry["timeout"] > DEFAULT_CONFIG["providers"]["lmstudio"]["timeout"]
+
+    result = _lx(["config", "get", "providers.llamacpp.base_url"], tmp_path, env)
+    assert result.returncode == 0
+    assert _out(result).strip() == "http://localhost:8080/v1"
+
+
+def test_the_default_routing_still_names_local_after_llamacpp_was_added():
+    """Adding a provider must not repoint anybody's stages.
+
+    Separated from the membership test above because the two fail for different
+    reasons: this one is the compatibility promise, and it is the assertion a
+    well-meant "make llama.cpp the default" would break.
+    """
+    for stage in ROUTING_STAGES:
+        assert DEFAULT_CONFIG["routing"][stage] == "local"
+
+
+# ── the version segment: said, never enforced ──────────────────────────────
+
+@pytest.mark.parametrize("url", [
+    "https://api.openai.com/v1",
+    "http://localhost:11434/v1",
+    "http://localhost:8080/v1/",
+    "https://host/api/v1",              # a proxy behind a prefix of its own
+    "https://res.openai.azure.com/openai/v1/",
+    "https://host/v1beta",              # Google's spelling
+    "https://host/v1beta2",             # and its numbered variant
+    "https://host/v1alpha1",
+    "https://host/v2",                  # Continue.dev #7682's endpoint
+    "https://host/v10/chat",
+    "https://host/V1",                  # case: a path is not lowercased for us
+])
+def test_an_ordinary_versioned_endpoint_has_a_version_segment(url):
+    assert cli.has_version_segment(url) is True
+
+
+@pytest.mark.parametrize("url", [
+    "http://127.0.0.1",                # a bare host: llama.cpp serves chat here, measured
+    "http://127.0.0.1/",
+    "https://host/openai",
+    # The next four all contain the literal text `/v1/` or `/v1` somewhere in the
+    # URL and none of them in the *path*. They are here because a mutation that
+    # searched the whole URL instead of `urlsplit(url).path` survived the rest of
+    # this list: `https://v1.example.com/` does not distinguish the two, since the
+    # `v1` there is followed by a dot and matches neither way.
+    "https://v1/",                     # the host is literally `v1`
+    "https://v1.example.com/",         # the version is in the HOST, not the path
+    "https://host/?p=/v1/",            # in the query
+    "https://host/#/v1/",              # in the fragment
+    "https://host/?version=v1",
+    "https://host/vone",
+    "https://host/service/v8080x",     # a version-looking run that is not a segment
+    "https://host/inv1",
+    # `\\d` is Unicode-aware in Python, so these three silenced the note until the
+    # pattern was narrowed to `[0-9]`. An endpoint served under an Arabic-Indic
+    # or fullwidth "1" is not a thing; a regex that accepts one is.
+    "http://host/v١",             # Arabic-Indic one
+    "http://host/v１",             # fullwidth one
+    "http://host/v۱",             # extended Arabic-Indic one
+    "",
+    None,
+    b"http://host",                    # not a string at all
+    12345,
+])
+def test_a_path_without_a_version_segment_is_reported_as_such(url):
+    """And each of these is still a legal thing to configure.
+
+    The bare host at the top is the shape that decided the whole
+    question: measured on 2026-08-20, llama.cpp serves chat completions there and
+    at `/v1` alike, so a rule that refused it or repaired it would have broken a
+    working configuration. The helper only ever *reports*.
+    """
+    assert cli.has_version_segment(url) is False
+
+
+def test_a_base_url_with_no_version_segment_is_written_and_noted(tmp_path):
+    """Noted, and **written** — the note is not a refusal wearing a hat.
+
+    Deleting the `has_version_segment` branch in `cmd_config_set` makes the
+    second assertion fail; turning the note into a `ConfigError` makes the first
+    and third fail. Both mutations were run.
+    """
+    env = _project(tmp_path)
+    result = _lx(["config", "set", "providers.llamacpp.base_url",
+                  "http://127.0.0.1"], tmp_path, env)
+    assert result.returncode == 0, "a note never blocks the write"
+    assert "version segment" in _out(result)
+    assert _config(tmp_path)["providers"]["llamacpp"]["base_url"] == "http://127.0.0.1"
+    # It points at the command that can actually answer the question, rather
+    # than asserting what the path should have been.
+    assert "lx models --provider llamacpp" in _out(result)
+
+
+def test_a_versioned_base_url_is_written_without_a_note(tmp_path):
+    env = _project(tmp_path)
+    for url in ("http://127.0.0.1/v1", "https://host/api/v1", "https://host/v2"):
+        result = _lx(["config", "set", "providers.llamacpp.base_url", url], tmp_path, env)
+        assert result.returncode == 0
+        assert "version segment" not in _out(result), f"{url} was libelled"
+
+
+def test_the_note_reaches_a_base_url_written_inside_a_block(tmp_path):
+    """A rule is about where a field lands, and so is a note about that field.
+
+    The advisory lines were keyed on the last segment of the key, so the leaf
+    spelling printed them and the block spelling — which is what the README's own
+    worked example uses — printed nothing. Measured 2026-08-20.
+    """
+    env = _project(tmp_path)
+    block = json.dumps({"kind": "openai", "base_url": "http://127.0.0.1",
+                        "model": "m", "api_key_env": ""})
+    result = _lx(["config", "set", "providers.router", block], tmp_path, env)
+    assert result.returncode == 0
+    assert "version segment" in _out(result)
+    assert "providers.router.base_url is where the document" in _out(result)
+
+
+def test_the_note_addresses_a_provider_whose_name_contains_a_dot(tmp_path):
+    """A provider name is a key, and a key may hold a dot; a joined path is not its address.
+
+    `lx config set providers '{"a.b": {…}}'` writes one, and splitting the joined
+    dotted key back apart pointed the advice at `--provider a`, which does not
+    exist. Found by the adversarial pass, 2026-08-20.
+    """
+    env = _project(tmp_path)
+    block = json.dumps({"a.b": {"kind": "openai", "base_url": "http://127.0.0.1",
+                                "model": "m", "api_key_env": ""}})
+    result = _lx(["config", "set", "providers", block], tmp_path, env)
+    assert result.returncode == 0
+    assert "lx models --provider a.b" in _out(result)
+    assert "--provider a`" not in _out(result)
+    # And the name it printed is one `lx models` actually resolves.
+    assert "unknown provider" not in _both(
+        _lx(["models", "--provider", "a.b"], tmp_path, env))
+
+
+def test_a_note_never_appears_where_no_base_url_landed(tmp_path):
+    env = _project(tmp_path)
+    for key, value in (("batch.size", "10"),
+                       ("providers.llamacpp.model", "some/model:Q4"),
+                       ("providers.llamacpp.timeout", "900")):
+        result = _lx(["config", "set", key, value], tmp_path, env)
+        assert result.returncode == 0
+        assert "version segment" not in _out(result)
+        assert "where the document under translation is sent" not in _out(result)
+
+
+def test_a_router_model_id_round_trips_byte_identically(tmp_path):
+    """A slash, a dot and a colon in a model id, through `set` and back out of `get`.
+
+    The dot is the one under suspicion: dotted-key addressing is the mechanism
+    in this project that could plausibly read it as structure. Here it is a
+    *value*, and `split_key` never sees it — but "should" is not a test, and a
+    llama.cpp router serves nothing but ids of this shape.
+    """
+    env = _project(tmp_path)
+    for model in ("unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_M",
+                  "mradermacher/translategemma-12b-it-i1-GGUF:Q4_K_M:IMMERSIVETRANSLATE",
+                  "ScrambieBambie_Snowpiercer-15B-v2_Q8_0"):
+        assert _lx(["config", "set", "providers.llamacpp.model", model],
+                   tmp_path, env).returncode == 0
+        result = _lx(["config", "get", "providers.llamacpp.model"], tmp_path, env)
+        assert result.returncode == 0
+        assert _out(result).strip() == model, "the id came back changed"
+        assert _config(tmp_path)["providers"]["llamacpp"]["model"] == model

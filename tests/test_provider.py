@@ -210,6 +210,46 @@ def test_a_base_url_is_masked_everywhere_it_can_be_read():
     assert "SECRET" not in str(caught.value)
     assert "127.0.0.1:1" in str(caught.value)
 
+def test_a_listing_that_answers_the_wrong_shape_masks_the_url(models_server):
+    """The surface the adversarial pass found, and it has to be *reached* to be tested.
+
+    Both `list_models` methods interpolated the raw `base_url` into this message.
+    A hand-edited `http://user:SECRET@host/v1?key=abc` was masked by
+    `lx providers` and printed in full by `lx models` beside it — the same defect
+    closed for `describe()` on 2026-08-13, reintroduced by a new surface. It
+    reaches stderr through `cli.main`'s exit-2 tuple.
+
+    **The server must answer**, which is why this uses the live mock rather than
+    a dead port. The first version of this test pointed at `127.0.0.1:1`, failed
+    to connect, and asserted against the *`URLError`* message — which was already
+    masked and had been for a year. It passed without ever executing the line it
+    was written for.
+
+    **The credential shape used here is the query string, not userinfo**, and
+    that is a measured constraint rather than a preference:
+    `urllib.request.urlopen` cannot reach a URL carrying userinfo at all — it
+    fails `getaddrinfo` before a byte goes out — so the `?key=SECRET` proxy
+    shape is the only one that reaches this branch. `printable_url` strips both,
+    and the userinfo half is covered by the `describe()` assertion above.
+    """
+    port = models_server.rsplit(":", 1)[1].split("/")[0]
+    MODELS["payload"] = {"object": "list"}          # no `data` array: the shape error
+    os.environ["LX_TEST_KEY"] = "sk-not-a-real-key"
+    try:
+        for kind, url in (("openai", f"http://127.0.0.1:{port}/v1?key=SUPERSECRET"),
+                          ("anthropic", f"http://127.0.0.1:{port}?key=SUPERSECRET")):
+            spec = {"providers": {"p": {
+                "kind": kind, "base_url": url, "model": "m", "retries": 0,
+                "timeout": 5, "api_key_env": "LX_TEST_KEY" if kind == "anthropic" else ""}}}
+            with pytest.raises(ProviderError, match="model list") as caught:
+                build("p", spec).list_models()
+            said = str(caught.value)
+            assert "SUPERSECRET" not in said, f"{kind} listing leaked the query"
+            assert "sk-not-a-real-key" not in said, f"{kind} listing leaked the key"
+            assert "127.0.0.1" in said, "the host survives, or the message is unfollowable"
+    finally:
+        os.environ.pop("LX_TEST_KEY", None)
+
 
 def test_unreachable_server_gives_actionable_message():
     # timeout=0.2 rather than 1: port 1 is refused instantly on Linux but times
@@ -380,3 +420,593 @@ def test_a_stalled_read_gives_an_actionable_message(stalling):
     p = build("local", _cfg(stalling, retries=0, timeout=0.3))
     with pytest.raises(ProviderError, match="timed out"):
         p.complete("s", "u")
+
+
+# ── an empty completion ────────────────────────────────────────────────────
+
+EMPTYISH = {"content": ""}
+
+
+class EmptyContentHandler(BaseHTTPRequestHandler):
+    """A 200 whose `message.content` is whatever the test staged.
+
+    The path this isolates was measured on 2026-08-20 and is not hypothetical:
+    `complete()` returned `''` with no error, and the failure surfaced two hops
+    later as `no JSON object in reply: ''` out of `parse_reply` — a message that
+    reads as a protocol fault and sends the reader to look at the prompt.
+    """
+
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        body = json.dumps({"choices": [{"message": {"content": EMPTYISH["content"]}}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+@pytest.fixture(scope="module")
+def emptyish():
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), EmptyContentHandler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{httpd.server_address[1]}/v1"
+    httpd.shutdown()
+
+
+@pytest.mark.parametrize("content", ["", "   ", "\n\n", "\t"])
+def test_an_empty_completion_is_a_provider_error(emptyish, content):
+    """Every spelling of "the model said nothing", not only `None`.
+
+    Whitespace is in the list because `translate.accept` strips before it
+    judges, so a run of spaces was already destined to be refused one layer
+    later as "empty translation" — the two agreeing at the transport is what
+    makes the reason the reader sees the true one.
+    """
+    EMPTYISH["content"] = content
+    p = build("local", _cfg(emptyish, retries=0))
+    with pytest.raises(ProviderError, match="empty completion"):
+        p.complete("s", "u")
+    EMPTYISH["content"] = ""
+
+
+def test_a_completion_that_is_not_text_is_a_shape_error(emptyish):
+    """A gateway answering the content-parts shape puts a list here.
+
+    Before the empty-completion guard the list was returned unchanged and failed
+    in `parse_reply`; with a bare `.strip()` it would fail here as an
+    `AttributeError`, which is worse than either. It belongs with the other
+    shape refusal.
+    """
+    EMPTYISH["content"] = [{"type": "text", "text": "hi"}]
+    p = build("local", _cfg(emptyish, retries=0))
+    with pytest.raises(ProviderError, match="unexpected response shape"):
+        p.complete("s", "u")
+    EMPTYISH["content"] = ""
+
+
+def test_a_completion_of_a_single_zero_is_not_empty(emptyish):
+    """`"0"` is a reply, and the guard must not eat it.
+
+    Cheap, and it pins that the decision is made on the stripped *string* rather
+    than on the truthiness of whatever was parsed.
+    """
+    EMPTYISH["content"] = "0"
+    assert build("local", _cfg(emptyish, retries=0)).complete("s", "u") == "0"
+    EMPTYISH["content"] = ""
+
+
+# ── asking a backend what it serves ────────────────────────────────────────
+
+MODELS = {"payload": None, "method": None, "body_len": None, "auth": None}
+
+
+class ModelsHandler(BaseHTTPRequestHandler):
+    """`GET /v1/models`, answering whatever the test staged.
+
+    It records the method and the body length, because *how* the listing is
+    fetched is part of the contract rather than an implementation detail:
+    llama.cpp answers `POST /v1/models` with a 404 while `POST /models` means
+    "add a model to the router". A listing that sent a body could therefore
+    reach a mutating endpoint on a real server. Measured against build
+    `b9892-ee445f93d`, 2026-08-20.
+    """
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        MODELS["method"] = self.command
+        MODELS["body_len"] = self.headers.get("Content-Length")
+        MODELS["auth"] = self.headers.get("Authorization")
+        body = json.dumps(MODELS["payload"]).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+@pytest.fixture(scope="module")
+def models_server():
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), ModelsHandler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{httpd.server_address[1]}/v1"
+    httpd.shutdown()
+
+
+def test_a_plain_openai_model_list_is_read(models_server):
+    MODELS["payload"] = {"object": "list",
+                         "data": [{"id": "gpt-4o-mini"}, {"id": "gpt-4o"}]}
+    rows = build("local", _cfg(models_server, retries=0)).list_models()
+    assert rows == [{"id": "gpt-4o", "status": ""},
+                    {"id": "gpt-4o-mini", "status": ""}], "sorted by id; status empty"
+
+
+def test_a_listing_is_a_GET_carrying_no_body(models_server):
+    MODELS["payload"] = {"data": [{"id": "m"}]}
+    build("local", _cfg(models_server, retries=0)).list_models()
+    assert MODELS["method"] == "GET"
+    assert MODELS["body_len"] is None, "a listing must not carry a request body"
+
+
+def test_a_listing_sends_no_auth_header_without_a_key(models_server):
+    MODELS["payload"] = {"data": [{"id": "m"}]}
+    build("local", _cfg(models_server, retries=0)).list_models()
+    assert MODELS["auth"] is None, "a keyless local server wants no Authorization"
+
+
+def test_a_routers_status_object_is_read_as_its_value(models_server):
+    """llama.cpp's router puts an object in `status`, not a string.
+
+    Measured against build `b9892-ee445f93d`: `status` is
+    `{"value": "sleeping", "args": [...], "preset": "..."}`. Reading it as a
+    string is the mistake this pins — and `args` is the whole `llama-server`
+    argv, which carries absolute paths off the operator's disk and is not ours
+    to print. The reader wants `value` and nothing else in there.
+    """
+    MODELS["payload"] = {"data": [
+        {"id": "b/model:Q4", "status": {
+            "value": "sleeping",
+            "args": ["llama-server.exe", "--model", "C:/private/secret.gguf"],
+            "preset": "[b/model:Q4]\nmodel = C:/private/secret.gguf\n"}},
+        {"id": "a/model:Q8", "status": {"value": "loaded"}},
+    ]}
+    rows = build("local", _cfg(models_server, retries=0)).list_models()
+    assert rows == [{"id": "a/model:Q8", "status": "loaded"},
+                    {"id": "b/model:Q4", "status": "sleeping"}]
+    assert not any("secret.gguf" in str(r) for r in rows), "argv and preset stay behind"
+
+
+def test_a_model_id_carrying_a_dot_and_a_colon_survives(models_server):
+    """A router's ids are not identifier-shaped, and nothing may split them.
+
+    `unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_M` carries a slash, a dot and a colon. The
+    dot earns the test: dotted-key addressing is the one mechanism here that
+    could plausibly read it as structure, and in this position it is a *value*.
+    """
+    MODELS["payload"] = {"data": [{"id": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_M"}]}
+    rows = build("local", _cfg(models_server, retries=0)).list_models()
+    assert rows == [{"id": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_M", "status": ""}]
+
+
+@pytest.mark.parametrize("payload", [
+    {"object": "list"},          # no `data` at all
+    {"data": {"gpt-4o": {}}},    # an object where the array belongs
+    ["gpt-4o"],                  # a bare array, without the envelope
+])
+def test_a_reply_that_is_not_a_model_list_is_refused(models_server, payload):
+    """Named as a listing failure rather than flattened into an empty list.
+
+    "This backend serves nothing" and "that endpoint answered something else"
+    are different facts, and a UI that renders the first for the second shows an
+    empty dropdown with nothing visibly wrong.
+    """
+    MODELS["payload"] = payload
+    p = build("local", _cfg(models_server, retries=0))
+    with pytest.raises(ProviderError, match="model list"):
+        p.list_models()
+
+
+def test_a_row_without_an_id_is_dropped_rather_than_fatal(models_server):
+    MODELS["payload"] = {"data": [{"id": "keep"}, {"object": "model"}, {"id": ""}, "junk"]}
+    assert build("local", _cfg(models_server, retries=0)).list_models() == [
+        {"id": "keep", "status": ""}]
+
+
+@pytest.mark.parametrize("evil", [
+    "evil\x1b[2K\rTOTALLY-DIFFERENT-MODEL",   # erase-line + CR: renders as the second half alone
+    "line1\nline2-forged-row",                # forges a whole extra row in the listing
+    "bell\x07and\x08backspace",
+    "tab\tseparated",
+    "bidi‮override",                     # U+202E reverses everything after it
+    "zero​width",
+])
+def test_a_model_id_carrying_a_control_character_is_dropped(models_server, evil):
+    """`lx models` is the one place remote text reaches a terminal.
+
+    Measured 2026-08-20 against this very payload: `\\x1b[2K\\r` erases the line
+    it is on, so a backend could display one id while being another, or wipe out
+    the advisory line printed under the listing; an embedded newline forged a row
+    that looked like a model. `--json` was never exposed, because `json.dumps`
+    escapes all of these — which is why the fix is at the boundary and not at the
+    print, so both surfaces agree.
+
+    Dropping the `_has_control` filter makes this fail. That mutation was run.
+    """
+    MODELS["payload"] = {"data": [{"id": "good"}, {"id": evil}]}
+    assert build("local", _cfg(models_server, retries=0)).list_models() == [
+        {"id": "good", "status": ""}]
+
+
+def test_a_control_character_in_a_status_drops_the_row_too(models_server):
+    """`status` prints beside the id and is remote text just the same."""
+    MODELS["payload"] = {"data": [{"id": "good"}, {"id": "bad", "status": "load\red"}]}
+    assert build("local", _cfg(models_server, retries=0)).list_models() == [
+        {"id": "good", "status": ""}]
+
+
+def test_an_ordinary_router_id_is_not_mistaken_for_control_characters(models_server):
+    """The filter must not eat the ids this feature exists to print.
+
+    Slashes, colons, dots, underscores and CJK are all category `L`, `N`, `P` or
+    `S` — never `Cc` or `Cf`. Asserted because a filter written as "printable
+    ASCII only" would pass every test above and quietly refuse a real id.
+    """
+    ids = ["mradermacher/translategemma-12b-it-i1-GGUF:Q4_K_M:IMMERSIVETRANSLATE",
+           "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_M",
+           "ScrambieBambie_Snowpiercer-15B-v2_Q8_0",
+           "ggml-org/bge-m3-Q8_0-GGUF:Q8_0",
+           "模型/繁體-中文:Q4"]
+    MODELS["payload"] = {"data": [{"id": i} for i in ids]}
+    rows = build("local", _cfg(models_server, retries=0)).list_models()
+    assert [r["id"] for r in rows] == sorted(ids)
+
+
+def test_an_anthropic_listing_refuses_without_a_key():
+    """The refusal `complete` already gives, for the same reason: that endpoint is authenticated."""
+    cfg = {"providers": {"c": {"kind": "anthropic", "base_url": "https://example.invalid",
+                               "model": "m", "api_key_env": "", "retries": 0}}}
+    with pytest.raises(ProviderError, match="no API key"):
+        build("c", cfg).list_models()
+
+
+# ── what the adversarial pass over this feature found ──────────────────────
+
+class NotJsonHandler(BaseHTTPRequestHandler):
+    """A 200 that is HTML, which is what a proxy or a web UI at the root answers."""
+
+    def log_message(self, *a):
+        pass
+
+    def _reply(self):
+        body = b"<html><body>404 not found</body></html>"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    do_GET = do_POST = _reply
+
+
+@pytest.fixture(scope="module")
+def not_json():
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), NotJsonHandler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{httpd.server_address[1]}"
+    httpd.shutdown()
+
+
+def test_a_200_that_is_not_json_is_a_provider_error(not_json):
+    """Not a `JSONDecodeError` escaping to the top of the process.
+
+    `json.loads` sat outside the three exception handlers, and `cli.main` has no
+    `ValueError` in its exit-2 tuple — so `lx models` answered a traceback and
+    exit 1. Every other caller was shielded by `translate.run_batch`'s blanket
+    `except Exception`; `do_models` is not. The trigger is exactly the
+    misconfiguration `_url_hint` exists for, and OpenRouter's bare host answers
+    200 with 131 KB of HTML.
+    """
+    for call in (lambda p: p.complete("s", "u"), lambda p: p.list_models()):
+        p = build("local", _cfg(not_json, retries=0))
+        with pytest.raises(ProviderError, match="not JSON"):
+            call(p)
+
+
+def test_a_listing_is_bounded_below_the_completion_budget(models_server):
+    """`timeout` and `retries` are sized for a model load; a listing never incurs one.
+
+    The shipped `llamacpp` entry is `timeout: 600` with the default 3 retries,
+    which is **40 minutes** before a black-holed listing gives up — measured — on
+    a command `docs/windows-setup.md` sells as the quick way to check the server
+    is up. Bounded downward only: a project that chose a shorter timeout keeps it.
+    """
+    from scriptorium.providers.base import _LIST_RETRIES, _LIST_TIMEOUT
+
+    seen = {}
+    p = build("local", _cfg(models_server, timeout=600, retries=3))
+    real = p._request
+
+    def spy(url, headers, payload=None, method="POST", timeout=None, retries=None):
+        seen[method] = (timeout, retries)
+        return real(url, headers, payload=payload, method=method,
+                    timeout=timeout, retries=retries)
+
+    p._request = spy
+    MODELS["payload"] = {"data": [{"id": "m"}]}
+    p.list_models()
+    assert seen["GET"] == (_LIST_TIMEOUT, _LIST_RETRIES)
+    assert _LIST_TIMEOUT < 600 and _LIST_RETRIES < 3
+
+    p2 = build("local", _cfg(models_server, timeout=5, retries=0))
+    p2._request = lambda *a, **k: seen.update({"short": (k.get("timeout"), k.get("retries"))}) or {"data": []}
+    p2.list_models()
+    assert seen["short"] == (5, 0), "a shorter budget than the cap is kept"
+
+
+def test_post_stays_a_post_even_with_a_null_payload():
+    """The verb is explicit, not inferred from whether there is a body.
+
+    It was inferred, so `_post(url, None, headers)` issued a silent GET —
+    unreachable from today's two callers and a trap for the third.
+    """
+    seen = {}
+    p = build("local", _cfg("http://127.0.0.1:1/v1", retries=0, timeout=0.1))
+    p._request = lambda url, headers, payload=None, method="POST", **k: seen.update(
+        {"method": method, "payload": payload})
+    p._post("http://127.0.0.1:1/v1/x", None, {})
+    assert seen["method"] == "POST"
+
+
+def test_an_anthropic_listing_drops_forged_rows_too():
+    """The untrusted-reply rules belong to every backend, not to one file.
+
+    The control-character filter was written private to `openai_compat.py`, and
+    a `kind: "anthropic"` `base_url` is configurable — LiteLLM serves the
+    Messages API — so this path could forge terminal rows while the other could
+    not. Moving `_sane`/`_listing` onto `Provider` is what makes them agree.
+    """
+    from scriptorium.providers.base import Provider
+
+    rows = [{"id": "keep"},
+            {"id": "evil\x1b[2K\rTOTALLY-DIFFERENT"},
+            {"id": "forged\nrow"},
+            {"id": "bidi‮override"}]
+    assert Provider._listing(rows) == [{"id": "keep", "status": ""}]
+
+
+@pytest.mark.parametrize("evil", ["line separator", "para separator"])
+def test_a_unicode_line_separator_is_dropped_as_well(models_server, evil):
+    """`json.dumps(ensure_ascii=False)` escapes C0 and nothing else.
+
+    An earlier comment here claimed `--json` was protected by that. It is not:
+    C1, `Cf` and `Zl`/`Zp` all pass through it unescaped, and `U+2028` is a line
+    break to a great many renderers. The **drop** is what protects both
+    surfaces, which is why it is at the boundary and not at the print.
+    """
+    import json as _json
+    assert evil in _json.dumps({"id": evil}, ensure_ascii=False), "the premise"
+    MODELS["payload"] = {"data": [{"id": "good"}, {"id": evil}]}
+    assert build("local", _cfg(models_server, retries=0)).list_models() == [
+        {"id": "good", "status": ""}]
+
+
+def test_an_overlong_field_is_dropped_before_it_can_pad_a_column(models_server):
+    """`cmd_models` pads to the widest row it is handed, and the rows are untrusted.
+
+    Measured: one 200k-character `status.value` among 2000 ordinary rows turned
+    a listing into 400 MB of stdout in 0.76 s.
+    """
+    from scriptorium.providers.base import _MAX_FIELD
+
+    MODELS["payload"] = {"data": [{"id": "good"},
+                                  {"id": "x" * (_MAX_FIELD + 1)},
+                                  {"id": "big", "status": "s" * 200_000}]}
+    assert build("local", _cfg(models_server, retries=0)).list_models() == [
+        {"id": "good", "status": ""}]
+
+
+def test_do_models_asks_the_backend_that_routing_names(models_server):
+    """`lx models` with no `--provider` asks whatever `routing.draft` points at.
+
+    And it reports the model *this project would send*, resolved through
+    `config.resolve_route` rather than read off the provider spec — which is the
+    only reason to print the two together. A second resolver here is how the
+    listing comes to mark a model the run would not have used.
+    """
+    from scriptorium import cli
+
+    MODELS["payload"] = {"data": [{"id": "chosen"}, {"id": "other"}]}
+    cfg = {**_cfg(models_server, retries=0), "routing": {"draft": "local"}}
+    cfg["providers"]["elsewhere"] = {"kind": "openai", "base_url": "http://127.0.0.1:1/v1",
+                                     "model": "never-reached", "api_key_env": "", "retries": 0}
+
+    name, configured, rows = cli.do_models(cfg)
+    assert name == "local"
+    assert configured == "test-model", "the provider's own model, resolved not guessed"
+    assert [r["id"] for r in rows] == ["chosen", "other"]
+
+    # A routing entry naming a model of its own wins over the provider's, which
+    # is `resolve_route`'s rule and must not be re-decided here.
+    cfg["routing"] = {"draft": {"provider": "local", "model": "chosen"}}
+    assert cli.do_models(cfg)[1] == "chosen"
+
+
+# ── a base_url with no version segment ─────────────────────────────────────
+
+class NotFoundHandler(BaseHTTPRequestHandler):
+    """404 to everything, the way a server that does not serve this path answers.
+
+    This is the shape the advice used to miss entirely. A `base_url` short of its
+    version segment reaches a server that is running perfectly well and answers
+    `404` — an `HTTPError` — while the "check base_url" sentence lived only on
+    the `URLError` branch, which is *cannot connect*. The person who made the
+    mistake was the one person the message never reached.
+    """
+
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        body = b'{"error": {"message": "File Not Found", "code": 404}}'
+        self.send_response(404)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class ForbiddenHandler(NotFoundHandler):
+    """401, which means the route was found. The hint must stay silent."""
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        body = b'{"error": {"message": "no key", "code": 401}}'
+        self.send_response(401)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+@pytest.fixture(scope="module")
+def missing_route():
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), NotFoundHandler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{httpd.server_address[1]}"      # deliberately no /v1
+    httpd.shutdown()
+
+
+@pytest.fixture(scope="module")
+def unauthorized():
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), ForbiddenHandler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{httpd.server_address[1]}"      # also no /v1
+    httpd.shutdown()
+
+
+def test_a_404_on_a_path_with_no_version_segment_says_so(missing_route):
+    """The hint reaches the branch the mistake actually takes.
+
+    Remove the `self._url_hint(e.code, url)` call from the `HTTPError` handler in
+    `providers/base.py` and this fails — that is the mutation, and it was run.
+    """
+    p = build("local", _cfg(missing_route, retries=0))
+    with pytest.raises(ProviderError, match="version segment"):
+        p.complete("s", "u")
+
+
+def test_the_hint_is_silent_when_the_path_already_has_a_version(missing_route):
+    """`/v1` present and still a 404 means something else is wrong.
+
+    Repeating the version advice there is the Continue.dev #7682 failure with the
+    sign flipped: confident, irrelevant, and it sends the reader down the wrong
+    path. Removing the `has_version_segment` early return in `_url_hint` makes
+    this fail; removing the whole guard makes both this and the `/v2` case fail.
+    """
+    p = build("local", _cfg(missing_route + "/v1", retries=0))
+    with pytest.raises(ProviderError) as caught:
+        p.complete("s", "u")
+    assert "HTTP 404" in str(caught.value)
+    assert "version segment" not in str(caught.value)
+
+
+@pytest.mark.parametrize("path", ["/v2", "/v1beta", "/api/v1", "/openai/v1", "/v3/"])
+def test_no_ordinary_versioned_prefix_is_told_it_forgot_one(missing_route, path):
+    """The shapes a `/v1`-shaped rule would have libelled.
+
+    `/v2` is the measured one: Continue.dev told a user with that endpoint they
+    had forgotten `/v1`. `/api/v1` and `/openai/v1` are how a proxy and Azure
+    spell it, and `/v1beta` is Google's.
+    """
+    p = build("local", _cfg(missing_route + path, retries=0))
+    with pytest.raises(ProviderError) as caught:
+        p.complete("s", "u")
+    assert "version segment" not in str(caught.value)
+
+
+def test_a_401_is_never_told_to_check_its_path(unauthorized):
+    """A 401 means the route was found; a path hint there is a plausible lie.
+
+    Mutating `if code is not None and code != 404` to `if False` catches this.
+    """
+    p = build("local", _cfg(unauthorized, retries=0))
+    with pytest.raises(ProviderError) as caught:
+        p.complete("s", "u")
+    assert "HTTP 401" in str(caught.value)
+    assert "version segment" not in str(caught.value)
+
+
+def test_an_unreachable_host_with_no_version_segment_gets_both_sentences():
+    """The `URLError` branch keeps naming `base_url` and gains the same condition.
+
+    Both halves matter: the field is worth naming however the URL is wrong, and
+    the *prescriptive* half — "it must end in /v1" — was the part that was
+    sometimes false.
+    """
+    p = build("local", _cfg("http://127.0.0.1:1", retries=0, timeout=0.2))
+    with pytest.raises(ProviderError) as caught:
+        p.complete("s", "u")
+    assert "base_url" in str(caught.value)
+    assert "version segment" in str(caught.value)
+
+
+def test_lx_models_names_the_key_the_model_actually_came_from(models_server, capsys):
+    """`configured` is resolved most-specific-first, so the remedy must follow it.
+
+    With `routing.draft = {"provider": …, "model": …}` the value comes from the
+    routing entry, not from `providers.<name>.model` — and both the note and the
+    closing line said `providers.<name>.model` regardless. So the note quoted a
+    value `lx config get providers.<name>.model` did not return, and following
+    the printed remedy changed nothing at all. Found by the adversarial pass,
+    2026-08-20.
+    """
+    import argparse as _argparse
+
+    from scriptorium import cli
+
+    MODELS["payload"] = {"data": [{"id": "listed"}]}
+    args = _argparse.Namespace(provider=None, json=False)
+
+    # Provider-supplied: the config key is the remedy.
+    cfg = {**_cfg(models_server, retries=0), "routing": {"draft": "local"}}
+    cli.cmd_models(args, cfg)
+    out = capsys.readouterr().out
+    assert "providers.local.model is 'test-model'" in out
+    assert "lx config set providers.local.model" in out
+
+    # Entry-supplied: the routing command is, and the config key is not named —
+    # writing it would have left the note reading the same value.
+    cfg["routing"] = {"draft": {"provider": "local", "model": "from-entry"}}
+    cli.cmd_models(args, cfg)
+    out = capsys.readouterr().out
+    assert "routing.draft is 'from-entry'" in out
+    assert "lx routing set draft local:" in out
+    assert "lx config set providers.local.model" not in out
+
+
+def test_do_models_takes_a_provider_override(models_server):
+    """`--provider` names a different backend, and the model does not follow it.
+
+    `resolve_route` drops the routing entry's model when the provider is
+    overridden — a model id belongs to the backend that serves it — and this
+    command inherits that rather than restating it.
+    """
+    from scriptorium import cli
+
+    MODELS["payload"] = {"data": [{"id": "m"}]}
+    cfg = {"providers": {
+        "a": {"kind": "openai", "base_url": "http://127.0.0.1:1/v1", "model": "a-model",
+              "api_key_env": "", "retries": 0},
+        "b": {"kind": "openai", "base_url": models_server, "model": "b-model",
+              "api_key_env": "", "retries": 0},
+    }, "routing": {"draft": {"provider": "a", "model": "a-model"}}}
+
+    name, configured, rows = cli.do_models(cfg, provider="b")
+    assert (name, configured) == ("b", "b-model"), "a's model did not follow the override"
+    assert rows == [{"id": "m", "status": ""}]

@@ -162,6 +162,22 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    streaming unless the project opts in per-provider. Self-hosted runtimes reject
    unknown fields rather than ignoring them, and local support is a requirement.
 
+   This is about the **chat completion body**, which is exactly
+   `{model, messages, temperature, max_tokens, stream}` and is pinned by two
+   tests. `Provider.list_models` — `GET {base_url}/models`, added 2026-08-20 —
+   is a different endpoint and adds no field to that body. It is **advisory and
+   gates nothing**: a single-model `llama-server` ignores the `model` field
+   entirely and still answers, so a listing that became a check would refuse a
+   working configuration on the strength of an endpoint this world treats as
+   optional. It is also the one place where text from a remote server reaches a
+   terminal, so an id carrying a control character — or a line separator, or
+   an over-long field — is dropped at the boundary rather than escaped at the
+   print, and the drop is what protects **both** the listing and `--json`.
+   `json.dumps(ensure_ascii=False)` was assumed to cover the second and does
+   not: it escapes C0 and passes C1, `Cf` and `U+2028`/`U+2029` straight
+   through. Measured 2026-08-20 by the adversarial pass over the change that
+   introduced this.
+
 8. **The CLI is the product.** The skill, the adapters, and the web UI are all
    callers of `cli.py`. Nothing may implement pipeline logic of its own — if the
    web UI needs behaviour the CLI lacks, add it to the CLI first. The frontend
@@ -319,12 +335,13 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 1206 tests; no network (one is POSIX-only,
+python -m pytest -q                 # 1329 tests; no network (one is POSIX-only,
                                     #   one runs only where the filesystem folds case)
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
 
 lx run docs/guide.md --lang zh-TW   # extract -> translate -> check -> repair -> render
+lx models --provider llamacpp       # ask a backend which models it serves
 lx web                              # review workbench on 127.0.0.1:8787
 lx status --json                    # the frozen project-status contract
 lx status --scan ~/books            # every project under a root

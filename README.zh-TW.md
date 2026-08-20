@@ -135,6 +135,7 @@ CI 上有一組語料庫在把關，裡面收了 28 份刻意刁難的輸入，L
 | `lx routing show\|set STAGE PROVIDER[:MODEL]` | 每個階段走哪個後端、用哪個模型 |
 | `lx untracked` | `sources` 掃得到卻還沒建立狀態的檔案；每個目標語言各一列 |
 | `lx status [--json] [--scan ROOT]` | 專案進度；`--json` 是凍結後的契約，見 `docs/contracts/status-json.md` |
+| `lx models [--provider P]` | 問後端它供應哪些模型 |
 | `lx providers` / `lx stats` | 後端 / 覆蓋率 |
 
 `translate`、`repair`、`run` 都吃 `--dry-run`，只回報會做哪些工作，不會真的呼叫模型；
@@ -259,16 +260,70 @@ routing 那筆的模型就不算數了——模型 id 是屬於服務它的那�
 
 任何 OpenAI 相容端點都可以，包含完全跑在本機的：
 
-| 執行環境 | `base_url` |
-|---|---|
-| Ollama | `http://localhost:11434/v1` |
-| LM Studio | `http://localhost:1234/v1` |
-| llama.cpp server | `http://localhost:8080/v1` |
-| vLLM | `http://localhost:8000/v1` |
-| LiteLLM proxy | `http://localhost:4000/v1` |
+| 執行環境 | `base_url` | 預設條目名 |
+|---|---|---|
+| Ollama | `http://localhost:11434/v1` | `local` |
+| LM Studio | `http://localhost:1234/v1` | `lmstudio` |
+| llama.cpp `llama-server` | `http://localhost:8080/v1` | `llamacpp` |
+| vLLM | `http://localhost:8000/v1` | — |
+| LiteLLM proxy | `http://localhost:4000/v1` | — |
 
 請求本身刻意保持單純：沒有 `response_format`、沒有 tools，也沒有 streaming——
 除非你主動開啟。原因是自架的推論環境傾向於**拒絕**未知欄位，而不是忽略它們。
+
+`lx models` 會去問後端它到底供應哪些模型，讓模型 id 用抄的而不是用打的：
+
+```bash
+lx models                                  # 問 routing.draft 指到的那個後端
+lx models --provider llamacpp
+lx models --json                           # {"provider", "configured", "models"}
+```
+
+## llama.cpp，以及 router 模式改變了什麼
+
+`llama-server` 不需要特別待遇——它跟其他 OpenAI 相容端點一樣是 `kind: "openai"`，
+`lx init` 會在 8080 埠上生出一個叫 `llamacpp` 的預設條目。但把它開成 **router 模式**
+會改變四件事，而這四件都是量出來的，不是推的。以下數字量自 build `b9892-ee445f93d`，
+2026-08-20，一台供應 16 個模型、`max_instances: 1`、每個 preset 都帶
+`--sleep-idle-seconds 60` 的 router。
+
+**`model` 欄位決定跑哪個模型，而且 id 必須一字不差。** 單模型的 `llama-server` 根本
+不看這個欄位；router 則會對任何它不認得的值回 `400 model '…' not found`。那些 id 很長
+——`mradermacher/translategemma-12b-it-i1-GGUF:Q4_K_M`——所以從 `lx models` 抄一個，
+不要用打的。整套從零設起是這樣：
+
+```bash
+lx init
+lx config set providers.llamacpp.base_url http://127.0.0.1:8088/v1   # 如果不是 8080
+lx models --provider llamacpp                                        # 抄一個 id
+lx config set providers.llamacpp.model mradermacher/translategemma-12b-it-i1-GGUF:Q4_K_M
+lx routing set draft llamacpp
+lx routing set polish llamacpp
+lx routing set repair llamacpp
+lx run book/ch1.md --lang zh-TW
+```
+
+**載入模型時它會把呼叫端擋住，而不是回一個可重試的狀態碼。** `models_autoload: true`
+意味著第一次要用一個還沒常駐的模型時，它會去載——而且第一次還會先下載。實測：在一次
+104.9 秒的冷啟動開始後 1.5 秒再送一個請求，那個請求也等了 103.1 秒，然後回 `200`。
+沒有任何一刻回過 `503` 或 `425`，所以 `retries` 在這裡幫不上忙，**只有 `timeout` 有用**。
+這就是為什麼預設的 `llamacpp` 條目給 600 秒，而 Ollama 和 LM Studio 給 300。第一次要抓
+大模型的話再往上調。
+
+**換模型要付重載成本，但比想像中便宜。** `max_instances: 1` 之下只有一個模型常駐，所以
+把兩個階段指到兩個模型，中間就有一次卸載加載入——各量三輪，2.5 GB 的模型
+**4.8–5.0 秒**、7 GB 的 **6.4–6.9 秒**（兩者都已經在磁碟上），把睡著的叫醒是
+**5.2 秒**。這筆帳是每換一次階段付一次，不是每個批次付一次，所以初譯和潤稿分開用不同
+模型，一趟下來也只多幾秒，划得來。不過這個數字會跟著檔案大小走：兩個 15 GB 的模型互相
+輪替就是另一回事了，那種情況下整趟都用同一個模型比較划算。
+
+**`batch.concurrency: 2` 是對的，而 4 比 2 還糟。** 單一個常駐模型仍然能同時服務多個
+請求。四個真實大小的批次：循序 4.64 秒，**兩個同時在線 2.85 秒**（1.63 倍），四個同時
+在線 4.28 秒——預設值是量出來的最佳點，不是猜的。如果某個模型的 preset 帶了
+`--parallel 1`，那它無論如何都會排隊，調高之前先看一下該模型自己的 preset。
+
+第一次拿一個模型是唯一的例外，值得講清楚：104.9 秒，其中絕大部分是從 HuggingFace 下載
+2.5 GB，不是載入。
 
 API 金鑰只從 `api_key_env` 指定的環境變數讀取，絕不寫進設定檔、狀態或記錄檔。
 本機伺服器通常不需要金鑰，把 `api_key_env` 留空就不會送出 `Authorization` 標頭。
@@ -387,7 +442,7 @@ Markdown 與純文字目前都可以端到端跑完：抽取、翻譯、驗證�
 ## 開發
 
 ```bash
-python -m pytest -q                # 972 tests，不碰網路
+python -m pytest -q                # 1329 tests，不碰網路
 python -m ruff check src tests
 ```
 
