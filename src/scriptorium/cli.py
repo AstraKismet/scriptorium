@@ -11,7 +11,7 @@ import sys
 import urllib.parse
 from collections import Counter
 
-from . import __version__, formats
+from . import __version__, formats, sentences
 from .checks import HELD, check_segment, is_held, workable
 from .config import (
     DEFAULT_TONE,
@@ -42,6 +42,7 @@ from .config import (
 from .docio import (
     UndecodableDocument,
     apply_terminator,
+    apply_terminator_parts,
     read_document,
     split_terminator,
     write_document,
@@ -1475,7 +1476,71 @@ def cmd_check(args, cfg):
 
 # ── render / commit / stats ────────────────────────────────────────────────
 
+def do_blocks(src, lang, cfg, fallback=False):
+    """The rendered document as an ordered block map. ``(blocks, missing)``.
+
+    A block is ``{"id", "kind", "from", "text"}`` — :func:`skeleton.render_blocks`
+    describes the record — and **the concatenation of their ``text`` is exactly
+    what** :func:`do_render` **returns**, because `do_render` is written in terms
+    of this. That property is what the reading view rests on: a client that joins
+    the blocks it was handed gets the file `lx render` writes, and there is no
+    second walk of the document for the two answers to drift apart in.
+
+    **Blocks carry text, never integer spans**, and that is the decision rather
+    than an implementation detail. Offsets are wrong twice over and neither error
+    is visible on the LF-only ASCII fixtures a test would reach for first: a CRLF
+    document shifts every one of them, because the terminator is re-imposed here
+    rather than held in the nodes; and Python counts code points where JavaScript
+    counts UTF-16 code units, so a name outside the BMP — routine in Chinese —
+    desynchronizes the two silently. See `docs/decisions.md`, 2026-08-21.
+    """
+    doc = load_doc(src, lang)
+    # From the document, never from the path: the skeleton is only readable by
+    # the parser that wrote it, and a file renamed after extract would otherwise
+    # be rebuilt by a different one.
+    fmt = formats.for_doc(doc)
+    if fmt.render_blocks is None:
+        raise UnknownFormat(
+            f"the {fmt.name} format renders documents but cannot report a block map, "
+            f"so `lx blocks` and the workbench's reading view have nothing to show for "
+            f"{src}. A format supplies `render_blocks` beside `render`; see "
+            f"scriptorium/formats.py.")
+    blocks, missing = fmt.render_blocks(
+        doc, cfg, polish=lambda t: polish_rendered(t, lang, cfg),
+        fallback=fallback, marker=fmt.marker)
+    # Here rather than in write_document so every caller gets it: the file path,
+    # `--out -`, and the workbench's render endpoint are all downstream of this.
+    # Per block through `apply_terminator_parts` rather than per block through
+    # `apply_terminator`, because the blanket `\r?\n` substitution does not
+    # distribute over a concatenation — that function's docstring has the case.
+    texts = apply_terminator_parts([b["text"] for b in blocks], doc.get("eol", "\n"))
+    for block, text in zip(blocks, texts):
+        block["text"] = text
+    return blocks, missing
+
+
 def do_render(src, lang, cfg, fallback=False):
+    """The rendered target document as one string. ``(text, missing)``.
+
+    **Through the registry's ``render``, not as the join of** :func:`do_blocks`.
+    Written as that join it was shorter and it was wrong twice over, and both
+    were found by an adversarial pass on 2026-08-21 rather than by a test:
+
+    - ``Format.render`` became dead code — ``grep -rn "\\.render(" src/`` returned
+      nothing — so a container format supplying its own ``render``, which is the
+      case the slot exists for and the case ``AGENTS.md``'s "New format support"
+      recipe describes, would have been silently ignored;
+    - and the three tests asserting the blocks join back into what this returns
+      became 56 assertions of ``join(blocks) == join(blocks)``, which cannot
+      fail. Two paths through the registry is what makes them a measurement.
+
+    The two agree by construction for both formats registered today, because
+    :func:`skeleton.render` is itself the join of :func:`skeleton.render_blocks`
+    — one walk of ``doc["nodes"]``, which is the invariant that matters. What the
+    separation buys is the layer above it: the registry wiring, and a terminator
+    re-imposed on the whole string here against one re-imposed part by part
+    there, which are two genuinely different pieces of code.
+    """
     doc = load_doc(src, lang)
     # From the document, never from the path: the skeleton is only readable by
     # the parser that wrote it, and a file renamed after extract would otherwise
@@ -1486,6 +1551,33 @@ def do_render(src, lang, cfg, fallback=False):
     # Here rather than in write_document so every caller gets it: the file path,
     # `--out -`, and the workbench's render endpoint are all downstream of this.
     return apply_terminator(text, doc.get("eol", "\n")), missing
+
+
+def do_sentences(texts, cfg):
+    """Each string cut into sentences, in order. ``[[str, …], …]``, by index.
+
+    The rule itself is :func:`sentences.split`; this is the seam every surface
+    goes through, so the abbreviation list is read in one place and the batch
+    shape cannot be re-invented per caller. The refusal lives here rather than at
+    the endpoint for the reason `do_apply`'s empty-target refusal does: a rule the
+    CLI can walk around is a rule that holds on one surface.
+
+    The abbreviations are ``terms.abbreviations`` — the same list `lx terms`
+    reads, never a second one — so a project that adds ``Ashcombe`` to it changes
+    both answers together. That makes this function's output depend on the
+    project's configuration, which the contract says out loud.
+    """
+    if not isinstance(texts, list):
+        raise UnusableTarget("texts is an array of strings")
+    for i, text in enumerate(texts):
+        if not isinstance(text, str):
+            # The value is deliberately not echoed. A reviewer's editor buffer is
+            # what lands here, and this project does not repeat back a string it
+            # refused — the rule invariant 6 holds for a credential, applied to a
+            # field that has no reason to make an exception of itself.
+            raise UnusableTarget(f"texts[{i}] is not a string")
+    abbreviations = (cfg.get("terms") or {}).get("abbreviations", ())
+    return [sentences.split(text, abbreviations) for text in texts]
 
 
 def default_output(src, lang, cfg):
@@ -1502,6 +1594,63 @@ def cmd_render(args, cfg):
     out = args.out or default_output(args.src, args.lang, cfg)
     write_document(out, text)
     _out(f"wrote {out}" + (f" ({missing} untranslated)" if missing else ""))
+
+
+#: How much of a block's text one terminal line shows. Long enough that a
+#: paragraph is recognizable, short enough that a book-length document is still
+#: something a person can scroll.
+_BLOCK_PREVIEW = 60
+
+
+def _one_line(text):
+    """``text`` on one line, with the characters that would break the line shown.
+
+    Only the three that actually move a terminal cursor, spelled the way Python
+    spells them, so the output is greppable and a hard break is visible as
+    ``  \\n`` rather than as trailing space nobody can see.
+    """
+    return (text.replace("\\", "\\\\").replace("\r", "\\r")
+                .replace("\n", "\\n").replace("\t", "\\t"))
+
+
+def cmd_blocks(args, cfg):
+    blocks, missing = do_blocks(args.src, args.lang, cfg, args.fallback)
+    if args.json:
+        _out(json.dumps({"blocks": blocks, "missing": missing},
+                        ensure_ascii=False, indent=2))
+        return
+    for block in blocks:
+        head = f"{block['id'] or '-':>6}  {(block['kind'] or 'skeleton'):9}"
+        head += f"{(block['from'] or ''):7}"
+        body = _one_line(block["text"])
+        if len(body) > _BLOCK_PREVIEW:
+            body = body[:_BLOCK_PREVIEW] + "…"
+        _out(f"{head}{body}")
+    _out(f"{len(blocks)} block(s), {missing} untranslated")
+
+
+def cmd_sentences(args, cfg):
+    doc = load_doc(args.src, args.lang)
+    wanted = {i.strip() for i in args.ids.split(",") if i.strip()} if args.ids else None
+    rows = []
+    for seg in doc["segments"]:
+        if wanted is not None and seg["id"] not in wanted:
+            continue
+        # The masked source under `--source`, and the stored target otherwise —
+        # both of which still hold `⟦n⟧`, which is the string a reviewer's editor
+        # holds and therefore the string the endpoint is handed. A rendered block's
+        # text is `lx blocks`' answer, and running the rule over that is a
+        # different question with a different command in front of it.
+        text = seg["masked"] if args.source else (seg.get("target") or "")
+        rows.append({"id": seg["id"], "sentences": do_sentences([text], cfg)[0]})
+    if args.json:
+        _out(json.dumps({"source": doc["source"], "lang": doc["lang"],
+                         "segments": rows}, ensure_ascii=False, indent=2))
+        return
+    for row in rows:
+        _out(f"{row['id']}  {len(row['sentences'])} sentence(s)")
+        for n, sentence in enumerate(row["sentences"], 1):
+            _out(f"    {n:>3}  {_one_line(sentence)}")
 
 
 def cmd_commit(args, cfg):
@@ -3697,6 +3846,26 @@ def build_parser():
     r.add_argument("--fallback", action="store_true",
                    help="untranslated segments fall back to source")
     r.set_defaults(fn=cmd_render)
+
+    # Beside `render` and sharing its spellings, because it answers the same
+    # question — what does this document say once it is rebuilt — and differs only
+    # in whether the answer is joined. It writes nothing, so it has no `--out`.
+    bl = sub.add_parser("blocks", help="the rendered document, block by block")
+    bl.add_argument("src")
+    bl.add_argument("--lang", required=True)
+    bl.add_argument("--fallback", action="store_true",
+                    help="untranslated segments fall back to source")
+    bl.add_argument("--json", action="store_true")
+    bl.set_defaults(fn=cmd_blocks)
+
+    sn = sub.add_parser("sentences", help="how a segment's text divides into sentences")
+    sn.add_argument("src")
+    sn.add_argument("--lang", required=True)
+    sn.add_argument("--ids", help="comma-separated segment ids; default every segment")
+    sn.add_argument("--source", action="store_true",
+                    help="split the masked source instead of the target")
+    sn.add_argument("--json", action="store_true")
+    sn.set_defaults(fn=cmd_sentences)
 
     m = sub.add_parser("commit", help="bank approved segments in the translation memory")
     m.add_argument("src")

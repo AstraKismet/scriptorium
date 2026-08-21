@@ -32,7 +32,7 @@ import os
 
 from . import mdparse, textparse
 from .config import TEXT_DEFAULTS
-from .skeleton import MARKDOWN_MARKER
+from .skeleton import MARKDOWN_MARKER, render_blocks
 
 __all__ = ["EXTENSIONS", "Format", "UnknownFormat", "by_name", "encodings",
            "for_doc", "for_path", "name_for_path", "options"]
@@ -62,12 +62,24 @@ class UnknownFormat(ValueError):
 class Format:
     """One registered format. A record, so the fields are named at every use."""
 
-    __slots__ = ("name", "parse", "render", "marker", "defaults", "describe")
+    __slots__ = ("name", "parse", "render", "render_blocks", "marker", "defaults",
+                 "describe")
 
-    def __init__(self, name, parse, render, marker, defaults, describe=None):
+    def __init__(self, name, parse, render, marker, defaults, describe=None,
+                 render_blocks=None):
         self.name = name
         self.parse = parse
         self.render = render
+        #: ``render_blocks(doc, cfg, polish, fallback, marker) -> (blocks, missing)``
+        #: — the same walk ``render`` makes, reporting where each piece of the
+        #: output came from instead of joining it. Defaults to ``None`` rather
+        #: than to :func:`skeleton.render_blocks`, because a container format
+        #: brings its own ``render`` and a shared block builder would be wrong
+        #: for it in exactly the same way. A format that leaves it unset is
+        #: refused by `lx blocks` and by `GET /api/preview` with a message
+        #: naming it, which is the honest answer — not a second walk invented on
+        #: the spot to fill the hole.
+        self.render_blocks = render_blocks
         #: ``describe(text, opts) -> dict`` of facts the parse resolved that the
         #: document should record — for plain text, which paragraph shape a
         #: heuristic decided the file is in. Merged into the state file and
@@ -92,7 +104,7 @@ class Format:
 _FORMATS = {
     "markdown": Format(
         name="markdown", parse=mdparse.parse, render=mdparse.render,
-        marker=MARKDOWN_MARKER,
+        render_blocks=render_blocks, marker=MARKDOWN_MARKER,
         # UTF-8 alone, which is exactly what `read_document` did before this
         # existed. Markdown is a format people write in an editor that already
         # decided on UTF-8; plain text is a format people *find*.
@@ -100,7 +112,7 @@ _FORMATS = {
     ),
     "text": Format(
         name="text", parse=textparse.parse, render=textparse.render,
-        marker=textparse.MARKER, defaults=TEXT_DEFAULTS,
+        render_blocks=render_blocks, marker=textparse.MARKER, defaults=TEXT_DEFAULTS,
         describe=textparse.describe,
     ),
 }

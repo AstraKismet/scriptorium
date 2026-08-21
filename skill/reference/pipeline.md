@@ -35,6 +35,8 @@ the second, third, and seventh translation of a document nearly free.
 | `lx check SRC --lang L [--json]` | validate; exit 1 if any error |
 | `lx render SRC --lang L -o OUT` | rebuild the target document |
 | `lx render SRC --lang L --fallback` | untranslated segments fall back to source |
+| `lx blocks SRC --lang L [--fallback] [--json]` | the rebuilt document block by block; writes nothing |
+| `lx sentences SRC --lang L [--ids A,B] [--source]` | where sentences begin and end, by the one rule in Python |
 | `lx commit SRC --lang L` | append approved segments to the TM |
 | `lx stats [--lang L]` | coverage across tracked documents |
 | `lx status [--json] [--lang L] [--scan ROOT] [--depth N]` | project status. `--json` is a frozen contract — `docs/contracts/status-json.md`. `--scan` reports every project under a root. Exits 0 even when it reports errors; read `totals.errors`, not the exit code. |

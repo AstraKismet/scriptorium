@@ -2,6 +2,7 @@
 
 import os
 import pathlib
+import re
 import sys
 
 import pytest
@@ -2690,15 +2691,51 @@ def test_unknown_tone_falls_back_for_a_language_with_no_brief_at_all():
 # README, no manifest. The same reasoning as `handoff/`: anything else in the
 # directory would be collected as a fixture, so the explanation lives here.
 #
-# The properties covered, one file each: a UTF-8 BOM, CRLF terminators, CRLF
-# mixed with bare LF, CR-only terminators, CRLF list items, nested lists, wrapped
-# list-item continuations at four spaces and at two, indented code, HTML blocks,
-# tables with alignment padding and tables without a leading pipe, hard line
-# breaks, front matter, reference link definitions, setext headings and thematic
-# breaks, fenced and unclosed code, nested blockquotes, inline markup, unbalanced
-# inline HTML, CJK with full-width punctuation, a file with no trailing newline,
-# whitespace-only, blank-lines-only, an empty file, and one 112k-character manual
-# long enough for a per-block defect to hide in.
+# The properties covered, with the file that carries each. **Every fixture is
+# named here and a test asserts it** — `test_the_roster_above_names_every_fixture`
+# below. That guard exists because this list went stale silently: on 2026-08-21 it
+# described 27 properties for 35 files, so eight fixtures were being swept by a
+# harness whose only explanation of itself did not know they were there.
+#
+# A UTF-8 BOM (`bom-utf8-heading.md`). CRLF terminators (`crlf-line-endings.md`),
+# CRLF mixed with bare LF (`crlf-mixed-terminators.md`), CR-only terminators
+# (`cr-only-terminators.md`), CRLF list items (`crlf-list-items.md`), and every
+# character `str.splitlines()` breaks on that `str.split("\n")` does not
+# (`line-separator-control-chars.md`).
+#
+# Nested lists (`nested-lists.md`), wrapped list-item continuations at four
+# spaces (`list-continuation-indent.md`) and at two
+# (`list-continuation-two-space-indent.md`), and a list item's *second* paragraph
+# (`list-item-second-paragraph.md`), whose indent sits at position 0 of the
+# segment rather than inside it — delete it and the paragraph leaves the item.
+#
+# Indented code (`indented-code-block.md`), an indented code block inside a
+# blockquote (`blockquote-indented-code.md`), an indented run of fence characters
+# (`indented-fence-run.md`), fenced and unclosed code (`fences-and-unclosed.md`),
+# and a backtick fence whose info string carries a backtick
+# (`fence-info-string-backtick.md`) — which is not a fence, and used to take the
+# rest of the file into the skeleton with it.
+#
+# HTML blocks (`html-block.md`) and unbalanced inline HTML
+# (`html-unbalanced-inline.md`). Tables with alignment padding
+# (`table-alignment-padding.md`), tables without a leading pipe
+# (`table-without-leading-pipe.md`), and where a table body ends
+# (`table-body-boundary.md`), which is not at the last line holding a pipe.
+#
+# Hard line breaks (`hard-line-breaks.md`), front matter (`front-matter.md`),
+# reference link definitions (`reference-link-definitions.md`) and what makes a
+# line one at all (`link-definition-tails.md`), setext headings and thematic
+# breaks (`setext-and-thematic-breaks.md`), nested blockquotes
+# (`blockquote-nested.md`), inline markup (`inline-markup.md`), a block marker's
+# indent measured in columns rather than counted in characters
+# (`block-marker-whitespace.md`), and one short document holding every block kind
+# at once (`mixed-blocks.md`).
+#
+# CJK with full-width punctuation (`cjk-fullwidth.md`), a file with no trailing
+# newline (`no-trailing-newline.md`), whitespace-only (`whitespace-only.md`),
+# blank-lines-only (`blank-lines-only.md`), an empty file (`empty.md`), and one
+# 112k-character manual long enough for a per-block defect to hide in
+# (`long-manual.md`).
 #
 # Three of them are load-bearing rather than decorative.
 #
@@ -2836,3 +2873,56 @@ def test_corpus_is_present_and_known_breakage_names_real_fixtures():
     assert names, "tests/corpus/ is empty"
     missing = sorted(KNOWN_BROKEN.keys() - names)
     assert not missing, f"KNOWN_BROKEN names fixtures that do not exist: {missing}"
+
+
+def test_the_roster_above_names_every_fixture():
+    """The corpus has no README, so this file's comment is its only explanation.
+
+    Which makes the comment part of the fixture set rather than decoration, and
+    a comment nothing checks drifts: on 2026-08-21 it described 27 properties
+    for 35 files, so eight fixtures had been added with no record of what they
+    are for. That is recoverable by reading eight files and was — but only
+    because somebody counted.
+
+    The check is deliberately the weakest one that is decidable: the *name* has
+    to appear. Whether the sentence around it is still true is judgement, and
+    invariant 4's line runs between the two.
+    """
+    roster = pathlib.Path(__file__).read_text(encoding="utf-8")
+    roster = roster[:roster.index("KNOWN_BROKEN = {}")]
+    unnamed = sorted(p.name for p in _corpus_files() if f"`{p.name}`" not in roster)
+    assert not unnamed, (
+        f"tests/corpus/ holds fixtures the roster comment above does not name: "
+        f"{unnamed}. Add each to it with what it is the one input file for — the "
+        f"directory holds no README because anything in it would be collected.")
+
+
+#: Where each README states the size of the corpus, and in which order the two
+#: numbers appear. Both files carry the same claim in two languages, so they go
+#: stale together and are checked together.
+_README_CLAIMS = [
+    ("README.md",
+     r"corpus of (\d+) deliberately awkward inputs, (\d+) Markdown and (\d+) plain text"),
+    ("README.zh-TW.md",
+     r"裡面收了 (\d+) 份刻意刁難的輸入（Markdown (\d+) 份、純文字\s*(\d+) 份）"),
+]
+
+
+@pytest.mark.parametrize("name,pattern", _README_CLAIMS, ids=[c[0] for c in _README_CLAIMS])
+def test_each_readme_states_the_size_the_corpus_actually_is(name, pattern):
+    """A number in prose is a claim, and this one was wrong by seven.
+
+    Measured 2026-08-21: both READMEs said 28 when the Markdown corpus alone held
+    35. It is the same failure as the roster above — a fact about the tree,
+    written once, checked by nobody — and `README.zh-TW.md` is kept in step with
+    `README.md`, so the two go stale in the same edit and are checked in one.
+
+    A reworded sentence fails to match rather than passing silently, which is
+    the intended behaviour: rewording it is a decision to re-state the claim.
+    """
+    root = pathlib.Path(__file__).parent.parent
+    found = re.search(pattern, (root / name).read_text(encoding="utf-8"))
+    assert found, f"{name} no longer states the corpus size where this test looks"
+    markdown = len(_corpus_files())
+    plain = len([p for p in (root / "tests" / "corpus-text").iterdir() if p.is_file()])
+    assert [int(g) for g in found.groups()] == [markdown + plain, markdown, plain]

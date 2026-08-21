@@ -22,7 +22,7 @@ import sys
 
 __all__ = ["UndecodableDocument", "decode_document", "read_document",
            "write_document", "write_document_to_stdout",
-           "split_terminator", "apply_terminator"]
+           "split_terminator", "apply_terminator", "apply_terminator_parts"]
 
 
 class UndecodableDocument(ValueError):
@@ -285,6 +285,49 @@ def apply_terminator(text, eol):
     indistinguishable from the lone CR that ``decisions.md`` classifies as text.
     """
     return text if eol == "\n" else _ANY_LF_RE.sub(eol, text)
+
+
+def apply_terminator_parts(parts, eol):
+    """:func:`apply_terminator` over the concatenation, answered part by part.
+
+    ``"".join(apply_terminator_parts(parts, eol))`` equals
+    ``apply_terminator("".join(parts), eol)`` for every input, which is the
+    property the block map's round trip rests on: a client that joins the blocks
+    it was given has to get the file ``lx render`` writes, byte for byte.
+
+    **The substitution does not distribute over concatenation**, which is why
+    this exists rather than a comprehension at the call site. ``["a\\r", "\\nb"]``
+    is one ``\\r\\n`` to the join and two unmatched characters to the parts, so
+    substituting each part separately writes ``a\\r`` + ``\\r\\nb`` — a ``\\r``
+    the pipeline did not decide, in a file invariant 2a says is reproduced as-is.
+
+    The repair is to move the ``\\r`` **right**, into the part that holds its
+    ``\\n``, before substituting. The concatenation is untouched by the move and
+    the pair then sits where the regex can see it. Right rather than left because
+    it is the only direction that takes a terminator *out* of a segment when the
+    left-hand neighbour is one, and a terminator is a document-level fact that is
+    never carried inside a segment (``AGENTS.md``, "Conventions").
+
+    **The straddle is unreachable through today's writers, and the guard is here
+    anyway.** ``split_terminator`` only reports ``eol == "\\r\\n"`` for a file that
+    is uniformly CRLF, and it hands that file to the parser with every ``\\r``
+    already removed — so no skeleton node can supply one. A target could, and
+    does not: ``normalize.reseat_outer_blanks`` re-imposes the *source's* trailing
+    blank run on every proposal, and ``cli.do_apply`` refuses a blank target
+    outright. That is four separate facts holding one property up. A third format,
+    or a fifth writer, only has to disturb one of them, and the failure would be a
+    corrupted line ending in a rendered book rather than a red test.
+    """
+    if eol == "\n":
+        return list(parts)
+    out = list(parts)
+    for i in range(len(out) - 1):
+        if not out[i].endswith("\r"):
+            continue
+        nxt = next((k for k in range(i + 1, len(out)) if out[k]), None)
+        if nxt is not None and out[nxt].startswith("\n"):
+            out[i], out[nxt] = out[i][:-1], "\r" + out[nxt]
+    return [apply_terminator(part, eol) for part in out]
 
 
 def write_document(path, text):

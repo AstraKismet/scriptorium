@@ -103,8 +103,8 @@ lx web                              # 檢視結果
 
 **四、以填回的方式輸出。** 譯文填回原本的骨架，絕不從語法樹重新序列化。正因為如此，
 front matter、圍欄式程式碼區塊、表格對齊、縮排、換行字元才能逐位元組活下來。
-CI 上有一組語料庫在把關，裡面收了 28 份刻意刁難的輸入，Linux 與 Windows 都跑，
-從磁碟上的位元組一路驗到寫回去的位元組。
+CI 上有一組語料庫在把關，裡面收了 55 份刻意刁難的輸入（Markdown 35 份、純文字
+20 份），Linux 與 Windows 都跑，從磁碟上的位元組一路驗到寫回去的位元組。
 
 每個 segment 的誤差會一路累積，所以第一步和第四步寫成程式，而不是寫成給模型的指示。
 就算每個 segment 的正確率有 99.5%，一份 500 個 segment 的文件也只有 8% 的機率
@@ -129,6 +129,8 @@ CI 上有一組語料庫在把關，裡面收了 28 份刻意刁難的輸入，L
 | `lx repair SRC --lang L` | 只重譯失敗的 segment |
 | `lx run SRC --lang L` | 跑完整條流程；加 `--polish` 會多跑一次流暢度潤稿 |
 | `lx render SRC --lang L -o OUT` | 重建目標文件 |
+| `lx blocks SRC --lang L` | 重建後的文件，逐區塊列出，不寫檔 |
+| `lx sentences SRC --lang L` | 一個 segment 的文字如何切成句子 |
 | `lx commit SRC --lang L` | 把核可的譯法存進翻譯記憶 |
 | `lx web` | 本機審校工作台 |
 | `lx config get\|set\|unset KEY [VALUE]` | 用點號路徑讀寫 `lx.config.json` |

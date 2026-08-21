@@ -382,6 +382,11 @@ def test_every_endpoint_returns_exactly_the_keys_the_contract_documents(base, pr
     # `lang` — which this endpoint ignores and the confinement check above does
     # not, which is the point of leaving them in.
     record("POST", "/api/config", {"key": "batch.size", "value": 12})
+    # `texts` alone; this endpoint reads neither `src` nor `lang`, and leaving
+    # them in the payload `record` builds is the point — the confinement checks
+    # above bind by field presence, so they still cover an endpoint that ignores
+    # both. The same argument `/api/config` already carries.
+    record("POST", "/api/sentences", {"texts": ["One sentence. And another."]})
     record("GET", "/api/state", {})
 
     documented = _documented_response_keys()

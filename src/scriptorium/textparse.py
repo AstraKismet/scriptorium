@@ -24,10 +24,10 @@ import re
 
 from .config import TEXT_DEFAULTS
 from .mask import has_translatable_text, mask, strip_placeholders
-from .skeleton import render
+from .skeleton import render, render_blocks
 from .store import seg_hash
 
-__all__ = ["MARKER", "describe", "parse", "render", "split_document"]
+__all__ = ["MARKER", "describe", "parse", "render", "render_blocks", "split_document"]
 
 #: What stands in for an untranslated segment. Not Markdown's HTML comment: in a
 #: .txt file that is four words of visible junk pretending to be invisible.

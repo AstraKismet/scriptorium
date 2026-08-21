@@ -12,10 +12,10 @@ from here because that is where every caller has always found it.
 import re
 
 from .mask import has_translatable_text, mask, strip_placeholders
-from .skeleton import render
+from .skeleton import render, render_blocks
 from .store import seg_hash
 
-__all__ = ["parse", "render"]
+__all__ = ["parse", "render", "render_blocks"]
 
 #: Only a space and a tab indent a fence, the same character class
 #: `_indent_columns` counts and for the same reason. `\s` reaches U+3000, U+00A0,

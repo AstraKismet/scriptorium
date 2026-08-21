@@ -1674,3 +1674,136 @@ def test_two_writes_at_once_do_not_lose_each_other(base, tmp_path, monkeypatch):
     stored = load_config()
     for key, value in zip(keys, values):
         assert get_in(stored, key.split(".")) == value, f"{key} was lost"
+
+
+# ── the block map and the sentence rule ────────────────────────────────────
+
+def test_preview_carries_the_block_map_and_keeps_missing_an_integer(
+        base, tmp_path, monkeypatch):
+    """`missing` is documented as "a count, not a list" and must stay one.
+
+    Turning it polymorphic, or replacing it with a list, is a type change and
+    bumps the contract version. The list form is `blocks`, which is why both are
+    asserted here in one place: a future change that grows the count into a list
+    has to red this test on its way past.
+    """
+    src, _root = _project(base, tmp_path, monkeypatch)
+    code, body = _get(base, f"/api/preview?src={src}&lang=zh-TW")
+    assert code == 200
+    got = json.loads(body)
+    assert isinstance(got["missing"], int) and not isinstance(got["missing"], bool)
+    assert isinstance(got["blocks"], list) and got["blocks"]
+    assert "".join(b["text"] for b in got["blocks"]) == got["text"]
+    for block in got["blocks"]:
+        assert set(block) == {"id", "kind", "from", "text"}
+    assert got["missing"] == sum(1 for b in got["blocks"]
+                                 if b["id"] and b["from"] != "target")
+
+
+def test_preview_never_reports_the_marker_branch(base, tmp_path, monkeypatch):
+    """`fallback` is hardcoded true here — divergence (11) — so `marker` cannot occur.
+
+    Asserted rather than assumed, because the contract says so and a client that
+    drew the marker string as prose would be showing an HTML comment to a reader.
+    """
+    src, _root = _project(base, tmp_path, monkeypatch)
+    code, body = _get(base, f"/api/preview?src={src}&lang=zh-TW")
+    assert code == 200
+    assert all(b["from"] != "marker" for b in json.loads(body)["blocks"])
+
+
+def test_the_block_map_matches_what_the_cli_answers(base, tmp_path, monkeypatch):
+    """Invariant 8, on the wire: one seam, so the two surfaces cannot disagree."""
+    from scriptorium.cli import do_blocks
+
+    src, _root = _project(base, tmp_path, monkeypatch)
+    code, body = _get(base, f"/api/preview?src={src}&lang=zh-TW")
+    assert code == 200
+    blocks, missing = do_blocks(src, "zh-TW", load_config(), fallback=True)
+    got = json.loads(body)
+    assert got["blocks"] == blocks and got["missing"] == missing
+
+
+def test_sentences_answers_by_index(base, tmp_path, monkeypatch):
+    _project(base, tmp_path, monkeypatch)
+    code, body = _post(base, "/api/sentences",
+                       {"texts": ["He left. She stayed.", "", "他走了。她留下。"]})
+    assert code == 200
+    assert json.loads(body) == {"sentences": [
+        ["He left. ", "She stayed."], [], ["他走了。", "她留下。"]]}
+
+
+def test_sentences_concatenate_back_to_what_was_sent(base, tmp_path, monkeypatch):
+    """The promise a client walks a string with, asserted over the wire itself."""
+    _project(base, tmp_path, monkeypatch)
+    texts = ["「不要走。」他轉身離開。", "A ⟦1⟧⟦2⟧ run. And more.", "   ", ""]
+    code, body = _post(base, "/api/sentences", {"texts": texts})
+    assert code == 200
+    for sent, text in zip(json.loads(body)["sentences"], texts):
+        assert "".join(sent) == text
+
+
+def test_an_empty_texts_array_is_legal(base, tmp_path, monkeypatch):
+    _project(base, tmp_path, monkeypatch)
+    code, body = _post(base, "/api/sentences", {"texts": []})
+    assert code == 200
+    assert json.loads(body) == {"sentences": []}
+
+
+@pytest.mark.parametrize("payload", [{}, {"texts": None}, {"texts": "a string"},
+                                     {"texts": {"a": 1}}, {"texts": 3}])
+def test_a_texts_that_is_not_an_array_is_a_400_naming_the_field(
+        base, tmp_path, monkeypatch, payload):
+    _project(base, tmp_path, monkeypatch)
+    code, body = _try_post(base, "/api/sentences", payload)
+    assert code == 400
+    assert "texts" in json.loads(body)["error"]
+
+
+def test_an_element_that_is_not_a_string_is_a_400_naming_its_index(
+        base, tmp_path, monkeypatch):
+    _project(base, tmp_path, monkeypatch)
+    code, body = _try_post(base, "/api/sentences", {"texts": ["fine", 7, "fine"]})
+    assert code == 400
+    assert "texts[1]" in json.loads(body)["error"]
+
+
+def test_a_refused_sentence_payload_is_never_echoed(base, tmp_path, monkeypatch):
+    """A reviewer's editor buffer is what lands here, and it is not repeated back.
+
+    The same rule invariant 6 holds for a credential. Measured with a key-shaped
+    string, because that is the paste this protects against.
+    """
+    _project(base, tmp_path, monkeypatch)
+    secret = "sk-live-0123456789abcdef"
+    code, body = _try_post(base, "/api/sentences", {"texts": [{"k": secret}]})
+    assert code == 400
+    assert secret not in body.decode("utf-8") and "sk-live" not in body.decode("utf-8")
+
+
+def test_sentences_reads_neither_src_nor_lang(base, tmp_path, monkeypatch):
+    """It carries no path of any name, so confinement is satisfied by carrying nothing.
+
+    **What the gate at the top of `_post` does to a `src` sent anyway, exactly.**
+    This docstring said "is still refused" until 2026-08-21, while the assertion
+    below it said `200` — and both the server comment and the contract said the
+    same wrong thing. The gate binds by the *presence* of the field rather than
+    by the endpoint's name, so it runs; what it does is confine, and a path that
+    is already inside the project is not refused by confinement. It is then
+    ignored, because this endpoint opens no document.
+
+    The escaping case is the other half and is asserted with it, or "the gate
+    still binds" is a claim with nothing behind it.
+    """
+    _project(base, tmp_path, monkeypatch)
+    code, body = _post(base, "/api/sentences",
+                       {"texts": ["He left. She stayed."],
+                        "src": "no-such-file.md", "lang": "zh-TW"})
+    assert code == 200
+    assert json.loads(body) == {"sentences": [["He left. ", "She stayed."]]}
+
+    for payload in ({"texts": ["a"], "src": "../../pwn.md"},
+                    {"texts": ["a"], "lang": "../../pwn"},
+                    {"texts": ["a"], "lang": None}):
+        code, _body = _try_post(base, "/api/sentences", payload)
+        assert code == 403, payload

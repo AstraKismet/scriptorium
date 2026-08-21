@@ -188,7 +188,7 @@ one is not.
 
 ## Endpoints
 
-Twelve. Every one is listed here; a test walks the dispatch chain in
+Thirteen. Every one is listed here; a test walks the dispatch chain in
 `web/server.py` and fails if the two lists disagree in either direction.
 
 Common to all of them:
@@ -308,10 +308,11 @@ difference between this call and `/api/check`'s.
 
 ### GET /api/preview
 
-The rendered document, as text, without writing it anywhere.
+The rendered document, as text and as a block map, without writing it anywhere.
 
-Backed by: `cli.do_render` (with `fallback=True`) and `cli.default_output`.
-Equivalent to `lx render <src> --lang <lang> --fallback --out -`.
+Backed by: `cli.do_blocks` (with `fallback=True`) and `cli.default_output`.
+Equivalent to `lx render <src> --lang <lang> --fallback --out -` for `text`, and
+to `lx blocks <src> --lang <lang> --fallback --json` for `blocks` and `missing`.
 
 **Request** — `src` (required), `lang` (required), query string.
 
@@ -320,12 +321,79 @@ Equivalent to `lx render <src> --lang <lang> --fallback --out -`.
 | Key | Type | Meaning |
 |---|---|---|
 | `text` | string | The rendered document, with the document's own line terminator re-imposed. |
-| `missing` | integer | **A count**, not a list — how many segments fell back to their source instead of a target. |
+| `blocks` | array of *block* | The same document, cut at the positions the skeleton already has. Unconditional — there is no `?blocks=` to switch it off. |
+| `missing` | integer | **A count**, not a list — how many segments fell back to their source instead of a target. The list form is `blocks`: the segments this counts are exactly those whose block carries `from` other than `"target"`. |
 | `default_out` | string | Where `POST /api/render` would write if given no `out`. |
+
+`"".join(b["text"] for b in blocks)` **is** `text`, byte for byte, and the server
+derives one from the other rather than rendering twice.
+
+`blocks` roughly doubles the reply, because it reproduces the whole document a
+second time. Dropping the top-level `text` is the obvious saving and it is
+**candidate cargo for the next version bump**, not something to do additively.
 
 `fallback` is hardcoded true here and is caller-controlled on `/api/render`, so
 the same document previews and renders differently by default — *Known
-divergences* (11).
+divergences* (11). One consequence is visible in the block map: `from` is never
+`"marker"` on this endpoint, because the marker branch is the one `fallback`
+turns off.
+
+Side effects: none.
+
+---
+
+### POST /api/sentences
+
+Where sentences begin and end, in text the client is holding. **The rule lives in
+Python and the client computes nothing** — a boundary rule invented in a browser
+is a second rule that `lx`, an agent and CI cannot see, which makes a
+sentence-level diff impossible outside the frontend.
+
+Backed by: `cli.do_sentences`. Equivalent to `lx sentences <src> --lang <lang>`
+for a document's stored text; this endpoint takes arbitrary text instead, because
+what a reviewer is editing belongs to no file yet — so the wire can be asked a
+question the command cannot. *Known divergences* (30), open: the rule itself is
+shared, and what the CLI lacks is a way to hand it text from a terminal.
+
+**The highlight is stale while a reviewer types, and is recomputed on debounce or
+blur.** That is the design and not a limitation of it: caret positioning, IME
+composition and rendering are the frontend's, and a round trip per keystroke is
+not viable. A client that calls this per keystroke has misread the contract.
+
+**Request**
+
+| Key | Type | Meaning |
+|---|---|---|
+| `texts` | array of string | Required. Each element is split independently. `[]` is legal and answers `[]`. |
+
+Neither `src` nor `lang` is read, because what a reviewer is editing belongs to no
+file. **The admission gate in front of this endpoint still binds**, and the
+distinction is worth stating exactly: the gate binds by the *presence* of a field
+rather than by the endpoint's name, so a `src` that escapes the project root and a
+`lang` that is not a language tag are `403` here as everywhere, before this
+handler runs. A `src` naming a real file is refused by nothing — it passes the
+gate and is then ignored, because this endpoint opens no document, and a path
+nothing opens has nothing to confine.
+
+A `texts` that is not an array, or an element that is not a string, is `400`; the
+refusal names the field and the index and **never repeats the value**, because a
+reviewer's editor buffer is what lands here.
+
+**Response**
+
+| Key | Type | Meaning |
+|---|---|---|
+| `sentences` | array of array of string | Parallel to `texts` by index. |
+
+`"".join(sentences[i])` **is** `texts[i]`, exactly. A client walks the string with
+a cursor rather than searching it — which matters because **two sentences in one
+paragraph may be byte-identical**, and a client that located them by searching
+would put both highlights on the first one. That is the accepted cost of
+returning text; see *The sentence rule* below for the two offset forms that were
+refused and why.
+
+The answer depends on the project's `terms.abbreviations` — the same list
+`lx terms` reads. A project that adds a word to it changes both answers together.
 
 Side effects: none.
 
@@ -936,6 +1004,37 @@ under exactly that rule, at **warn** severity, so a held segment never blocks a
 render — a severity that failed `lx check` would make lifting every hold the only
 way to finish a book.
 
+**block** — an element of `GET /api/preview`'s `blocks`.
+
+Documented here rather than inside the endpoint's own *Response* section on
+purpose: the test that compares each endpoint's documented keys against a live
+reply harvests every `| \`key\` |` row between `**Response**` and
+`Side effects:`, so a nested table there would silently join `/api/preview`'s
+top-level key set.
+
+| Key | Type | Notes |
+|---|---|---|
+| `id` | string \| null | The *segment* id this block renders, or `null` for a run of skeleton the pipeline did not translate. `null` **is** the discriminator — there is no `type` tag — and it is spelled the same way `GET /api/doc`'s segment `id` is, so the two join on it. |
+| `kind` | string \| null | The segment's block kind, the same enum as *segment*'s `kind`. `null` for skeleton. Without it a reading view cannot typeset a chapter opening as a chapter opening: `# Chapter One` is a skeleton run of `# ` beside a `heading` segment, and the alternative is a client parsing Markdown out of the neighbouring skeleton text. |
+| `from` | string \| null | Which branch of the render produced `text`: `target` (the stored translation), `source` (the masked source, unmasked, because the caller asked for a fallback), or `marker` (the format's untranslated marker). `null` for skeleton. It names the branch outright rather than leaving a client to reconstruct it from `status`, the `fallback` it asked for and the marker string, and it is the key that lets `missing` stay an integer. **Where the two answers actually part company is a row an older build left behind**, and the sentence used to imply a reachable state: the render branches on a *truthy* target while `status` is derived from a *stripped* one, so a target of three spaces renders its own text, reports `pending`, and is not counted by `missing` — but no writer produces one now. `do_apply` refuses a blank target at the door (2026-08-14) and `translate.accept` refuses it as an empty translation, so a state file written before those is the way that row is reached. |
+| `text` | string | What this position contributes to the rendered document, with the document's line terminator already re-imposed — so `"".join(b["text"])` is `/api/preview`'s `text`. It is neither `segment.source` (masked) nor `segment.target` (stored masked): placeholders are gone and real markup is back. **It may be empty**, rarely; nothing here promises otherwise. |
+
+`status`, `origin`, `review`, `token` and `issues` are deliberately **absent**. All
+five are already frozen on *segment* and a client joins them on `id`; carrying
+them twice is one field on two endpoints, which is the drift invariant 8 names
+and which divergences (2) and (3) already cost once.
+
+**Offsets are deliberately absent, and this is a decision rather than an
+omission.** A block carries its text, never a start and end position in
+`/api/preview`'s `text`. Integer offsets are wrong twice over and neither error
+shows on the LF-only ASCII fixtures a test reaches for first: a CRLF document
+shifts every one of them, because the document's terminator is re-imposed at
+render rather than held in the skeleton; and Python counts **code points** where
+JavaScript counts **UTF-16 code units**, so a single character outside the BMP —
+routine in Chinese names — desynchronizes the two silently, with no error
+anywhere. A later proposal to "just send offsets" is a decision to reopen, with
+an entry in `docs/decisions.md`.
+
 **provider** — an element of `GET /api/state`'s `providers`.
 
 | Key | Type | Notes |
@@ -956,6 +1055,67 @@ way to finish a book.
 malformed. A malformed stage is reported rather than raised, because this is the
 endpoint that draws the whole page and one bad stage must not take the document
 list down with it.
+
+## The sentence rule
+
+`POST /api/sentences` and `lx sentences` answer with **text**, in order, and the
+concatenation of the answer is the input exactly. Two forms were put to the
+maintainer on 2026-08-17 and both were refused: offsets in UTF-16 code units, and
+offsets in Python code points. They lose to the same hazard the block map's own
+offsets lose to, which is the argument for stating it once and applying it twice.
+
+What the rule decides, normatively:
+
+- A run of `。！？.!?` ends a sentence, unless what follows says it did not — a
+  lower-case letter continues, and a mark that cannot begin a line in Chinese
+  typesetting (`，、；：,;:` and the bracket-shaped closers) means the sentence is
+  still open. `他嘴裡念著「快跑！」，腳下卻沒動。` is one sentence.
+- A run of `…⋯` alone is weaker: it ends a sentence only before an opening mark,
+  before a capital, or at the end of the text. `「我不知道……」她輕聲說。` is one
+  sentence and `一、二、三……十。完了。` is two.
+- A lone ASCII `.` ends a sentence only when whitespace or the end of the text
+  follows it — which is the whole of what keeps `3.14` and `example.com` in one
+  piece — and only when the word in front of it is neither a configured
+  abbreviation nor a lone capital. `J. R. R. Tolkien` and `U.S.` stay whole.
+- Closing marks are pulled in, so `」` and `”` stay with the sentence they close.
+  Each of those has a different opening twin, so finding one after a full stop
+  settles what it is doing there and it is taken with no further test.
+- **A mark that opens and closes with the same glyph is taken only when the run
+  of them is followed by whitespace or by the end of the text.** `"`, `'`, `*`,
+  `_` and `~` are the five — the last three because emphasis reaches a segment
+  unmasked — and the run is taken whole or not at all, or `**She stayed.**` would
+  end after the first asterisk of a pair. Until 2026-08-21 they were taken
+  unconditionally; English never noticed, because a space follows the stop and the
+  question never arose, and Traditional Chinese always did, because no space
+  follows `。`: `他走了。**她留下。**` came back as `他走了。**` and `她留下。**`.
+- **A `⟦n⟧` run is an atom**: no boundary falls inside one or between two adjacent
+  members, and a run glued to a terminator belongs to the sentence that ended.
+- Whitespace after a boundary belongs to the sentence that ended, which is what
+  makes the concatenation exact without anyone deciding where a run of blanks
+  "really" goes. `""` answers `[]`; every other input answers at least one
+  element.
+
+**Known failures, stated rather than discovered.** An abbreviation that genuinely
+ends a sentence keeps it open (`He turned onto Main St. Then he stopped.`). A
+sentence-final lower-case opener merges (`The bell rang. iPhone screens lit up.`).
+An enumerated run reads as sentences (`1. First item. 2. Second item.`). In
+*rendered* text a full stop inside restored markup — a URL, a code span — can take
+a boundary, because the rule is handed text and not slots; masked text does not
+have the problem, since a placeholder is an atom.
+
+**Chinese dialogue attribution over-splits**, and it is the one that matters most
+here, because the primary use case is a novel. `「站住！」他喊。沒有人停下。` comes
+back as three pieces and `他喊。` is half a sentence. The continuation test after a
+strong run is `str.islower` on the word that follows, which is `False` for every
+Chinese character — so English is protected by it and Chinese cannot be, on the
+same construction. Telling an attribution verb from an ordinary one needs a verb
+table, and that is judgement rather than a rule a program decides, so it is
+admitted here rather than repaired. The *comma* form is already correct:
+`他嘴裡念著「快跑！」，腳下卻沒動。` stays whole, because `，` cannot begin a line.
+
+The rule is **not** a validator and never will be: invariant 4 admits a rule to
+`checks.py` only when a program decides it without judgement, and this one does
+not.
 
 ## Static assets
 
@@ -1693,6 +1853,32 @@ today. What the endpoint changes is who can reach them.
     maintainer's own backend. Both are `docs/decisions.md` entries. The narrower
     half — `model` accepting and storing a key — has no such tension and is the
     part to schedule first.
+
+Appended 2026-08-21 by the adversarial pass over the block map and the sentence
+rule. Open.
+
+30. **`POST /api/sentences` answers a question `lx sentences` cannot be asked.**
+    The endpoint splits arbitrary text; the command splits a document's stored
+    text and takes no other input. **This is not invariant 8's usual shape and
+    the difference matters**: no pipeline logic lives in the server here, because
+    both surfaces call `cli.do_sentences(texts, cfg)` and that function has taken
+    a list of arbitrary strings from the day it was written. What the CLI lacks
+    is a way to hand it one from a terminal.
+
+    It was considered and **not** dismissed as inherent, which was the other
+    available reading. The argument for inherent is that a reviewer mid-edit
+    holds text belonging to no file and a terminal does not — but a terminal
+    holds such text routinely, through a pipe or a flag, so the asymmetry is a
+    missing affordance rather than a property of the two surfaces. And the module
+    that owns the rule says why it is worth closing: `sentences.py`'s docstring
+    puts the rule in Python "precisely so that `lx`, an agent and CI can see it",
+    and CI checking the boundary rule on a shape that is not yet a document
+    cannot use `lx sentences` today.
+
+    The repair is one flag — `lx sentences --text` or a `-` that reads stdin —
+    and it is recorded rather than taken because the package that found it was a
+    repair package and adding an interface is construction. Nothing about the
+    wire moves when it lands: `Backed by` already names `cli.do_sentences`.
 
 ## What is not frozen
 

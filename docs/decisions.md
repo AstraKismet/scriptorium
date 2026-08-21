@@ -3,6 +3,366 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-08-21 · The reading view's two Python halves: a block map that carries text, and a sentence rule that lives in one place
+
+Closing HANDOFF-028. `GET /api/preview` gains a `blocks` array and a new
+`POST /api/sentences` answers where sentences begin and end. Both are additive,
+so `contract_version` stays at **3**.
+
+### Blocks carry text, never integer spans — and so do sentences
+
+The block map's shape was decided in HANDOFF-028 and is not re-argued here. What
+this entry records is that the *sentence* rule was a separate, open question, and
+the maintainer settled it on 2026-08-17 the same way: **the response carries an
+ordered array of sentence strings.** Two forms were put and both lost.
+
+*Lost: offsets in UTF-16 code units, documented as such.* Smallest payload, and
+the server does the conversion once. It loses because Python does not natively
+count that unit, every future consumer has to be told which unit it is looking
+at, and the conversion is a second place to be wrong about a document.
+
+*Lost: offsets in Python code points.* Smallest change, and wrong on the first
+novel with a character outside the BMP in it — routine in Chinese names, where
+JavaScript counts two units for Python's one. Recorded so it is visibly refused
+rather than quietly available.
+
+Both lose to the hazard the block map had already rejected them for, which is the
+argument for stating it once and applying it twice. The cost of strings is
+response size and a client that **must handle two sentences with identical text**;
+the contract says so rather than leaving a client to discover it. It is a smaller
+cost than it looks, because the partition is **exact** — the concatenation of the
+answer is the input, character for character — so a client walks the string with a
+cursor and never searches it. Reopening either is a decision, with an entry here.
+
+### The block record has four keys, and the fourth is the one nobody proposed
+
+`id`, `kind`, `from`, `text`. `from` names **which branch of the render produced
+this text** — `target`, `source` or `marker` — and it replaced a `status` field in
+the design, on a case that decides it.
+
+The render branches on a **truthy** target; `store` derives `status` from a
+**stripped** one. So a stored target of three spaces renders its own text, reports
+`pending`, and is *not* counted by `missing` — three answers to one question,
+already inconsistent before this package existed. A client asking "is the text you
+handed me a translation" gets the wrong answer from `status` on exactly that row.
+`from` is computed by the walk that made the text, so it cannot disagree with it.
+
+`from` is also what lets `missing` keep its integer type. The 2026-08-14 entry
+required that `/api/preview`'s "`missing` is a count rather than a list" close with
+the same additive change as the segment mapping; the list form is `blocks`,
+filtered on `from`, and the count stays a count. Turning `missing` polymorphic
+would have been a type change and a version bump for nothing.
+
+*Lost:* carrying `status`, `origin`, `review`, `token` and `issues` on a block. All
+five are already frozen on the *segment* shape and a client joins them on `id`.
+Carrying them twice is one field on two endpoints, which is the drift invariant 8
+names and which divergences (2) and (3) already cost once.
+
+*Lost:* a `type` tag to tell a segment block from a skeleton one. `id === null`
+decides it, and a null-when-absent discriminator is this surface's own idiom —
+`review`, `collisions`, and the provider row's `error` all work that way.
+
+*Lost:* promising `text` is never empty. It is nearly always true and it cannot be
+guaranteed: `mdparse.emit_raw` has no empty guard, and the terminator repair below
+can empty a one-character block. A promise that holds by luck is worse than no
+promise, because breaking it later is a meaning change and therefore a bump.
+
+*Deferred, with the number taken first:* `blocks[].sentences`. It was designed and
+refused for this package. The array reproduces the document a third time — roughly
+2.4 MB on a 120 000-word novel, on a surface that neither compresses nor paginates
+— and computing it per block turns a GET that costs one `load_doc` into a full
+re-scan of the book. It is **additive to add later**, which is what makes leaving
+it out the reversible choice; a client that wants sentences for the blocks it is
+showing calls `POST /api/sentences` with those block texts.
+
+### One walk of `doc["nodes"]`, and a test that keeps it one
+
+`skeleton.render_blocks` is the walk and `skeleton.render` is its join. The
+alternative — a block builder beside the renderer — is two answers to "what does
+this document say at this position", both correct the day they are written, and
+the reading view would be reading the one nobody writes files from. A test reads
+every module in `src/` with `ast` and asserts the node list is looped over exactly
+once, in `skeleton.py`, and read nowhere else at all — by syntax rather than by
+text, because the first spelling of that guard matched the literal string
+`for node in doc["nodes"]` and single quotes, a renamed loop variable or a
+comprehension all walked past it;
+`formats.Format` gains a `render_blocks` slot beside `render`, so the container
+format that brings its own renderer has to bring its own block builder rather than
+silently inherit a wrong one.
+
+### The line terminator does not distribute over the parts, and it took a sweep to say so
+
+`docio.apply_terminator` is a blanket `\r?\n` substitution over the *joined* text,
+and applying it to each block separately is not the same operation. Parts
+`["a\r", "\nb"]` are one CRLF to the join and two unmatched characters to the
+parts, so the naive spelling writes an extra CR — a byte the pipeline never
+decided, in a file invariant 2a says is reproduced as-is. Measured over 400 000
+randomized parts lists across both terminator values: the naive spelling disagrees
+with the join **28 904** times and `apply_terminator_parts` **zero**.
+
+**Two numbers appear here and they are not the same measurement.** The 400 000
+above is the one-off sweep that established the defect and its rate, and it is
+not in the suite. What is committed is
+`test_the_parts_helper_agrees_with_the_join_over_randomized_input`: 20 000 parts
+lists against both terminator values, 40 000 comparisons, on a fixed seed, so it
+costs a fraction of a second on every run. The larger sweep answered *how often*;
+the committed one answers *whether it is still true*, and sizing the second like
+the first would buy a slower suite and no more information.
+
+The repair moves the straddling CR **right**, into the block holding its LF. The
+concatenation is untouched by the move, so the property is exact rather than
+approximate. Right rather than left because it is the only direction that takes a
+terminator *out* of a segment when the left-hand neighbour is one, and a
+terminator is a document-level fact that is never carried inside a segment.
+
+**The case is unreachable through today's writers, and the guard is there anyway.**
+Four separate facts hold it up: `split_terminator` reports a CRLF terminator only
+for a uniformly-CRLF file, and hands that file to the parser with every CR already
+gone; `normalize.reseat_outer_blanks` re-imposes the source's trailing blank run on
+every proposal; and `cli.do_apply` refuses a blank target at the door. A third
+format or a fifth writer has to disturb only one of them, and the failure would be
+a corrupted line ending in a rendered book rather than a red test.
+
+### The sentence rule, and what it is honest about
+
+A new `sentences.py`. Not `checks.py`: invariant 4 admits a rule there only when a
+program decides it without judgement, and a sentence boundary is not such a rule.
+Nothing reaches `store.SEGMENTATION_VERSION` or the translation-memory key, which a
+test pins as values — the first would invalidate every banked wording on every
+machine.
+
+**HANDOFF-028's premise for the rule was false and the design had to survive it.**
+The package says `Dr.` and `example.com` "are `⟦n⟧` before any splitter sees them".
+They are not: `mask.INLINE_PATTERNS` has no bare-domain pattern and its `url` entry
+requires a scheme, and `Dr.` is masked only if somebody put it in the
+do-not-translate list. So the rule carries a full-stop test of its own — a lone
+ASCII full stop ends a sentence only when whitespace or the end of the text follows
+it, which is the whole of what keeps `3.14` and `example.com` whole — plus the
+abbreviation list, which is `terms.abbreviations`, the one `lx terms` already reads
+rather than a second copy.
+
+Three rules were grafted from the design panel and each closes something a
+proposal got wrong and did not admit:
+
+- **The word before a full stop is read as letters plus internal apostrophe and
+  hyphen, never with `str.isalnum`.** That spelling halts at the apostrophe, so the
+  token in front of the stop in `He didn't.` is `t` — a lone letter, which the
+  initials rule suppresses — and *every contraction-final sentence* merges with the
+  one after it. Two of the three independent designs had this defect and neither
+  listed it.
+- **A mark that cannot begin a line in Chinese typesetting cancels the boundary.**
+  Without it `他嘴裡念著「快跑！」，腳下卻沒動。` splits into a sentence beginning with
+  a full-width comma — visibly wrong, in the target language, on a routine
+  construction.
+- **An ellipsis run is weaker than a full stop**: it ends a sentence only before an
+  opening mark, before a capital, or at the end of the text. `一、二、三……十。` is one
+  sentence and `「我不知道……」她輕聲說。` is one sentence, and a design without the
+  weak class gets both wrong.
+
+The failures are written into the module and into the contract rather than
+discovered: an abbreviation that genuinely ends a sentence keeps it open
+(`Main St. Then he stopped.`), a lower-case opener merges (`The bell rang. iPhone
+screens lit up.`), an enumerated run reads as sentences, and in *rendered* text a
+full stop inside restored markup can take a boundary because the rule is handed
+text and not slots. Each candidate repair was measured to cost more than it buys.
+
+*Lost:* computing protected spans from `mask.INLINE_PATTERNS` on every call, so
+that masked and rendered text partition identically. It is a real idea and it loses
+on price and on honesty: ten regexes over the whole book per request, a `cfg`
+dependency inside the rule, and a claim of agreement that the panel's own
+adversarial pass broke on the do-not-translate axis its measurement had held
+constant. The narrower promise — a placeholder run is an atom — is exact.
+
+*Lost:* a `rendered` flag on the wire selecting between two answers the contract
+would then have to permit to disagree. A frozen surface should not carry a mode
+whose branches contradict each other.
+
+### What the mutation pass found, including the two mutants that are equivalent
+
+Eighteen guards this change added were removed one at a time and the suite
+watched. **One survivor was a real defect, and two more are equivalent mutants**,
+recorded rather than papered over; every other mutant died, and so did the
+defect's own once it was repaired.
+
+The defect: `sentences._WORD_RE`'s character class was spelled `[^\W\d_'’-]`,
+which excludes the apostrophe and hyphen it was documented as *including*. So the
+token in front of a full stop in `He didn't` was `t`, exactly what the
+`str.isalnum` spelling the docstring argued against would have produced, and the
+rule had never done anything. Thirty-five hand-written cases could not see it,
+because contractions are protected by a different clause — the initials rule
+requires the lone letter to be **upper-case** — and no case in the battery used an
+abbreviation carrying an apostrophe. Both are fixed: the pattern, and the note,
+which now says which clause protects what. A `Int'l` case pins it.
+
+The same pass found `*`, `_` and `~` were dead in the closing class: removing them
+left every test green, because the one case that used them had the emphasis at the
+*end* of the text where the difference does not show. `*She left.* He stayed.` is
+the case that discriminates and it is in the battery now.
+
+The two equivalent mutants, stated so nobody re-derives them:
+
+- **Stepping over a `⟦n⟧` run in the scan loop.** No character of `⟦\d+⟧` is a
+  terminator, so a boundary could not land inside one even without the skip. It is
+  kept because the contract's promise is about placeholders rather than about
+  which characters are terminators this month — widen `_STRONG` by one character
+  and the line is the difference between a promise and a coincidence. The code
+  says so at the line.
+- **`GET /api/preview` deriving `text` from a second `do_render` call.**
+  `do_render` *is* the join of `do_blocks`, so the two are byte-identical and the
+  mutant costs a redundant `load_doc` and nothing else. No test was written for it:
+  a test that pinned which function the branch calls would be a test of the
+  implementation, and the property that matters — one walk — is already pinned at
+  source level.
+
+### The commands exist because the rule's whole justification is that they can
+
+`lx blocks` and `lx sentences`. The sentence rule lives in Python so that `lx`, an
+agent and CI can see it; without a command they cannot, and `blocks` reaching the
+wire alone would be a new divergence of exactly the class (2) and (3) recorded and
+2026-08-15 closed. Both go through the same `cli.do_*` the endpoints do, and a test
+asserts the CLI's answer equals the wire's.
+
+*Lost:* `lx render --json` instead of `lx blocks`. `lx render`'s job is writing a
+file, and a flag that turns it into a non-writing JSON printer makes `--out`
+meaningless on the same command.
+
+### What the adversarial pass over this work found, and the two shapes it found twice
+
+Six read-only lenses over the change above. Its verification phase was cut short,
+so each finding below carries how it was established rather than one blanket
+claim — which is the routing rule `docs/conventions/delegated-work.md` §2c now
+states, written *because* executing this package measured the cost of not having
+it. Everything here is repair to the change in this same entry; nothing on the
+wire moved and `contract_version` is still **3**.
+
+**The sentence splitter was quadratic, and the obvious fix is not one.**
+`_stop_is_terminal` read the word in front of a full stop with
+`_WORD_RE.search(text[:at])`, which copies the whole prefix at every candidate
+stop, and English prose offers one stop per sentence. Measured on this tree:
+2 KB 0.013 s, 8 KB 0.200 s, 32 KB 3.198 s, 64 KB 12.387 s — four times the input
+for sixteen times the time — against a `POST /api/sentences` with no request size
+limit and a chapter-sized segment as ordinary input.
+
+*Lost, and worth recording because it is what one reaches for first:*
+`_WORD_RE.search(text, 0, at)`. Dropping the copy leaves `search` trying every
+start position, so it stays quadratic and only the constant improves. What fixes
+it is knowing where the pattern *could* start: every character it accepts is a
+letter or an in-word mark, so a walk back over that run bounds the window and the
+scan is O(word). 64 KB is 0.025 s now, a factor of 495. The pattern is unchanged
+and a randomized differential against the spelling it replaced — 4 000 strings ×
+every position, on an alphabet carrying the two classes' disagreements — pins
+that it reads the same word.
+
+**`do_render` written as the join of `do_blocks` was shorter and wrong twice
+over.** `Format.render` became dead code — `grep -rn "\.render(" src/` returned
+nothing — so a container format bringing its own renderer, which is the case the
+slot exists for and the case `AGENTS.md`'s "New format support" recipe describes,
+would have been ignored in silence. And the three tests asserting the blocks join
+back into what `do_render` returns became 56 parametrized assertions of
+`join(blocks) == join(blocks)`, which cannot fail. `do_render` goes back through
+`fmt.render` and `do_blocks` through `fmt.render_blocks`. The two still agree by
+construction — `skeleton.render` is the join of `skeleton.render_blocks`, which is
+the invariant that matters — and what the separation buys is the layer above:
+the registry wiring, and a terminator re-imposed on a whole string against one
+re-imposed part by part.
+
+**A test whose oracle is produced by the code under test measures nothing**, and
+two of them were. The corpus sweeps now also compare against a hand-written
+second walk in the test file, copied from `skeleton.render` as it stood at
+`3f12225`, with the terminator rule spelled out rather than called. It lives in
+the test and not in `src/`, where the one-walk guard would refuse it and would be
+right to.
+
+**Three holes the join could not see, each found by removing a guard and watching
+nothing happen.** Positional attribution: the concatenation can be exact while
+every block's `id` and `kind` sit on the wrong node, because moving a label moves
+no character — the block sequence is asserted against `doc["nodes"]` now, over
+both corpora. The `polish` branch: the corpus sweeps run on `fallback=True` and
+never reach a target at all, and `do_apply` normalizes on ingest, so a target that
+arrived through a writer is already spaced and the render-time call cannot change
+it; the branch is reached by writing the row directly. And `do_blocks`' choice of
+`apply_terminator_parts` over the blanket rule, which had unit tests and a 20 000
+-case sweep and no integration-level cover, because no document in either corpus
+puts a CR at the end of one block and its LF at the start of the next — the state
+for that is built directly rather than through a writer, which is the only way to
+reach a shape four separate facts hold out of range.
+
+**A guard spelled as a text match reports on the day it is written and never
+again.** The one-walk check grepped for the literal `for node in doc["nodes"]`,
+so single quotes, a renamed loop variable or a comprehension all walked past it.
+It reads every module with `ast` now and asks two questions: is the node list
+looped over exactly once, and is it *read* anywhere outside `skeleton.py` at all
+— the second because `nodes = doc["nodes"]` followed by a loop over `nodes` is a
+walk no syntactic check of the loop itself can find, and naming the read closes
+it without a dataflow analysis nobody would maintain.
+
+The same shape twice more, both in prose nothing checked. `tests/corpus/` holds no
+README on purpose, so the enumerating comment in `tests/test_pipeline.py` is its
+only explanation — and it described 27 properties for 35 files, so eight fixtures
+had been added with no record of what they are for. Both READMEs said the corpus
+held 28 inputs. Each now has the weakest guard that is decidable: every fixture
+name must appear in the roster, and each README's stated size must equal the
+count. Whether the sentence around a name is still *true* is judgement, and
+invariant 4's line runs between the two.
+
+### Two sentence-rule behaviours, one admitted and one repaired — and the difference is invariant 4
+
+Both are real, both were independently refuted and survived, and they need
+opposite treatments. **Which side of invariant 4 a defect falls on is what
+decides**, and stating that is more useful than either fix.
+
+**Repaired: the five symmetric marks were absorbed as closers unconditionally.**
+`"`, `'`, `*`, `_` and `~` open exactly as often as they close, because the glyph
+is the same at both ends, and the closing loop took them without asking. English
+escaped by accident — a space follows the stop, so the loop never started — and
+Traditional Chinese writes no space after `。`, so it always bit:
+`他走了。**她留下。**` came back as `他走了。**` and `她留下。**`, every piece
+carrying a stray delimiter and the emphasis pair broken across the boundary. The
+rule is mechanically decidable, so it is a rule: a run of them is absorbed only
+when what follows the *whole run* is whitespace or the end of the text. Per
+character it would end `**She stayed.**` after the first asterisk of a pair; the
+run is taken whole or not at all. The bracket-shaped closers each have a
+different opening twin and keep absorbing with no test.
+
+*Not extended to `”` and `’`, deliberately.* They are directional — `“` and `‘`
+open — so one after a full stop is unambiguously closing, and in Chinese, where
+no space follows, absorbing them is the correct answer rather than the accident.
+Their ambiguity is with the apostrophe, which appears mid-word and never here.
+
+*One narrowing that would have been a regression:* `_stop_is_terminal` skips
+trailing marks to find out whether whitespace follows a lone ASCII stop at all,
+and for *that* question an opening asterisk and a closing one are the same
+character in the same place. It keeps the union. Narrowing it to the unambiguous
+set merges `*She left.* He stayed.` into one piece.
+
+**Admitted: Chinese dialogue attribution over-splits.**
+`「站住！」他喊。沒有人停下。` is three pieces and `他喊。` is half a sentence. The
+only continuation test after a strong run is `str.islower` on the word that
+follows, which is `False` for every Chinese character — so English is protected by
+it and Chinese cannot be, on the same construction. Telling an attribution verb
+from an ordinary one needs a verb table, and a verb table is judgement, which is
+invariant 4's line. It goes into `KNOWN_FAILURES` and the contract with the reason,
+and a test asserts the admitted output so it stays the admitted one. The *comma*
+form is already right — `他嘴裡念著「快跑！」，腳下卻沒動。` stays whole, because
+`，` cannot begin a line — which is what makes this a gap in one construction
+rather than in the rule.
+
+**Divergence (30), recorded rather than closed.** `POST /api/sentences` splits
+arbitrary text and `lx sentences` splits only a document's stored text, so the
+wire can be asked a question the command cannot. It is *not* invariant 8's usual
+shape: both surfaces call `cli.do_sentences`, which has taken a list of arbitrary
+strings from the day it was written, so no pipeline logic lives in the server.
+The other available reading was that the asymmetry is inherent — a reviewer
+mid-edit holds text belonging to no file and a terminal does not — and it was
+refused, because a terminal holds such text routinely through a pipe or a flag.
+The repair is one flag and it is a scheduled item, not a repair package's to take.
+
+**A mutation round over eleven guards, all eleven killed**, after two of the three
+first-round survivors turned out to be exactly the holes above. The harness
+anchors on exact source strings and reports a non-matching pattern as an error
+rather than a pass, because items 1, 2 and the symmetric-mark repair all rewrite
+lines a stale harness would have anchored on.
+
 ## 2026-08-20 · Configuration becomes writable over HTTP, and the allowlist is closed by arithmetic rather than by vigilance
 
 Closing HANDOFF-029. `POST /api/config` writes one configuration key from a

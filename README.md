@@ -115,8 +115,8 @@ any error, so a build can gate on it.
 **4. Render by substitution.** Translations are refilled into the original
 skeleton, never re-serialized from a parse tree. This is why front matter, fenced
 code, table alignment, indentation and line endings survive byte for byte — a CI
-corpus of 28 deliberately awkward inputs asserts it on Linux and Windows, from
-the bytes on disk to the bytes written back.
+corpus of 55 deliberately awkward inputs, 35 Markdown and 20 plain text, asserts
+it on Linux and Windows, from the bytes on disk to the bytes written back.
 
 Per-segment errors compound, which is why steps 1 and 4 are code rather than
 instructions. Even at a hypothetical 99.5% per segment, a 500-segment document
@@ -142,6 +142,8 @@ It does not mean the translation is good; that is what review is for.
 | `lx repair SRC --lang L` | re-translate only failing segments |
 | `lx run SRC --lang L` | the whole loop, with `--polish` for a fluency pass |
 | `lx render SRC --lang L -o OUT` | rebuild the target document |
+| `lx blocks SRC --lang L` | the rebuilt document block by block, without writing it |
+| `lx sentences SRC --lang L` | how a segment's text divides into sentences |
 | `lx commit SRC --lang L` | bank approved wording in the translation memory |
 | `lx web` | local review workbench |
 | `lx config get\|set\|unset KEY [VALUE]` | read and write `lx.config.json` with dotted keys |

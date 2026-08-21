@@ -28,6 +28,7 @@ from ..cli import (
     confined_path,
     default_output,
     do_apply,
+    do_blocks,
     do_check,
     do_config_set,
     do_config_unset,
@@ -37,6 +38,7 @@ from ..cli import (
     do_render,
     do_routing_set,
     do_select,
+    do_sentences,
     do_translate,
     do_untracked,
     language_tag,
@@ -560,8 +562,13 @@ class _Handler(BaseHTTPRequestHandler):
             }
         if path == "/api/preview":
             _require(path, src=src, lang=lang)
-            text, missing = do_render(src, lang, cfg, fallback=True)
-            return {"text": text, "missing": missing,
+            # One call, both answers. `text` is the join of `blocks` rather than
+            # a second render: two walks of one document are two chances to
+            # disagree about what it says, and the reading view would be reading
+            # the one nobody writes files from.
+            blocks, missing = do_blocks(src, lang, cfg, fallback=True)
+            return {"text": "".join(b["text"] for b in blocks),
+                    "blocks": blocks, "missing": missing,
                     "default_out": default_output(src, lang, cfg)}
         raise ValueError(f"unknown endpoint {path}")
 
@@ -653,6 +660,24 @@ class _Handler(BaseHTTPRequestHandler):
             # to read it *inside* the lock or it validates against one snapshot
             # and writes into another.
             return _config_write(body)
+        if path == "/api/sentences":
+            # No `src`, no `lang` and no path of any name — the editor's buffer is
+            # what a reviewer is holding mid-edit and it belongs to no file yet.
+            #
+            # The admission gate above still binds, because it binds by the
+            # presence of the field rather than by the endpoint's name. What that
+            # does and does not mean, stated exactly, because the comment here
+            # overclaimed it until 2026-08-21: a `src` that escapes the project
+            # root, or a `lang` that is not a language tag, is refused *there* and
+            # never reaches this branch. A `src` naming a real file is not refused
+            # by anything — it passes the gate and is then ignored, because this
+            # endpoint opens no document. Ignored is the right answer; the gate's
+            # job is that an untrusted path is confined before it is opened, and
+            # a path nothing opens has nothing to confine.
+            #
+            # The type check is `do_sentences`', not this function's, so the CLI
+            # cannot walk around it.
+            return {"sentences": do_sentences(body.get("texts"), cfg)}
         raise ValueError(f"unknown endpoint {path}")
 
 

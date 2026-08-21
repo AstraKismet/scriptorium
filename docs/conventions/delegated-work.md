@@ -117,6 +117,62 @@ coordinating worker that finds itself waiting should read what has finished rath
 than wait for what has not. Check that before concluding a slow run is a stuck one.
 The mechanism is tool-specific and lives in the per-machine binding.
 
+### 2c. A finding is routed to verification by what would settle it, not by how bad it sounds
+
+A review that fans out to find things and then fans out again to check them pays
+twice, and the second fan-out is where the money goes: it is one worker per
+*finding* rather than per *lane*, so it scales with how productive the first stage
+was. Two rules keep it honest without keeping it expensive, and both are about the
+join between the stages rather than about either stage.
+
+**Measured 2026-08-21**, on HANDOFF-028's adversarial review. Six read-only lenses
+returned **32 findings**; the refutation stage was one worker per finding at the
+design tier. It was interrupted after **10 of 32** verdicts. What the ten showed:
+
+- **Three of them refuted the same finding.** One stray carriage return in a
+  tracked document was reported by three separate lenses, and each report bought
+  its own design-tier worker. Across the whole set, 32 findings covered roughly
+  twenty distinct issues — the two heaviest were reported by four lenses each.
+- **Five of the ten verdicts were "reproducible, and not a defect".** That is the
+  refutation stage earning its price, and it earned it entirely on *low-severity*
+  findings, where the question was whether a true observation was a defect or a
+  preference.
+- **The two findings that carried real weight were settled by the coordinating
+  worker in a single shell call** — a three-point timing loop, a `grep` for call
+  sites, and a byte count. That evidence is *stronger* than a delegated verdict,
+  not weaker, and it cost less than dispatching one worker.
+
+So:
+
+1. **Deduplicate before the second fan-out, in plain code.** Independent lenses
+   over one change agree far more than they disagree, and every duplicate is a
+   whole worker. This is the case where a barrier between the stages is genuinely
+   right — merging across the full result set is exactly what a barrier is for —
+   and it is the only work in the pipeline that must not be delegated to a model,
+   because "are these the same finding" keyed on file and claim is arithmetic.
+
+2. **Route each surviving finding by what would settle it.** A claim with a
+   command that decides it — a count, a timing, a grep, an exit code — is settled
+   by *running the command*, at no tier at all. A claim whose real question is
+   "is this a defect or a preference" is judgement, and judgement is what the
+   design tier is for. Severity is not the router: a `high` finding is often the
+   mechanical one, because what makes it high is usually that it is measurable.
+
+3. **Make the reporting lane declare what would settle its own claim**, as a
+   required field beside the claim itself. The lane that found it knows; the
+   coordinator guessing afterwards is re-deriving something that was free at the
+   source, and a lane asked the question writes better findings for having been
+   asked it.
+
+The residue is a real one and belongs in the closing report rather than hidden: a
+review whose verification stage is skipped or cut short has findings of **more than
+one evidential kind**, and a list that does not say which is which reads as
+uniform. Mark each item with how it was established — measured here, refuted
+independently, or reported once and unchecked — and give whoever acts on it the
+rule that an unchecked low-severity item is verified *before* it is repaired, with
+the outcome recorded either way. An item quietly dropped for being a preference is
+an item the next reader re-derives from nothing.
+
 ## 3. The brief carries the context, or the worker invents one
 
 A delegated worker does not investigate before acting and does not know anything

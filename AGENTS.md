@@ -240,7 +240,13 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    `POST /api/extract` type-checks neither `reset` nor `tone`, so the *string*
    `"false"` is a reset that discards a document's translations. It is recorded
    rather than repaired because refusing it narrows an accepted value set, and
-   that bumps.
+   that bumps. (30) was appended on 2026-08-21 and is **open**, and it is this
+   invariant's without being its usual shape: `POST /api/sentences` splits
+   arbitrary text and `lx sentences` splits only a document's stored text, so the
+   wire can be asked a question the command cannot — but no logic lives in the
+   server, because both call `cli.do_sentences` and that function has taken a
+   list of arbitrary strings since it was written. What the CLI lacks is a way to
+   hand it one from a terminal, which is a flag and a scheduled item.
    `contract_version` moved to **2** on 2026-08-14, once, carrying five items: the `candidates` → `untracked` rename,
    the identity label normalized, `status` derived from the target text, an empty
    target refused, and a lost-update token. It closed (13)'s wire half, (14), (17)
@@ -319,7 +325,10 @@ src/scriptorium/
   mask.py        markup protection: ⟦n⟧ slot records, tag pairing, DNT terms, bracket repair
   mdparse.py     markdown -> (skeleton nodes, segments)
   textparse.py   plain text -> the same pair; encoding, paragraph and chapter heuristics
-  skeleton.py    render(): nodes + targets -> document, for every format at once
+  skeleton.py    render_blocks(): the one walk of doc["nodes"], as an ordered
+                 block map; render() is its join, for every format at once
+  sentences.py   where one sentence ends and the next begins — text, never
+                 offsets; the rule the reading view is given rather than computes
   normalize.py   deterministic repair: punctuation width, CJK/Latin spacing
   checks.py      validators; error severity fails the build. Invariant 2b lives
                  here: block-start containment, host escaping, placeholder pairs
@@ -346,13 +355,15 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 1414 tests; no network (one is POSIX-only,
+python -m pytest -q                 # 1658 tests; no network (one is POSIX-only,
                                     #   one runs only where the filesystem folds case)
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
 
 lx run docs/guide.md --lang zh-TW   # extract -> translate -> check -> repair -> render
 lx models --provider llamacpp       # ask a backend which models it serves
+lx blocks docs/guide.md --lang zh-TW --json   # the rendered document, block by block
+lx sentences docs/guide.md --lang zh-TW       # where its sentences begin and end
 lx web                              # review workbench on 127.0.0.1:8787
 lx status --json                    # the frozen project-status contract
 lx status --scan ~/books            # every project under a root
@@ -500,6 +511,37 @@ own.
   construction. It stayed a whitelist after document state moved into SQLite, where
   `lang` is a column value: two of the three paths it feeds are still files, and a
   check that narrows as storage changes is a check nobody can rely on.
+- **The rendered document has one walk, and it is `skeleton.render_blocks`.**
+  `render` is its join, `formats.Format` carries a `render_blocks` slot beside
+  `render`, and a test reads every module in `src/` with `ast` to assert the node
+  list is looped over exactly once and read nowhere outside `skeleton.py` — by
+  syntax rather than by text, because the first spelling of that guard matched a
+  literal string and a rename defeated it. **`cli.do_render` goes through
+  `fmt.render` and `cli.do_blocks` through `fmt.render_blocks`, on purpose**:
+  written as the join of the other, `Format.render` was dead code and every test
+  comparing them compared a value to itself.
+  Two walks are two answers to "what does this document say at this position",
+  both right the day they are written; the reading view would be reading the one
+  nobody writes files from. A block carries **text, never an integer span** — a
+  CRLF document shifts every offset because the terminator is re-imposed at
+  render, and Python counts code points where JavaScript counts UTF-16 code
+  units, so one character outside the BMP desynchronizes them silently. The
+  terminator is re-imposed through `docio.apply_terminator_parts`, because the
+  blanket `\r?\n` substitution does **not** distribute over a concatenation.
+- **Where a sentence ends is `sentences.py`, and nowhere else.** Not `checks.py`
+  (invariant 4 — it is not decidable without judgement), not the frontend, and
+  not the translation-memory key or `store.SEGMENTATION_VERSION`, which a test
+  pins as values. The answer is an ordered array of **strings** whose
+  concatenation is the input exactly; both offset forms were refused on
+  2026-08-17. `lx sentences` and `POST /api/sentences` exist because the rule
+  lives in Python precisely so that `lx`, an agent and CI can see it — a rule with
+  no command in front of it cannot be. Its known failures are listed in the module
+  and in the contract rather than left to be discovered, and **which side of
+  invariant 4 a failure falls on is what decides whether it is repaired or
+  admitted**: the five marks that open and close with the same glyph are told
+  apart by what follows the run, mechanically, and Chinese dialogue attribution
+  is not, because telling an attribution verb from an ordinary one needs a verb
+  table. See `docs/decisions.md`, 2026-08-21.
 - A document's line terminator is a document-level fact, held in `doc["eol"]` and
   re-imposed once at render — never carried inside a segment, where the model and
   the reviewer would both have to reproduce a control character neither can be
