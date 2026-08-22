@@ -44,25 +44,36 @@ Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
 
 ## Git identity and remote
 
-**This is already done.** The repository was initialized on `main`, the identity
-was set with `--local` so nothing else on the machine is affected, and the first
-commit records the delivered state unmodified. Confirm rather than repeat:
+**This is already done.** The repository was initialized on `main`, and the first
+commit records the delivered state unmodified. The commit identity is **not** set
+per-repository — it is inherited from the machine's global config, which uses the
+account's ID-based noreply address. Confirm rather than repeat:
 
 ```powershell
-git log -1 --format='%an <%ae>'    # AstraKismet-Isida <305370422+astrakismet-isida@users.noreply.github.com>
-git config --local core.autocrlf   # input
+git log -1 --format='%an <%ae>'              # AstraKismet Isida <305370422+astrakismet-isida@users.noreply.github.com>
+git config --local core.autocrlf             # input
+git config --show-origin --get user.email    # file:C:/Users/Isida/.gitconfig — global, not local
 ```
 
-If you ever need to reproduce the setup on another machine, it is four commands —
+A `--local` identity was used here until 2026-08-22, and removing it was the
+point. A per-repository override is invisible once set and silently outlives a
+change to the global identity: when the machine moved to the noreply address,
+the two repositories carrying a `--local` override were the only ones that kept
+committing under the old one — and they were the two that most needed the
+change. The global value is the safe default, so inheriting it is the correct
+behaviour. Projects that genuinely need a different identity get a
+directory-scoped `includeIf` in `~/.gitconfig`, not an override here.
+
+If you ever need to reproduce the setup on another machine, it is two commands —
 there is deliberately no script, because a script that stops halfway is worse
 than a list you can read:
 
 ```powershell
 git init -b main
-git config --local user.name  "AstraKismet-Isida"
-git config --local user.email "305370422+astrakismet-isida@users.noreply.github.com"
 git config --local core.autocrlf input
 ```
+
+Do not set `user.name` or `user.email` with `--local` in this repository.
 
 ### The SSH identity trap on this machine
 
