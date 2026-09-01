@@ -165,6 +165,33 @@ def mask(text, dnt=()):
     return out, slots
 
 
+def target_map(seg):
+    """The map a segment's **stored target**'s ids mean.
+
+    One answer, because there were two readers of a stored target and they
+    disagreed for a fortnight. `save_doc` rewrites `slots` from the fresh parse
+    on every extract and the divergence (24) keep path leaves an older wording
+    sitting on a newer segment, so `cli.do_extract` pins the wording's own map as
+    `target_slots` — written only when the two differ, which is why the ordinary
+    segment costs nothing here.
+
+    `skeleton.render_blocks` and `checks.containment_problems` both go through
+    this. They must: the containment rule asks "what does this target do to the
+    block it lands in", answered on the unmasked text *because that is what
+    reaches the file* — so a render reading one map while the rule reads the
+    other reports on bytes nobody writes. Measured 2026-09-01, when the render
+    moved first and the rule did not: a stranded segment rendering
+    `Note 說。` was failed at error severity for opening a list, which the
+    rendered line does not do, and `lx run` then refused to render a document
+    that renders correctly.
+
+    It is here rather than in `store` so that `checks` and `skeleton` do not gain
+    an import edge to it for one dictionary lookup, and because "which slot map"
+    is this module's question.
+    """
+    return seg.get("target_slots") or seg.get("slots") or {}
+
+
 def unmask(text, slots):
     """Restore placeholders, following nesting a few levels deep.
 

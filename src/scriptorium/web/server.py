@@ -657,8 +657,9 @@ class _Handler(BaseHTTPRequestHandler):
             # `store` calls and the contract said so. What may be banked stopped
             # being "has a target" that day, and a policy with two homes is the
             # drift invariant 8 exists to stop.
-            committed, refused, held = do_commit(src, lang, cfg)
-            return {"committed": committed, "refused": refused, "held": held}
+            committed, refused, held, stranded = do_commit(src, lang, cfg)
+            return {"committed": committed, "refused": refused, "held": held,
+                    "stranded": stranded}
         if path == "/api/config":
             # `cfg` above is deliberately not passed on. The merged configuration
             # is what the field rules are checked against, and this endpoint has

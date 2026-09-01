@@ -1417,6 +1417,7 @@ def test_commit_names_what_it_declined_to_bank(base, tmp_path, monkeypatch):
     body = json.loads(_post(base, "/api/commit", {"src": "d.md", "lang": "zh-TW"})[1])
     assert body["refused"] == [ids[0]], "a `tags` error is not banked"
     assert body["held"] == [ids[1]]
+    assert body["stranded"] == []
     assert body["committed"] == 0
 
 

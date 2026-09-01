@@ -1570,8 +1570,8 @@ def test_a_broken_wording_does_not_hide_the_good_one_already_banked(
     doc, *_ = do_extract("b.md", "zh-TW", CFG)
     do_apply("b.md", "zh-TW", CFG, {_only(doc)["id"]: "⟦1⟧ 出貨，⟦1⟧ 準時。"},
              origin="human")
-    committed, refused, held = _commit("b.md")
-    assert (committed, refused, held) == (0, [_only(doc)["id"]], [])
+    committed, refused, held, stranded = _commit("b.md")
+    assert (committed, refused, held, stranded) == (0, [_only(doc)["id"]], [], [])
     assert [r["target"] for r in load_tm("zh-TW").values()] == [good], \
         "the memory still answers with the wording that fits"
 
@@ -1601,7 +1601,7 @@ def test_the_gate_is_lx_checks_rule_and_not_a_second_copy_of_half_of_it(
         "the acceptance path cannot see this, which is the point"
 
     do_apply("d.md", "zh-TW", CFG, {seg["id"]: crossed}, origin="human")
-    assert _commit() == (0, [seg["id"]], [])
+    assert _commit() == (0, [seg["id"]], [], [])
     assert load_tm("zh-TW") == {}
 
 
@@ -1621,11 +1621,11 @@ def test_a_held_segment_is_not_banked_and_an_unhold_is_all_it_takes(
     do_apply("d.md", "zh-TW", CFG, {a: "甲。", b: "乙。"}, origin="human")
     do_hold("d.md", "zh-TW", CFG, [b])
 
-    assert _commit() == (1, [], [b])
+    assert _commit() == (1, [], [b], [])
     assert [r["target"] for r in load_tm("zh-TW").values()] == ["甲。"]
 
     do_hold("d.md", "zh-TW", CFG, [b], held=False)
-    assert _commit() == (1, [], [])
+    assert _commit() == (1, [], [], [])
     assert sorted(r["target"] for r in load_tm("zh-TW").values()) == ["乙。", "甲。"]
 
 
@@ -1641,7 +1641,7 @@ def test_a_segment_that_is_both_held_and_failing_is_reported_as_held(
     sid = _only(doc)["id"]
     do_apply("d.md", "zh-TW", CFG, {sid: "⟦1⟧ 出貨，⟦1⟧ 準時。"}, origin="human")
     do_hold("d.md", "zh-TW", CFG, [sid])
-    assert _commit() == (0, [], [sid])
+    assert _commit() == (0, [], [sid], [])
 
 
 def test_the_gate_honours_a_rule_the_project_turned_off(tmp_path, monkeypatch):
@@ -1656,10 +1656,10 @@ def test_the_gate_honours_a_rule_the_project_turned_off(tmp_path, monkeypatch):
     doc, *_ = do_extract("d.md", "zh-TW", CFG)
     sid = _only(doc)["id"]
     do_apply("d.md", "zh-TW", CFG, {sid: "他等了三天。"}, origin="human")
-    assert _commit() == (0, [sid], [])
+    assert _commit() == (0, [sid], [], [])
 
     cfg = dict(CFG, checks_disabled=["numbers"])
-    assert do_commit("d.md", "zh-TW", cfg) == (1, [], [])
+    assert do_commit("d.md", "zh-TW", cfg) == (1, [], [], [])
 
 
 # ── which map a stored wording's ⟦n⟧ actually mean ──────────────────────────
@@ -1724,3 +1724,91 @@ def test_a_corrective_apply_does_not_inherit_the_map_it_replaced(
     assert "target_slots" not in stored
     assert do_render("d.md", "zh-TW", CFG)[0] == "Alphamet 了 Beta。\n"
     assert tm_record(stored)["slots"] == ["Alpha", "met"]
+
+def test_re_applying_a_stranded_segments_own_words_changes_nothing(
+        tmp_path, monkeypatch):
+    """Found by the adversarial pass, 2026-09-01, and it is the whole reason the
+    `target_slots` strip is conditional.
+
+    `store.save_targets` pops the map unconditionally and is right to: its text
+    has been through `translate.accept` against the current segment. `lx apply`
+    takes whatever it is handed — and an agent's whole-document round trip hands
+    back every segment, unchanged ones included. An unconditional pop there
+    un-strands a segment nobody edited: the render flips to the wrong original
+    and the `numbering` warning that was the only report of it disappears, with
+    `lx check` green on both sides of the act.
+    """
+    _project(tmp_path, monkeypatch, dnt="Alpha\nBeta\n", doc=b"Alpha met Beta.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    sid = _only(doc)["id"]
+    do_apply("d.md", "zh-TW", CFG, {sid: "⟦1⟧遇見⟦2⟧。"}, origin="human")
+    (tmp_path / "config" / "dnt.txt").write_text("Alpha\nmet\n", encoding="utf-8")
+    do_extract("d.md", "zh-TW", CFG)
+
+    stored = load_doc("d.md", "zh-TW")["segments"][0]
+    assert stored.get("target_slots")
+    do_apply("d.md", "zh-TW", CFG, {sid: stored["target"]}, origin="human")
+
+    after = load_doc("d.md", "zh-TW")["segments"][0]
+    assert after.get("target_slots"), "a no-op re-apply must not un-strand it"
+    assert do_render("d.md", "zh-TW", CFG)[0] == "Alpha 遇見 Beta。\n"
+    assert do_check("d.md", "zh-TW", CFG)[0]["by_rule"] == {"numbering": 1}
+
+
+def test_a_stranded_wording_is_not_banked_over_one_that_fits(tmp_path, monkeypatch):
+    """The `numbering` rule is warn, so the error gate cannot see this one.
+
+    Found by the adversarial pass, 2026-09-01: a stranded wording renders
+    correctly and passes `lx check`, so it went into the memory — where it
+    shadowed a wording banked under the same key that *did* speak the current
+    numbering, and the next document came back with nothing usable. The memory is
+    read by every document in this project under the numbering the project has
+    now; a wording that does not speak it does not belong there yet.
+    """
+    _project(tmp_path, monkeypatch, dnt="Alpha\nBeta\n",
+             doc=b"Alpha met Beta.\n", name="a.md")
+    doc, *_ = do_extract("a.md", "zh-TW", CFG)
+    do_apply("a.md", "zh-TW", CFG, {_only(doc)["id"]: "⟦1⟧遇見⟦2⟧。"}, origin="human")
+    assert _commit("a.md")[0] == 1
+
+    (tmp_path / "config" / "dnt.txt").write_text("Alpha\nmet\n", encoding="utf-8")
+    (tmp_path / "b.md").write_bytes(b"Alpha met Beta.\n")
+    doc, *_ = do_extract("b.md", "zh-TW", CFG)
+    do_apply("b.md", "zh-TW", CFG, {_only(doc)["id"]: "⟦1⟧⟦2⟧了 Beta。"}, origin="human")
+    assert _commit("b.md")[0] == 1
+    good = "⟦1⟧⟦2⟧了 Beta。"
+
+    do_extract("a.md", "zh-TW", CFG)
+    sid = load_doc("a.md", "zh-TW")["segments"][0]["id"]
+    assert do_check("a.md", "zh-TW", CFG)[0]["errors"] == 0, "warn, not error"
+    assert _commit("a.md") == (0, [], [], [sid])
+    assert [r["target"] for r in load_tm("zh-TW").values()] == [good]
+
+    (tmp_path / "c.md").write_bytes(b"Alpha met Beta.\n")
+    doc, reused, rejected, _notes = do_extract("c.md", "zh-TW", CFG)
+    assert (reused, rejected) == (1, 0), "the good record still answers"
+
+
+def test_containment_reads_the_target_against_the_map_the_render_uses(
+        tmp_path, monkeypatch):
+    """Found by the adversarial pass, 2026-09-01, and it is invariant 2b's own rule.
+
+    `checks.containment_problems` asks what a target does to the block it lands
+    in, answered on the unmasked text *because that is what reaches the file*.
+    When the render moved to `target_slots` and this rule did not, a stranded
+    segment rendering `Note 說。` was failed at error severity for opening a list
+    — which the rendered line does not do — and `lx run` then refused to render a
+    document that renders correctly, while `lx commit` refused to bank it.
+    """
+    _project(tmp_path, monkeypatch, dnt="Note\n", doc=b"Say - Note here.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    sid = _only(doc)["id"]
+    assert _only(doc)["masked"] == "Say - ⟦1⟧ here."
+    do_apply("d.md", "zh-TW", CFG, {sid: "⟦1⟧ 說。"}, origin="human")
+
+    (tmp_path / "config" / "dnt.txt").write_text("- Note\n", encoding="utf-8")
+    do_extract("d.md", "zh-TW", CFG)
+    text, _missing = do_render("d.md", "zh-TW", CFG)
+    assert text == "Note 說。\n", "the rendered line opens no list"
+    report, _ = do_check("d.md", "zh-TW", CFG)
+    assert report["errors"] == 0 and report["by_rule"] == {"numbering": 1}

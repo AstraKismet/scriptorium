@@ -412,7 +412,16 @@ $('#bCommit').onclick = async () => {
   if (!cur) return;
   await save();
   const r = await api('/api/commit', cur);
-  say(`translation memory += ${r.committed}`, 'good');
+  // Not the count alone. Since 2026-09-01 `committed` is not a complete report:
+  // held, stranded and failing segments are declined, and a reviewer told only
+  // "+= 12" cannot act on the forty that were not.
+  const left = [
+    r.refused?.length ? `${r.refused.length} failing` : null,
+    r.stranded?.length ? `${r.stranded.length} on an older numbering` : null,
+    r.held?.length ? `${r.held.length} held` : null,
+  ].filter(Boolean);
+  say(`translation memory += ${r.committed}`
+      + (left.length ? ` — not banked: ${left.join(', ')}` : ''), 'good');
 };
 
 window.addEventListener('beforeunload', e => { if (dirty.size) e.preventDefault(); });

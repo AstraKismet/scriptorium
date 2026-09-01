@@ -238,13 +238,79 @@ derives the set from `checks.check_segment` with `ast` — by syntax rather than
 text, the lesson `skeleton.render_blocks` taught on 2026-08-21 when a rename
 defeated a guard that matched a literal string.
 
+### What the adversarial pass found, and the three repairs it forced
+
+The first version of all of the above went to a mutation pass and three
+read-only lenses. Two of the four things they found were regressions this change
+had introduced, both invisible to a green suite, and both on the axis the work
+had not varied.
+
+**A no-op re-apply un-stranded a segment.** `store.save_targets` pops
+`target_slots` unconditionally and is right to — its text has been through
+`translate.accept` against the current segment, so it is never the old wording.
+`store.save_segments` takes whatever `lx apply` was handed, **including the
+stored target byte for byte**: an agent's whole-document round trip sends every
+segment back, and `cmd_apply` sends no `base`, so nothing filters the unchanged
+ones. Re-applying a stranded segment's own text therefore dropped the map,
+flipped the render back to the wrong original, and erased the `numbering`
+warning that was the only report of it — with `lx check` green on both sides of
+the act. The pop is conditional on the target actually changing now, read inside
+the write transaction like every other guard in that module. The test that
+shipped with the pop applied a *different* wording, which is exactly the axis it
+did not vary.
+
+**The commit gate did not cover its own subject.** `numbering` is warn, so a
+stranded wording passed the error gate and was banked — where it shadowed a
+correct record under the same key and the next document came back with nothing
+usable, which is the story the gate's own docstring tells. Stranded wording is
+declined now, in its own list beside `refused` and `held`, because the remedy
+differs: re-word the segment against the source as it stands. The memory is read
+by every document in this project under the numbering the project has *now*, and
+a wording that does not speak it does not belong there yet.
+
+**`containment` read one map while the render read the other.** Its docstring
+says it reads the unmasked text "because what reaches the file is what `render`
+writes" — and for one commit that was false: a stranded segment rendering
+`Note 說。` was failed at *error* severity for opening a list, which the rendered
+line does not do, and `lx run` then refused to render a document that renders
+correctly while `lx commit` refused to bank it. A true positive turned into a
+false one at the severity that stops a build. `mask.target_map` is the one answer
+to "which map do this stored target's ids mean" now, and `skeleton.render_blocks`
+and `checks.containment_problems` both go through it. `escaping_problems` is
+unaffected and stays that way on purpose: it reads the *masked* target, which is
+the opposite side and has no map in it.
+
+The fourth was the workbench: `POST /api/commit`'s only shipped client printed
+`translation memory += 12` and dropped the arrays, which is the "report nobody
+can act on" shape the gate's own docstring names. It names them now.
+
+The security lens found **no new exposure**: the two arrays carry segment ids
+`GET /api/doc` already gives the same caller, `src` and `lang` are confined by
+field presence before the dispatch reaches this endpoint, and the
+`config/glossary.csv` and `config/dnt.txt` reads are a third door onto a path
+`POST /api/check` and `GET /api/doc` already opened. It measured one thing worth
+keeping and it is **not this change's**: `checks.check_segment`'s glossary rule
+builds a regex per row per segment, and `re`'s pattern cache holds 512, so past
+that the cost steps by roughly eighty times — 52 s for 500 segments against 3000
+glossary rows, identical on the parent commit. Scheduled as **HANDOFF-037**.
+
 ### What this leaves
 
 Divergence **(26)** is untouched and open. Divergence **(31)** is new, open, and
-scheduled as **HANDOFF-036** with the version decision it owns. Giving
-`lx commit` an `--ids` is named above and scheduled nowhere yet. Nothing here
-moved `contract_version`, and `docs/contracts/status-json.md` is not affected at
-all.
+scheduled as **HANDOFF-036** with the version decision it owns. The glossary
+recompilation is **HANDOFF-037**. Giving `lx commit` an `--ids` is named above
+and scheduled nowhere yet. Nothing here moved `contract_version`, and
+`docs/contracts/status-json.md` is not affected at all.
+
+One thing measured and deliberately **not** acted on, because it is older and
+larger than this package: **any two error-free divergent wordings under one key
+shadow each other**, so a document holding one sentence twice with two different
+translations makes `lx commit` non-idempotent forever, the two alternating as
+`store.load_tm`'s winner. Identical at the parent commit. It is the ordinary
+shape of a novel with repeated dialogue, and it is a question about the memory's
+last-write-wins semantics rather than about what may be banked — which is why it
+is recorded here rather than answered by a gate that was scoped to a different
+question.
 
 ## 2026-08-21 · The reading view's two Python halves: a block map that carries text, and a sentence rule that lives in one place
 

@@ -958,6 +958,23 @@ def _written_by_hand(conn, did, lang, ids):
     return out
 
 
+def _stored_targets(conn, did, lang, ids):
+    """``{seg_id: target}`` for these ids. Read inside the write, like the guard.
+
+    Chunked and transacted for :func:`_written_by_hand`'s reasons, which its
+    docstring gives; this is the same read one column over.
+    """
+    out = {}
+    ids = list(ids)
+    for start in range(0, len(ids), 500):
+        chunk = ids[start:start + 500]
+        marks = ",".join("?" * len(chunk))
+        out.update(conn.execute(
+            f"SELECT seg_id, target FROM segments WHERE doc_id=? AND lang=? "
+            f"AND seg_id IN ({marks})", (did, lang, *chunk)).fetchall())
+    return out
+
+
 def save_segments(src, lang, segments, expect=None, over_human=False):
     """Write these segments and nothing else. ``(written, stale)``.
 
@@ -1005,20 +1022,7 @@ def save_segments(src, lang, segments, expect=None, over_human=False):
     could not, which was a claim about its *default* origin and not about the
     command.
     """
-    # **The same pop :func:`save_targets` makes, for the same reason.** This
-    # statement always writes `target`, so whatever map an *earlier* target was
-    # written against stops being provenance the moment it runs. Left behind it
-    # is worse than useless: `prior_targets` hands `translate.accept` the wrong
-    # map at the next extract, `tm_record` banks `slots` naming originals the
-    # wording's ids do not mean — a wrong record in invariant 9's source of
-    # truth — and `skeleton.render_blocks` unmasks the corrected wording against
-    # the map it was written to replace. Measured 2026-09-01, all three from one
-    # `lx apply` that fixed a segment the divergence (24) keep path had stranded.
-    # A copy rather than a mutation: the caller's dict is `cli.do_apply`'s own
-    # and it goes on to build the reply from it.
-    rows = [(*_seg_row(0, {k: v for k, v in seg.items() if k != "target_slots"})[2:],
-             doc_id(src), lang, seg["id"]) for seg in segments]
-    if not rows:
+    if not segments:
         return 0, [], []
     expect = expect or {}
     conn = _connect()
@@ -1029,11 +1033,36 @@ def save_segments(src, lang, segments, expect=None, over_human=False):
             guard = () if over_human else _written_by_hand(
                 conn, doc_id(src), lang,
                 [s["id"] for s in segments if is_model_origin(s.get("origin"))])
-            for row, seg in zip(rows, segments):
+            # **The same pop :func:`save_targets` makes, and the condition it does
+            # not need.** A wording is written against the segment as it stands,
+            # so whatever map an *earlier* target was written against stops being
+            # provenance — left behind, `prior_targets` hands `translate.accept`
+            # the wrong map at the next extract, `tm_record` banks `slots` naming
+            # originals the ids do not mean (a wrong record in invariant 9's
+            # source of truth), and the render substitutes the map the wording
+            # was written to replace.
+            #
+            # `save_targets` pops unconditionally and is right to: its text has
+            # been through `translate.accept` against the current segment, so it
+            # is never the old wording. This function takes whatever `lx apply`
+            # was handed, **including the stored target byte for byte** — an
+            # agent's whole-document round trip sends every segment back — and an
+            # unconditional pop there un-strands a segment nobody edited: the
+            # render flips to the wrong original and the `numbering` warning that
+            # was the only report of it disappears. Measured 2026-09-01 by the
+            # adversarial pass over the commit that added the pop.
+            was = _stored_targets(conn, doc_id(src), lang,
+                                  [s["id"] for s in segments])
+            for seg in segments:
                 seg_id = seg["id"]
                 if seg_id in guard:
                     refused.append(seg_id)
                     continue
+                # A copy rather than a mutation: the caller's dict is
+                # `cli.do_apply`'s own and it builds the reply from it.
+                if seg.get("target_slots") and seg.get("target") != was.get(seg_id):
+                    seg = {k: v for k, v in seg.items() if k != "target_slots"}
+                row = (*_seg_row(0, seg)[2:], doc_id(src), lang, seg_id)
                 if seg_id in expect:
                     n = conn.execute(
                         "UPDATE segments SET content_hash=?, context=?, variant=?, status=?, "

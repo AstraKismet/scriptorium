@@ -867,10 +867,11 @@ and a policy with two homes is what invariant 8 exists to stop.
 |---|---|---|
 | `committed` | integer | The count of memory lines that were **new** — not the count of translated segments. Committing an unchanged document twice returns `0` the second time, and that is correct. |
 | `refused` | array of string | Segment ids not banked because `lx check` reports an **error** on them. `.lx/tm.<lang>.jsonl` keeps the *last* record per key, so banking a broken wording does not merely add a useless line — it hides the good one already banked under the same key, and a third document then finds nothing. Added 2026-09-01; before it, every non-empty target was banked. |
-| `held` | array of string | Segment ids not banked because they are `held`. A hold is the reviewer's own declaration that the segment is theirs to finish, and this endpoint takes a whole document with no per-segment selection, so the hold is the only thing in the request that can say "not this one". Nothing is lost: an unhold makes the wording eligible for the very next commit. Checked **before** `refused`, so a segment that is both appears only here — "unhold it" is the more useful sentence. |
+| `stranded` | array of string | Segment ids not banked because their wording speaks a numbering this document has moved on from — they carry `target_slots`, they render as they were written, and `lx check` reports them at **warn** on the `numbering` rule. That severity is why `refused` does not catch them, and they need their own row for the same reason `kept` does: the remedy is to re-word the segment against the source as it stands, not to fix an error. Banked, such a wording shadows a correct record under the same key and the next document finds nothing usable — measured 2026-09-01. |
+| `held` | array of string | Segment ids not banked because they are `held`. A hold is the reviewer's own declaration that the segment is theirs to finish, and this endpoint takes a whole document with no per-segment selection, so the hold is the only thing in the request that can say "not this one". Nothing is lost: an unhold makes the wording eligible for the very next commit. Checked **first**, so a segment that is also stranded or failing appears only here — "unhold it" is the remedy that comes before the others. |
 
-Both arrays are new keys and therefore additive; `contract_version` did not move
-for them. What *did* narrow is which segments `committed` counts, and that is a
+All three arrays are new keys and therefore additive; `contract_version` did not
+move for them. What *did* narrow is which segments `committed` counts, and that is a
 change to what this endpoint **does** rather than to what a documented value
 means — the reading `replaced` and `rejected` are already written under on
 `POST /api/extract`.

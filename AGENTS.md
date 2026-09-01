@@ -364,7 +364,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 1672 tests; no network (one is POSIX-only,
+python -m pytest -q                 # 1675 tests; no network (one is POSIX-only,
                                     #   one runs only where the filesystem folds case)
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
@@ -674,6 +674,16 @@ own.
   also what makes `checks_disabled` bind here without a second exception list.
   `cli.do_commit` is the seam both surfaces call, and it exists because this
   decision is what made "three inline `store` calls on each side" untenable.
+
+  **Nor is a wording that speaks a numbering the document has moved on from** —
+  one carrying `target_slots`. It renders correctly and `lx check` reports it at
+  *warn*, which is precisely why the error gate cannot see it; the memory is read
+  by every document in this project under the numbering the project has now, and
+  banked, such a wording shadows a correct record under the same key. A third
+  list beside `refused` and `held`, because the remedy differs: re-word the
+  segment. Found by the adversarial pass over the first version of the gate, which
+  is also where the conditional half of the `target_slots` strip came from — see
+  `docs/decisions.md`, 2026-09-01.
 
 - **An `llm:*` write does not land on a segment whose stored `origin` is
   `human`.** Since 2026-08-15, and enforced inside `store.save_targets` and

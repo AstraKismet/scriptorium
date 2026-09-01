@@ -1729,18 +1729,32 @@ def do_commit(src, lang, cfg):
     hold in with a hit, so the receiving document cannot know. *Lost:* a
     `--skip-held` flag, which answers "what does commit mean" once per call.
 
-    The refused and held ids come back rather than being dropped, for the reason
+    **Nor is a wording that speaks a numbering this document has moved on from.**
+    A segment carrying `target_slots` was stranded by a re-parse: it renders
+    correctly, because the render reads the map its ids mean, and `lx check`
+    reports it at *warn* — deliberately, since failing the build would block a
+    book over a segment that comes out right. That severity is exactly why the
+    error gate above does not catch it, and it is the population this whole
+    package is about, so it needs saying separately: the memory is read by every
+    document in this project under the numbering the project has **now**, and
+    this wording does not speak it. Measured 2026-09-01 by the adversarial pass:
+    banked, it shadowed a correct record under the same key and a third document
+    came back `reused 0, rejected 1`. Re-word the segment and it banks.
+
+    The three sets come back rather than being dropped, for the reason
     `store.save_targets` returns its refusals: a run reporting "+= 12 entries"
     while having declined four is a report nobody can act on.
     """
     doc = load_doc(src, lang)
     glossary, dnt = load_glossary(cfg), load_dnt(cfg)
-    bankable, refused, held = [], [], []
+    bankable, refused, held, stranded = [], [], [], []
     for seg in doc["segments"]:
         if not seg.get("target"):
             continue
         if is_held(seg):
             held.append(seg["id"])
+        elif seg.get("target_slots"):
+            stranded.append(seg["id"])
         elif any(i["severity"] == "error"
                  for i in check_segment(seg, lang, cfg, glossary, dnt)):
             refused.append(seg["id"])
@@ -1751,17 +1765,23 @@ def do_commit(src, lang, cfg):
     # from stored state, and the reason that function takes a document at all.
     committed = append_tm(lang, tm_records({**doc, "segments": bankable},
                                            load_tm(lang)))
-    return committed, refused, held
+    return committed, refused, held, stranded
 
 
 def cmd_commit(args, cfg):
-    committed, refused, held = do_commit(args.src, args.lang, cfg)
+    committed, refused, held, stranded = do_commit(args.src, args.lang, cfg)
     _out(f"translation memory += {committed} entries")
     if refused:
         _out(f"  {len(refused)} segment(s) not banked because `lx check` reports an "
              f"error on them: {', '.join(refused)}. The memory keeps the last record "
              f"per key, so banking one would hide the wording already there. Fix "
              f"them and commit again.")
+    if stranded:
+        _out(f"  {len(stranded)} segment(s) not banked because their wording speaks a "
+             f"numbering this document has moved on from: {', '.join(stranded)}. They "
+             f"render as they were written and `lx check` reports them as "
+             f"`numbering` warnings; re-word them against the source as it stands "
+             f"and commit again.")
     if held:
         _out(f"  {len(held)} held segment(s) not banked: {', '.join(held)}. A hold "
              f"says the segment is yours to finish; `lx unhold {args.src} "

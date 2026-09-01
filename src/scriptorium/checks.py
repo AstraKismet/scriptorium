@@ -13,7 +13,15 @@ containment, host escaping, and the carriage return a segment may not invent.
 import re
 from collections import Counter
 
-from .mask import CJK, CJK_RE, PH_RE, strip_placeholders, term_pattern, unmask
+from .mask import (
+    CJK,
+    CJK_RE,
+    PH_RE,
+    strip_placeholders,
+    target_map,
+    term_pattern,
+    unmask,
+)
 from .mdparse import (
     FENCE_RE,
     HEADING_RE,
@@ -321,10 +329,14 @@ def _block_start(line, table):
 def containment_problems(seg):
     """Messages for structure the target adds to the block it lands in.
 
-    Read on the *unmasked* text, both sides. What reaches the file is what
-    ``render`` writes, and ``render`` unmasks first — a rule that reads ⟦n⟧ is
-    answering a slightly different question, and a near miss of that kind is
-    exactly what this file exists to remove.
+    Read on the *unmasked* text, both sides, and each side against **its own**
+    slot map — the source against the segment's, the target against
+    :func:`mask.target_map`. What reaches the file is what ``render`` writes, and
+    ``render`` unmasks first, so a rule that reads ⟦n⟧ is answering a slightly
+    different question and a rule that unmasks with the *other* map is answering
+    about bytes nobody writes. Both near misses are exactly what this file exists
+    to remove, and the second one was live for the length of one commit on
+    2026-09-01.
 
     Everything is compared against the source rather than stated absolutely,
     because a nested list item and a nested blockquote are ordinary input whose
@@ -339,9 +351,11 @@ def containment_problems(seg):
     """
     kind = seg.get("kind") or "para"
     profile = _profile(seg)
-    slots = seg.get("slots") or {}
-    src = unmask(seg["masked"], slots)
-    tgt = unmask(seg.get("target") or "", slots)
+    # Two maps, and they are not the same one. The source is the fresh parse's;
+    # the target speaks whatever numbering it was written in, which is what the
+    # render substitutes. See `mask.target_map`.
+    src = unmask(seg["masked"], seg.get("slots") or {})
+    tgt = unmask(seg.get("target") or "", target_map(seg))
     src_lines, tgt_lines = src.split("\n"), tgt.split("\n")
     table = profile["block_starts"]
     out = []

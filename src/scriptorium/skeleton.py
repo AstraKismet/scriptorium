@@ -16,7 +16,7 @@ it. The registry has a slot for that; both formats that exist today point it
 here.
 """
 
-from .mask import unmask
+from .mask import target_map, unmask
 
 __all__ = ["MARKDOWN_MARKER", "render", "render_blocks"]
 
@@ -87,7 +87,7 @@ def render_blocks(doc, cfg, polish=None, fallback=False, marker=MARKDOWN_MARKER)
             # invariant 5 says corrected rather than reported; the `numbering`
             # rule reports the segment as well, because the wording still does
             # not speak the numbering the source has now.
-            text = unmask(seg["target"], seg.get("target_slots") or seg["slots"])
+            text = unmask(seg["target"], target_map(seg))
             source = "target"
             text = polish(text) if polish else text
         else:
