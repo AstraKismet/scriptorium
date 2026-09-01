@@ -327,6 +327,14 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
     claims even so: that the structure survived and the mechanical rules passed,
     never that the translation is good.
 
+    **A rule audited for one kind of false positive is not an audited rule.** That
+    repair reached the two it was aimed at and not the one beside them: on
+    2026-09-02 `numbers` was measured reporting 52 of 110 labelled pairs — 51 of
+    the 55 whose target is Chinese or Japanese — because an ASCII-digit multiset
+    cannot see that 第一章 is how Chinese writes "Chapter 1". Every chapter
+    heading in every novel, at error severity, since before the 2026-07-28 audit.
+    Repaired the same day; `docs/decisions.md`, 2026-09-02.
+
 11. **An untrusted path is confined before it is opened.** Any path the user did
     not type at a terminal — one that arrived in an HTTP request, was read out of
     a configuration file, or is an entry name inside a container — goes through
@@ -395,7 +403,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 1726 tests; no network (one is POSIX-only,
+python -m pytest -q                 # 1827 tests; no network (one is POSIX-only,
                                     #   one runs only where the filesystem folds case)
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
@@ -793,7 +801,10 @@ own.
   `translate.py` for each register, with the register-independent terminology in
   `_LANG_TERMS` — one string shared, never a copy per register — plus a
   normalization profile in `config.py` and a reference file under
-  `skill/reference/`.
+  `skill/reference/`. One question beyond that list since 2026-09-02: does the
+  language write cardinal numbers in CJK numerals? That decides
+  `checks._CJK_NUMERAL_LANGS` and nothing else — the numeral reader itself is
+  shared, so a language adds a subtag rather than a table.
 - New format support: implement `parse(text, dnt, opts) -> (nodes, segments)` and
   register it in `formats.py`. `render` is shared from `skeleton.py` and knows
   nothing about syntax; a format supplies only its untranslated marker, its

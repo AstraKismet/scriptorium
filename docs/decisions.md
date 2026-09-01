@@ -3,6 +3,331 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-09-02 · Chinese has a second numeral system, and the rule that did not know it
+
+Closing HANDOFF-038. `checks.py`'s `numbers` rule stops differencing ASCII digit
+multisets and starts asking whether the target spells the figure in a numeral
+system that target language writes. Neither contract version moves: `numbers`
+keeps its name and its severity, `issue.message` is documented as unstable, and
+both frozen contracts put the validator rule set outside what they freeze
+(`workbench-http.md`, *The rule set is expected to grow*; `status-json.md`:610).
+
+The package recommended one option and two narrowings to be measured before
+choosing them. The option survived in a different shape; **both narrowings lost
+to the measurement**, and the one that replaced them was in no option set.
+
+### What the rule was doing, measured rather than described
+
+The package reported one case — `Chapter 1: Research and Development` rendered
+`第一章：研究與開發`, an error, on a real 90-segment document. A frozen set of
+110 labelled `(source, target)` pairs was built before any design, and 19 more
+were added from an independent measurement of this repository's own Chinese
+prose. Against that set the rule scored:
+
+| | false positives | false negatives |
+|---|---|---|
+| before | 52 of 110, and 62 of 129 | 0 |
+| after | 5 of 110, and 10 of 129 | 23 |
+
+Fifty-one of the fifty-five oracle cases whose target is CJK were wrong — the
+rule was not mostly right with an edge case, it was wrong on Chinese. Every one
+of the 52 is at error severity, so each one stops `lx render`, fails `lx run`,
+and makes the exit code invariant 10 rests on wrong on a correct book. It is the
+second half of the 2026-07-27 measurement — five correct Traditional Chinese
+sentences failed — reappearing on a rule that audit did not reach.
+
+*One correction to the package, because the entry it asked for has to be right.*
+Its illustration of the cost, 一位守塔人 standing in for a 1, is not the cost: 一位
+**is** one, and `1 keeper → 一位守塔人` is a correct translation the old rule
+failed. The traps are 一直, 一些, 一切 — 一 used as an article.
+
+### Parse the target; never spell the source
+
+The package's phrasing was "check whether the target carries its Chinese-numeral
+form", which is a spelling table and a substring search. Both halves lose.
+
+One integer has several correct spellings — 二 and 兩, 一九八四 and
+一千九百八十四, 一百 and 25 萬 — so a table has to enumerate them, and this file
+has now recorded **five times** what happens when an enumeration is read as the
+definition of the rule it stood in for. And a substring search for a spelling
+accepts 一 inside 十一, which is 11 and not 1: an ordinary chapter renumbering
+would pass silently.
+
+So the relaxation reads the target's numeral runs to a figure, by two total
+functions of the run — place-value (`十一` is 11, `一百零五` is 105) and
+digit-by-digit (`一九八四` is 1984, which is how a novel writes a year). The
+character tables are that rule's consequence and the rule is written above them:
+*a glyph either language uses to write a cardinal number*.
+
+**One run answers one figure.** The place-value reading is offered first and the
+digit-by-digit one only where it failed, which keeps the multiset discipline the
+rule already had. The two cannot both succeed today, so the order costs nothing
+— but "the two readings never collide" is a property of the current tables, and
+the ordering makes "one run, one number" true by construction instead.
+
+### Both narrowings the package proposed lost, and a third one was measured
+
+*"Only integers below some bound."* **Falsified.** Risk does not track magnitude,
+it runs the other way. Measured over 9354 characters of this repository's own
+Chinese prose: of 232 occurrences of 一, 183 are an ordinary word; of 64
+occurrences of 二 and 兩, and 7 of 四, and 12 of 十, **none** is. The smallest
+value is the worst and the larger ones are clean, so any bound that admits the
+production defect also admits the worst case. It also fails real books:
+`Chapter 100 → 第一百章` is ordinary in a long serial, and `1984 → 一九八四`
+is how the year is written.
+
+*"Only where the source number is not adjacent to a unit or a decimal point."*
+**Falsified.** Three correct targets in the set are reported by it —
+`3 metres → 三公尺`, `5 mg → 五毫克`, `1.5 times → 一點五倍` — and it does not
+touch the defect that started this, because a chapter heading has neither a unit
+nor a decimal point. Keeping decimals strict is right and is *not* a narrowing:
+it falls out of a reader that produces integer figures, so there is no condition
+for anyone to maintain.
+
+*The third, which nobody listed:* the **financial alphabet**
+(壹貳參肆伍陸柒捌玖拾佰仟) is a third spelling of the same integers, and every
+one of its glyphs is also an ordinary word. 參 occurs 13 times in this
+repository's Chinese and is 參考/參照/參數/參閱/參見 every time, never 3; 陸 is
+登陸, 伍 is 隊伍, 拾 is 收拾. Admitting the alphabet takes the false-negative
+rate for 3 from 13% to 41%, measured — and the oracle cannot see any of it,
+because a labelled case set contains the words its author thought of.
+
+The alphabet is admitted anyway, under **one condition over a closed set**: a
+*lone* glyph from it reads as no number. A cheque writes 伍仟元整 and never a
+bare 伍, so the guard costs the alphabet nothing and removes every measured
+collision. That is the shape `_LEXICON_UNLESS_FOLLOWED_BY` already uses and the
+discipline the 2026-07-28 audit set for it — one condition, not a ladder.
+*Lost:* excluding the alphabet outright, which was the first answer and gives up
+the one thing it is mandatory for. *Lost:* admitting it and exempting the five
+common words, which is the exception list that entry names as the losing
+alternative.
+
+### What `canonical` folds, and what it refuses to
+
+`250,000` was two figures, `250` and `000`, so every target that regrouped or
+dropped the separators was told two numbers were missing; and `\d` is
+Unicode-aware, so a target setting `１９８４` full width matched nothing. Both are
+the same figure written for a different column or a different keyboard, and
+nothing about the number is lost by folding them. Both sides are folded, in
+every language.
+
+**Leading zeros are not folded, and neither is a trailing zero after the point.**
+They are the same move: `08` and `8` are one value and two figures, exactly as
+`1.10` and `1.1` are. Folding the second lets a target claim a version the source
+never named — the case this rule exists for — so the rule takes neither half.
+The cost is recorded: an ISO date whose month a zh-TW target renders 八月 is
+reported, and that is a real false positive this change does not fix.
+
+### What it gives up, named rather than described
+
+**Twenty-three false negatives, and 一 is the largest single source but not the
+whole of it.** A numeral character standing inside an ordinary word satisfies a
+figure the sentence never meant: 一直, 一些, 一切, 一律 for 1; 十分, 十足 for 10;
+五花八門 for 5 and 8; 獨一無二 for 1 and 2. Measured over this repository's own
+Chinese: 183 of 232 occurrences of 一 are a word rather than a number, and 84 of
+README.zh-TW.md's 186 Chinese sentences already carry one, so for 1 the guarantee
+is roughly halved.
+
+**Do not read the rest of that corpus measurement as saying the other values are
+safe.** It reported zero collisions for 2, 4 and 10 — of this repository's own
+technical prose, which contains almost no idiom. The adversarial pass built the
+battery the corpus could not: 二話不說 answers a 2, 接二連三 a 3, 四處 a 4,
+六神無主 a 6, 九死一生 a 9, 略知一二 a 12, 十之八九 an 89, 五十步笑百步 a 50,
+十萬火急 a 100000, 進退兩難 a 2. A novel is made of these. The surface is wider
+than the corpus can see and every one of them is now a fixture, because the
+number that matters here is not "zero" but "we only counted where we could".
+
+The class 一 does not enter: 千萬, 百般, 千方百計, 萬一 and 三三兩兩 read as no
+number at all, because a place and a myriad each need something in front of them.
+
+This is the cost the package asked to have recorded rather than glossed, and it
+is pinned as fixtures rather than described.
+
+**A false negative now reaches the tracked translation memory.** `lx commit`'s
+gate is `check_segment` at error severity by construction, so anything the check
+stops reporting becomes bankable in the same edit. Measured: `The wall is 10
+metres thick.` rendered 這道牆十分厚實。 — 十分 means *very* and the 10 is gone —
+is refused by the incumbent and banked by this, into a file that is tracked in
+git and read by every document in the project. It is not closable at the commit
+gate, because the gate *is* the check. It is the price of the relaxation and it
+is recorded here rather than discovered later.
+
+**An identifier rendered as a quantity is invisible.** `HTTP 500 → 五百`,
+`port 8080 → 八千八十`, `retries 3 → 設為三`. The figure is there and the text is
+unusable, because a status code is read digit by digit and a port is typed back.
+Telling an identifier from a quantity is the classifier invariant 4 refuses, so
+this is an accepted loss and not an oversight. It is also why the guidance for
+*writers* in `skill/reference/zh-TW.md` still says what it says.
+
+**Five false positives survive**, and each is beyond a numeral reader:
+`12:30 → 十二點半` needs 半 to mean thirty minutes; `1st place → 冠軍` carries no
+numeral at all; `100 Years of Solitude → 百年孤寂`, `1.5 → 一點五` and
+`87.5% → 百分之八十七點五` are the two readings refused below.
+
+### Why it stays at error, against four precedents that say warn
+
+This project has a stated test for warn, applied at `held` (checks.py), at
+`bare_term` (2026-08-17), at `numbering` (2026-09-01) and at a Roman-numeral
+chapter heading (2026-08-02): a rule is warn when the render is correct, the
+remedy is a taste call, and a severity that failed the build would make clearing
+every occurrence the only way to finish a book.
+
+**The old rule failed that test, which is the honest argument for the downgrade
+the package ruled out.** 第一章 renders correctly and the build stopped on it.
+
+The relaxation is what makes error defensible again rather than something error
+survives. `bare_term`'s test is that *the defect and the legitimate use are the
+same string at the level the rule can see*; after this change they are not — 第一章
+carries a run reading 1 and a target that dropped the 1 does not, and the rule
+sees the difference. What remains ambiguous is one value, 1, and a severity that
+varied by value would be an enumeration standing in for a rule.
+
+Error is also what protects the translation memory, and that is not a separate
+argument but the same one measured: `lx commit`'s gate is `check_segment` at
+error severity, and on 2026-09-01 a *warn*-severity defect (`numbering`) was
+found passing that gate and shadowing a correct record under the same key for
+every future document. Warn at check and safe to bank are different questions,
+and this rule cannot answer the second from the first.
+
+*Lost:* **warn for a lone Han numeral** — the only mechanical route to the
+ordinary-word traps. Built and scored: it buys one case and pays 26 false
+positives, warning on every single-digit chapter heading, count and floor number
+— roughly thirty new warnings on the measured 90-segment document for one extra
+catch. Invariant 5's other half settles it: reporting a defect wastes the
+reviewer's attention. *Lost:* **a second rule name** at a softer severity, which
+would restore `checks_disabled` granularity and does add a name to the frozen
+enumeration; it loses because `glossary` is already one name at two severities,
+so the precedent runs the other way.
+
+### The three readings that were built, scored and refused
+
+*A bare 一 counts only after 第.* **The strongest false-negative reducer there
+is**, and it was measured, not argued: 23 false negatives fall to 10 and thirteen
+ordinary-word traps disappear. It is refused, and the reason is a property of the
+measurement rather than of the rule. The frozen set holds 24 trap cases built on
+1 and only 2 correct targets that render a source 1 as a 一 without 第, so the
+gate's score is produced by the set's own composition. On the axis the set holds
+constant it reports `她有一個妹妹` for "She had 1 sister", `他等了一小時` for
+"He waited 1 hour", `一つ選んでください` for "Pick 1" and `一、安裝套件` for a
+hand-set list marker — correct targets, at error severity. That is trading a
+guaranteed false positive on chapter headings for a guaranteed false positive on
+counted nouns: the same disease with a smaller blast radius, and this package
+exists to cure it rather than move it.
+
+*A bare 百 or 千 reads as 100 or 1000.* Refused, and this one is structural
+rather than a score. 百 with no digit in front of it is 百年 (a hundred years),
+百般 (in every way) and the 百 of 百分之 (per cent, counting nothing at all) —
+one string in three senses, which is the judgement invariant 4 excludes — while
+the number itself is written 一百, which the reader already answers. Measured
+cost of refusing it: `100 Years of Solitude → 百年孤寂` is reported. Measured
+cost of admitting it: 百般 and 千方百計 stop being visible.
+
+*點 is a decimal point.* Refused, and also structural: the same character is the
+decimal point of 一點五 and the hour of 三點半. Admitting it swallows
+`3:50 → 三點五十` into one figure 3.50 and loses **both** numbers, reads
+一點一滴 (bit by bit) as 1.1, and lets 三點一一 satisfy Python 3.11. Telling the
+two 點 apart is the classifier invariant 4 refuses. The price is that
+`1.5 → 一點五` and `87.5% → 百分之八十七點五` stay errors.
+
+### The language gate, and the tag that turned it off
+
+`spells_numbers_in_cjk` folds `_` to `-` before taking the primary subtag,
+because `cli.language_tag` admits an underscore — `zh_TW` is a tag this project
+accepts, and a gate that split on `-` alone left it strict with nothing saying
+so. Found by the adversarial pass; the first two designs and this one all had it.
+
+The set carries the Sinitic varieties (`cmn`, `yue`, `nan`, `hak`, `wuu`) beside
+`zh` and `ja`, although nothing translates into them yet, because the two
+mistakes are not the same size. Admitting a language wrongly only relaxes a
+target that literally contains these characters, which a non-CJK translation does
+not; refusing one wrongly reinstates the whole defect for that language,
+silently. The list is still an enumeration and the rule is written above it: its
+ordinary prose writes cardinal numbers with these characters. Korean is out, and
+the reason is in the code rather than in its absence.
+
+### Gating on the register was considered and lost
+
+The relaxation is right for a novel and wrong for a manual — `skill/reference/zh-TW.md`
+tells the model to keep Arabic numerals for exactly the identifier cases above —
+so gating on `tone` rather than on `lang` is the obvious idea. It loses twice.
+`cfg["tone"]` is the *configured* register and `doc["tone"]` is the one the
+document was frozen in; a rule reading the first is a second home for a fact
+AGENTS.md puts in the second, and reaching the second means a signature change on
+a shared seam. And it does not decide the question: a technical document has
+chapter headings and a novel has port numbers, so the register correlates with
+whether a figure should be spelled out without deciding it. A correlation in a
+switch's clothing is what invariant 4 excludes.
+
+### The mutation pass, and the one equivalent guard
+
+**21 of 23 killed**, each by a test that names the property: the rule itself, the
+language gate, the underscore in a tag, the Sinitic subtags, a non-string `lang`,
+each of the two readings, the myriad's head, the Arabic-and-myriad form, the
+digit a place needs, two bare digits in a row, 兩 in a digit string, the
+lone-financial guard, 零 as a placeholder, the elided trailing place, the
+full-width fold, the comma strip, the comma grouping, the canonicalisation left
+ungated, the leading zero that has no place-value reading, and a `canonical` that
+folds leading zeros — a wrong-direction mutant, killed by the fixtures that say
+`1.10` is not `1.1` and `007` is not `7`.
+
+**Both survivors are equivalent guards**, labelled at the line rather than
+deleted, and both proved by enumeration rather than argued. The two-character
+floor in `_cjk_digit_string` cannot fire visibly, because the place-value reading
+is offered first and over the whole character class there is no single character
+that reading refuses while the digit-by-digit one would accept. And `scale > 10`
+in the elision is the same test as `scale > 1`, because `scale` is only ever 0, a
+place or a myriad and nothing lies between 1 and 10.
+
+This is worth stating because it is what separated the four designs. Two of them
+shipped a complete rule and **no fixtures**, and their adversarial passes found
+the same thing on each: deleting the entire relaxation left the suite as green as
+keeping it. A rule whose relaxation can be removed with nothing failing has been
+checked by nothing except its author.
+
+### Two defects the review found that no design review would have
+
+Both were in a first version of this rule and in two of the four candidate
+designs, and both are on the axis a labelled case set cannot see.
+
+`int()` raises `ValueError` on a string of more than 4300 digits from Python 3.11
+on, and the limit is backported to 3.9.14, so every leg of the CI matrix has it.
+Converting a source token — or a digit-by-digit reading of a long enough run,
+which a model repetition loop produces on its own — turned `lx check` from a
+report into a traceback. Nothing in this module calls `int` on text it did not
+write: the readings are digit *strings*, and the Arabic-and-myriad form scales by
+concatenating zeros because a power of ten is a run of them.
+
+And `\d` is Unicode-aware in `str` mode, so `１９８４` matched as a figure and
+compared unequal to `1984`. Full width folds now, on both sides.
+
+### The rule had a second home, and it was saying the opposite
+
+`skill/reference/zh-TW.md` said *"Arabic numerals throughout; never convert to
+Chinese numerals"*, written for translated tables and never revisited when the
+2026-07-29 re-founding made novels the primary use case. So the project was
+instructing the model not to write 第一章 while the checker failed it for doing
+so, and both halves were the same mistake. The sentence is now split by register,
+and it says which half the checker can see and which it cannot — a writer's rule
+rather than a claim about what is enforced.
+
+Found by the blast-radius pass and by nothing else; no design review named it,
+and it was on no list.
+
+### Per-segment suppression does not land here
+
+The package asked this session to decide explicitly whether a way to say *"I have
+reviewed this segment; stop reporting it"* lands with this rule. **It does not**,
+and the id is HANDOFF-043.
+
+Three reasons. The case that wanted it was this defect, and fixing the rule is
+the right order — a suppression built to work around a wrong rule outlives the
+rule. It changes what a green `lx check` claims, which is invariant 10's own
+territory and a heavier decision than a numeral table. And `review` is a closed
+vocabulary whose only member is `held`, scoped to the *commit* gate rather than
+the check gate; the 2026-09-01 entry that added it already calls the overload an
+honest objection, so a second meaning for that field is a decision to take
+deliberately and not in passing.
+
 ## 2026-09-01 · Choosing a backend and a model, on both surfaces — and the fourth display surface nobody had counted
 
 Closing HANDOFF-035. `GET /api/models` lands, the workbench gains a model control

@@ -185,7 +185,7 @@ lx terms novel.md --lang zh-TW --append     # 沒收錄過的直接補進詞彙�
 | `tags` | error | placeholder 遺失、重複或憑空出現；成對的 placeholder 顛倒或交叉 |
 | `containment` | error | 譯文開了一個原文沒有的區塊；表格被多加一欄 |
 | `eol` | error | 原文沒有、譯文卻多出來的歸位字元 |
-| `numbers` | error | 原文裡的數字在譯文中不見了 |
+| `numbers` | error | 原文裡的數字在譯文中不見了——中文與日文兩套數字系統都算，所以「第一章」抵得上 `Chapter 1` |
 | `missing` | error | segment 從未翻譯 |
 | `escaping` | error | XML 類語法裡未跳脫的 `<`、`&` 或 `]]>`——目前空轉，等 EPUB 進來才生效 |
 | `glossary` | 逐列設定，`forbidden` 一律 error | 約定術語譯法不一致，或用了禁用的譯法 |
@@ -216,7 +216,9 @@ lx terms novel.md --lang zh-TW --append     # 沒收錄過的直接補進詞彙�
 
 其他 `--lang` 值一樣可以跑，結構檢查照常生效，只是沒有該語言專屬的指引和術語規則。
 要新增一個語言，需要在 `translate.py` 加一份 brief、在 `config.py` 加一組正規化設定，
-再到 `skill/reference/` 放一份參考檔。
+再到 `skill/reference/` 放一份參考檔，另外回答一個問題：這個語言的散文寫基數詞
+用不用漢字數字？中文和日文都用，所以「第一章」抵得上原文的 `Chapter 1`；讀取的
+程式是共用的，所以新增語言加的是一個 subtag，不是一張表。
 
 ## 模型後端
 
@@ -469,7 +471,7 @@ Markdown 與純文字目前都可以端到端跑完：抽取、翻譯、驗證�
 ## 開發
 
 ```bash
-python -m pytest -q                # 1726 tests，不碰網路
+python -m pytest -q                # 1827 tests，不碰網路
 python -m ruff check src tests
 ```
 

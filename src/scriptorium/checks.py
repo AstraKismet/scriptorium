@@ -105,6 +105,248 @@ _LEXICON_UNLESS_FOLLOWED_BY = {
 #   視圖   正視圖、俯視圖、透視圖    用戶   用戶端、電信用戶
 
 
+# ── the second numeral system ───────────────────────────────────────────────
+#
+# Chinese and Japanese write cardinal numbers twice over. 第一章 and 第 1 章 are
+# both "Chapter 1", and which of them prose uses is habit and register rather
+# than rule, so "the target carries the same ASCII digits" is not a decidable
+# proposition for those languages. Measured 2026-09-02 over 129 labelled pairs:
+# rule 7 reported 62 correct translations — 51 of the 55 CJK-target cases in the
+# oracle alone — every one at error severity, which stops `lx run` rendering and
+# makes the exit code invariant 10 rests on wrong. It is the second half of the
+# 2026-07-27 measurement reappearing on a different rule.
+#
+# What *is* decidable is the figure a run of numeral characters reads as, so the
+# relaxation parses the target rather than spelling the source. Spelling loses
+# twice. One integer has several correct spellings — 二 and 兩, 一九八四 and
+# 一千九百八十四 — so a spelling table has to enumerate them, and this project has
+# recorded five times what happens when an enumeration is read as the definition
+# of the rule it stood in for. And a substring search for a spelling accepts 一
+# inside 十一, which is 11.
+#
+# What a character has to be to belong below: a glyph either language uses to
+# write a cardinal number. The tables are that sentence's consequence, never its
+# definition.
+_CJK_DIGITS = {"〇": 0, "零": 0, "一": 1, "二": 2, "兩": 2, "两": 2, "三": 3,
+               "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9,
+               "壹": 1, "貳": 2, "贰": 2, "參": 3, "叁": 3, "参": 3, "肆": 4,
+               "伍": 5, "陸": 6, "陆": 6, "柒": 7, "捌": 8, "玖": 9}
+_CJK_UNITS = {"十": 10, "拾": 10, "百": 100, "佰": 100, "千": 1000, "仟": 1000}
+_CJK_MYRIAD = {"萬": 10 ** 4, "万": 10 ** 4, "億": 10 ** 8, "亿": 10 ** 8,
+               "兆": 10 ** 12}
+
+#: 廿 and 卅 are the twenty and thirty a Taiwanese newspaper still sets. Alone
+#: among the characters here they cannot collide with an ordinary word, so
+#: admitting them costs nothing measurable and refusing them would be a gap.
+_CJK_SCORE = {"廿": 20, "卅": 30}
+
+#: The financial alphabet: mandatory on a cheque, an ordinary word everywhere
+#: else. 參 occurs 13 times in this repository's own 9354 characters of Chinese
+#: prose and is 參考/參照/參數/參閱/參見 every one of them, never 3; 陸 is 登陸,
+#: 伍 is 隊伍, 拾 is 收拾. So a **lone** glyph from this set reads as no number.
+#: One condition over a closed set — the shape `_LEXICON_UNLESS_FOLLOWED_BY`
+#: already uses, and the discipline the 2026-07-28 audit set for it. A cheque
+#: writes 伍仟元整 and never a bare 伍, so the guard costs the alphabet nothing.
+_FINANCIAL = frozenset("壹貳贰參叁参肆伍陸陆柒捌玖拾佰仟")
+
+_CJK_NUM_RE = re.compile("[" + "".join(sorted(
+    set(_CJK_DIGITS) | set(_CJK_UNITS) | set(_CJK_MYRIAD) | set(_CJK_SCORE))) + "]+")
+
+#: `25 萬` is a numeral too, half of it in Arabic, and it is how zh-TW writes a
+#: large round number.
+_ARABIC_MYRIAD_RE = re.compile(r"(\d[\d,]*)\s*([萬万億亿兆])")
+
+_FULLWIDTH = {ord(wide): ord(narrow) for wide, narrow in
+              zip("０１２３４５６７８９", "0123456789")}
+
+#: A figure as the rule has read one since 2026-07-27. **Only a target language
+#: this rule relaxes for gets anything else**, because a target that does not
+#: write CJK numerals also does not group its thousands with a comma: folding the
+#: separator for every language turned a French `1,234 words` rendered
+#: `1 234 mots` from silent into an error, which is a regression on a language
+#: this package was not about. Measured 2026-09-02.
+STRICT_NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
+
+#: A figure, in either width and with or without its thousands separators.
+#: Grouping is matched first, so `250,000` is one figure rather than `250` and
+#: `000` — which is what it was until 2026-09-02, so a target that regrouped or
+#: dropped the separators was told two numbers were missing.
+NUMBER_RE = re.compile(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?")
+
+#: Which languages get the relaxation, by primary subtag, so `zh-TW`, `zh-Hant`
+#: and a bare `zh` are one answer and no region or script suffix can take a
+#: language out of the set. `_` is folded to `-` first because `cli.language_tag`
+#: admits it, so `zh_TW` is a tag this project accepts and a gate that split on
+#: `-` alone turned the relaxation silently off for it.
+#:
+#: **The test is a property of the language and not the list of languages this
+#: project supports**: its ordinary prose writes cardinal numbers with the
+#: characters above. That is why the Sinitic varieties are here although nothing
+#: translates into them yet — the two mistakes are not the same size. Admitting a
+#: language wrongly only relaxes a target that literally contains these
+#: characters, which a non-CJK translation does not; refusing one wrongly
+#: reinstates the whole defect for that language, silently. Korean is
+#: deliberately out: modern Korean writes its numbers in Arabic or Hangul and
+#: reaches for hanja numerals about as often as English reaches for Roman ones.
+#: `Kapitel 一` is broken German and the rule has to keep saying so.
+_CJK_NUMERAL_LANGS = ("zh", "cmn", "yue", "nan", "hak", "wuu", "ja")
+
+
+def canonical(figure):
+    """One spelling per figure — of its *encoding* only, never of its value.
+
+    Full width folds to ASCII and the thousands separators come out, because
+    `１９８４` and `250,000` are the same figures written for a different column
+    or a different keyboard, and nothing about the number is lost either way.
+
+    A leading zero stays, and so does a trailing one after the point. `08` is a
+    month a target may legitimately render as 八 and this rule reports it — a
+    cost recorded rather than paid off — but folding the zero means `007`
+    rendered 七號 passes with nothing said, and folding `1.10` onto `1.1` lets a
+    target claim a version the source never named. Those are one move, and the
+    rule takes neither half of it.
+    """
+    return figure.translate(_FULLWIDTH).replace(",", "")
+
+
+def _cjk_positional(run):
+    """The place-value reading, as a figure — 十一 is 11, 一百零五 is 105.
+
+    ``None`` when the run is not a number in this reading, which is what most
+    ordinary words made of these characters come back as: 萬一 (in case), 千萬
+    (by all means) and 三三兩兩 (in twos and threes) read as nothing at all
+    rather than as some figure nobody wrote.
+
+    A place and a myriad each need something in front of them. That is one rule
+    doing two jobs. 百 with no digit is 百年 (a hundred years), 百般 (in every
+    way) and the 百 of 百分之 (per cent, counting nothing) — one string in three
+    senses, which is the judgement invariant 4 excludes — while the number is
+    written 一百. And it bounds the arithmetic, because a myriad can never
+    multiply an accumulator a myriad has already filled.
+
+    A run of more than one character that *starts* with a zero has no
+    place-value reading: 零 marks a skipped place, as in 一百零五, and a number
+    is not written with one in front of it. Without this, 〇〇七 read as 7 here
+    and the digit-by-digit reading below — which answers `007`, the figure the
+    source wrote — was never reached.
+    """
+    if len(run) > 1 and run[0] in ("〇", "零"):
+        return None
+    total = section = 0
+    digit = None
+    scale = 0                             # the last place consumed; see below
+    for ch in run:
+        if ch in ("〇", "零"):
+            if digit is not None:
+                return None
+            scale = 0                     # the skip names the place; see below
+            continue                      # a placeholder, carrying no value
+        if ch in _CJK_SCORE:
+            if digit is not None or section:
+                return None
+            section = _CJK_SCORE[ch]      # 廿八 is 28, so the run keeps going
+            continue
+        if ch in _CJK_DIGITS:
+            if digit is not None:
+                return None               # two bare digits: not this reading
+            digit = _CJK_DIGITS[ch]
+        elif ch in _CJK_UNITS:
+            unit = _CJK_UNITS[ch]
+            if digit is None and unit != 10:
+                return None
+            section += (1 if digit is None else digit) * unit
+            digit = None
+            scale = unit
+        else:
+            head = section + (digit or 0)
+            if not head:
+                return None
+            total += head * _CJK_MYRIAD[ch]
+            section = 0
+            digit = None
+            scale = _CJK_MYRIAD[ch]
+    # A trailing bare digit takes the place one below the last one used, which is
+    # how Chinese elides it: 一千五 is 1500 and 兩百五 is 250, while 二十五 is 25
+    # because one below 十 is the units. It is not a special case for large
+    # numbers — it is the same rule at every scale, and 一千零五 still reads 1005
+    # because the 零 says which place was skipped.
+    return str(total + section + (digit or 0) * (scale // 10 if scale > 10 else 1))
+
+
+def _cjk_digit_string(run):
+    """The digit-by-digit reading — 一九八四 is 1984, 二〇二六 is 2026.
+
+    How a novel writes a year, which is why it is here rather than left to the
+    place-value reading: 一千九百八十四 is the same integer and almost nobody
+    writes it. Two characters at least, because a one-character run already has
+    a reading and the two agree on it. 兩 is excluded: it is the form 2 takes
+    before a classifier and is never a digit in a string of them.
+
+    A string of digits rather than an integer, so 〇〇七 answers `007`. Which is
+    also why nothing in this module calls ``int`` on text it did not write: a
+    source carrying a four-thousand-digit figure would otherwise reach a
+    conversion that raises from Python 3.11 on, and CI runs 3.12.
+
+    The length floor is an **equivalent guard**, labelled here rather than
+    deleted: `cjk_numeral_values` offers the place-value reading first, and over
+    the whole character class there is no single character that reading refuses
+    while this one would accept — 百, 千 and 萬 have no place-value reading alone
+    and are not digits either. It states this function's own contract for the
+    caller that does not exist yet, so it stays, and no mutant can kill it.
+    """
+    if len(run) < 2:            # an equivalent guard; see the docstring
+        return None
+    digits = []
+    for ch in run:
+        if ch not in _CJK_DIGITS or ch in ("兩", "两"):
+            return None
+        digits.append(str(_CJK_DIGITS[ch]))
+    return "".join(digits)
+
+
+def cjk_numeral_values(text):
+    """Every figure this text writes in CJK numerals, as a multiset.
+
+    **One run answers for one figure**, which is the multiset discipline rule 7
+    already had: the place-value reading is offered first and the digit-by-digit
+    one only where it failed. The two cannot both succeed — a run of two or more
+    bare digits is not place-value, and on a single character they agree — so the
+    order costs nothing today, and it keeps "one run, one number" true by
+    construction rather than by that coincidence.
+    """
+    figures = Counter()
+    for match in _CJK_NUM_RE.finditer(text):
+        run = match.group(0)
+        if len(run) == 1 and run in _FINANCIAL:
+            continue
+        reading = _cjk_positional(run)
+        if reading is None:
+            reading = _cjk_digit_string(run)
+        if reading is not None:
+            figures[canonical(reading)] += 1
+    for match in _ARABIC_MYRIAD_RE.finditer(text):
+        # A multiplier that is a power of ten is a run of zeros, so the scaling
+        # is a concatenation and `int()` is never reached — see the note in
+        # `_cjk_digit_string`.
+        figures[canonical(match.group(1))
+                + "0" * (len(str(_CJK_MYRIAD[match.group(2)])) - 1)] += 1
+    return figures
+
+
+def spells_numbers_in_cjk(lang):
+    """Whether this target language writes cardinal numbers with 一二三…
+
+    A non-string answers no rather than raising. `cli.language_tag` refuses one
+    at every surface that receives a `lang` from outside, but `check_segment`
+    itself has no such guarantee and the rule it stands in has to *report* on a
+    document rather than traceback on one — which is what the incumbent's
+    `lang == "zh-TW"` did for free.
+    """
+    if not isinstance(lang, str):
+        return False
+    return lang.lower().replace("_", "-").split("-")[0] in _CJK_NUMERAL_LANGS
+
+
 def pair_problems(target, slots):
     """Messages for paired placeholders the target broke; empty when it did not.
 
@@ -629,9 +871,46 @@ def check_segment(seg, lang, cfg, glossary, dnt):
             add("spacing", "warn", "missing space at CJK/Latin boundary")
 
     # 7. numeric fidelity
-    ns = Counter(re.findall(r"\d+(?:\.\d+)?", strip_placeholders(src)))
-    nt = Counter(re.findall(r"\d+(?:\.\d+)?", strip_placeholders(tgt)))
-    missing = sorted((ns - nt).elements())
+    #
+    # The strict comparison first, then — for a language that has a second
+    # numeral system — one more chance for each figure it found missing. The
+    # order is the design: a target that kept the digits is answered without
+    # parsing anything, and the relaxation can only ever remove a report,
+    # never add one.
+    #
+    # Everything the change touches is under the language gate, including how
+    # a figure is read off the two texts. A target that writes CJK numerals is
+    # also one that regroups a thousands separator or sets its digits full
+    # width; a target that does not is left byte for byte as it was, because
+    # folding the separator for every language turned a French `1,234 words`
+    # rendered `1 234 mots` from silent into an error.
+    #
+    # The comparison stays between *figures*, so a decimal is kept strict by
+    # construction rather than by a rule of its own: `1.22` is not a string
+    # any reading above can produce, and a version number is protected
+    # exactly as it was.
+    #
+    # The measured cost is a false negative on a small integer whose target
+    # dropped it and happens to hold an ordinary word made of numeral
+    # characters. 一 is 一個/一直/一切 in 183 of its 232 occurrences in this
+    # repository's own Chinese prose, and no rule tells those from the 一 of
+    # 第一章 without the judgement invariant 4 excludes. It is bought
+    # deliberately: `docs/decisions.md`, 2026-09-02.
+    src_text, tgt_text = strip_placeholders(src), strip_placeholders(tgt)
+    if not spells_numbers_in_cjk(lang):
+        ns = Counter(STRICT_NUMBER_RE.findall(src_text))
+        nt = Counter(STRICT_NUMBER_RE.findall(tgt_text))
+        missing = sorted((ns - nt).elements())
+    else:
+        ns = Counter(canonical(f) for f in NUMBER_RE.findall(src_text))
+        nt = Counter(canonical(f) for f in NUMBER_RE.findall(tgt_text))
+        spelled = cjk_numeral_values(tgt_text)
+        missing = []
+        for figure in sorted((ns - nt).elements()):
+            if spelled[figure]:
+                spelled[figure] -= 1
+            else:
+                missing.append(figure)
     if missing:
         add("numbers", "error", f"numbers absent from target: {missing}")
 

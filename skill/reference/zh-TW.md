@@ -133,6 +133,16 @@ write `快取（cache）` and add a glossary row so the rendering stays consiste
 
 ## Numbers and units
 
-Arabic numerals throughout; never convert to Chinese numerals. Keep the source
-decimal separator. The `numbers` rule fails the build when a figure goes missing,
-which is the most common silent defect in translated tables.
+**Which numeral system a figure takes depends on the register.** In technical
+documentation, Arabic numerals throughout, and keep the source decimal separator:
+a version, a port, a status code, a dosage or a configuration value is a string
+the reader types back, and 五百 for `500` makes it unusable. In narrative prose
+the opposite is idiomatic — 第一章, 三天, 一九八四年 are how a book written in
+Chinese says those things, and 第 1 章 reads as a translation.
+
+The `numbers` rule fails the build when a figure goes missing, which is the most
+common silent defect in a translated table. Since 2026-09-02 it reads Chinese
+numerals as well as Arabic ones, so a figure correctly spelled out satisfies it.
+What it cannot see is a figure rendered in the *wrong* system for its register:
+`HTTP 500` written 五百 passes. The paragraph above is therefore a rule for the
+writer rather than a claim about what the checker enforces.

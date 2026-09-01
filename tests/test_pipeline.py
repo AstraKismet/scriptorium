@@ -9,7 +9,11 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from scriptorium.checks import check_segment, containment_problems  # noqa: E402
+from scriptorium.checks import (  # noqa: E402
+    check_segment,
+    cjk_numeral_values,
+    containment_problems,
+)
 from scriptorium.config import DEFAULT_CONFIG, load_dnt  # noqa: E402
 from scriptorium.mask import (  # noqa: E402
     mask,
@@ -2050,6 +2054,185 @@ def test_a_carriage_return_the_source_already_had_is_not_flagged():
 
 def test_missing_number_is_an_error():
     assert "numbers" in _rules("Requires Go 1.22 exactly.", "\u9700\u8981 Go 1.21\u3002")
+
+
+# --- the second numeral system, in both directions ---------------------------
+#
+# Chinese and Japanese write cardinal numbers twice over — 第一章 and 第 1 章 are
+# both "Chapter 1" — so an ASCII-digit multiset difference fails correct work.
+# Measured 2026-09-02 over 110 labelled pairs: the rule reported 52 of them, 51
+# of the 55 whose target is CJK, every one at error severity. Fixtures here are
+# written raw rather than escaped for the lexicon's reason one section down: for
+# a rule about how a language spells its numbers the fixture *is* the
+# specification, and 第一章 is not reviewable.
+
+
+@pytest.mark.parametrize("source, target", [
+    ("Chapter 1: Research and Development", "第一章：研究與開發"),   # the measured defect
+    ("Chapter 12", "第十二章"),                        # a unit and a digit
+    ("Chapter 100", "第一百章"),                       # three digits: no magnitude bound survives
+    ("He waited 3 days.", "他等了三天。"),
+    ("There were 2 men.", "有兩個男人。"),               # 兩, the counting form of 2
+    ("It was 1984.", "那是一九八四年。"),                # a year, read digit by digit
+    ("In 2026 the tower fell.", "二〇二六年，塔倒了。"),   # 〇 is U+3007, not 零 and not an ideograph
+    ("The wall is 3 metres thick.", "這道牆有三公尺厚。"),  # adjacent to a unit
+    ("Take 5 mg twice daily.", "每日兩次，每次五毫克。"),    # a dosage, and two numbers at once
+    ("The city held 250000 people.", "這座城市住著二十五萬人。"),
+    ("The city held 20000 people.", "這座城市住著 2 萬人。"),  # half Arabic, half myriad
+    ("The train leaves at 3:15.", "火車三點十五分開。"),      # 點 is the hour, not a decimal point
+    ("He raised 1500 dollars.", "他籌到一千五百美元。"),
+    ("He raised 1500 dollars.", "他籌到一千五美元。"),       # and the elided form of the same
+    ("Agent 007 arrived.", "〇〇七到了。"),               # the leading zeros are kept
+    ("The cheque was for 5000.", "金額為伍仟元整。"),        # the financial alphabet, in a run
+    ("The city held 250,000 people.", "這座城市住著二十五萬人。"),  # a grouped figure is one figure
+    ("It was 1984.", "那是１９８４年。"),                    # full width is the same figure
+])
+def test_a_number_the_target_spells_in_cjk_is_present(source, target):
+    assert "numbers" not in _rules(source, target)
+
+
+@pytest.mark.parametrize("source, target", [
+    ("Requires Go 1.22 exactly.", "需要 Go 1.21。"),   # the incumbent case, unchanged
+    ("Take 5 mg twice daily.", "每日服用。"),            # a dosage the target dropped
+    ("Chapter 1", "第十一章"),                        # 一 is inside 十一, and that is 11
+    ("He waited 3 days.", "他等了五天。"),               # a number the target got wrong
+    ("The load rose 1.5 times.", "負載上升了。"),        # a decimal is offered no reading at all
+    ("He read 2 books and 3 papers.", "他讀了兩本書。"),  # the multiset still counts
+    ("Go 1.10 is required.", "需要 Go 1.1。"),         # a fraction is never folded
+    ("Agent 007 arrived.", "七號探員到了。"),            # nor is a leading zero
+    ("See 3 reference documents.", "請參考文件。"),      # a lone 參 is 參考, not 3
+])
+def test_a_number_the_target_lost_is_still_an_error(source, target):
+    assert "numbers" in _rules(source, target)
+
+
+def test_the_severity_is_still_error():
+    """Half the assertion, and the half `_rules` cannot make.
+
+    The relaxation is what makes error defensible rather than something error
+    survives, so a package that quietly downgraded it would satisfy every other
+    test in this section. Four warn precedents argue the other way and
+    `docs/decisions.md`, 2026-09-02, answers them.
+    """
+    issues = check_segment(_seg("Take 5 mg twice daily.", "每日服用。"), "zh-TW", CFG, [], [])
+    assert [(i["rule"], i["severity"]) for i in issues if i["rule"] == "numbers"] == [
+        ("numbers", "error")]
+
+
+@pytest.mark.parametrize("lang, reports", [
+    ("zh-TW", False), ("zh-Hant", False), ("zh", False), ("ja", False),
+    ("zh_TW", False),                       # cli.language_tag admits an underscore
+    ("ZH-tw", False), ("ja-JP", False),
+    ("yue-Hant-HK", False), ("cmn-Hant-TW", False),
+    ("de", True), ("fr", True), ("ko", True), ("", True), ("und", True),
+])
+def test_the_relaxation_is_gated_on_the_target_language(lang, reports):
+    """One pair, eight tags. `Kapitel 一` is broken German, so the rule keeps
+    saying so; and a region or script suffix must not take a Chinese one out of
+    the set. Korean is here because it is the language the test is about — it
+    writes its numbers in Arabic or Hangul, so it does not get the relaxation,
+    and being CJK-adjacent is not the question.
+    """
+    assert ("numbers" in _rules("Chapter 1", "第一章", lang=lang)) is reports
+
+
+@pytest.mark.parametrize("text, readings", [
+    ("第一章", {"1": 1}),
+    ("十一", {"11": 1}),
+    ("二十", {"20": 1}),
+    ("一百零五", {"105": 1}),
+    ("一千二百三十四", {"1234": 1}),
+    ("一九八四", {"1984": 1}),
+    ("二〇二六", {"2026": 1}),
+    ("〇〇七", {"007": 1}),                  # a leading zero has no place-value reading
+    ("二十五萬", {"250000": 1}),
+    ("25 萬", {"250000": 1}),
+    ("廿八", {"28": 1}),
+    ("一千五", {"1500": 1}),   # a trailing digit takes the place one below
+    ("兩百五", {"250": 1}),
+    ("一百五", {"150": 1}),
+    ("一萬五", {"15000": 1}),
+    ("二十五", {"25": 1}),     # and one below 十 is the units, so this is not 250
+    ("一千零五", {"1005": 1}),  # the 零 says which place was skipped
+    ("一千萬", {"10000000": 1}),
+    # Ordinary words made of numeral characters. Each reads as no number at all,
+    # which is what keeps the relaxation from swallowing a genuinely lost one.
+    ("萬一", {}),          # in case — a myriad needs a head, as 百 and 千 do
+    ("千萬", {}),          # by all means
+    ("百般", {}),          # in every way
+    ("上百種", {}),         # over a hundred: an approximation, not a count
+    ("三三兩兩", {}),        # in twos and threes
+    ("兩三天", {}),         # two or three days
+    ("參考文件", {}),        # a lone financial glyph reads as nothing; this is 參考
+    ("登陸", {}), ("隊伍", {}), ("收拾", {}),   # 陸, 伍, 拾 — the same guard
+    ("伍仟元整", {"5000": 1}),   # and a run of two is the cheque it was admitted for
+])
+def test_what_a_run_of_numeral_characters_reads_as(text, readings):
+    assert dict(cjk_numeral_values(text)) == readings
+
+
+@pytest.mark.parametrize("text, value", [
+    ("一直", "1"), ("一些", "1"), ("一切", "1"), ("一位", "1"), ("一律", "1"),
+    ("十分", "10"), ("十足", "10"), ("獨一無二", "1"), ("五花八門", "5"),
+    ("一緒", "1"), ("一番", "1"), ("一体", "1"),
+    # and it is not only 一: every unguarded character is inside an idiom too.
+    ("二話不說", "2"), ("接二連三", "3"), ("四處", "4"), ("六神無主", "6"),
+    ("九死一生", "9"), ("略知一二", "12"), ("十之八九", "89"),
+    ("五十步笑百步", "50"), ("十萬火急", "100000"), ("進退兩難", "2"),
+])
+def test_the_false_negative_this_relaxation_buys(text, value):
+    """The cost, pinned rather than described.
+
+    These are ordinary words, not numbers, and the relaxation reads a value out
+    of every one of them — so a target that genuinely lost a 1 and happens to
+    say 一直 is not reported. Measured over this repository's own Chinese prose:
+    183 of 232 occurrences of 一 are a word like these, and 84 of 186 sentences
+    carry one. No rule can tell them from the 一 of 第一章 without the judgement
+    invariant 4 excludes, which is why this is a fixture and not a bug.
+    """
+    assert cjk_numeral_values(text)[value] >= 1
+
+
+@pytest.mark.parametrize("lang", [None, 5, True, 0.5])
+def test_a_lang_that_is_not_a_string_reports_rather_than_raises(lang):
+    """`cli.language_tag` refuses one at every surface that takes a `lang` from
+    outside, but `check_segment` has no such guarantee and a validator has to
+    report on a document rather than traceback on one. The incumbent got this
+    for free from `lang == "zh-TW"`; a gate that lower-cases has to be told.
+
+    An *unhashable* `lang` is deliberately not in this list: `[]` and `{}` already
+    raise `TypeError` inside rule 9, where `cfg["length_ratio"].get(lang)` is the
+    caller, and they did so before this rule changed. Out of scope here — the
+    package's OUT list is any other rule — and recorded so the next reader knows
+    the omission was measured rather than missed.
+    """
+    assert "numbers" in _rules("Chapter 1", "第一章", lang=lang)
+
+
+def test_a_language_without_the_relaxation_is_read_exactly_as_before():
+    """Everything the change touches is under the language gate, the pattern too.
+
+    A target that writes CJK numerals is also one that regroups a thousands
+    separator, so `250,000` became one figure — but only there. Folding the
+    separator for every language turned a French `1,234 words` rendered
+    `1 234 mots` from silent into an error, which is a regression on a language
+    this rule was not being changed for.
+    """
+    assert "numbers" not in _rules("The report has 1,234 words.",
+                                  "Le rapport compte 1 234 mots.", lang="fr")
+    assert "numbers" not in _rules("It cost 1,000 euros.",
+                                  "Il en coute 1 000 euros.", lang="fr")
+
+
+def test_the_relaxation_can_only_ever_remove_a_report():
+    """It filters what the strict comparison already found, and adds nothing.
+
+    Worth its own test because the guard is an `if` inside the rule rather than
+    a separate one: a target whose CJK numerals say something the source never
+    did is not this rule's business, and never was.
+    """
+    assert "numbers" not in _rules("Chapter 1", "第一章，共三節")
+    assert "numbers" not in _rules("No numbers here.", "這裡有三個數字。")
 
 
 def test_lexicon_flags_a_nonpreferred_term():

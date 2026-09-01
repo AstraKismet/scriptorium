@@ -210,7 +210,7 @@ notes for the segments it emitted.
 | `tags` | error | a placeholder lost, duplicated or invented; a pair inverted or crossed |
 | `containment` | error | a block the translation opened and the source did not; an added table column |
 | `eol` | error | a carriage return the source did not have |
-| `numbers` | error | a figure in the source missing from the target |
+| `numbers` | error | a figure in the source missing from the target — in Chinese and Japanese, from both numeral systems, so 第一章 answers `Chapter 1` |
 | `missing` | error | a segment never translated |
 | `escaping` | error | a raw `<`, `&` or `]]>` in an XML host — inert today, activates with EPUB |
 | `glossary` | per row, `forbidden` always error | an agreed term rendered inconsistently, or a banned variant used |
@@ -243,8 +243,10 @@ deleting one joins two lines the translation meant to keep apart.
 
 Any other `--lang` value works and gets the structural checks, but no
 locale-specific guidance or terminology rules. Adding one means a brief in
-`translate.py`, a normalization profile in `config.py`, and a reference file
-under `skill/reference/`.
+`translate.py`, a normalization profile in `config.py`, a reference file
+under `skill/reference/`, and one question: does the language write cardinal
+numbers in CJK numerals? Chinese and Japanese do, so `第一章` answers a source
+`Chapter 1`; the reader is shared, so the answer is a subtag rather than a table.
 
 ## Model backends
 
@@ -544,7 +546,7 @@ that lost.
 ## Development
 
 ```bash
-python -m pytest -q                # 1726 tests, no network
+python -m pytest -q                # 1827 tests, no network
 python -m ruff check src tests
 ```
 
