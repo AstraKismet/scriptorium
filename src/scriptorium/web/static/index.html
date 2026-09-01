@@ -217,6 +217,7 @@ dialog pre{margin:0;padding:18px;max-height:62vh;overflow:auto;
     <label><span>API key variable</span>
       <input id="cEnv" spellcheck="false" autocomplete="off" placeholder="OPENAI_API_KEY"></label>
     <p class="hint" id="cKeyNote"></p>
+    <p class="hint" id="cErr"></p>
     <label><span>Timeout (s)</span><input id="cTimeout" type="number" min="1" step="1"></label>
     <label><span>Temperature</span><input id="cTemp" type="number" min="0" max="2" step="0.05"></label>
     <p class="hint">A blank number is inherited, not unset — leave it alone unless you
@@ -352,19 +353,29 @@ async function loadState() {
 function paintProviders(list, routes, snap) {
   providers = list; routing = routes;
   const keep = $('#provider').value;
-  fill($('#provider'), list.map(p => {
-    const bad = p.needs_key && !p.key_present;
-    const o = opt(p.name, p.name + (bad ? ' — ' + p.key_env + ' not set' : ''));
-    o.disabled = bad;
-    return o;
-  }));
+  // **The head option sends no `provider` at all, and it is the default.** The
+  // control used to be seeded with `routing.draft.provider` and sent on every
+  // run — and `config.resolve_route` treats a `provider` that differs from the
+  // stage's own as an override *and drops that stage's model with it*. So every
+  // Polish and Repair started from this toolbar went to draft's backend with
+  // draft's model, silently, on exactly the projects that route stages apart.
+  // Fixing the model box alone did not fix it; the box beside it did the same
+  // thing one level up.
+  const stages = ['draft', 'polish', 'repair']
+    .map(k => k + ' → ' + ((routes[k] && routes[k].provider) || '?')).join(', ');
+  fill($('#provider'), [opt('', 'each stage’s own backend  (' + stages + ')')].concat(
+    list.map(p => {
+      const bad = p.needs_key && !p.key_present;
+      const o = opt(p.name, p.name + (bad ? ' — ' + p.key_env + ' not set' : ''));
+      o.disabled = bad;
+      return o;
+    })));
   // Deliberately no `· model` suffix any more: there is a model control beside
   // this one now, and the provider's own default is not what a run resolves —
   // a routing entry naming a model outranks it. Two answers to "what will run"
   // on one bar, with the wrong one in bigger type.
-  const routed = routes.draft && routes.draft.provider;
-  const want = snap ? routed : (keep || routed);
-  if (want && list.some(p => p.name === want)) $('#provider').value = want;
+  const want = snap ? '' : keep;
+  if (!want || list.some(p => p.name === want)) $('#provider').value = want || '';
   ['draft', 'polish', 'repair'].forEach(stage => {
     const el = $('#r' + stage[0].toUpperCase() + stage.slice(1));
     const now = routes[stage] && routes[stage].provider;
@@ -373,6 +384,15 @@ function paintProviders(list, routes, snap) {
     // same thing in a browser; only this one is unambiguous, and a control that
     // reports no value here would save a routing change nobody asked for.
     if (now && list.some(p => p.name === now)) el.value = now;
+    delete el.dataset.touched;
+    el.onchange = () => { el.dataset.touched = '1'; };
+    if (!now) {
+      // Say it rather than swallow it: this stage's configured entry could not be
+      // read, the select is showing a guess, and nothing is written unless the
+      // person chooses. `routes[stage].error` is the projection's own sentence.
+      const why = (routes[stage] && routes[stage].error) || '';
+      el.title = why || 'this stage has no readable routing entry';
+    } else { el.title = ''; }
   });
   fill($('#cName'), [opt('__new', 'New backend…')].concat(list.map(p => opt(p.name))));
 }
@@ -383,6 +403,11 @@ function paintProviders(list, routes, snap) {
 // backend's models while the select reads another — the stale-model hazard this
 // control clears the field to prevent, arriving through a different door.
 let modelSeq = 0;
+// Which backend the model list on screen came from. A model id belongs to the
+// backend that serves it, so choosing one from a listing chooses that backend
+// for the run — otherwise a model picked while the provider box says "each
+// stage's own" would be sent to whichever backend each stage happens to name.
+let listedProvider = '';
 
 async function loadModels(target) {
   const el = target || $('#model');
@@ -398,6 +423,7 @@ async function loadModels(target) {
     d = {models: [], configured: '', error: e.message};
   }
   if (mine !== modelSeq) return;          // superseded by a later provider change
+  listedProvider = d.provider || '';
   // **Empty by default, with `configured` as the placeholder.** Seeding the
   // value would send `model` on every run — and `configured` is *draft's*
   // answer, so pressing Polish would silently override whatever `routing.polish`
@@ -489,6 +515,12 @@ function fillForm(name) {
   // not configured this" when the real next step is a restart.
   const note = $('#cKeyNote');
   note.className = 'hint';
+  // The projection's own sentence for a block it could not read. Without it the
+  // configuration this form exists to repair is the one thing the form does not
+  // show — the row is drawn from `available()`, which already says what is wrong.
+  const bad = $('#cErr');
+  bad.textContent = (p && p.error) || '';
+  bad.className = p && p.error ? 'hint bad' : 'hint';
   if (!p || !p.needs_key) note.textContent = 'Empty means this backend needs no key.';
   else if (p.key_present) note.textContent = p.key_env + ' is set in this workbench’s environment.';
   else {
@@ -496,29 +528,43 @@ function fillForm(name) {
     note.textContent = p.key_env + ' is not set in the environment this workbench was '
       + 'started in. Export it and restart lx web — a running process cannot re-read it.';
   }
+  editorSeq++;                   // any listing still out belongs to the old row
   if (p) loadModelsInto(name);
 }
 
 // The editor's model box is fed by the same listing the toolbar uses, so a
 // 47-character id is picked rather than copied by hand between two controls on
 // one page.
+let editorSeq = 0;
+
 async function loadModelsInto(name) {
   const el = $('#cModel');
-  fill(el, [opt('', 'asking the backend…')]);
+  const own = ((providers.find(x => x.name === name) || {}).model) || '';
+  const mine = ++editorSeq;
+  // **The placeholder carries the stored id, and that is not cosmetic.**
+  // Replacing a `<select>`'s options resets its value, so a blank placeholder
+  // made `saveBackends` read `want === ''` — which this form spells
+  // `unset: true`. Pressing Save while the listing was in flight therefore
+  // *deleted* `providers.<name>.model` from a backend nobody meant to touch, and
+  // reported it as "Saved: model". The window is the whole round trip — up to
+  // about eighty seconds against a backend that has stopped answering, and the
+  // person in this form is the one whose backend has stopped answering.
+  fill(el, [opt(own, own ? own + '  · asking the backend…' : 'asking the backend…')]);
+  el.value = own;
+  let models = [];
   try {
-    const d = await api('/api/models?provider=' + encodeURIComponent(name));
-    const p = providers.find(x => x.name === name);
-    const own = (p && p.model) || '';
-    fill(el, [opt(own, own || '(none)')].concat(
-      d.models.filter(m => m.id !== own).map(m => opt(m.id, m.status ? m.id + '  · ' + m.status : m.id)),
-      [opt('__other', 'Type an id…')]));
-    el.value = own;
-  } catch (e) {
-    const p = providers.find(x => x.name === name);
-    fill(el, [opt((p && p.model) || '', (p && p.model) || '(none)'),
-              opt('__other', 'Type an id…')]);
-    el.value = (p && p.model) || '';
-  }
+    models = (await api('/api/models?provider=' + encodeURIComponent(name))).models;
+  } catch (e) { /* the listing is advisory; the stored id stands without it */ }
+  // Superseded — by another backend being chosen, or by the form being refilled.
+  // Without this the slow reply overwrote the form under somebody who had already
+  // moved on, and the next Save wrote *another backend's* model id into this one.
+  // It is the hazard `modelSeq` guards in the toolbar: the fix was written once
+  // and this second call site did not get it.
+  if (mine !== editorSeq || !editing || editing.name !== name) return;
+  fill(el, [opt(own, own || '(none)')].concat(
+    models.filter(m => m.id !== own).map(m => opt(m.id, m.status ? m.id + '  · ' + m.status : m.id)),
+    [opt('__other', 'Type an id…')]));
+  el.value = own;
 }
 
 function openBackends() {
@@ -536,7 +582,18 @@ async function saveBackends() {
   log.className = 'hint';
   if (!name) { log.className = 'hint bad'; log.textContent = 'Name the backend first.'; return; }
   const done = [];
-  for (const [field, read] of FIELDS) {
+  // **Which of the two credential fields goes first depends on which risk is
+  // live.** On a *new* backend `base_url` leads, so a refusal creates nothing at
+  // all. On an *existing* one, if both change, `api_key_env` leads: the
+  // acknowledgement the person ticked says the key named below goes with the new
+  // URL, and writing the URL first and then having the key refused leaves the
+  // backend pointing at the new host with the *old* credential — the one
+  // sentence of the acknowledgement that no ordering of two requests can keep,
+  // unless the credential half lands first.
+  const order = editing
+    ? FIELDS.slice().sort((a, b) => (a[0] === 'api_key_env' ? -1 : b[0] === 'api_key_env' ? 1 : 0))
+    : FIELDS;
+  for (const [field, read] of order) {
     const want = read();
     const had = editing ? (field === 'api_key_env' ? editing.key_env
                          : editing[field] == null ? '' : String(editing[field])) : '';
@@ -581,6 +638,12 @@ async function saveBackends() {
   }
   for (const [stage, el] of [['draft', '#rDraft'], ['polish', '#rPolish'], ['repair', '#rRepair']]) {
     const want = $(el).value;
+    // **Touched, not merely different.** A stage whose configured entry is
+    // malformed resolves to `{provider: "", …}`, so *every* value in the select
+    // differs from it — and a Save that changed only a timeout silently rewrote
+    // that stage to whichever backend happened to be showing. The person came to
+    // this form to repair the file, not to have it decided for them.
+    if (!$(el).dataset.touched) continue;
     if (!want || (routing[stage] && routing[stage].provider === want)) continue;
     try {
       // The bare provider name, never `{provider, model}`: both spellings are
@@ -724,13 +787,18 @@ async function job(mode) {
   busy(true);
   say(`— ${mode} —`);
   try {
-    // `model` only when the person actually chose one. Left alone the field is
-    // empty and the key is omitted, so the server resolves this stage's own
-    // routing entry — which is what makes one control on a bar with three run
-    // buttons safe. A seeded value would be draft's answer riding on Polish.
+    // **Neither key is sent unless it was chosen.** With both omitted the server
+    // resolves this stage's own routing entry, which is what makes one pair of
+    // controls on a bar with three run buttons safe — a seeded value in either
+    // box is draft's answer riding on Polish and Repair.
     const model = chosenModel();
-    const j = await api('/api/translate',
-      {...cur, mode, provider: $('#provider').value, ...(model ? {model} : {})});
+    const provider = $('#provider').value || (model ? listedProvider : '');
+    const j = await api('/api/translate', {...cur, mode,
+      ...(provider ? {provider} : {}), ...(model ? {model} : {})});
+    // What the server actually resolved, which is the only place this answer
+    // appears outside a log line the contract forbids parsing. Without it a
+    // reviewer cannot tell which backend produced the wording in front of them.
+    if (j.route) say(`  ${j.route.error || j.route.provider + ' · ' + (j.route.model || 'default')}`);
     if (!j.total) { say('nothing to do'); return; }
     let seen = 0;
     for (;;) {

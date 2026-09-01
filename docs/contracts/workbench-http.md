@@ -345,8 +345,9 @@ Side effects: none.
 ### GET /api/models
 
 What a configured backend says it serves, so a model id can be chosen rather
-than typed. **This is the only endpoint on this surface that leaves the
-machine.**
+than typed. **This is the only GET on this surface that leaves the machine** —
+`POST /api/translate` has always done so, and carries more: the document text as
+well as the credential.
 
 Backed by: `cli.do_models`, and `config.resolve_route` for the answer a *failed*
 listing still carries. Equivalent to `lx models [--provider P] --json`, with one
@@ -364,7 +365,7 @@ validated if sent, then discarded.
 
 | Key | Type | Meaning |
 |---|---|---|
-| `provider` | string | The backend that was asked, resolved through `config.resolve_route`. `""` when no backend could be resolved at all. |
+| `provider` | string | The backend that was asked, resolved through `config.resolve_route`. **It echoes the `provider` you sent even when no such backend is configured** — `resolve_route` does not validate the name, and `providers.build` is what refuses it, so an unknown name comes back here with the refusal in `error`. `""` only when the whole `routing` block is unreadable. |
 | `configured` | string | The model id this project would send **today**, resolved most-specific-first — the caller's `provider`, then the routing entry's model, then the provider's own. `""` when unknown. Present on the failure path too, and that is what it is for. |
 | `models` | array of *model* | Sorted by id. **Present and empty** when the listing failed. |
 | `error` | string \| null | The sentence when the listing failed, `null` when it did not. **Always present**, like `POST /api/job`'s. |
@@ -391,8 +392,12 @@ the list; do not enforce it.
 **The reply is untrusted input.** Ids and statuses come from whatever `base_url`
 names. Every row is filtered at the boundary — any field carrying a character in
 Unicode category `Cc`, `Cf`, `Zl` or `Zp`, or longer than 120 characters, is
-dropped, and the list is capped at 1000 rows — and `error` has the same
-categories replaced with `U+FFFD`. **That filter is about control characters and
+dropped, the list is capped at 1000 rows, and the reply is refused unread past
+4 MB — and `error` has the same categories replaced with `U+FFFD`. The three are
+separate controls and each was added because the other two do not cover it: the
+field cap bounds one value, the row cap bounds what is serialized back, and the
+byte cap bounds what is *parsed to get there*, which a hostile backend was
+measured driving to roughly 910 MB on one request thread. **That filter is about control characters and
 says nothing about markup**: `<`, `>`, `"` and `'` all pass it, because they are
 legal in a model id. A client escapes them, or builds the DOM node rather than a
 string.
@@ -402,7 +407,10 @@ the `Authorization` header built from that provider's `api_key_env` when one is
 set. Nothing on disk. The budget is `min(timeout, 30) s` per attempt with at
 most one retry, plus at most 20 s of backoff a slow backend can ask for with
 `Retry-After` — so a hung backend occupies one server thread for up to about 80
-seconds, and a client shows a spinner. **Never a "retrying" message**: a
+seconds. That bound is on a backend that stops *answering*; one that answers
+slowly but continuously — a byte at a time — is bounded by nothing here, because
+the timeout is per socket operation rather than per request. A client shows a
+spinner either way. **Never a "retrying" message**: a
 llama.cpp router *blocks* the caller while it loads a model rather than
 answering `503`, so a slow first request is a slow request.
 
@@ -1286,7 +1294,7 @@ absence closes.
   it touches no document content — but "no GET writes anything" would be a false
   sentence, so it is not the sentence written here.
 
-  **A second honest exception, since 2026-09-01, and this one leaves the
+  **A second honest exception, since 2026-09-01: a GET that leaves the
   machine.** `GET /api/models` opens an outbound request to whatever `base_url`
   names and sends the `Authorization` header built from that provider's
   `api_key_env` with it. Nothing on disk changes, and the sentence above stays
@@ -2088,9 +2096,10 @@ Appended 2026-09-01 by the package that added `GET /api/models`. Both open.
 
 32. **The wire degrades where the command exits.** `GET /api/models` answers
     `200` with `error` when a backend cannot be reached, still carrying
-    `provider` and `configured`; `lx models` against the same backend exits 2 and
-    prints one sentence, and `lx models --json` emits three keys with no `error`
-    at all. One question, two shapes and two behaviours — divergence (8)'s
+    `provider` and `configured`; `lx models` against the same backend exits 2
+    and prints one sentence to stderr, `--json` or not — the flag never gets to
+    run, so there is no JSON at all rather than a three-key object without an
+    `error`. One question, two shapes and two behaviours — divergence (8)'s
     family, in a stronger form.
 
     **It is not leaked logic**, which is the distinction that decides whether it
@@ -2117,9 +2126,11 @@ Appended 2026-09-01 by the package that added `GET /api/models`. Both open.
 
     Older than this endpoint and not introduced by it: the same opener carries
     every completion. It is recorded here rather than under invariant 6's list
-    because `GET /api/models` is the first path on which a **browser gesture**
-    causes a credential-bearing outbound request, which is what makes it worth a
-    number. Not repaired here because the fix lands in the shared transport that
+    because `GET /api/models` is the first **GET** on which it happens — a
+    request that acquires no state, carries no `Origin`, and still sends the
+    credential outbound. It is *not* the first browser gesture that does: the
+    Translate button has since the workbench existed, which is what makes this
+    divergence older and broader than the endpoint that got it a number. Not repaired here because the fix lands in the shared transport that
     every completion also uses — either a redirect handler that drops
     `Authorization` when the host changes, or refusing redirects on a listing,
     which has no legitimate reason to follow one — and changing what every

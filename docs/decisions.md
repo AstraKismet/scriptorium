@@ -24,8 +24,9 @@ not expire together:
 - *"That endpoint is not written until the origin and path hardening exists"* —
   **expired.** The hardening landed 2026-07-29 and `POST /api/config` on
   2026-08-20, with its allowlist closed by arithmetic.
-- *"Building a settings panel into a 369-line shell that A6 already schedules for
-  replacement spends the work twice"* — **overruled**, by the maintainer's
+- *"The current one is a 369-line shell that A6 already schedules for
+  replacement; building a settings panel into it spends the work twice"* —
+  **overruled**, by the maintainer's
   requirement of 2026-08-20 that both CLI and GUI must let a person choose a
   local, self-hosted or cloud backend. The cost is real and is paid: the controls
   in `index.html` are disposable and HANDOFF-204 will delete them.
@@ -175,16 +176,17 @@ userinfo>` answered:
 The password, in full, in a body a browser renders. `http.client.InvalidURL`
 descends from `HTTPException` — it is **neither a `ValueError` nor an
 `OSError`** — so `urllib` does not wrap it in a `URLError`, none of
-`Provider._request`'s three `printable_url`-masked branches applied to it, it
-never became a `ProviderError`, and it was not in `cli.main`'s exit-2 tuple
-either. `lx models` and `lx translate` printed the same string in a traceback
+`Provider._request`'s `printable_url`-masked branches applied to it — there were
+two of them, the not-JSON one and the `URLError` one, and this repair made a
+third — it never became a `ProviderError`, and it was not in `cli.main`'s exit-2
+tuple either. `lx models` and `lx translate` printed the same string in a traceback
 long before this endpoint existed.
 
 This is invariant 6's own clause rather than a new rule: *the enumerated list of
 display surfaces is a symptom and never the definition.* The list has now been
-wrong four times — `describe()` and the transport message in 2026-08-13,
-`POST /api/config`'s reply in 2026-08-20, `list_models`' wrong-shape message the
-same day, and this. Every one was a *new path to an old value*, which is the only
+wrong five times — `describe()` and the transport message in 2026-08-13 (two),
+`POST /api/config`'s reply and `list_models`' wrong-shape message in 2026-08-20
+(two), and this. Every one was a *new path to an old value*, which is the only
 shape this failure has ever taken.
 
 Fixed in `_request` beside the other three, catching the **class** and not the
@@ -194,8 +196,11 @@ one level down, caught only because the probe was re-run.
 
 ### Two controls at a new boundary, and two open items
 
-`GET /api/models` is the first endpoint on this surface that leaves the machine.
-Two controls were added because a browser is a softer audience than a terminal:
+`GET /api/models` is the first **GET** on this surface that leaves the machine.
+Not the first endpoint — `POST /api/translate` has always reached a backend, with
+the manuscript as well as the credential — and the first draft of this entry said
+"endpoint", which would have sent a future auditor to the wrong one. Two controls
+were added because a browser is a softer audience than a terminal:
 
 - **A hostile error *body* is scrubbed.** `Provider._sane` filters a listing's
   `id` and `status` and never saw an error body, so a backend answering `400`
@@ -211,8 +216,59 @@ is a real asymmetry; and **a redirect carries `Authorization` to another host**,
 because CPython's `HTTPRedirectHandler` strips `Content-*` and keeps
 `Authorization`. The second is older than this endpoint and lands in the shared
 transport every completion uses, so it is its own package rather than a patch
-here — but this is the first path where a *browser gesture* causes a
-credential-bearing outbound request, which is why it is written down now.
+here — but this is the first **GET** on which it happens. Not the first browser
+gesture: the Translate button has caused a credential-bearing outbound request
+since the workbench existed, so (33) is older and broader than this endpoint, and
+the entry above says so.
+
+### What the adversarial pass found, after all of the above was written
+
+Four read-only lenses over the finished commit returned thirty-two findings, of
+which two were blockers and six were security-relevant. They are recorded here
+rather than summarized away, because the pattern in them is more useful than any
+one of them.
+
+**Both blockers were controls that existed and were not applied twice.**
+`loadModels` in the toolbar guards its reply with a request token, and
+`loadModelsInto` in the editor — written twenty lines below it, from the same
+shape — had none, so a slow reply overwrote the form and the next Save wrote
+*another backend's* model id into this one. And the model box was fixed to send
+nothing by default while the **provider** box beside it went on sending
+unconditionally, which `resolve_route` treats as an override that drops the
+stage's model with it: every Polish and Repair from this toolbar went to draft's
+backend, on exactly the projects that route stages apart. The commit message
+claimed the opposite. Both are fixed and pinned; the lesson is that a fix written
+once has to be *searched for* at its second site, because the second site is
+always the one that reads as already correct.
+
+**The credential guard was in the right function and the wrong place.**
+`Request.__init__` raises `ValueError` quoting the whole URL, and it was
+constructed one line *above* the `try` that masks — so the sibling of the
+measured leak walked straight past the new handler. Catching the class rather
+than the member was necessary and not sufficient; the class also has to be
+reachable.
+
+**A masking function crashed inside the mask.** `config.printable_url` wraps
+`urlsplit` in a `try`, and `SplitResult.port` is a *lazy property* that parses on
+access — so `if parsed.port:`, one line below the guard, raised on
+`https://user:SECRET@host:notaport/v1`. `/api/state` answered 400 for that
+configuration, which means the whole workbench failed to load on a project the
+backend editor exists to repair.
+
+**A mutation run refuted one of this package's own tests.** The test named for
+the `Request` placement passed with the placement reverted: the scheme check
+added beside it was catching the case first. The placement is kept as depth and
+both the test and the comment now say which guard each row exercises — a row that
+passes for a neighbouring reason stops testing anything the day the neighbour
+moves. A second test could not fail at all, because its payload was already
+sorted and the cut it meant to pin was taken from the same rows either way.
+
+**Six documentation claims were false**, and the load-bearing one was "the only
+endpoint that leaves the machine" — written in five places, and wrong, because
+`POST /api/translate` has always reached a backend and carries the manuscript as
+well as the credential. A future auditor reading "which endpoints leave the
+machine" would have audited the wrong one. It is "the only **GET**" everywhere
+now.
 
 *Lost:* spelling the endpoint `POST` to keep a mispasted `?provider=` out of the
 server's stdout log and to gain the `Origin` rule. It loses because a listing is

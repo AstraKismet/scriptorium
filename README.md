@@ -417,9 +417,12 @@ cloud API are all reachable from that form.
 
 Every rule it enforces is the CLI's. The page sends one key per request and
 renders whatever `lx config set` would have said, so the two surfaces cannot
-disagree about what is writable — and **no field anywhere accepts an API key**:
+disagree about what is writable — and **no field is meant to hold an API key**:
 `api_key_env` takes the *name* of an environment variable, and a value shaped
-like a key is refused without being repeated back. Changing `base_url` needs an
+like a key is refused there and in `base_url` without being repeated back. The
+honest caveat is that the *model* box stores whatever you type, a key pasted into
+the wrong field included; `docs/contracts/workbench-http.md` records that as a
+known divergence rather than pretending otherwise. Changing `base_url` needs an
 explicit acknowledgement, because it decides where the document and the
 credential are sent. A backend cannot be deleted from the browser; that is
 `lx config unset` or the file.
@@ -527,7 +530,9 @@ is SQLite, and a translation run commits each batch as it lands — an interrupt
 The workbench's HTTP surface is written down and versioned
 (`docs/contracts/workbench-http.md`), configuration is writable from both the CLI
 and the browser, and either surface can point each pipeline stage at a different
-backend and model.
+backend. Naming a *model* per stage is `lx routing set draft <provider>:<id>` or
+the file — the browser writes the backend, and a model chosen there applies to
+the run in front of you rather than being stored.
 
 Queued: EPUB, which is how novels actually circulate; and a rebuilt review
 workbench, which is the largest item by far and is what the frozen contract
@@ -539,7 +544,7 @@ that lost.
 ## Development
 
 ```bash
-python -m pytest -q                # 1700 tests, no network
+python -m pytest -q                # 1726 tests, no network
 python -m ruff check src tests
 ```
 

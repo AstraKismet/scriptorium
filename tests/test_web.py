@@ -1867,8 +1867,9 @@ def test_sentences_reads_neither_src_nor_lang(base, tmp_path, monkeypatch):
 
 # ── asking a backend what it serves ────────────────────────────────────────
 #
-# `GET /api/models` is the only endpoint on this surface that leaves the
-# machine, so what is tested here is the shell around that: that a failure is an
+# `GET /api/models` is the only GET on this surface that leaves the machine —
+# `POST /api/translate` has always done so, with more — so what is tested here is
+# the shell around that: that a failure is an
 # answer rather than a refusal, that the answer still carries what the control
 # needs in order to degrade, and that nothing a backend or a hand-edited file
 # supplies reaches the browser unmasked. The listing itself is `cli.do_models`
@@ -2070,3 +2071,59 @@ def test_a_number_no_coercion_accepts_is_null_and_is_named(
     rows = {p["name"]: p for p in json.loads(_get(base, "/api/state")[1])["providers"]}
     assert rows["broken"]["timeout"] is None
     assert "timeout" in rows["broken"]["error"]
+
+
+def test_an_unbuildable_provider_still_answers_200_with_configured(
+        base, tmp_path, monkeypatch, backend):
+    """The endpoint's boldest promise, on the shapes that used to break it.
+
+    `providers.build` raised `AttributeError` / `TypeError` / a bare
+    `ValueError` for these, none of which `_models` caught — so the endpoint
+    answered `400`, lost `configured`, and put a raw Python exception string in
+    front of the reader. On a numeric knob that string carried the configured
+    value into a browser.
+    """
+    root = _config_project(tmp_path, monkeypatch)
+    _routed(root, backend, scalar=5, wordy={"kind": "openai", "timeout": "soon"},
+            headery={"kind": "openai", "headers": "nope"})
+    for name in ("scalar", "wordy", "headery"):
+        d = _models(base, "?provider=" + name)
+        assert d["provider"] == name, name
+        assert d["models"] == [] and d["error"], name
+
+
+def test_a_refusal_over_the_wire_never_repeats_a_mispasted_knob(
+        base, tmp_path, monkeypatch, backend):
+    pasted = "sk-REDACTEDLOOKINGVALUE0123456789"
+    root = _config_project(tmp_path, monkeypatch)
+    _routed(root, backend, oops={"kind": "openai", "timeout": pasted})
+    code, body = _get(base, "/api/models?provider=oops")
+    assert code == 200
+    assert pasted not in body.decode("utf-8")
+
+
+def test_a_bad_port_beside_userinfo_does_not_take_the_whole_page_down(
+        base, tmp_path, monkeypatch, backend):
+    """`/api/state` is the bootstrap endpoint: if it 400s the workbench cannot
+    draw at all — including the editor that exists to repair this very file."""
+    secret = "SUPERSECRETPASSWORD"
+    root = _config_project(tmp_path, monkeypatch)
+    _routed(root, backend, badport={
+        "kind": "openai", "base_url": f"https://a:{secret}@example.invalid:notaport/v1",
+        "api_key_env": "", "timeout": 1, "retries": 0})
+    for path in ("/api/state", "/api/models?provider=badport"):
+        code, body = _get(base, path)
+        assert code == 200, (path, body)
+        assert secret not in body.decode("utf-8"), path
+
+
+def test_a_non_finite_knob_leaves_the_state_endpoint_parseable(
+        base, tmp_path, monkeypatch, backend):
+    root = _config_project(tmp_path, monkeypatch)
+    _routed(root, backend, inf={"kind": "openai", "base_url": "http://x/v1",
+                                "api_key_env": "", "timeout": "Infinity"})
+    code, body = _get(base, "/api/state")
+    assert code == 200
+    text = body.decode("utf-8")
+    assert "Infinity" not in text and "NaN" not in text, "the body is not JSON"
+    json.loads(text)

@@ -3528,7 +3528,14 @@ def cmd_models(args, cfg):
     else:
         holder, remedy = f"providers.{name}.model", f"lx config set providers.{name}.model <id>"
     if configured and not any(m["id"] == configured for m in rows):
-        _out(f"\nnote: {holder} is {configured!r}, which this backend did not list. "
+        # **Say when the list was cut**, or this note accuses a backend of not
+        # serving a model it may well serve: `Provider._listing` caps the rows,
+        # so on a backend publishing more than the cap "did not list" means "is
+        # not in the part we kept". Nothing else here can tell the two apart.
+        from .providers.base import _MAX_ROWS
+        cut = (f" The listing was cut at the first {_MAX_ROWS} ids, so it may "
+               f"serve this one anyway." if len(rows) >= _MAX_ROWS else "")
+        _out(f"\nnote: {holder} is {configured!r}, which this backend did not list.{cut} "
              f"A single-model server ignores the field and will still answer; a "
              f"router will refuse with 400.")
     _out(f"\nto use one: {remedy}")

@@ -8,6 +8,7 @@ so adding a backend never means reimplementing the pipeline.
 
 import http.client
 import json
+import math
 import os
 import random
 import socket
@@ -42,6 +43,17 @@ _MAX_FIELD = 120
 #: model is not among what came back.
 _MAX_ROWS = 1000
 
+#: How many bytes a *listing* may read before it is refused. `_MAX_ROWS` bounds
+#: what is serialized back and says nothing about what was parsed to get there:
+#: a hostile backend answering 50 MB of rows was measured driving one request
+#: thread to roughly 910 MB of peak memory before the cap trimmed the reply, and
+#: since 2026-09-01 that request is one dropdown change on a threading server.
+#: Four megabytes is far above any real model list — the largest measured is
+#: about eighty ids — and the cap is on the listing alone, never on a completion,
+#: whose body is legitimately large and is not reachable by a browser gesture in
+#: the same way.
+_MAX_LIST_BYTES = 4 * 1024 * 1024
+
 #: The Unicode categories a value from a backend may not carry into a terminal
 #: or a DOM. `Cc` and `Cf` are the controls and the format characters, which is
 #: where the bidirectional overrides live; `Zl` and `Zp` are `U+2028`/`U+2029`,
@@ -55,6 +67,21 @@ _UNSAFE_CATEGORIES = ("Cc", "Cf", "Zl", "Zp")
 #: A model listing's own budget, bounded below the completion one. See `_get`.
 _LIST_TIMEOUT = 30.0
 _LIST_RETRIES = 1
+
+
+def _finite(value, cast):
+    """`cast(value)`, refusing an infinity or a NaN.
+
+    Both survive `float()` and neither survives `json.dumps` as JSON: they are
+    written as the bare tokens `Infinity` and `NaN`, which `JSON.parse` rejects,
+    so one hand-edited knob took the whole of `/api/state` down rather than
+    marking one row. Raised as `ValueError` because that is what every caller
+    here already handles for a knob it cannot read.
+    """
+    number = cast(value)
+    if isinstance(number, float) and not math.isfinite(number):
+        raise ValueError(f"{number} is not a finite number")
+    return number
 
 
 def _tame(text):
@@ -77,11 +104,25 @@ class Provider:
         self.name = name
         self.spec = spec
         self.model = spec.get("model", "")
-        self.timeout = float(spec.get("timeout", 120))
-        self.temperature = float(spec.get("temperature", 0.2))
-        self.max_tokens = int(spec.get("max_tokens", 4096))
-        self.retries = int(spec.get("retries", 3))
-        self.extra_headers = spec.get("headers", {}) or {}
+        # `_finite`, not a bare `float`. `float("Infinity")` and `float("nan")`
+        # both succeed, so a hand-edited `"timeout": "Infinity"` built a provider
+        # that never times out — and `providers.available` beside this refuses
+        # the same value, so the row said the block could not be read while
+        # `build()` handed back a working object. One answer, in both places.
+        self.timeout = _finite(spec.get("timeout", 120), float)
+        self.temperature = _finite(spec.get("temperature", 0.2), float)
+        self.max_tokens = _finite(spec.get("max_tokens", 4096), int)
+        self.retries = _finite(spec.get("retries", 3), int)
+        # Shape-checked here rather than at the `{**headers, **self.extra_headers}`
+        # unpack in `_request`. Both refuse it now, but only this one refuses it
+        # at *construction*, which is what makes `providers.build` the single
+        # place that answers "can this spec be read" — otherwise a backend the
+        # editor just created looks fine until the first run, and the sentence
+        # the reader gets is `'str' object is not a mapping`.
+        headers = spec.get("headers", {}) or {}
+        if not isinstance(headers, dict):
+            raise TypeError("`headers` is a block of name to value")
+        self.extra_headers = headers
 
     # -- credentials -------------------------------------------------------
     @property
@@ -274,10 +315,24 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
         """
         return self._request(url, headers, payload=None, method="GET",
                              timeout=min(self.timeout, _LIST_TIMEOUT),
-                             retries=min(self.retries, _LIST_RETRIES))
+                             retries=min(self.retries, _LIST_RETRIES),
+                             max_bytes=_MAX_LIST_BYTES)
 
     def _request(self, url, headers, payload=None, method="POST",
-                 timeout=None, retries=None):
+                 timeout=None, retries=None, max_bytes=None):
+        # **Only http(s) leaves this function.** `urllib`'s stock opener also
+        # speaks `file:`, `ftp:` and `data:`, so a hand-edited `base_url` of
+        # `file:///…` made the one endpoint a browser gesture can reach into a
+        # local-file read whose content comes back inside the wrong-shape error
+        # message. No configuration this project writes can produce one —
+        # `_field_base_url` refuses an empty netloc — so this costs nothing and
+        # closes the hand-edited case. A plain prefix test rather than
+        # `urlsplit`, because that parser raises on some of the inputs this is
+        # here to refuse.
+        if not str(url).lower().startswith(("http://", "https://")):
+            raise ProviderError(
+                f"{self.name}: base_url must be an http:// or https:// address. This one "
+                f"names another scheme, and the value is not repeated here.")
         body = json.dumps(payload).encode("utf-8") if payload is not None else None
         timeout = self.timeout if timeout is None else timeout
         retries = self.retries if retries is None else retries
@@ -288,12 +343,37 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
             # cost a second of pure latency per failed call — which the suite
             # paid on every run.
             final = attempt == retries
-            req = urllib.request.Request(url, data=body, method=method)
-            for k, v in {**headers, **self.extra_headers}.items():
-                req.add_header(k, v)
             try:
+                # **Constructed inside the `try`, and this is depth rather than
+                # the guard.** `Request.__init__` raises `ValueError("unknown url
+                # type: %r")` quoting the *whole* URL, userinfo and all, and it
+                # sat above this block where the masked handler below could not
+                # see it — a `base_url` of `//user:SECRET@host/v1` was masked by
+                # `/api/state` and printed in full by `GET /api/models` beside
+                # it. Measured 2026-09-01.
+                #
+                # **It has no reachable case today**, and that is worth saying
+                # rather than leaving for somebody to rediscover: the scheme
+                # check at the top of this function refuses the only URL form
+                # `Request.__init__` rejects, so it fires first. A mutation run
+                # proved it — moving this construction back out left the suite
+                # green, and the test that claimed to pin it was passing on the
+                # scheme check instead. It stays because the two guards answer to
+                # different rules, and the day the scheme rule widens this is
+                # what is left.
+                req = urllib.request.Request(url, data=body, method=method)
+                for k, v in {**headers, **self.extra_headers}.items():
+                    req.add_header(k, v)
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
-                    raw = resp.read()
+                    # Bounded for a listing, unbounded for a completion. One
+                    # extra byte is read so that "exactly at the cap" and "over
+                    # it" are distinguishable without a second call.
+                    raw = resp.read() if max_bytes is None else resp.read(max_bytes + 1)
+                if max_bytes is not None and len(raw) > max_bytes:
+                    raise ProviderError(
+                        f"{self.name}: {printable_url(url)} answered more than "
+                        f"{max_bytes} bytes for a model list, which no real backend "
+                        f"does. Nothing was parsed.")
                 try:
                     return json.loads(raw.decode("utf-8"))
                 except (ValueError, UnicodeDecodeError) as e:
@@ -361,7 +441,7 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
             # so it escaped both handlers and reached the user as a bare OSError
             # instead of the message below. On 3.10+ the two names are one class
             # and the tuple is a duplicate, which costs nothing.
-            except (ValueError, http.client.HTTPException) as e:
+            except (TypeError, ValueError, http.client.HTTPException) as e:
                 # A URL `urllib` will not even attempt, and every other failure
                 # this client raises on its own rather than as an `OSError`. No
                 # exchange happened, so no retry can help and this raises rather

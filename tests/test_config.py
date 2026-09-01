@@ -1284,3 +1284,26 @@ def test_the_typed_readback_masks_exactly_what_the_printed_one_masks():
     # of one.
     assert cli.do_config_value(cfg, "batch.size") == 12
     assert cli.do_config_value(cfg, "batch.nothing") is None
+
+
+def test_printable_url_reads_a_bad_port_inside_its_own_guard():
+    """`SplitResult.port` is a *lazy property* — it parses on access.
+
+    So `if parsed.port:` raised `ValueError` from outside the `try` that exists
+    to contain exactly that. Measured 2026-09-01: one hand-edited
+    `https://user:SECRET@host:notaport/v1` answered `400` on `/api/state` **and**
+    on `/api/models`, and gave `lx providers` a traceback and exit 1 instead of
+    this project's one sentence and exit 2. The masking function crashed inside
+    the mask.
+    """
+    from scriptorium.config import printable_url
+
+    secret = "SUPERSECRETPASSWORD"
+    out = printable_url(f"https://alice:{secret}@example.invalid:notaport/v1")
+    assert secret not in out
+    # Nothing about it is printable, so nothing of it is printed. Returning the
+    # value verbatim was the other option and is wrong in the one case this
+    # function exists for.
+    assert "example.invalid" not in out
+    assert printable_url("https://alice:s3cr3t@example.invalid:8443/v1") == \
+        "https://example.invalid:8443/v1"

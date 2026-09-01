@@ -164,8 +164,9 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    own message quotes the netloc it choked on — password included. That class
    descends from `HTTPException` and is **neither a `ValueError` nor an
    `OSError`**, so `urllib` never wrapped it in a `URLError`, none of
-   `providers/base.py`'s three masked branches applied, it never became a
-   `ProviderError`, and `lx models` and `lx translate` answered a traceback
+   `providers/base.py`'s masked branches applied — there were two, and this
+   made a third — it never became a `ProviderError`, and `lx models` and
+   `lx translate` answered a traceback
    carrying it. `GET /api/models` is what put it in front of a *browser*, and a
    probe over that endpoint is what found it — no design review did. It is masked
    in `_request` beside the other three now. Note what the first attempt at the
@@ -271,8 +272,10 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    `cli.do_*` behind it: what may be banked stopped being "has a target", and a
    policy with two homes is what this invariant exists to stop.
    (32) and (33) were appended on 2026-09-01 by `GET /api/models`, the fourteenth
-   endpoint and **the only one that leaves the machine** — every other touches
-   the project directory alone. Both are **open** and neither is leaked logic.
+   endpoint and the only **GET** that leaves the machine. Not the only endpoint:
+   `POST /api/translate` has always reached a backend and carries the document
+   text with the credential, which is a strictly larger exposure. What is new is
+   that a *read* does it. Both are **open** and neither is leaked logic.
    (32) is the shape this invariant usually catches, arriving honestly: the wire
    answers `200` with `error` where `lx models` exits 2, because the endpoint
    feeds a control that must degrade rather than block and a terminal has no such
@@ -392,7 +395,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 1700 tests; no network (one is POSIX-only,
+python -m pytest -q                 # 1726 tests; no network (one is POSIX-only,
                                     #   one runs only where the filesystem folds case)
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`

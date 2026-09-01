@@ -731,10 +731,12 @@ def test_a_listing_is_bounded_below_the_completion_budget(models_server):
     p = build("local", _cfg(models_server, timeout=600, retries=3))
     real = p._request
 
-    def spy(url, headers, payload=None, method="POST", timeout=None, retries=None):
+    def spy(url, headers, payload=None, method="POST", timeout=None, retries=None,
+            max_bytes=None):
         seen[method] = (timeout, retries)
+        seen["max_bytes"] = max_bytes
         return real(url, headers, payload=payload, method=method,
-                    timeout=timeout, retries=retries)
+                    timeout=timeout, retries=retries, max_bytes=max_bytes)
 
     p._request = spy
     MODELS["payload"] = {"data": [{"id": "m"}]}
@@ -1081,10 +1083,16 @@ def test_a_listing_is_capped_so_a_row_count_cannot_grow_without_bound(models_ser
     """
     from scriptorium.providers.base import _MAX_ROWS
 
-    MODELS["payload"] = {"data": [{"id": f"m{i:06d}"} for i in range(_MAX_ROWS + 50)]}
+    # **Answered in reverse**, which is the whole of the second assertion: with
+    # an already-sorted payload a cut taken *before* the sort keeps exactly the
+    # same rows, so the test passed either way and pinned nothing. Caught by a
+    # mutation run on 2026-09-01.
+    n = _MAX_ROWS + 50
+    MODELS["payload"] = {"data": [{"id": f"m{i:06d}"} for i in reversed(range(n))]}
     rows = build("local", _cfg(models_server, retries=0)).list_models()
     assert len(rows) == _MAX_ROWS
     assert rows[0]["id"] == "m000000", "the cut was taken before the sort"
+    assert rows[-1]["id"] == f"m{_MAX_ROWS - 1:06d}"
 
 
 def test_a_base_url_carrying_userinfo_is_refused_without_printing_the_password():
@@ -1109,3 +1117,176 @@ def test_a_base_url_carrying_userinfo_is_refused_without_printing_the_password()
             call(build("p", cfg))
         assert secret not in str(e.value)
         assert "example.invalid" in str(e.value), "masked into uselessness"
+
+
+# ── what the adversarial pass over `GET /api/models` found, 2026-09-01 ─────
+#
+# Every case below is a hand-edited `lx.config.json` — `lx config set` refuses
+# each of them — which is the premise every `printable_url` call site in this
+# project already exists for. What changed is the audience: a browser, reachable
+# by opening a dropdown.
+
+@pytest.mark.parametrize("base,pins", [
+    ("//alice:{s}@example.invalid/v1", "the scheme guard"),
+    ("http://alice:{s}@exa\nmple.invalid/v1", "the masked InvalidURL handler"),
+    ("http://alice:{s}@exa\x00mple.invalid/v1", "the masked InvalidURL handler"),
+    ("http://alice:{s}@example.invalid:notaport/v1", "printable_url's own guard"),
+    ("http://alice:{s}@127.0.0.1:9/v1", "the masked URLError branch"),
+])
+def test_no_shape_of_userinfo_base_url_prints_the_password(base, pins):
+    """Five shapes, five different guards, one rule.
+
+    Written as a sweep rather than as one case because the enumeration is what
+    this project keeps getting wrong: the measured leak was `InvalidURL` out of
+    `urlopen`, the *first* guard written for it caught `ValueError` (which
+    `InvalidURL` is not), and the sibling that `Request.__init__` raises needed a
+    third guard again. Each row names the guard it actually exercises, because a
+    row that passes for a neighbouring reason is a row that stops testing
+    anything the day the neighbour moves — which is exactly what a mutation run
+    caught here on 2026-09-01.
+
+    **What is deliberately *not* pinned:** building the `Request` inside the
+    `try` rather than above it. That was part of the same repair and it has no
+    reachable case left, because the scheme guard refuses the only URL form
+    `Request.__init__` rejects. It is kept as depth, and `base.py` says so.
+    """
+    secret = "SUPERSECRETPASSWORD"
+    cfg = {"providers": {"p": {"kind": "openai", "api_key_env": "", "retries": 0,
+                               "timeout": 1, "base_url": base.format(s=secret)}}}
+    for call in (lambda p: p.list_models(), lambda p: p.complete("s", "u")):
+        with pytest.raises(ProviderError) as e:
+            call(build("p", cfg))
+        assert secret not in str(e.value), pins
+
+
+@pytest.mark.parametrize("scheme", ["file://", "ftp://", "gopher://", "data:text/plain,"])
+def test_a_base_url_that_is_not_http_never_leaves_through_the_transport(scheme):
+    """`urllib`'s stock opener also speaks `file:`, and one endpoint is now
+    reachable by a browser gesture — so a `file:///` base_url turned a dropdown
+    into a local-file read whose content came back in the wrong-shape message."""
+    cfg = {"providers": {"p": {"kind": "openai", "api_key_env": "", "retries": 0,
+                               "base_url": f"{scheme}/etc/passwd"}}}
+    with pytest.raises(ProviderError) as e:
+        build("p", cfg).list_models()
+    assert "http:// or https://" in str(e.value)
+    assert "passwd" not in str(e.value), "the refusal repeated the value"
+
+
+@pytest.mark.parametrize("spec,why", [
+    (5, "single value"),
+    (["a"], "single value"),
+    ({"kind": "openai", "timeout": "soon"}, "cannot be read"),
+    ({"kind": "openai", "headers": "not-a-block"}, "cannot be read"),
+    ({"kind": "openai", "retries": "many"}, "cannot be read"),
+])
+def test_a_malformed_provider_block_is_a_provider_error_not_a_traceback(spec, why):
+    """`build` raised whatever Python raised on the way past.
+
+    None of `AttributeError`, `TypeError` or a bare `ValueError` is in
+    `cli.main`'s exit-2 tuple, so `lx models` answered a traceback; and
+    `GET /api/models` answered `400` with `str(e)` — which for a numeric knob
+    carries the configured value into a browser. `providers.available` beside
+    this had reported every one of these shapes gracefully since 2026-08-20.
+    """
+    with pytest.raises(ProviderError) as e:
+        build("p", {"providers": {"p": spec}})
+    assert why in str(e.value)
+
+
+def test_a_malformed_knob_refusal_never_repeats_the_value():
+    """A mispasted key lands in whichever box the hand slipped into."""
+    pasted = "sk-REDACTEDLOOKINGVALUE0123456789"
+    with pytest.raises(ProviderError) as e:
+        build("p", {"providers": {"p": {"kind": "openai", "timeout": pasted}}})
+    assert pasted not in str(e.value)
+
+
+@pytest.mark.parametrize("value", ["Infinity", "-Infinity", "nan"])
+def test_a_non_finite_knob_is_refused_rather_than_serialized(value):
+    """`float("Infinity")` succeeds and `json.dumps` writes the bare token
+    `Infinity`, which is not JSON — so `JSON.parse` rejects the whole body and
+    one hand-edited knob took `/api/state` down for the entire page."""
+    from scriptorium.providers import available
+
+    cfg = {"providers": {"p": {"kind": "openai", "base_url": "http://x/v1",
+                               "api_key_env": "", "timeout": value}}}
+    row = available(cfg)[0]
+    assert row["timeout"] is None and "timeout" in row["error"]
+    assert json.loads(json.dumps(available(cfg))), "the projection is not JSON"
+    with pytest.raises(ProviderError):
+        build("p", cfg)
+
+
+def test_a_wrong_shape_reply_is_tamed_like_an_error_body(models_server):
+    """`str(data)` is the identity on a `str`, so `repr` never escaped it.
+
+    The comment that justified not taming here said `str(data)[:300]` "goes
+    through `repr`". True when the decoded body is a dict or a list; false when
+    a proxy or a web UI at the root answers a bare JSON string — which is
+    exactly the misconfiguration this message was written for.
+    """
+    MODELS["payload"] = "‮hello[2Kthere"
+    with pytest.raises(ProviderError) as e:
+        build("local", _cfg(models_server, retries=0)).list_models()
+    msg = str(e.value)
+    assert "" not in msg and "‮" not in msg
+    assert "�" in msg
+
+
+class _FloodHandler(BaseHTTPRequestHandler):
+    """Answers a model list far larger than any real backend serves."""
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        # Long ids rather than a huge count, so the body clears the cap without
+        # the test spending its time on string building. ~215 bytes a row.
+        pad = "x" * 190
+        rows = ",".join(f'{{"id":"m{i:06d}{pad}"}}' for i in range(25_000))
+        body = ('{"data":[' + rows + ']}').encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+@pytest.fixture(scope="module")
+def flood():
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), _FloodHandler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{httpd.server_address[1]}/v1"
+    httpd.shutdown()
+
+
+def test_a_listing_refuses_a_body_larger_than_any_real_backend_sends(flood):
+    """`_MAX_ROWS` bounds the reply; this bounds the *read*.
+
+    The two are different controls and only one existed: a hostile backend
+    answering fifty megabytes of rows was measured driving one request thread to
+    roughly 910 MB of peak memory — parsed in full, and only then trimmed to a
+    thousand rows on the way out. Since `GET /api/models` exists that request is
+    one dropdown change, on a threading server.
+
+    The completion path keeps its unbounded read: a translation's body is
+    legitimately large, and nothing reaches it by a browser gesture the way a
+    listing now does.
+    """
+    from scriptorium.providers.base import _MAX_LIST_BYTES
+
+    with pytest.raises(ProviderError) as e:
+        build("local", _cfg(flood, retries=0)).list_models()
+    assert "model list" in str(e.value) and "Nothing was parsed" in str(e.value)
+    assert str(_MAX_LIST_BYTES) in str(e.value)
+
+
+def test_an_ordinary_listing_is_nowhere_near_the_read_cap(models_server):
+    """The cap must not be reachable by anything real — the guard against a
+    guard that refuses working configurations."""
+    from scriptorium.providers.base import _MAX_LIST_BYTES
+
+    MODELS["payload"] = {"data": [{"id": f"m{i:03d}"} for i in range(200)]}
+    rows = build("local", _cfg(models_server, retries=0)).list_models()
+    assert len(rows) == 200
+    assert len(json.dumps(MODELS["payload"])) * 20 < _MAX_LIST_BYTES

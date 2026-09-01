@@ -465,18 +465,31 @@ def printable_url(url):
     """
     if not isinstance(url, str):
         return url
+    # **Every read of `parsed` is inside the guard, and that is the whole shape
+    # of this function.** `SplitResult.port` is a *lazy property* that parses on
+    # access, so `if parsed.port:` raised `ValueError` from outside the `try`
+    # that was put there to contain exactly that — measured 2026-09-01 against
+    # `https://user:SECRET@host:notaport/v1`, which took down `/api/state` and
+    # `/api/models` with a `400`, and answered `lx providers` with a traceback
+    # and exit 1 instead of this project's one sentence and exit 2. The masking
+    # function crashed inside the mask.
     try:
         parsed = urllib.parse.urlsplit(url)
         carries = bool(parsed.username or parsed.password or parsed.query)
+        if not carries:
+            return url
+        host = parsed.hostname or ""
+        if parsed.port:
+            host = f"{host}:{parsed.port}"
+        return urllib.parse.urlunsplit(
+            (parsed.scheme, host, parsed.path, "…" if parsed.query else "", ""))
     except ValueError:
-        return url
-    if not carries:
-        return url
-    host = parsed.hostname or ""
-    if parsed.port:
-        host = f"{host}:{parsed.port}"
-    return urllib.parse.urlunsplit(
-        (parsed.scheme, host, parsed.path, "…" if parsed.query else "", ""))
+        # A URL this parser cannot read at all. Returning it verbatim is what
+        # this function did before and is wrong here for the reason the function
+        # exists: it may be the userinfo-bearing one. Nothing about it is
+        # printable, so nothing of it is printed.
+        return "(unreadable base_url)"
+
 
 
 #: An API version segment inside a URL *path*: `/v1`, `/v2`, `/v1beta`,

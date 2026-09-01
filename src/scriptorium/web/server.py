@@ -147,9 +147,12 @@ def _routing_state(cfg):
 def _models(cfg, provider):
     """What a backend says it serves — and never a refusal that blocks the run.
 
-    **The only endpoint here that leaves the machine.** Every other one touches
-    the project directory; this one opens a request to whatever `base_url` names
-    and sends the credential built from `api_key_env` with it. What that costs,
+    **The only GET here that leaves the machine**, which is a narrower claim
+    than it first looks: `POST /api/translate` has always reached a backend, and
+    carries the document text along with the credential. What is new is that a
+    *read* does it — so the admission gate has one rule fewer to work with, and a
+    request that acquires no state still causes an outbound, credential-bearing
+    call. What that costs,
     and why it is bounded, is in the contract's own section for it.
 
     **It answers `200` whatever happens, with `error` carrying the sentence.**
