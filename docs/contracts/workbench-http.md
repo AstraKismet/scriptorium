@@ -453,7 +453,7 @@ client must remember something.
 | `rejected` | integer | Segments where **every** proposal was refused by the acceptance path — a banked wording no longer fits the segment it matched. It counts **segments, not refusals**, and a refusal with an accepted proposal behind it is not one: that segment counts in `reused` and is named in `replaced`. Corrected here on 2026-08-19 — the value has never changed, but this row said "carryover or memory hits refused", which reads as a count of refusals and is `0` on the very case `replaced` was added to report. What *did* change, on 2026-08-17, is that a refusal no longer **deletes** this document's own stored target. See below. |
 | `kept` | array of string | Segment ids whose stored target the acceptance path refused and this endpoint **kept anyway**, with its `origin` and its `review`. They come back `status: "translated"` holding wording that fails validation, and `POST /api/doc` carries the error on the segment itself — so this array is a convenience, not the only way to find them. *Known divergences* (24), closed. |
 | `ambiguous` | array of string | Segment ids the position diff could not place, which took the last stored wording under their key instead: a new occurrence of a sentence the document already had, a paragraph that moved, or a member of a run of identical paragraphs that changed size. **Which stored wording belongs to which position is not established for these** — check their `origin`. Nothing else on this surface reports it. **Not capped:** past the alignment work budget the diff is skipped for the whole document and every carried segment lands here, which on a novel that is one sentence repeated is every segment in it. *Known divergences* (26), open. |
-| `replaced` | array of string | Segment ids where a translation-memory hit was accepted **over wording this document was already holding** — the stored target no longer fit the re-parsed segment, a banked one did, and the sentence is gone with its provenance: `origin` comes back `tm`, so the next unattended run may overwrite it. Nothing else on this surface reports it, and unlike `kept` there is no error to find it by: the segment is `translated` and passes every validator. *Known divergences* (27), open and decided — when the fix ships, only a machine draft gives way and fewer segments qualify. That is a change to what this endpoint **does**; this key means what the run did and does not move with it, exactly as `rejected` did not on 2026-08-17. |
+| `replaced` | array of string | Segment ids where a translation-memory hit was accepted **over wording this document was already holding** — the stored target no longer fit the re-parsed segment and a banked one did. Since 2026-09-01 the wording that gives way is always a machine's (`llm:*`, `tm`, `tm:legacy`); what a person or an agent wrote is kept instead and named in `kept`. So the sentence is not gone — the memory still holds it — but the segment's `origin` is now `tm`, which is worth a reviewer's eye. Nothing else on this surface reports it, and unlike `kept` there is no error to find it by: the segment is `translated` and passes every validator. *Known divergences* (27), **closed**. The array narrowed and the key did not move, exactly as `rejected` did not on 2026-08-17: it means what the run did. |
 
 **Carrying over is position-aware, and a refusal does not delete.** Two rules
 landed on 2026-08-17 and neither moves a key:
@@ -853,10 +853,11 @@ surface that writes anything outside `.lx/`.
 
 Bank the document's approved wordings into the translation memory.
 
-Backed by: no `cli.do_*` — `cmd_commit` is itself three inline `store` calls, so
-there is no shared function for the server to call. It makes the same calls, in
-the same order, and the two are equivalent by inspection rather than by
-construction. Equivalent to `lx commit`.
+Backed by: `cli.do_commit`. Equivalent to `lx commit`. Until 2026-09-01 this was
+three inline `store` calls on each surface — "equivalent by inspection rather
+than by construction", which was tolerable only while the answer to *what may be
+banked* was "everything with a target". It stopped being that on the same day,
+and a policy with two homes is what invariant 8 exists to stop.
 
 **Request** — `src` (required), `lang` (required).
 
@@ -865,6 +866,15 @@ construction. Equivalent to `lx commit`.
 | Key | Type | Meaning |
 |---|---|---|
 | `committed` | integer | The count of memory lines that were **new** — not the count of translated segments. Committing an unchanged document twice returns `0` the second time, and that is correct. |
+| `refused` | array of string | Segment ids not banked because `lx check` reports an **error** on them. `.lx/tm.<lang>.jsonl` keeps the *last* record per key, so banking a broken wording does not merely add a useless line — it hides the good one already banked under the same key, and a third document then finds nothing. Added 2026-09-01; before it, every non-empty target was banked. |
+| `stranded` | array of string | Segment ids not banked because their wording speaks a numbering this document has moved on from — they carry `target_slots`, they render as they were written, and `lx check` reports them at **warn** on the `numbering` rule. That severity is why `refused` does not catch them, and they need their own row for the same reason `kept` does: the remedy is to re-word the segment against the source as it stands, not to fix an error. Banked, such a wording shadows a correct record under the same key and the next document finds nothing usable — measured 2026-09-01. |
+| `held` | array of string | Segment ids not banked because they are `held`. A hold is the reviewer's own declaration that the segment is theirs to finish, and this endpoint takes a whole document with no per-segment selection, so the hold is the only thing in the request that can say "not this one". Nothing is lost: an unhold makes the wording eligible for the very next commit. Checked **first**, so a segment that is also stranded or failing appears only here — "unhold it" is the remedy that comes before the others. |
+
+All three arrays are new keys and therefore additive; `contract_version` did not
+move for them. What *did* narrow is which segments `committed` counts, and that is a
+change to what this endpoint **does** rather than to what a documented value
+means — the reading `replaced` and `rejected` are already written under on
+`POST /api/extract`.
 
 Side effects: appends to `.lx/tm.<lang>.jsonl`. Never overwrites.
 
@@ -993,7 +1003,7 @@ surface is a second thing to keep in step. The one thing it does not project is
 | Key | Type | Notes |
 |---|---|---|
 | `seg` | string | Segment id. |
-| `rule` | string | One of `containment`, `dnt`, `eol`, `escaping`, `glossary`, `held`, `length`, `lexicon`, `missing`, `numbers`, `punct`, `spacing`, `tags`, `untranslated`. |
+| `rule` | string | One of `bare_term`, `containment`, `dnt`, `eol`, `escaping`, `glossary`, `held`, `length`, `lexicon`, `missing`, `numbering`, `numbers`, `punct`, `spacing`, `tags`, `untranslated`. |
 | `severity` | string | `error` or `warn` for every rule the code decides. The `glossary` rule passes column four of `config/glossary.csv` through unvalidated, and `lexicon_extra` does the same, so a hand-edited configuration can put any string here. Anything that is not exactly `error` is counted as a warning. |
 | `message` | string | Human-readable. Not stable; do not parse it. |
 
@@ -1002,7 +1012,10 @@ the contract version; a consumer must not treat the list as closed, and must not
 crash on a `severity` outside the two it knows. `held` was added on 2026-08-15
 under exactly that rule, at **warn** severity, so a held segment never blocks a
 render — a severity that failed `lx check` would make lifting every hold the only
-way to finish a book.
+way to finish a book. `bare_term` (2026-08-17) and `numbering` (2026-09-01) were
+added the same way and are warn for the same reason; a test now derives this list
+from `checks.py` with `ast`, because it had drifted — `bare_term` was missing from
+it for a fortnight and nothing could tell.
 
 **block** — an element of `GET /api/preview`'s `blocks`.
 
@@ -1017,7 +1030,7 @@ top-level key set.
 | `id` | string \| null | The *segment* id this block renders, or `null` for a run of skeleton the pipeline did not translate. `null` **is** the discriminator — there is no `type` tag — and it is spelled the same way `GET /api/doc`'s segment `id` is, so the two join on it. |
 | `kind` | string \| null | The segment's block kind, the same enum as *segment*'s `kind`. `null` for skeleton. Without it a reading view cannot typeset a chapter opening as a chapter opening: `# Chapter One` is a skeleton run of `# ` beside a `heading` segment, and the alternative is a client parsing Markdown out of the neighbouring skeleton text. |
 | `from` | string \| null | Which branch of the render produced `text`: `target` (the stored translation), `source` (the masked source, unmasked, because the caller asked for a fallback), or `marker` (the format's untranslated marker). `null` for skeleton. It names the branch outright rather than leaving a client to reconstruct it from `status`, the `fallback` it asked for and the marker string, and it is the key that lets `missing` stay an integer. **Where the two answers actually part company is a row an older build left behind**, and the sentence used to imply a reachable state: the render branches on a *truthy* target while `status` is derived from a *stripped* one, so a target of three spaces renders its own text, reports `pending`, and is not counted by `missing` — but no writer produces one now. `do_apply` refuses a blank target at the door (2026-08-14) and `translate.accept` refuses it as an empty translation, so a state file written before those is the way that row is reached. |
-| `text` | string | What this position contributes to the rendered document, with the document's line terminator already re-imposed — so `"".join(b["text"])` is `/api/preview`'s `text`. It is neither `segment.source` (masked) nor `segment.target` (stored masked): placeholders are gone and real markup is back. **It may be empty**, rarely; nothing here promises otherwise. |
+| `text` | string | What this position contributes to the rendered document, with the document's line terminator already re-imposed — so `"".join(b["text"])` is `/api/preview`'s `text`. It is neither `segment.source` (masked) nor `segment.target` (stored masked): placeholders are gone and real markup is back — **against the map the wording's ids mean**, which for an ordinary segment is its own and for one a re-parse stranded is the map it was written in. Before 2026-09-01 it was always the segment's own, so a stranded wording rendered the wrong original with nothing reporting it; the field's meaning did not change and this sentence says which map so that a reader does not have to assume the other one. **It may be empty**, rarely; nothing here promises otherwise. |
 
 `status`, `origin`, `review`, `token` and `issues` are deliberately **absent**. All
 five are already frozen on *segment* and a client joins them on `id`; carrying
@@ -1686,11 +1699,37 @@ it is the only one that rebuilds a document rather than editing it.
     the person had written `Gamma、Alpha` — with nothing visibly broken about it,
     and `missing` falling from 1 to 0 because the segment now has a target.
     `lx run` never gets there, since it refuses to render while errors remain, and
-    a person's `lx apply` could already produce exactly that target. Teaching
-    `render` to treat a target whose placeholders do not match as missing is the
-    repair and is **HANDOFF-031**, which also has to answer whether that changes
-    what `missing` counts, since it is documented as a count of segments with no
-    target and changing it bumps.
+    a person's `lx apply` could already produce exactly that target.
+
+    **The wrong-entity half is closed, 2026-09-01, and it was not closed the way
+    this paragraph expected.** Treating a mismatching target as missing — the
+    repair named here — compares placeholder id *multisets*, and the wrong-entity
+    case has **equal** multisets by construction: measured that day, a
+    `config/dnt.txt` edit that swaps one protected term for another (`Alpha, Beta`
+    → `Alpha, met` over `Alpha met Beta.`) renders `Alpha 遇見 met。` where the
+    reviewer wrote `Beta`, with `lx check` reporting **0 errors and 0 warnings**,
+    `missing` `0` and `from` `"target"`. The gate would never have fired on it.
+    What closes it is that `cli.do_extract` already pins the map a kept wording's
+    ids mean, as `target_slots`, and `store.prior_targets` and `store.tm_record`
+    both read it first — `skeleton.render_blocks` was the one reader of a stored
+    target that did not. It does now, so the bytes are the reviewer's own words,
+    and a `numbering` rule reports the segment at warn because the source has
+    moved under the wording. Deterministic, so invariant 5 corrects rather than
+    reports; additive, so nothing here moved. The stale-`target_slots` defect
+    found beside it — `store.save_segments` did not clear the field the way
+    `store.save_targets` does, so an `lx apply` that *fixed* such a segment left
+    the old map on it and `store.tm_record` banked `slots` naming originals the
+    wording's ids do not mean — was repaired in the same change.
+
+    **What is left of this cost is the loud half**, and it still stands: a
+    hand-typed `⟦99⟧`, or a kept wording no seating can place, renders a bare
+    placeholder into the file. Every one of those is an `lx check` error today
+    and `lx run` refuses to render, so the exposure is `lx render`,
+    `lx run --force` and `POST /api/render`. Closing it by construction is
+    **HANDOFF-036**, which owns the version decision: `missing` is documented as
+    a count of segments with **no target** and `from`'s `target` branch as the
+    one a stored translation takes, so counting "no *usable* target" changes what
+    two documented values mean and bumps.
 25. **Closed 2026-08-17.** *One identity, two positions: duplicate source text
     collapses.* Carryover was keyed on the translation-memory key alone, so two
     segments whose source text is byte-identical shared one entry and the last
@@ -1734,8 +1773,8 @@ it is the only one that rebuilds a document rather than editing it.
     can align, which are equal and are now reported.
 
 Appended 2026-08-17 by the package that closed (24) and (25), and by the design
-pass over it. Both are open. Neither is a regression: (26) is what position
-cannot reach and (27) predates all of this.
+pass over it. Neither was a regression: (26) is what position cannot reach and
+(27) predated all of this. (26) is open; (27) closed on 2026-09-01.
 
 26. **A sentence the document already had, written again, is still told apart by
     nothing.** The diff answers wherever the text around a repeated line places
@@ -1757,8 +1796,8 @@ cannot reach and (27) predates all of this.
     `SequenceMatcher` is quadratic on a sequence that is one element repeated —
     measured 2026-08-17: 2.0 s at five thousand identical paragraphs, 14.2 s at
     twelve thousand, against 8 ms for a realistic novel.
-27. **A memory hit answers over wording this document was already holding.**
-    `cli.do_extract` offers two proposals in order — this document's own stored
+27. **Closed 2026-09-01.** *A memory hit answers over wording this document was
+    already holding.* `cli.do_extract` offered two proposals in order — this document's own stored
     target, then a translation-memory hit — and takes the first the acceptance
     path accepts. So a stored target that no longer fits *with a banked wording
     behind it that does* is replaced rather than kept: (24)'s rule covers the
@@ -1776,13 +1815,31 @@ cannot reach and (27) predates all of this.
     to a stale one sitting in front of it", was written when the refused wording
     was going to be deleted either way, which stopped being true the same day.
 
-    **Decided 2026-08-17, implementation scheduled as HANDOFF-031:** only a
-    *machine draft* gives way. A stored target whose `origin` is `llm:*`, `tm` or
+    **Closed by letting only a machine draft give way**, decided 2026-08-17 and
+    shipped 2026-09-01. A stored target whose `origin` is `llm:*`, `tm` or
     `tm:legacy` may be replaced by a memory hit the acceptance path accepts;
-    wording written by a person or an agent is kept, and reported at `lx check`
-    like any other kept wording. That is invariant 9's line — a machine draft is
-    regenerable and a person's sentence is not — applied to an ordering question
-    rather than to a storage one. The entry stays open until it ships.
+    wording written by a person or an agent is kept — it wins over the memory even
+    when the acceptance path refused it — and is reported at `lx check` like any
+    other kept wording. That is invariant 9's line, a machine draft is
+    regenerable and a person's sentence is not, applied to an ordering question
+    rather than to a storage one. `store.is_regenerable_origin` is the predicate
+    and it lives beside `store.is_model_origin`, which reads the same field for
+    the write guard; `cli.do_extract` skips the *lookup* rather than dropping the
+    candidate, since a hit nothing may use is a read nobody asked for.
+
+    **It enumerates what may be replaced, never what is protected.** `carryover`
+    — what `store.prior_targets` calls a body written before the `origin` field
+    existed, and a reachable state, not a hypothetical — is nobody's *known*
+    prose, and neither is an origin a later build invents. Both are kept. The
+    decision's own accepted cost is one repair call for a machine draft that no
+    longer gets out of the way; being wrong in the other direction costs a
+    sentence somebody wrote, replaced with nothing printed.
+
+    *Cost, accepted with the decision:* a broken machine draft no longer gives way
+    to a banked wording that fits, so that segment costs one repair call. *Lost:*
+    "the document's own wording always wins", which keeps a stale machine draft in
+    front of a good banked one for no gain, since the draft is regenerable.
+    *Lost:* keeping today's ordering, which is the defect.
 
 Appended 2026-08-19 by the adversarial pass over `contract_version = 3`. Open,
 and older than that change — both halves are identical at its parent commit.
@@ -1879,6 +1936,33 @@ rule. Open.
     and it is recorded rather than taken because the package that found it was a
     repair package and adding an interface is construction. Nothing about the
     wire moves when it lands: `Backed by` already names `cli.do_sentences`.
+
+Appended 2026-09-01 by the package that closed (27) and the wrong-entity half of
+(24)'s cost. Open, and older than that change.
+
+31. **A rendered document can still carry a bare placeholder.** `mask.unmask`
+    returns an id it has no slot for verbatim, and `skeleton.render_blocks` takes
+    the target branch whenever the target is truthy, so a stored wording carrying
+    a `⟦n⟧` this segment has no slot for writes that token into the file.
+    Reachable two ways, both measured 2026-09-01: `lx apply` — or
+    `POST /api/save` — with a hand-typed id the segment does not have, since a
+    person's words are deliberately not refused at the door; and a kept wording
+    (see (24)) no seating can place, where a term occurs a different number of
+    times in the wording than the segment has slots for it. `missing` counts
+    neither, `from` reports `"target"` for both, and `GET /api/preview` shows the
+    token to the reviewer as if it were prose.
+
+    **It is loud, and it is already reported.** Every case is a `tags` error, so
+    `lx check` exits non-zero and `lx run` refuses to render — exposure is
+    `lx render`, `lx run --force` and `POST /api/render`. That is why it is
+    recorded here rather than repaired beside (27): the *silent* half of the same
+    cost, a placeholder resolving to the wrong original, is the one that closed
+    on 2026-09-01, and it closed by reading `target_slots` rather than by any
+    gate. This half needs a gate, and a gate is a version decision: `missing` is
+    documented as a count of segments with **no target** and `from`'s `target`
+    branch as the one a stored translation takes, so counting "no *usable*
+    target" changes what two documented values mean. Scheduled as **HANDOFF-036**,
+    which owns the bump.
 
 ## What is not frozen
 

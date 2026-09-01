@@ -16,7 +16,7 @@ it. The registry has a slot for that; both formats that exist today point it
 here.
 """
 
-from .mask import unmask
+from .mask import target_map, unmask
 
 __all__ = ["MARKDOWN_MARKER", "render", "render_blocks"]
 
@@ -56,7 +56,10 @@ def render_blocks(doc, cfg, polish=None, fallback=False, marker=MARKDOWN_MARKER)
 
     ``text`` is neither ``seg["target"]``, which is stored masked, nor
     ``seg["masked"]``: it is what this position contributes to the rendered file,
-    after unmasking and after ``polish``. The document's line terminator is *not*
+    after unmasking and after ``polish``. **Unmasked against the map the wording's
+    ids mean** — ``target_slots`` where a re-parse moved the numbering out from
+    under a kept wording, the segment's own ``slots`` otherwise, which is every
+    ordinary segment. The document's line terminator is *not*
     applied here, because a terminator is a document-level fact and this function
     is handed no document-level facts — ``cli.do_blocks`` re-imposes it, once, the
     way ``cli.do_render`` always has.
@@ -69,7 +72,22 @@ def render_blocks(doc, cfg, polish=None, fallback=False, marker=MARKDOWN_MARKER)
             continue
         seg = by_id[node["id"]]
         if seg.get("target"):
-            text = unmask(seg["target"], seg["slots"])
+            # **The map this wording's ids actually mean, which is not always the
+            # segment's own.** `save_doc` rewrites `slots` from the fresh parse on
+            # every extract, and the divergence (24) keep path leaves an older
+            # wording sitting on a newer segment — so `cli.do_extract` pins the
+            # map that wording was written in as `target_slots`, written only
+            # when the two differ. `store.prior_targets` and `store.tm_record`
+            # both already read it first, each saying why; this was the one
+            # reader of a stored target that did not, and the cost was measured
+            # on 2026-09-01: a `config/dnt.txt` edit that swapped one protected
+            # term for another rendered `Alpha 遇見 met。` where the reviewer had
+            # written `Beta`, with `lx check` green, `missing` 0 and `from`
+            # `"target"` — nothing anywhere reporting it. Deterministic, so
+            # invariant 5 says corrected rather than reported; the `numbering`
+            # rule reports the segment as well, because the wording still does
+            # not speak the numbering the source has now.
+            text = unmask(seg["target"], target_map(seg))
             source = "target"
             text = polish(text) if polish else text
         else:

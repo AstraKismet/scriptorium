@@ -67,6 +67,7 @@ from .store import (
     db_path,
     doc_id,
     doc_label,
+    is_regenerable_origin,
     load_doc,
     load_tm,
     no_carryover,
@@ -550,7 +551,28 @@ def do_extract(src, lang, cfg, tone=None, reset=False):
             candidates.append(carried)
             if ambiguous:
                 notes["ambiguous"].append(seg["id"])
-        hit, hit_origin, hit_slots = tm_lookup(tm, seg, tone)
+        # **A memory hit competes only with wording a machine can make again.**
+        # Divergence (27), closed 2026-09-01. The two proposals used to be tried
+        # in order with no regard for who wrote the first, so a stored target
+        # that no longer fits — with a banked wording behind it that does — was
+        # replaced, and a person's sentence came back as `tm`: a provenance
+        # nobody claimed, and not the one *Origin precedence* protects, so the
+        # next unattended run could overwrite it. Needed no collision and no
+        # race. Invariant 9 is the line — a machine draft is regenerable and a
+        # person's sentence is not — and `store.is_regenerable_origin` is where
+        # the taxonomy lives, beside the write guard that reads the same field.
+        #
+        # The lookup is skipped rather than the candidate dropped: a hit nothing
+        # may use is a read of the memory nobody asked for.
+        #
+        # *Cost, accepted with the decision:* a broken machine draft no longer
+        # gets out of the way of a banked wording that fits, so that segment
+        # costs one repair call. What a person or an agent wrote is kept instead,
+        # falls to the branch below, and is reported at `lx check` like any other
+        # kept wording.
+        hit = hit_origin = hit_slots = None
+        if carried is None or is_regenerable_origin(carried[1]):
+            hit, hit_origin, hit_slots = tm_lookup(tm, seg, tone)
         if hit is not None and (hit_slots is not None or not _protected(seg, hit, dnt)):
             # No review state on a memory hit, and that is the design: the memory
             # is wording banked from somewhere else, and a hold is one reviewer
@@ -579,12 +601,13 @@ def do_extract(src, lang, cfg, tone=None, reset=False):
                 if carried is not None and rank:
                     # The carried entry is always the first candidate, so a later
                     # one winning means the memory answered over wording this
-                    # document was already holding. That wording is gone and its
-                    # `origin` with it — a `human` segment comes back as `tm` and
-                    # stops being covered by origin precedence. Kept as it was,
-                    # because which of the two should win is a decision this
-                    # package did not list; reported, because until 2026-08-17
-                    # nothing counted it at all. Divergence (27).
+                    # document was already holding. Since 2026-09-01 that wording
+                    # is always a machine's — the gate above is what makes it so
+                    # — and the memory still holds what it replaced, so nothing
+                    # is lost. Still counted, because a segment whose `origin`
+                    # moved is a segment a reviewer may want to look at, and
+                    # because this is the array a client watches to see the run
+                    # narrow. Divergence (27), closed.
                     notes["replaced"].append(seg["id"])
                 reused += 1
                 break
@@ -681,18 +704,22 @@ def report_extract(src, lang, notes):
         # refused", which names the memory rather than the sentence.
         ids = ", ".join(notes["kept"])
         _out(f"  {len(notes['kept'])} segment(s) kept a stored target whose placeholders no "
-             f"longer match this document: {ids}. Nothing was lost — `lx check` reports them "
-             f"as errors, and a bare `lx render` will write the stale placeholder or the "
-             f"wrong term into the output. Fix the wording, or re-translate with "
+             f"longer match this document: {ids}. Nothing was lost — `lx render` writes each "
+             f"one against the numbering it was written in, and `lx check` reports it: an "
+             f"error where the placeholders no longer balance, a `numbering` warning where "
+             f"they balance but have stopped meaning the same terms. Fix the wording, or "
+             f"re-translate with "
              f"`lx translate {src} --lang {lang} --ids {','.join(notes['kept'])}` "
              f"(--overwrite-human if a person wrote it).")
     if notes["replaced"]:
         # The path (24) does not cover: a refused carryover with a memory hit
-        # behind it that fits. The banked wording wins, as it always has, and the
-        # sentence this document was holding is gone with its `origin`.
-        _out(f"  {len(notes['replaced'])} segment(s) had a stored target the memory replaced "
-             f"because it no longer fits this document: {', '.join(notes['replaced'])}. Their "
-             f"`origin` is now `tm`, so a model run may overwrite them.")
+        # behind it that fits. Since 2026-09-01 the wording that gives way is
+        # always a machine's and the memory still holds it, so this is a report
+        # of a provenance that moved rather than of a sentence that went.
+        _out(f"  {len(notes['replaced'])} segment(s) held a machine draft that no longer fits "
+             f"this document, and a banked wording replaced it: "
+             f"{', '.join(notes['replaced'])}. Their `origin` is now `tm`. Wording a person "
+             f"or an agent wrote is never replaced this way — it is kept and reported above.")
     if notes["ambiguous"]:
         # The half no alignment can fix: a run of identical paragraphs that
         # gained or lost a member has no evidence left about which wording
@@ -1653,10 +1680,112 @@ def cmd_sentences(args, cfg):
             _out(f"    {n:>3}  {_one_line(sentence)}")
 
 
+def do_commit(src, lang, cfg):
+    """Bank this document's approved wordings. ``(committed, refused, held)``.
+
+    The seam `lx commit` and `POST /api/commit` share. It did not exist until
+    2026-09-01 — both surfaces called three `store` functions inline and were
+    "equivalent by inspection rather than by construction", which the contract
+    said out loud — and the moment anything but "has a target" decided what gets
+    banked, that was two homes for one policy.
+
+    **What may be banked is what `lx check` does not call an error**, per
+    segment. `.lx/tm.*.jsonl` is a source of truth (invariant 9), it is tracked
+    in git so damage travels with a pull, and `store.load_tm` keeps the *last*
+    record per key — so a banked wording does not merely sit there being useless,
+    it **shadows** the good one already banked under the same key. Measured
+    2026-09-01: a correct wording banked, then a second document's broken one
+    banked over it, and a third, brand-new document came back `reused 0,
+    rejected 1` with the right sentence one line up in the file and unreachable.
+    That is what makes "bank it and let the refusal at lookup time handle it"
+    untenable: the refusal stops the bad wording rendering and does not bring the
+    good one back.
+
+    **`checks.check_segment` and not a rule of this function's own.** The
+    placeholder gate `translate.accept` applies is an id *multiset*, and a
+    swapped pair satisfies it: measured the same day, `這是⟦2⟧粗體⟦1⟧文字。`
+    against `This is <b>bold</b> text.` is accepted, renders `</b>粗體<b>`, and
+    reaches a second document intact. `checks.pair_problems` is what sees it, at
+    the same `tags` rule and the same error severity — so the rule that already
+    owns this question answers it here too, `checks_disabled` is honoured
+    because there is one rule and not a copy of half of it, and a project that
+    decides `numbers` is wrong for a novel gets the gate to agree by construction.
+    *Lost:* the id multiset in `store.tm_records`, which is two lines and lets the
+    swapped pair through. *Lost:* narrowing to the structural rules by name,
+    which makes an enumeration the thing a reader trusts — the failure
+    `docs/decisions.md` has recorded three times. *Lost:* refusing the whole
+    commit when the document fails, which on a novel means banking a chapter
+    waits for the book.
+
+    **A held segment is not banked either**, and it is checked first, because
+    "unhold it" is the more useful sentence when a segment is both. A hold is the
+    reviewer's own declaration that this segment is theirs to finish, and
+    `lx commit` takes a whole document — it is a batch act with no per-segment
+    selection, so the hold is the only thing in it that can say "not this one".
+    Nothing is lost: `tm_records` re-derives from the live segment every time, so
+    an unhold at any later date makes the wording eligible for the very next
+    commit. *Lost:* banking it anyway, which puts unfinished wording into the
+    memory wearing no mark at all — `do_extract` deliberately does not carry a
+    hold in with a hit, so the receiving document cannot know. *Lost:* a
+    `--skip-held` flag, which answers "what does commit mean" once per call.
+
+    **Nor is a wording that speaks a numbering this document has moved on from.**
+    A segment carrying `target_slots` was stranded by a re-parse: it renders
+    correctly, because the render reads the map its ids mean, and `lx check`
+    reports it at *warn* — deliberately, since failing the build would block a
+    book over a segment that comes out right. That severity is exactly why the
+    error gate above does not catch it, and it is the population this whole
+    package is about, so it needs saying separately: the memory is read by every
+    document in this project under the numbering the project has **now**, and
+    this wording does not speak it. Measured 2026-09-01 by the adversarial pass:
+    banked, it shadowed a correct record under the same key and a third document
+    came back `reused 0, rejected 1`. Re-word the segment and it banks.
+
+    The three sets come back rather than being dropped, for the reason
+    `store.save_targets` returns its refusals: a run reporting "+= 12 entries"
+    while having declined four is a report nobody can act on.
+    """
+    doc = load_doc(src, lang)
+    glossary, dnt = load_glossary(cfg), load_dnt(cfg)
+    bankable, refused, held, stranded = [], [], [], []
+    for seg in doc["segments"]:
+        if not seg.get("target"):
+            continue
+        if is_held(seg):
+            held.append(seg["id"])
+        elif seg.get("target_slots"):
+            stranded.append(seg["id"])
+        elif any(i["severity"] == "error"
+                 for i in check_segment(seg, lang, cfg, glossary, dnt)):
+            refused.append(seg["id"])
+        else:
+            bankable.append(seg)
+    # The document with its bankable segments, so `tm_records` still reads the
+    # register off the document it was written for — the one place a key is built
+    # from stored state, and the reason that function takes a document at all.
+    committed = append_tm(lang, tm_records({**doc, "segments": bankable},
+                                           load_tm(lang)))
+    return committed, refused, held, stranded
+
+
 def cmd_commit(args, cfg):
-    doc = load_doc(args.src, args.lang)
-    n = append_tm(args.lang, tm_records(doc, load_tm(args.lang)))
-    _out(f"translation memory += {n} entries")
+    committed, refused, held, stranded = do_commit(args.src, args.lang, cfg)
+    _out(f"translation memory += {committed} entries")
+    if refused:
+        _out(f"  {len(refused)} segment(s) not banked because `lx check` reports an "
+             f"error on them: {', '.join(refused)}. The memory keeps the last record "
+             f"per key, so banking one would hide the wording already there. Fix "
+             f"them and commit again.")
+    if stranded:
+        _out(f"  {len(stranded)} segment(s) not banked because their wording speaks a "
+             f"numbering this document has moved on from: {', '.join(stranded)}. They "
+             f"render as they were written and `lx check` reports them as "
+             f"`numbering` warnings; re-word them against the source as it stands "
+             f"and commit again.")
+    if held:
+        _out(f"  {len(held)} held segment(s) not banked: {', '.join(held)}. A hold "
+             f"says the segment is yours to finish; `lx unhold {args.src} "
+             f"--lang {args.lang} --ids {','.join(held)}` and commit again.")
 
 
 def cmd_stats(args, cfg):

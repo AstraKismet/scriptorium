@@ -871,6 +871,35 @@ def is_model_origin(origin):
     return isinstance(origin, str) and origin.startswith(_MODEL_PREFIX)
 
 
+#: Wording a machine produced and a machine can produce again. `tm` and
+#: `tm:legacy` are reuse, so the line they came from is still in
+#: `.lx/tm.*.jsonl`; `llm:*` costs one call to make again.
+_REGENERABLE = ("tm", "tm:legacy")
+
+
+def is_regenerable_origin(origin):
+    """Whether a memory hit may answer over wording carrying this origin.
+
+    Invariant 9's line — nothing regenerable is a source of truth — applied to an
+    ordering question rather than to a storage one. `cli.do_extract` offers this
+    document's own stored target first and a banked wording second, and until
+    2026-09-01 took whichever the acceptance path accepted first: a stored target
+    that no longer fits *with a banked wording behind it that does* was replaced,
+    and a `human` segment came back as `tm`, which is not the provenance *Origin
+    precedence* protects. `docs/contracts/workbench-http.md` divergence (27).
+
+    **It enumerates what may be replaced, never what is protected**, and the
+    difference is the whole safety of it. `carryover` — what
+    :func:`prior_targets` calls a body written before the `origin` field existed
+    — is nobody's *known* prose, and an origin a later build invents is nobody's
+    either; both are kept, because the cost of being wrong in that direction is
+    one repair call, which is the cost this rule already accepted, and the cost
+    of being wrong in the other is a sentence somebody wrote, replaced with
+    nothing printed.
+    """
+    return is_model_origin(origin) or origin in _REGENERABLE
+
+
 def _begin_write(conn):
     """Take the write lock **before** the first read of a read-then-write.
 
@@ -929,6 +958,23 @@ def _written_by_hand(conn, did, lang, ids):
     return out
 
 
+def _stored_targets(conn, did, lang, ids):
+    """``{seg_id: target}`` for these ids. Read inside the write, like the guard.
+
+    Chunked and transacted for :func:`_written_by_hand`'s reasons, which its
+    docstring gives; this is the same read one column over.
+    """
+    out = {}
+    ids = list(ids)
+    for start in range(0, len(ids), 500):
+        chunk = ids[start:start + 500]
+        marks = ",".join("?" * len(chunk))
+        out.update(conn.execute(
+            f"SELECT seg_id, target FROM segments WHERE doc_id=? AND lang=? "
+            f"AND seg_id IN ({marks})", (did, lang, *chunk)).fetchall())
+    return out
+
+
 def save_segments(src, lang, segments, expect=None, over_human=False):
     """Write these segments and nothing else. ``(written, stale)``.
 
@@ -976,8 +1022,7 @@ def save_segments(src, lang, segments, expect=None, over_human=False):
     could not, which was a claim about its *default* origin and not about the
     command.
     """
-    rows = [(*_seg_row(0, seg)[2:], doc_id(src), lang, seg["id"]) for seg in segments]
-    if not rows:
+    if not segments:
         return 0, [], []
     expect = expect or {}
     conn = _connect()
@@ -988,11 +1033,36 @@ def save_segments(src, lang, segments, expect=None, over_human=False):
             guard = () if over_human else _written_by_hand(
                 conn, doc_id(src), lang,
                 [s["id"] for s in segments if is_model_origin(s.get("origin"))])
-            for row, seg in zip(rows, segments):
+            # **The same pop :func:`save_targets` makes, and the condition it does
+            # not need.** A wording is written against the segment as it stands,
+            # so whatever map an *earlier* target was written against stops being
+            # provenance — left behind, `prior_targets` hands `translate.accept`
+            # the wrong map at the next extract, `tm_record` banks `slots` naming
+            # originals the ids do not mean (a wrong record in invariant 9's
+            # source of truth), and the render substitutes the map the wording
+            # was written to replace.
+            #
+            # `save_targets` pops unconditionally and is right to: its text has
+            # been through `translate.accept` against the current segment, so it
+            # is never the old wording. This function takes whatever `lx apply`
+            # was handed, **including the stored target byte for byte** — an
+            # agent's whole-document round trip sends every segment back — and an
+            # unconditional pop there un-strands a segment nobody edited: the
+            # render flips to the wrong original and the `numbering` warning that
+            # was the only report of it disappears. Measured 2026-09-01 by the
+            # adversarial pass over the commit that added the pop.
+            was = _stored_targets(conn, doc_id(src), lang,
+                                  [s["id"] for s in segments])
+            for seg in segments:
                 seg_id = seg["id"]
                 if seg_id in guard:
                     refused.append(seg_id)
                     continue
+                # A copy rather than a mutation: the caller's dict is
+                # `cli.do_apply`'s own and it builds the reply from it.
+                if seg.get("target_slots") and seg.get("target") != was.get(seg_id):
+                    seg = {k: v for k, v in seg.items() if k != "target_slots"}
+                row = (*_seg_row(0, seg)[2:], doc_id(src), lang, seg_id)
                 if seg_id in expect:
                     n = conn.execute(
                         "UPDATE segments SET content_hash=?, context=?, variant=?, status=?, "

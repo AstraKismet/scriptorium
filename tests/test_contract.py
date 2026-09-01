@@ -40,6 +40,7 @@ from scriptorium.web.server import CONTRACT_VERSION, _Handler  # noqa: E402
 _ROOT = os.path.join(os.path.dirname(__file__), "..")
 CONTRACT = os.path.join(_ROOT, "docs", "contracts", "workbench-http.md")
 SERVER_SRC = os.path.join(_ROOT, "src", "scriptorium", "web", "server.py")
+CHECKS_SRC = os.path.join(_ROOT, "src", "scriptorium", "checks.py")
 
 
 def _read(path):
@@ -202,6 +203,43 @@ def test_every_cli_function_the_server_stands_in_front_of_is_named_in_the_contra
 
 
 # ── the version ────────────────────────────────────────────────────────────
+
+def _rules_the_code_emits():
+    """Every `rule` name `checks.check_segment` can put on an issue.
+
+    Read with `ast`, not with a `grep`: the names are the first argument of a
+    local `add(...)`, so a pattern over the text matches the docstrings and the
+    comments that discuss them too, and the project has already been bitten once
+    by a source guard that matched a literal string and lost to a rename
+    (`skeleton.render_blocks`, 2026-08-21).
+    """
+    tree = ast.parse(_read(CHECKS_SRC))
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "check_segment")
+    return {n.args[0].value for n in ast.walk(fn)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            and n.func.id == "add" and n.args
+            and isinstance(n.args[0], ast.Constant)
+            and isinstance(n.args[0].value, str)}
+
+
+def test_the_contract_names_every_validator_rule_the_code_can_emit():
+    """The *issue* shape's `rule` enumeration, against `checks.py`.
+
+    A new rule name is additive and does not bump the version — the contract
+    says so — which is exactly why this list drifts without anything failing.
+    It had: `bare_term` shipped on 2026-08-17 and was still missing from the
+    document a fortnight later, found on 2026-09-01 while adding `numbering`
+    beside it. The weakest guard that decides the question is a comparison, so
+    this is one.
+    """
+    documented = set(re.findall(r"`([a-z_]+)`", re.search(
+        r"^\| `rule` \| string \| One of (.+?)\. \|$", _read(CONTRACT), re.M).group(1)))
+    emitted = _rules_the_code_emits()
+    assert documented == emitted, (
+        f"{CONTRACT} lists {sorted(documented)} and `checks.check_segment` emits "
+        f"{sorted(emitted)}. A new rule is additive and still has to be written down.")
+
 
 def test_the_document_declares_exactly_one_contract_version_and_the_module_agrees():
     declared = re.findall(r"^contract_version = (\d+)$", _read(CONTRACT), re.M)
