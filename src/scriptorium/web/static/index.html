@@ -636,14 +636,24 @@ async function saveBackends() {
       return;
     }
   }
-  for (const [stage, el] of [['draft', '#rDraft'], ['polish', '#rPolish'], ['repair', '#rRepair']]) {
-    const want = $(el).value;
-    // **Touched, not merely different.** A stage whose configured entry is
-    // malformed resolves to `{provider: "", …}`, so *every* value in the select
-    // differs from it — and a Save that changed only a timeout silently rewrote
-    // that stage to whichever backend happened to be showing. The person came to
-    // this form to repair the file, not to have it decided for them.
-    if (!$(el).dataset.touched) continue;
+  // **Read all three before writing any of them.** Every successful write
+  // repaints from its own reply, and that repaint rebuilds these selects — which
+  // resets their values to the server's state and clears the touched marks. So
+  // changing all three and pressing Save wrote only the first: the repaint after
+  // it discarded the other two choices before the loop reached them. Reported
+  // from the acceptance run, 2026-09-02, and it is the same class as the two
+  // listing races above — a control read *after* an await is a control somebody
+  // else may have rewritten.
+  const wanted = [['draft', '#rDraft'], ['polish', '#rPolish'], ['repair', '#rRepair']]
+    .filter(([, el]) => $(el).dataset.touched)
+    .map(([stage, el]) => [stage, $(el).value]);
+  // **Touched, not merely different**, which is what the filter above is for. A
+  // stage whose configured entry is malformed resolves to `{provider: "", …}`,
+  // so *every* value in the select differs from it — and a Save that changed
+  // only a timeout silently rewrote that stage to whichever backend happened to
+  // be showing. The person came to this form to repair the file, not to have it
+  // decided for them.
+  for (const [stage, want] of wanted) {
     if (!want || (routing[stage] && routing[stage].provider === want)) continue;
     try {
       // The bare provider name, never `{provider, model}`: both spellings are

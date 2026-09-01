@@ -2127,3 +2127,40 @@ def test_a_non_finite_knob_leaves_the_state_endpoint_parseable(
     text = body.decode("utf-8")
     assert "Infinity" not in text and "NaN" not in text, "the body is not JSON"
     json.loads(text)
+
+
+def test_a_port_already_taken_is_one_sentence_and_not_a_traceback(tmp_path, monkeypatch):
+    """`lx web` on a busy port answered a raw traceback and exit 1.
+
+    Every other refusal in this CLI is one sentence and exit 2, and the traceback
+    was actively misleading on Windows: a port held with an exclusive bind
+    reports `WinError 10013` — "access denied" — rather than the `EADDRINUSE`
+    every other platform gives, so the reader goes looking for a permissions
+    problem that is not there. Measured 2026-09-02 against a port a long-running
+    `node` server held.
+
+    `ConfigError` is the class because it is already in `cli.main`'s exit-2
+    tuple; nothing about the message is a configuration key, and the alternative
+    was a new exception class for one call site.
+    """
+    from scriptorium.config import ConfigError
+    from scriptorium.web.server import serve
+
+    monkeypatch.chdir(tmp_path)
+    # The bind is *made* to fail rather than raced into failing. Binding a truly
+    # busy port is not reliable here — `HTTPServer` sets `allow_reuse_address`,
+    # so a second bind can succeed, and then `serve_forever()` blocks and the
+    # test hangs instead of failing. Which it did, on the first version of this.
+    def refuse(*a, **k):
+        raise OSError(98, "Address already in use")
+
+    monkeypatch.setattr(web_server, "ThreadingHTTPServer", refuse)
+    with pytest.raises(ConfigError) as e:
+        serve(host="127.0.0.1", port=8787, open_browser=False)
+    msg = str(e.value)
+    assert "127.0.0.1:8787" in msg
+    assert "Address already in use" in msg
+    # The way out, in the message. `providers/base.py` is the reference for tone
+    # and every sentence there ends with what to do next.
+    assert "--port 8788" in msg
+    assert "another program" in msg

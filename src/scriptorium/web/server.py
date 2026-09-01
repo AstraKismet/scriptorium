@@ -996,7 +996,23 @@ def serve(host="127.0.0.1", port=8787, open_browser=True):
               f"         the cross-origin check degrades with it: with no loopback bind to "
               f"compare against, it can only match each request's own Host header, which "
               f"does not resist DNS rebinding.")
-    httpd = ThreadingHTTPServer((host, port), _Handler)
+    try:
+        httpd = ThreadingHTTPServer((host, port), _Handler)
+    except OSError as e:
+        # One sentence and exit 2, which is what every other refusal in this CLI
+        # answers with — `ConfigError` is in `cli.main`'s tuple. It used to be a
+        # raw traceback and exit 1, and the traceback was actively misleading on
+        # Windows: a port held by another program with an exclusive bind reports
+        # `WinError 10013`, "access denied", rather than the `EADDRINUSE` every
+        # other platform gives, so the reader is sent looking for a permissions
+        # problem that is not there. Measured 2026-09-02 against a port a
+        # long-running `node` server held.
+        raise ConfigError(
+            f"cannot serve on {host}:{port} ({e.strerror or e}). Most often another "
+            f"program already has that port — on Windows an exclusive bind reports this "
+            f"as a permission error rather than as a conflict, so check what is "
+            f"listening before believing it. Pick another: `lx web --port {port + 1}`."
+        ) from None
     url = f"http://{'localhost' if host == '127.0.0.1' else host}:{port}/"
     print(f"Scriptorium workbench on {url}")
     print(f"project: {os.getcwd()}")
