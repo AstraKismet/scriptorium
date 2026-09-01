@@ -29,8 +29,9 @@ prose. Against that set the rule scored:
 | before | 52 of 110, and 62 of 129 | 0 |
 | after | 5 of 110, and 10 of 129 | 23 |
 
-Fifty-one of the fifty-five oracle cases whose target is CJK were wrong — the
-rule was not mostly right with an edge case, it was wrong on Chinese. Every one
+**Every one of the 52 has a Chinese or Japanese target**, and there are 57 correct
+CJK-target cases in the set — the rule was not mostly right with an edge case, it
+was wrong on Chinese, and it was wrong nowhere else. Every one
 of the 52 is at error severity, so each one stops `lx render`, fails `lx run`,
 and makes the exit code invariant 10 rests on wrong on a correct book. It is the
 second half of the 2026-07-27 measurement — five correct Traditional Chinese

@@ -329,9 +329,10 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
 
     **A rule audited for one kind of false positive is not an audited rule.** That
     repair reached the two it was aimed at and not the one beside them: on
-    2026-09-02 `numbers` was measured reporting 52 of 110 labelled pairs — 51 of
-    the 55 whose target is Chinese or Japanese — because an ASCII-digit multiset
-    cannot see that 第一章 is how Chinese writes "Chapter 1". Every chapter
+    2026-09-02 `numbers` was measured reporting 52 of 110 labelled pairs, every
+    one of them on a Chinese or Japanese target and against 57 correct ones,
+    because an ASCII-digit multiset cannot see that 第一章 is how Chinese writes
+    "Chapter 1". Every chapter
     heading in every novel, at error severity, since before the 2026-07-28 audit.
     Repaired the same day; `docs/decisions.md`, 2026-09-02.
 

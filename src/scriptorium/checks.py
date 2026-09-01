@@ -111,8 +111,9 @@ _LEXICON_UNLESS_FOLLOWED_BY = {
 # both "Chapter 1", and which of them prose uses is habit and register rather
 # than rule, so "the target carries the same ASCII digits" is not a decidable
 # proposition for those languages. Measured 2026-09-02 over 129 labelled pairs:
-# rule 7 reported 62 correct translations — 51 of the 55 CJK-target cases in the
-# oracle alone — every one at error severity, which stops `lx run` rendering and
+# rule 7 reported 62 correct translations — in the 110-case oracle alone, 52 of
+# them, every one on a Chinese or Japanese target and against 57 correct ones —
+# every one at error severity, which stops `lx run` rendering and
 # makes the exit code invariant 10 rests on wrong. It is the second half of the
 # 2026-07-27 measurement reappearing on a different rule.
 #

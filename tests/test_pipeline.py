@@ -2060,8 +2060,9 @@ def test_missing_number_is_an_error():
 #
 # Chinese and Japanese write cardinal numbers twice over — 第一章 and 第 1 章 are
 # both "Chapter 1" — so an ASCII-digit multiset difference fails correct work.
-# Measured 2026-09-02 over 110 labelled pairs: the rule reported 52 of them, 51
-# of the 55 whose target is CJK, every one at error severity. Fixtures here are
+# Measured 2026-09-02 over 110 labelled pairs: the rule reported 52 of them —
+# every one on a Chinese or Japanese target, and there are 57 correct ones in the
+# set — at error severity each time. Fixtures here are
 # written raw rather than escaped for the lexicon's reason one section down: for
 # a rule about how a language spells its numbers the fixture *is* the
 # specification, and 第一章 is not reviewable.
