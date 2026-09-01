@@ -1647,19 +1647,39 @@ def test_a_segment_that_is_both_held_and_failing_is_reported_as_held(
 def test_the_gate_honours_a_rule_the_project_turned_off(tmp_path, monkeypatch):
     """One rule, one home, one disable list.
 
-    `numbers` is an error and 「三天」 for "3 days" trips it — correct Chinese for
-    a novel, and the reason the gate must not carry its own opinion. A project
-    that decides the rule is wrong for it says so once, and the gate agrees by
+    `numbers` is an error and 「五天」 for "3 days" trips it, so a project that
+    decides the rule is wrong for it says so once and the gate agrees by
     construction rather than by a second exception list.
+
+    The example was 「三天」 until 2026-09-02, when the rule learned to read
+    Chinese numerals and a correctly spelled-out number stopped being an error.
+    What the example needs is a number the target really gets wrong, which is
+    what 五天 is. `docs/decisions.md`, 2026-09-02.
+    """
+    _project(tmp_path, monkeypatch, doc=b"He waited 3 days.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    sid = _only(doc)["id"]
+    do_apply("d.md", "zh-TW", CFG, {sid: "他等了五天。"}, origin="human")
+    assert _commit() == (0, [sid], [], [])
+
+    cfg = dict(CFG, checks_disabled=["numbers"])
+    assert do_commit("d.md", "zh-TW", cfg) == (1, [], [], [])
+
+
+def test_a_number_the_target_spells_in_chinese_reaches_the_memory(
+        tmp_path, monkeypatch):
+    """The relaxation lives in `checks.py`, so the commit gate has it too.
+
+    Asserted on this surface and not only in `test_pipeline.py` because *that*
+    is the property the gate was built for: it is `checks.check_segment` reused
+    rather than a copy of half a rule. 「三天」 was refused here until
+    2026-09-02, for the same reason `lx check` failed it.
     """
     _project(tmp_path, monkeypatch, doc=b"He waited 3 days.\n")
     doc, *_ = do_extract("d.md", "zh-TW", CFG)
     sid = _only(doc)["id"]
     do_apply("d.md", "zh-TW", CFG, {sid: "他等了三天。"}, origin="human")
-    assert _commit() == (0, [sid], [], [])
-
-    cfg = dict(CFG, checks_disabled=["numbers"])
-    assert do_commit("d.md", "zh-TW", cfg) == (1, [], [], [])
+    assert _commit() == (1, [], [], [])
 
 
 # ── which map a stored wording's ⟦n⟧ actually mean ──────────────────────────
