@@ -3,6 +3,249 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-09-01 · What `lx commit` may bank, which wording a memory hit may answer over, and the map a stored `⟦n⟧` actually means
+
+Closing HANDOFF-031. Three decisions and one repair found while measuring them.
+Divergence (27) closes, the wrong-entity half of (24)'s recorded cost closes,
+`POST /api/commit` gains two response keys and a `Backed by` line — and
+**`contract_version` stays at 3**, because every one of those is either additive
+or a change to what an endpoint does rather than to what a documented value
+means.
+
+The package that scheduled this recommended two things. Both were re-measured
+first, as it asked, and **both recommendations lost to the measurement** — one
+because it covered less than half of what it was aimed at, the other because it
+was aimed at a case that no longer existed while the case that did was invisible
+to it. That is what the re-measurement clause is for, and it is worth saying
+plainly: the option that wins below is in neither of the package's option sets.
+
+### Only a machine draft gives way to a memory hit
+
+`cli.do_extract` offers two proposals per segment — this document's own stored
+target, then a banked wording — and took the first the acceptance path accepted,
+with no regard for who wrote the first. So a stored target that no longer fits,
+*with a banked wording behind it that does*, was replaced, and a `human` segment
+came back as `tm`: a provenance nobody claimed, and not the one **Origin
+precedence** protects, so the next unattended run could overwrite it. No
+collision and no race required. Divergence (27), open since 2026-08-17 and
+decided the same day; this is the implementation.
+
+The rule is invariant 9's own line applied to an ordering question rather than a
+storage one: a machine draft is regenerable and a person's sentence is not. A
+stored target whose `origin` is `llm:*`, `tm` or `tm:legacy` may be replaced;
+what a person or an agent wrote is kept, and reported at `lx check` like any
+other kept wording. `store.is_regenerable_origin` is the predicate, beside
+`store.is_model_origin`, which reads the same field for the write guard.
+
+**It enumerates what may be replaced, never what is protected**, and that
+direction is the whole safety of it. `store.prior_targets` gives a body written
+before the `origin` field existed the origin `carryover` — a reachable state,
+not a hypothesis, and one the decision's own text did not name. It is kept, as is
+any origin a later build invents. Being wrong in that direction costs one repair
+call, which is the cost this decision already accepted; being wrong in the other
+costs a sentence somebody wrote, replaced with nothing printed.
+
+*Lost:* "the document's own wording always wins", which leaves a stale machine
+draft sitting in front of a good banked one for no gain, since the draft is
+regenerable and the memory is right there. *Lost:* keeping the old ordering,
+which is the defect. *Cost, accepted:* a broken machine draft no longer gets out
+of the way, so that segment costs one repair call.
+
+### What `lx commit` may bank is what `lx check` does not call an error
+
+`store.tm_records` skipped a segment only when its target was empty or the memory
+already held that exact record. The package asked whether it should also skip
+wording the acceptance path would refuse, and recommended comparing placeholder
+id multisets — `translate.accept`'s own terminal check, reproduced in `store.py`.
+
+Two measurements decided it against that.
+
+**A bad record does not merely sit there — it hides the good one.**
+`store.load_tm` keeps the *last* record per key, and the file is append-only,
+tracked in git and shared across machines. Measured: a correct wording banked
+from one document; a second document's broken wording banked over it; a third,
+brand-new document then came back `reused 0, rejected 1` with the right sentence
+one line up in the file and unreachable. That is what makes "bank it and let the
+refusal at lookup time handle it" untenable — the refusal stops the bad wording
+rendering and does not bring the good one back. The package listed that option as
+the status quo and it was defensible until this was measured.
+
+**The recommended gate covers less than half of what it is aimed at.** An id
+multiset is satisfied by a swapped *pair*: measured, `這是⟦2⟧粗體⟦1⟧文字。` against
+`This is <b>bold</b> text.` is accepted by `translate.accept`, renders
+`</b>粗體<b>`, banks cleanly under that gate and reaches a second document intact.
+What sees it is `checks.pair_problems` — the same `tags` rule, the same error
+severity, one file over.
+
+So the gate is **`checks.check_segment`, per segment, at error severity**, in a
+new `cli.do_commit` that `lx commit` and `POST /api/commit` share. One rule, one
+home: `checks_disabled` is honoured because the gate is not a copy of half a
+rule, so a project that decides `numbers` is wrong for a novel — 「三天」 for
+"3 days" is an error today — says so once and the gate agrees by construction.
+The refused ids come back, for the reason `store.save_targets` returns its
+refusals: a run reporting "+= 12 entries" while having declined four is a report
+nobody can act on.
+
+`cli.do_commit` had to exist for this. Both surfaces called three `store`
+functions inline, which the contract described as "equivalent by inspection
+rather than by construction" — tolerable while the answer to *what may be banked*
+was "everything with a target", and two homes for one policy the moment it was
+not.
+
+*Lost:* the id multiset in `store.tm_records`, which is two lines and lets the
+swapped pair through, and which would have put half of `checks.py`'s `tags` rule
+in a second place that cannot see `checks_disabled`. `store` cannot import
+`checks` to share it — `store → checks → mdparse → store` — which is a symptom of
+the gate belonging in `cli.py`, not a reason to copy the rule. *Lost:* narrowing
+the gate to the structural rules by name (`tags`, `containment`, `escaping`,
+`eol`), which is a real distinction — those travel with the wording while
+`numbers` and `glossary` judge this document — but spends it on an enumeration
+that becomes what a reader trusts, the failure this file has recorded three
+times. *Lost:* refusing the whole commit when the document fails `lx check`,
+which on a novel means banking a chapter waits for the book. *Lost:* filtering
+inside `store.load_tm` instead, on the read: it is the only place that can reach
+lines another machine or an older build already wrote, but on its own it makes
+the tracked file grow a line on every commit, because `tm_records` would compare
+against a filtered memory and re-bank the same record forever. Worth revisiting
+as a *companion* to the write gate, never as a replacement. *Lost:* refusing bad
+placeholders at `lx apply`, which the 2026-07-29 decision already answered — a
+person's words are reported at `lx check`, not rejected at the door. *Lost:*
+banking it with a quarantine flag, which protects nothing: `load_tm` ignores
+unknown fields and still takes the last record per key, so the flagged line
+shadows the good one exactly as before.
+
+The package's own worry — that a record which does not fit *this* project may
+have fitted the machine that wrote it — turns out not to apply, and for a
+structural reason rather than a lucky one. `tm_records` runs on the **writing**
+side, against the writer's own current segment, so it cannot see and cannot
+refuse a reader's future `config/dnt.txt`. And a record carrying its own `slots`
+map is repaired by `mask.reseat` wherever it is reused, on any machine —
+measured. What is left is wording that is refused *on the machine that wrote it*,
+which is dead everywhere.
+
+### A hold is the only thing a commit request can say "not this one" with
+
+`lx commit` and `POST /api/commit` take a whole document. There is no
+per-segment selection on either surface, so a reviewer who wants one sentence
+left out of the memory has exactly one signal available, and until now it was
+ignored: `review == "held"` wording was banked like any other, and
+`cli.do_extract` deliberately does not carry a hold in with a memory hit, so it
+arrived at the next document wearing no mark at all. `docs/decisions.md` calls
+banked wording `lx commit`-approved; a held segment is by definition not.
+
+So a held segment is not banked, its ids are reported, and it is checked
+**before** the error gate — a segment that is both appears only in `held`,
+because "unhold it" is the remedy that comes first and a reviewer told only that
+the wording fails will fix it and find it still not banked. Nothing is lost:
+`tm_records` re-derives from the live segment on every call, so an unhold at any
+later date makes the wording eligible for the very next commit. Measured.
+
+This is a second meaning for a flag whose vocabulary the contract advertises as
+closed, and that is the honest objection to it. The answer is that both meanings
+are the same one — the segment is the reviewer's — and that `lx commit` is a
+*batch* act even though a person types it, which is the class of act a hold
+exists to stop.
+
+*Cost, measured:* a held segment that is never committed is genuinely gone after
+`lx extract --reset`, where today the memory would give it back. The reset
+message already says "in `.lx/tm.<lang>.jsonl` **if it was committed**", which
+stays true. *Lost:* banking it anyway, which puts unfinished wording into a
+shared source of truth wearing no mark. *Lost:* banking it and merely reporting
+the ids, the zero-behaviour-change middle — a real option, and it leaves the
+harm in place while making it visible. *Lost:* a `--skip-held` flag, which
+answers "what does commit mean" once per call and puts a new unvalidated boolean
+on the wire, which is divergence (28)'s shape.
+
+*Named, not taken:* the axis under this half is that `lx commit` has no `--ids`.
+Give it one and the hold stops doing two jobs. It is additive on both surfaces
+and it is a separate package, not a condition of this decision.
+
+### The render reads the map the wording's `⟦n⟧` mean
+
+The package asked whether `render` may substitute a target whose placeholders do
+not match, recommended treating it as missing, and said to re-measure first
+because a repair had landed under it. Re-measured: **the case the recommendation
+was written for no longer exists, and the case that does exist is invisible to
+it.**
+
+Dropping a do-not-translate term is repaired at extract now — `mask.reseat` moves
+the wording into the new numbering by content — so the 2026-08-17 measurement
+quoted in the package does not reproduce. What does reproduce is a *swap*.
+`config/dnt.txt` of `Alpha, Beta` becomes `Alpha, met` over the source
+`Alpha met Beta.`: the reseat refuses, because it cannot find "met" anywhere in
+the Chinese; the wording is kept, which is divergence (24)'s rule working as
+designed; and the placeholder ids are `['1','2']` on **both** sides, so every
+gate that compares ids is blind. `lx render` wrote `Alpha 遇見 met。` where the
+reviewer had written `Beta`, with `lx check` reporting **0 errors and 0
+warnings**, `missing` `0` and `from` `"target"`. Nothing anywhere reported it.
+The recommended gate would never have fired.
+
+`cli.do_extract` has pinned the map a kept wording's ids mean since 2026-08-17,
+as `target_slots`, and `store.prior_targets` and `store.tm_record` both read it
+before the segment's own `slots`, each saying why in a comment.
+`skeleton.render_blocks` was the one reader of a stored target that did not. It
+does now. The bytes become the reviewer's own words, which is invariant 5's
+answer — a deterministically correctable defect is corrected — and no documented
+value moves: `missing` stays a count of segments with no target, `from` stays
+`"target"`, and the block shape's `text` is documented with no formula for the
+map, which the contract now states rather than leaves to be assumed.
+
+Silent correctness is still wrong here, because the wording genuinely no longer
+speaks the numbering its source has, so `checks.py` gains **`numbering`** at
+warn: `unmask(target, target_slots) != unmask(target, slots)`, two string
+comparisons over data already on the segment, decidable without a shred of
+judgement. Warn for `bare_term`'s reason one step along — the render is correct,
+so failing the build would block a book over a segment that comes out right, and
+the remedy is a taste call. It also closes a claim this project's own documents
+were making and the code was not keeping: `AGENTS.md` and the contract both say a
+kept segment is reported at `lx check`, and this one was green.
+
+*Lost:* treating a mismatching target as missing, which is the package's
+recommendation. It is not refuted, it is **narrowed and repriced**: it now
+defends only the loud population — a hand-typed `⟦99⟧`, or a kept wording no
+seating can place — every member of which is a `tags` error today, so `lx check`
+exits non-zero and `lx run` refuses to render. It changes what `missing` counts
+and what `from`'s `target` branch means, so it bumps, and under the standing gate
+a bump is a scheduled package. It is **HANDOFF-036**, and divergence (31) is the
+entry it answers. *Lost:* refusing to render a document whose check fails, which
+costs the same bump, blocks a whole book over one segment, and repeats at a third
+seam the move divergence (24) rejected — answering "is this wording acceptable"
+with "then you may not have the document". *Lost:* leaving the render alone,
+which after the measurement means knowingly shipping a book that can name the
+wrong character with `lx check` green.
+
+### Found while measuring, and repaired in the same change
+
+**`store.save_segments` did not clear `target_slots`.** `store.save_targets`
+pops it, with a comment saying why — the wording being written is written against
+the segment as it stands, so an older target's map is not its provenance — and
+`save_segments`, which `cli.do_apply` is the only caller of and which always
+writes `target`, did not. Measured: a reviewer who *fixes* a stranded segment
+through the ordinary path left the old map on it, and then all three readers of
+that field were wrong at once. The render unmasked the corrected wording against
+the map it was written to replace; `store.tm_record` banked a `slots` array
+naming originals the ids do not mean, into invariant 9's source of truth; and
+`store.prior_targets` would have handed `translate.accept` the wrong map at the
+next extract. Fixed at the write, not at the call site, for the reason origin
+precedence is.
+
+**The contract's validator-rule list had drifted.** `bare_term` shipped on
+2026-08-17 and was still missing from the *issue* shape's enumeration a fortnight
+later; it was found while adding `numbering` beside it. A new rule name is
+additive and does not bump, which is exactly why nothing failed. The weakest
+guard that decides the question is a comparison, so `tests/test_contract.py` now
+derives the set from `checks.check_segment` with `ast` — by syntax rather than by
+text, the lesson `skeleton.render_blocks` taught on 2026-08-21 when a rename
+defeated a guard that matched a literal string.
+
+### What this leaves
+
+Divergence **(26)** is untouched and open. Divergence **(31)** is new, open, and
+scheduled as **HANDOFF-036** with the version decision it owns. Giving
+`lx commit` an `--ids` is named above and scheduled nowhere yet. Nothing here
+moved `contract_version`, and `docs/contracts/status-json.md` is not affected at
+all.
+
 ## 2026-08-21 · The reading view's two Python halves: a block map that carries text, and a sentence rule that lives in one place
 
 Closing HANDOFF-028. `GET /api/preview` gains a `blocks` array and a new

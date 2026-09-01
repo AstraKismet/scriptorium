@@ -513,6 +513,31 @@ def check_segment(seg, lang, cfg, glossary, dnt):
     for msg in pair_problems(tgt, seg.get("slots") or {}):
         add("tags", "error", msg)
 
+    # 1a. the wording speaks a numbering the source has moved on from
+    #
+    # A segment carrying `target_slots` is one the divergence (24) keep path
+    # stranded: the wording was written against one map and sits on a segment
+    # whose parse produced another. `skeleton.render_blocks` unmasks it against
+    # the map it was written in, so the rendered bytes are the reviewer's own
+    # words — but the two maps disagreeing means the *source* has changed under
+    # the wording, and until 2026-09-01 nothing said so after the extract that
+    # did it: rule 1 above compares ids, and the measured case has the same ids
+    # on both sides, so `lx check` was green on a segment `lx extract` had just
+    # named. That contradicted what this project's own documents claimed about
+    # what a kept segment does.
+    #
+    # **Warn, and for `bare_term`'s reason one step along.** The render is
+    # correct, so a severity that failed the build would block a book over a
+    # segment that comes out right; and the remedy is judgement — re-word it, or
+    # accept that the source now protects a term this wording translates.
+    # Decidable without any of that: two unmaskings of one string, compared.
+    if seg.get("target_slots") and seg.get("slots"):
+        if unmask(tgt, seg["target_slots"]) != unmask(tgt, seg["slots"]):
+            add("numbering", "warn",
+                "this wording was written against an older numbering and is "
+                "rendered with it; the source has changed under it, so re-check "
+                "what each ⟦n⟧ names now")
+
     # 1b. a protected term standing bare in the target
     #
     # The one thing that can see wording whose placeholders stopped meaning what

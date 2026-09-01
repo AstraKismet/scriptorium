@@ -27,6 +27,7 @@ from scriptorium.cli import (  # noqa: E402
     UnusableTarget,
     do_apply,
     do_check,
+    do_commit,
     do_extract,
     do_hold,
     do_render,
@@ -756,25 +757,33 @@ def test_reuse_and_model_output_are_refused_by_the_same_gate(tmp_path, monkeypat
     assert _only(doc)["status"] == "pending"
 
 
-def test_the_memory_is_still_tried_when_this_document_holds_a_stale_target(
-        tmp_path, monkeypatch):
-    """Prior state and the memory are both proposals, and they can disagree.
+@pytest.mark.parametrize("origin,gives_way", [
+    ("llm:draft", True), ("tm", True), ("tm:legacy", True),
+    ("human", False), ("agent", False), ("carryover", False),
+])
+def test_only_a_machine_draft_gives_way_to_a_memory_hit(
+        tmp_path, monkeypatch, origin, gives_way):
+    """Divergence (27), reproduced on both sides of the split and closed.
 
-    The old code took the document's own target whenever it had one and never
-    looked further. Now a refused carryover falls through, so a good banked
-    wording is not lost behind a stale one sitting in front of it.
+    Prior state and the memory are both proposals and they can disagree. Until
+    2026-09-01 they were tried in order with no regard for who wrote the first,
+    so a stored target that no longer fits — with a banked wording behind it that
+    does — was replaced, and a `human` segment came back as `tm`: a provenance
+    nobody claimed, and not the one *Origin precedence* protects, so the next
+    unattended run could overwrite it. No collision and no race required.
 
-    ⚠️ **This is the one path divergence (24) does not cover, and it is open as
-    (27).** The wording this document held is replaced rather than kept, and its
-    `origin` goes with it: a `human` segment comes back as `tm` and stops being
-    covered by origin precedence, so the next unattended run may overwrite it.
-    Which of the two should win is a decision, so the behaviour is unchanged
-    here and only the silence is fixed — `notes["replaced"]` names the ids and
-    `lx extract` prints them.
+    Invariant 9 is the line. A machine draft is regenerable and the memory still
+    holds the wording that replaced it, so nothing is lost by letting it give
+    way; a person's or an agent's sentence is not regenerable, so it is kept and
+    reported at `lx check` like any other kept wording. `carryover` is the origin
+    `store.prior_targets` gives a body written before the field existed — nobody's
+    *known* prose, so it is kept, because the rule enumerates what may be replaced
+    and never what is protected.
     """
     _project(tmp_path, monkeypatch, dnt="Celurion\n", doc=b"Celurion ships.\n")
     doc, _reused, _rejected, _notes = do_extract("d.md", "zh-TW", CFG)
-    do_apply("d.md", "zh-TW", CFG, {_only(doc)["id"]: "⟦1⟧ 出貨。"}, origin="human")
+    sid = _only(doc)["id"]
+    do_apply("d.md", "zh-TW", CFG, {sid: "⟦1⟧ 出貨。"}, origin=origin)
     append_tm("zh-TW", tm_records(load_doc("d.md", "zh-TW"), load_tm("zh-TW")))
 
     # Damage only the document's copy, leaving the memory's intact.
@@ -783,10 +792,44 @@ def test_the_memory_is_still_tried_when_this_document_holds_a_stale_target(
     save_doc("d.md", "zh-TW", state)
 
     doc, reused, rejected, notes = do_extract("d.md", "zh-TW", CFG)
-    assert (reused, rejected) == (1, 0)
-    assert (_only(doc)["origin"], _only(doc)["target"]) == ("tm", "⟦1⟧ 出貨。")
-    assert notes["replaced"] == [_only(doc)["id"]], "the swap must not be silent"
-    assert notes["kept"] == [], "nothing was kept: the memory took the segment"
+    after = _only(doc)
+    if gives_way:
+        assert (reused, rejected) == (1, 0)
+        assert (after["origin"], after["target"]) == ("tm", "⟦1⟧ 出貨。")
+        assert notes["replaced"] == [sid], "the swap must not be silent"
+        assert notes["kept"] == []
+    else:
+        assert (reused, rejected) == (0, 1), "the memory was never offered"
+        assert after["origin"] == origin, "the provenance stays with the wording"
+        assert after["target"] == "⟦1⟧ 與 ⟦2⟧ 出貨。"
+        assert notes["kept"] == [sid] and notes["replaced"] == []
+        report, _ = do_check("d.md", "zh-TW", CFG)
+        assert report["errors"] == 1 and report["by_rule"]["tags"] == 1
+
+
+def test_a_body_written_before_the_origin_field_existed_is_kept(tmp_path, monkeypatch):
+    """The `carryover` case reached the way it is actually reached.
+
+    `store.prior_targets` reads ``held.get("origin") or "carryover"``, so a state
+    row from before that field existed surfaces under that name. The parametrized
+    test above sets the string; this one removes the key, which is the state an
+    older build actually left behind and which `store` still reads today.
+    """
+    _project(tmp_path, monkeypatch, dnt="Celurion\n", doc=b"Celurion ships.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    sid = _only(doc)["id"]
+    do_apply("d.md", "zh-TW", CFG, {sid: "⟦1⟧ 出貨。"}, origin="human")
+    append_tm("zh-TW", tm_records(load_doc("d.md", "zh-TW"), load_tm("zh-TW")))
+
+    state = load_doc("d.md", "zh-TW")
+    state["segments"][0].pop("origin")
+    state["segments"][0]["target"] = "⟦1⟧ 與 ⟦2⟧ 出貨。"
+    save_doc("d.md", "zh-TW", state)
+
+    doc, reused, rejected, notes = do_extract("d.md", "zh-TW", CFG)
+    assert (reused, rejected) == (0, 1)
+    assert notes["kept"] == [sid] and notes["replaced"] == []
+    assert _only(doc)["origin"] == "carryover"
 
 
 # ── what a re-parse may do to wording the document already holds ────────────
@@ -1491,3 +1534,193 @@ def test_apply_still_takes_a_target_accept_would_refuse(tmp_path, monkeypatch):
     assert do_apply("d.md", "zh-TW", CFG, {seg["id"]: "現在執行。"})[:2] == (1, [])
     stored = next(s for s in load_doc("d.md", "zh-TW")["segments"] if s["id"] == seg["id"])
     assert stored["target"] == "    現在執行。"
+
+
+# ── what `lx commit` may put in a source of truth ───────────────────────────
+#
+# `.lx/tm.*.jsonl` is tracked in git, `store.load_tm` keeps the LAST record per
+# key, and nothing is ever deleted from it. So a banked wording does not merely
+# sit there being useless — it hides the good one already under that key.
+# Decided 2026-09-01: what `lx check` calls an error is not banked, and neither
+# is a hold.
+
+
+def _commit(src="d.md", lang="zh-TW"):
+    return do_commit(src, lang, CFG)
+
+
+def test_a_broken_wording_does_not_hide_the_good_one_already_banked(
+        tmp_path, monkeypatch):
+    """The measured harm, and the reason the status quo could not stand.
+
+    A correct wording is banked from one document. A second document holds
+    wording a person typed that names the protected term twice — `lx apply`
+    takes it, `lx check` reports it — and committing that document used to
+    append it under the same key, where `load_tm`'s last-write-wins made it the
+    answer. A third, brand-new document then found nothing usable, with the
+    right sentence one line up in the file and unreachable.
+    """
+    _project(tmp_path, monkeypatch, dnt="Celurion\n", doc=b"Celurion ships.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    do_apply("d.md", "zh-TW", CFG, {_only(doc)["id"]: "⟦1⟧ 出貨。"}, origin="human")
+    assert _commit()[0] == 1
+    good = list(load_tm("zh-TW").values())[0]["target"]
+
+    (tmp_path / "b.md").write_bytes(b"Celurion ships.\n")
+    doc, *_ = do_extract("b.md", "zh-TW", CFG)
+    do_apply("b.md", "zh-TW", CFG, {_only(doc)["id"]: "⟦1⟧ 出貨，⟦1⟧ 準時。"},
+             origin="human")
+    committed, refused, held = _commit("b.md")
+    assert (committed, refused, held) == (0, [_only(doc)["id"]], [])
+    assert [r["target"] for r in load_tm("zh-TW").values()] == [good], \
+        "the memory still answers with the wording that fits"
+
+    (tmp_path / "c.md").write_bytes(b"Celurion ships.\n")
+    doc, reused, rejected, _notes = do_extract("c.md", "zh-TW", CFG)
+    assert (reused, rejected) == (1, 0), "a third document still finds it"
+    assert _only(doc)["target"] == good
+
+
+def test_the_gate_is_lx_checks_rule_and_not_a_second_copy_of_half_of_it(
+        tmp_path, monkeypatch):
+    """A swapped pair is what decided which rule the gate reads.
+
+    `translate.accept` compares placeholder ids as a *multiset*, so
+    `⟦2⟧粗體⟦1⟧` against `<b>bold</b>` satisfies it — it is accepted, it renders
+    `</b>粗體<b>`, and it reaches a second document intact. `checks.pair_problems`
+    is what sees it, at the same `tags` rule and the same error severity. A gate
+    written as its own placeholder comparison in `store.tm_records` would bank
+    this; the gate that asks `checks.py` does not.
+    """
+    _project(tmp_path, monkeypatch, doc=b"This is <b>bold</b> text.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    seg = _only(doc)
+    assert seg["masked"] == "This is ⟦1⟧bold⟦2⟧ text."
+    crossed = "這是⟦2⟧粗體⟦1⟧文字。"
+    assert accept(seg, crossed, "zh-TW", CFG)[0] is not None, \
+        "the acceptance path cannot see this, which is the point"
+
+    do_apply("d.md", "zh-TW", CFG, {seg["id"]: crossed}, origin="human")
+    assert _commit() == (0, [seg["id"]], [])
+    assert load_tm("zh-TW") == {}
+
+
+def test_a_held_segment_is_not_banked_and_an_unhold_is_all_it_takes(
+        tmp_path, monkeypatch):
+    """A hold is the only thing in a commit request that can say "not this one".
+
+    `lx commit` takes a whole document and has no per-segment selection, so the
+    reviewer's own declaration that a segment is theirs to finish is what the
+    batch act has to read. Nothing is lost: `tm_records` re-derives from the live
+    segment every time, so the wording is eligible again the moment the hold
+    lifts.
+    """
+    _project(tmp_path, monkeypatch, doc=b"Alpha.\n\nBeta.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    a, b = [s["id"] for s in doc["segments"]]
+    do_apply("d.md", "zh-TW", CFG, {a: "甲。", b: "乙。"}, origin="human")
+    do_hold("d.md", "zh-TW", CFG, [b])
+
+    assert _commit() == (1, [], [b])
+    assert [r["target"] for r in load_tm("zh-TW").values()] == ["甲。"]
+
+    do_hold("d.md", "zh-TW", CFG, [b], held=False)
+    assert _commit() == (1, [], [])
+    assert sorted(r["target"] for r in load_tm("zh-TW").values()) == ["乙。", "甲。"]
+
+
+def test_a_segment_that_is_both_held_and_failing_is_reported_as_held(
+        tmp_path, monkeypatch):
+    """One id, one list, and it is the list whose remedy comes first.
+
+    Both answers are true; "unhold it" is the useful one, because a reviewer who
+    is told only that the wording fails will fix it and find it still not banked.
+    """
+    _project(tmp_path, monkeypatch, dnt="Celurion\n", doc=b"Celurion ships.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    sid = _only(doc)["id"]
+    do_apply("d.md", "zh-TW", CFG, {sid: "⟦1⟧ 出貨，⟦1⟧ 準時。"}, origin="human")
+    do_hold("d.md", "zh-TW", CFG, [sid])
+    assert _commit() == (0, [], [sid])
+
+
+def test_the_gate_honours_a_rule_the_project_turned_off(tmp_path, monkeypatch):
+    """One rule, one home, one disable list.
+
+    `numbers` is an error and 「三天」 for "3 days" trips it — correct Chinese for
+    a novel, and the reason the gate must not carry its own opinion. A project
+    that decides the rule is wrong for it says so once, and the gate agrees by
+    construction rather than by a second exception list.
+    """
+    _project(tmp_path, monkeypatch, doc=b"He waited 3 days.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    sid = _only(doc)["id"]
+    do_apply("d.md", "zh-TW", CFG, {sid: "他等了三天。"}, origin="human")
+    assert _commit() == (0, [sid], [])
+
+    cfg = dict(CFG, checks_disabled=["numbers"])
+    assert do_commit("d.md", "zh-TW", cfg) == (1, [], [])
+
+
+# ── which map a stored wording's ⟦n⟧ actually mean ──────────────────────────
+
+
+def test_a_stranded_wording_renders_the_words_that_were_written(
+        tmp_path, monkeypatch):
+    """The silent half of divergence (24)'s cost, measured and closed.
+
+    A `config/dnt.txt` edit that *swaps* one protected term for another leaves
+    the placeholder ids equal on both sides, so every gate that compares ids is
+    blind to it: `mask.reseat` refuses (it cannot find "met" in the Chinese), the
+    wording is kept, and `lx check` passes. Rendering it against the segment's
+    own map named the wrong entity — `Alpha 遇見 met。` where the reviewer wrote
+    `Beta` — with `missing` 0 and nothing anywhere reporting it.
+
+    `cli.do_extract` already pins the map the wording's ids mean. The render
+    reads it now, so the bytes are the reviewer's own words, and the `numbering`
+    rule says the source has moved under them.
+    """
+    _project(tmp_path, monkeypatch, dnt="Alpha\nBeta\n", doc=b"Alpha met Beta.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    sid = _only(doc)["id"]
+    assert _only(doc)["masked"] == "⟦1⟧ met ⟦2⟧."
+    do_apply("d.md", "zh-TW", CFG, {sid: "⟦1⟧遇見⟦2⟧。"}, origin="human")
+
+    (tmp_path / "config" / "dnt.txt").write_text("Alpha\nmet\n", encoding="utf-8")
+    doc, reused, rejected, notes = do_extract("d.md", "zh-TW", CFG)
+    assert (reused, rejected) == (0, 1) and notes["kept"] == [sid]
+    assert _only(doc)["masked"] == "⟦1⟧ ⟦2⟧ Beta."
+
+    text, missing = do_render("d.md", "zh-TW", CFG)
+    assert text == "Alpha 遇見 Beta。\n", "the wording is rendered as it was written"
+    assert missing == 0
+    report, _ = do_check("d.md", "zh-TW", CFG)
+    assert report["errors"] == 0
+    assert report["by_rule"] == {"numbering": 1}, "silent is what it must not be"
+
+
+def test_a_corrective_apply_does_not_inherit_the_map_it_replaced(
+        tmp_path, monkeypatch):
+    """`store.save_segments` clears `target_slots`, as `store.save_targets` does.
+
+    The wording being written is written against the segment as it stands, so an
+    older target's map is not its provenance. Left behind it was wrong three
+    ways at once, all measured 2026-09-01: the render unmasked the corrected
+    wording against the map it was written to replace, `store.tm_record` banked
+    a `slots` array naming originals the ids do not mean — into a source of truth
+    — and `store.prior_targets` would hand `translate.accept` the wrong map at
+    the next extract.
+    """
+    _project(tmp_path, monkeypatch, dnt="Alpha\nBeta\n", doc=b"Alpha met Beta.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    sid = _only(doc)["id"]
+    do_apply("d.md", "zh-TW", CFG, {sid: "⟦1⟧遇見⟦2⟧。"}, origin="human")
+    (tmp_path / "config" / "dnt.txt").write_text("Alpha\nmet\n", encoding="utf-8")
+    do_extract("d.md", "zh-TW", CFG)
+    assert load_doc("d.md", "zh-TW")["segments"][0].get("target_slots")
+
+    do_apply("d.md", "zh-TW", CFG, {sid: "⟦1⟧⟦2⟧了 Beta。"}, origin="human")
+    stored = load_doc("d.md", "zh-TW")["segments"][0]
+    assert "target_slots" not in stored
+    assert do_render("d.md", "zh-TW", CFG)[0] == "Alphamet 了 Beta。\n"
+    assert tm_record(stored)["slots"] == ["Alpha", "met"]

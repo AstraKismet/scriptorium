@@ -871,6 +871,35 @@ def is_model_origin(origin):
     return isinstance(origin, str) and origin.startswith(_MODEL_PREFIX)
 
 
+#: Wording a machine produced and a machine can produce again. `tm` and
+#: `tm:legacy` are reuse, so the line they came from is still in
+#: `.lx/tm.*.jsonl`; `llm:*` costs one call to make again.
+_REGENERABLE = ("tm", "tm:legacy")
+
+
+def is_regenerable_origin(origin):
+    """Whether a memory hit may answer over wording carrying this origin.
+
+    Invariant 9's line — nothing regenerable is a source of truth — applied to an
+    ordering question rather than to a storage one. `cli.do_extract` offers this
+    document's own stored target first and a banked wording second, and until
+    2026-09-01 took whichever the acceptance path accepted first: a stored target
+    that no longer fits *with a banked wording behind it that does* was replaced,
+    and a `human` segment came back as `tm`, which is not the provenance *Origin
+    precedence* protects. `docs/contracts/workbench-http.md` divergence (27).
+
+    **It enumerates what may be replaced, never what is protected**, and the
+    difference is the whole safety of it. `carryover` — what
+    :func:`prior_targets` calls a body written before the `origin` field existed
+    — is nobody's *known* prose, and an origin a later build invents is nobody's
+    either; both are kept, because the cost of being wrong in that direction is
+    one repair call, which is the cost this rule already accepted, and the cost
+    of being wrong in the other is a sentence somebody wrote, replaced with
+    nothing printed.
+    """
+    return is_model_origin(origin) or origin in _REGENERABLE
+
+
 def _begin_write(conn):
     """Take the write lock **before** the first read of a read-then-write.
 
@@ -976,7 +1005,19 @@ def save_segments(src, lang, segments, expect=None, over_human=False):
     could not, which was a claim about its *default* origin and not about the
     command.
     """
-    rows = [(*_seg_row(0, seg)[2:], doc_id(src), lang, seg["id"]) for seg in segments]
+    # **The same pop :func:`save_targets` makes, for the same reason.** This
+    # statement always writes `target`, so whatever map an *earlier* target was
+    # written against stops being provenance the moment it runs. Left behind it
+    # is worse than useless: `prior_targets` hands `translate.accept` the wrong
+    # map at the next extract, `tm_record` banks `slots` naming originals the
+    # wording's ids do not mean — a wrong record in invariant 9's source of
+    # truth — and `skeleton.render_blocks` unmasks the corrected wording against
+    # the map it was written to replace. Measured 2026-09-01, all three from one
+    # `lx apply` that fixed a segment the divergence (24) keep path had stranded.
+    # A copy rather than a mutation: the caller's dict is `cli.do_apply`'s own
+    # and it goes on to build the reply from it.
+    rows = [(*_seg_row(0, {k: v for k, v in seg.items() if k != "target_slots"})[2:],
+             doc_id(src), lang, seg["id"]) for seg in segments]
     if not rows:
         return 0, [], []
     expect = expect or {}

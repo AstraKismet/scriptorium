@@ -30,6 +30,7 @@ from ..cli import (
     do_apply,
     do_blocks,
     do_check,
+    do_commit,
     do_config_set,
     do_config_unset,
     do_config_value,
@@ -47,7 +48,7 @@ from ..cli import (
 from ..config import ROUTING_STAGES, ConfigError, load_config, resolve_route
 from ..docio import write_document
 from ..providers import available
-from ..store import append_tm, load_doc, load_tm, target_token, tm_records, tracked
+from ..store import load_doc, target_token, tracked
 
 STATIC = os.path.join(os.path.dirname(__file__), "static")
 
@@ -652,8 +653,12 @@ class _Handler(BaseHTTPRequestHandler):
             write_document(out, text)
             return {"wrote": out, "missing": missing}
         if path == "/api/commit":
-            doc = load_doc(src, lang)
-            return {"committed": append_tm(lang, tm_records(doc, load_tm(lang)))}
+            # `cli.do_commit` since 2026-09-01, where this was three inline
+            # `store` calls and the contract said so. What may be banked stopped
+            # being "has a target" that day, and a policy with two homes is the
+            # drift invariant 8 exists to stop.
+            committed, refused, held = do_commit(src, lang, cfg)
+            return {"committed": committed, "refused": refused, "held": held}
         if path == "/api/config":
             # `cfg` above is deliberately not passed on. The merged configuration
             # is what the field rules are checked against, and this endpoint has

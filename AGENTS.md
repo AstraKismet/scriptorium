@@ -228,14 +228,14 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    `POST /api/extract`: a stored target the acceptance path refuses is kept
    rather than deleted, and two segments whose source text is byte-identical are
    told apart by position instead of collapsing onto one carryover entry and
-   laundering each other's `origin`. (26) and (27) were appended by that work and
-   are **open** — a run of identical paragraphs that changed size is still told
-   apart by nothing, and a memory hit still answers over wording the document was
-   holding, taking its `origin` with it. Read the second before relying on origin
-   precedence: it is the remaining path that rewrites the field the rule
-   compares. Both are **named on both surfaces** since 2026-08-19 — `lx extract`
+   laundering each other's `origin`. (26) and (27) were appended by that work.
+   (26) is **open** — a run of identical paragraphs that changed size is still
+   told apart by nothing — and (27) **closed on 2026-09-01**: a memory hit
+   answers over this document's own wording only when that wording is a machine
+   draft, so origin precedence no longer has a path that rewrites the field it
+   compares. Both were **named on both surfaces** from 2026-08-19 — `lx extract`
    prints the segments it happened to and `POST /api/extract` returns them —
-   which closes their reporting half and neither of the entries. (28) was
+   which closed their reporting half and neither of the entries. (28) was
    appended the same day by the adversarial pass over that work and is **open**:
    `POST /api/extract` type-checks neither `reset` nor `tone`, so the *string*
    `"false"` is a reset that discards a document's translations. It is recorded
@@ -246,7 +246,16 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    wire can be asked a question the command cannot — but no logic lives in the
    server, because both call `cli.do_sentences` and that function has taken a
    list of arbitrary strings since it was written. What the CLI lacks is a way to
-   hand it one from a terminal, which is a flag and a scheduled item.
+   hand it one from a terminal, which is a flag and a scheduled item. (31) was
+   appended on 2026-09-01 by the package that closed (27) and the silent half of
+   (24)'s recorded cost, and is **open**: a stored
+   wording carrying a `⟦n⟧` the segment has no slot for still writes that token
+   into a rendered file, and `missing` counts none of it. Every case is an
+   `lx check` error and `lx run` refuses to render, so closing it by construction
+   is a version decision rather than a repair — **HANDOFF-036** owns the bump.
+   The same day, `POST /api/commit` stopped being the one endpoint with no
+   `cli.do_*` behind it: what may be banked stopped being "has a target", and a
+   policy with two homes is what this invariant exists to stop.
    `contract_version` moved to **2** on 2026-08-14, once, carrying five items: the `candidates` → `untracked` rename,
    the identity label normalized, `status` derived from the target text, an empty
    target refused, and a lost-update token. It closed (13)'s wire half, (14), (17)
@@ -355,7 +364,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 1658 tests; no network (one is POSIX-only,
+python -m pytest -q                 # 1672 tests; no network (one is POSIX-only,
                                     #   one runs only where the filesystem folds case)
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
@@ -528,6 +537,17 @@ own.
   units, so one character outside the BMP desynchronizes them silently. The
   terminator is re-imposed through `docio.apply_terminator_parts`, because the
   blanket `\r?\n` substitution does **not** distribute over a concatenation.
+
+  A stored target is unmasked against **the map its `⟦n⟧` mean** — `target_slots`
+  where a re-parse moved the numbering out from under a kept wording, the
+  segment's own `slots` otherwise. `store.prior_targets` and `store.tm_record`
+  already read it first; this was the one reader of a stored target that did not,
+  and the cost was measured on 2026-09-01: a `config/dnt.txt` edit that *swapped*
+  one protected term for another rendered the wrong entity with `lx check` green,
+  `missing` 0 and `from` `"target"`, because the placeholder ids were equal on
+  both sides and every gate here compares ids. `checks.py`'s `numbering` rule
+  reports the segment at warn, since the wording still does not speak the
+  numbering its source has.
 - **Where a sentence ends is `sentences.py`, and nowhere else.** Not `checks.py`
   (invariant 4 — it is not decidable without judgement), not the frontend, and
   not the translation-memory key or `store.SEGMENTATION_VERSION`, which a test
@@ -608,14 +628,24 @@ own.
   for two positions and the last row read filled both, carrying its `origin`:
   divergence (25), and the hole under origin precedence that needed no race.
 
+  **A memory hit answers over this document's own wording only when that wording
+  is a machine draft.** `store.is_regenerable_origin` — `llm:*`, `tm`,
+  `tm:legacy` — and it enumerates what may be replaced, never what is protected,
+  so `carryover` (a body older than the `origin` field) and anything a later
+  build invents are kept. Invariant 9's line on an ordering question: a machine
+  draft is regenerable and a person's sentence is not, and the memory still holds
+  what it replaced. Divergence (27), closed 2026-09-01; before it, a `human`
+  segment came back as `tm` and stopped being covered by origin precedence, with
+  no collision and no race.
+
   Two simpler spellings were built and both were wrong — by segment id, which a
   single insertion defeats and a deletion turns into laundering, and by ordinal
   within a key's run, whose size check compared translated rows against parsed
   segments. If a third is ever proposed, the measurement is in
   `docs/decisions.md`, 2026-08-17: twelve edit shapes, scored position by
-  position. What the diff still cannot do is recorded as (26), the memory
-  answering over the document's own wording as (27), and both are reported rather
-  than silent.
+  position. What the diff still cannot do is recorded as (26) and is reported
+  rather than silent; the memory answering over the document's own wording was
+  (27) and closed on 2026-09-01.
 
   `lx apply` is the deliberate exception, and only for *refusal*: a person's words
   are reported at `lx check`, not rejected at the door. **An empty target is not
@@ -631,6 +661,20 @@ own.
   belongs to the host syntax rather than to whichever of the three sources wrote
   the target — closing that half on 2026-08-03 was what stopped one document
   rendering differently depending on who translated it.
+- **What `lx commit` may bank is what `lx check` does not call an error**, per
+  segment, and the gate is `checks.check_segment` itself rather than a rule of
+  the commit path's own. `.lx/tm.*.jsonl` is a source of truth, it is tracked in
+  git, and `store.load_tm` keeps the **last** record per key — so a broken
+  wording does not merely add a useless line, it hides the good one already under
+  that key and a third document then finds nothing. Measured 2026-09-01, which is
+  also what refuted the two cheaper shapes: a placeholder-multiset test in
+  `store.tm_records` is satisfied by a swapped pair (`⟦2⟧粗體⟦1⟧` renders
+  `</b>粗體<b>` and banks cleanly), and refusing the whole commit on a failing
+  document means banking a chapter waits for the book. One rule and one home is
+  also what makes `checks_disabled` bind here without a second exception list.
+  `cli.do_commit` is the seam both surfaces call, and it exists because this
+  decision is what made "three inline `store` calls on each side" untenable.
+
 - **An `llm:*` write does not land on a segment whose stored `origin` is
   `human`.** Since 2026-08-15, and enforced inside `store.save_targets` and
   `store.save_segments` rather than at the call sites, because all three writers
@@ -677,6 +721,16 @@ own.
   And an explicitly named id still reaches a held segment — holding says no
   *queue* may take it, and `do_apply`'s own refusal message tells a reviewer to
   run `lx translate --ids <id>`, which a hold swallowing it would make false.
+
+  Since 2026-09-01 a hold also keeps wording **out of the translation memory**,
+  and that is the same rule rather than a second one: `lx commit` and
+  `POST /api/commit` take a whole document with no per-segment selection, so they
+  are batch acts even though a person types one, and the hold is the only thing
+  in the request that can say "not this one". Nothing is lost — `tm_records`
+  re-derives from the live segment, so an unhold makes the wording eligible for
+  the very next commit — and the skipped ids are named on both surfaces. The one
+  measured cost is that a held-and-never-committed wording really is gone after
+  `lx extract --reset`, which is what that command's message already says.
 - The project style sheet (`config/style.txt`) says how *this book* sounds, where
   the register brief says how the target language's prose is written. Its two
   halves are injected differently and that is the design, not an accident: the

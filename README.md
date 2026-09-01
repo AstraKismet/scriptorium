@@ -383,6 +383,14 @@ listing and lands in shell history before any refusal can run.
 `.lx/tm.<lang>.jsonl` only ever grows, and it is the file worth committing to
 version control.
 
+`lx commit` does not bank everything. A segment `lx check` reports an **error**
+on is left out, because the memory keeps the last record per key — banking a
+broken wording would hide the good one already there, for every document in the
+project and on every machine that pulls the file. A **held** segment is left out
+too: a hold says the segment is yours to finish, and `lx commit` takes a whole
+document. Both are named by id when it happens, and an `lx unhold` or a fix
+followed by another `lx commit` is all either one needs.
+
 `.lx/state.db` is working state — one SQLite database for the project. It is
 regenerable only for wording you have already banked with `lx commit`, so commit
 before you delete it. `.lx/reports/` is always regenerable.

@@ -1341,8 +1341,13 @@ def test_the_reply_names_a_wording_the_memory_answered_over(
     """`replaced` — divergence (27)'s population, and the only one invisible
     without it.
 
-    The segment comes back `translated`, passes every validator, and its
-    `origin` has rolled from `human` to `tm`. Unlike `kept` there is no error on
+    Narrowed on 2026-09-01 to the machine drafts, which is why the stale target
+    here is written with `cli.do_apply` and an `llm:draft` origin rather than
+    through `POST /api/save`: that endpoint writes `human`, and a person's
+    wording is kept now rather than replaced — the case below this one.
+
+    The segment still comes back `translated`, passes every validator, and its
+    `origin` has rolled to `tm`. Unlike `kept` there is no error on
     `POST /api/doc` to find it by, which is why this array is the one that
     matters most on this reply.
     """
@@ -1355,14 +1360,64 @@ def test_the_reply_names_a_wording_the_memory_answered_over(
                          "segmentation_version": SEGMENTATION_VERSION,
                          "source": seg["source"], "target": "請見 ⟦1⟧。",
                          "slots": slot_originals(seg["slots"])}])
-    _post(base, "/api/save", {"src": "d.md", "lang": "zh-TW",
-                              "targets": {seg["id"]: "請見 ⟦1⟧ 與 ⟦1⟧。"}})
+    cli.do_apply("d.md", "zh-TW", dict(DEFAULT_CONFIG),
+                 {seg["id"]: "請見 ⟦1⟧ 與 ⟦1⟧。"}, origin="llm:draft")
 
     r = _extract(base)
     assert r["replaced"] == [seg["id"]]
     assert r["kept"] == [], "the memory answered, so nothing had to be kept"
     after = json.loads(_get(base, "/api/doc?src=d.md&lang=zh-TW")[1])["segments"][0]
     assert after["target"] == "請見 ⟦1⟧。" and after["origin"] == "tm"
+
+
+def test_a_wording_saved_here_is_kept_rather_than_answered_over(
+        base, tmp_path, monkeypatch):
+    """The other side of the same split, over the wire.
+
+    `POST /api/save` writes `human`, so everything a workbench user types is on
+    this side: a banked wording behind it no longer wins, however well it fits.
+    The segment comes back in `kept` instead, holding the words that were typed,
+    and `POST /api/doc` carries the placeholder error on the segment itself.
+    """
+    _doc_project(base, tmp_path, monkeypatch,
+                 b"See [the guide](https://example.com/here) for details.\n")
+    _extract(base)
+    seg = load_doc("d.md", "zh-TW")["segments"][0]
+    append_tm("zh-TW", [{"hash": seg["hash"], "context": seg["context"],
+                         "segmentation_version": SEGMENTATION_VERSION,
+                         "source": seg["source"], "target": "請見 ⟦1⟧。",
+                         "slots": slot_originals(seg["slots"])}])
+    _post(base, "/api/save", {"src": "d.md", "lang": "zh-TW",
+                              "targets": {seg["id"]: "請見 ⟦1⟧ 與 ⟦1⟧。"}})
+
+    r = _extract(base)
+    assert r["kept"] == [seg["id"]] and r["replaced"] == []
+    after = json.loads(_get(base, "/api/doc?src=d.md&lang=zh-TW")[1])["segments"][0]
+    assert after["target"] == "請見 ⟦1⟧ 與 ⟦1⟧。" and after["origin"] == "human"
+
+
+def test_commit_names_what_it_declined_to_bank(base, tmp_path, monkeypatch):
+    """`refused` and `held` — what `POST /api/commit` did not put in the memory.
+
+    Both are new on 2026-09-01 and both are additive. The count alone was a
+    report nobody could act on the moment anything but "has a target" decided
+    what gets banked, which is `store.save_targets`' own argument for returning
+    its refusals.
+    """
+    _doc_project(base, tmp_path, monkeypatch,
+                 b"See [the guide](https://example.com/here) for details.\n\nPlain.\n")
+    _extract(base)
+    ids = [s["id"] for s in
+           json.loads(_get(base, "/api/doc?src=d.md&lang=zh-TW")[1])["segments"]]
+    _post(base, "/api/save", {"src": "d.md", "lang": "zh-TW",
+                              "targets": {ids[0]: "請見 ⟦1⟧ 與 ⟦1⟧。", ids[1]: "純文字。"}})
+    _post(base, "/api/hold", {"src": "d.md", "lang": "zh-TW",
+                              "ids": [ids[1]], "held": True})
+
+    body = json.loads(_post(base, "/api/commit", {"src": "d.md", "lang": "zh-TW"})[1])
+    assert body["refused"] == [ids[0]], "a `tags` error is not banked"
+    assert body["held"] == [ids[1]]
+    assert body["committed"] == 0
 
 
 # ── configuration over the wire ────────────────────────────────────────────
