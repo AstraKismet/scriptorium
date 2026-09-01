@@ -125,6 +125,24 @@ def project(tmp_path, monkeypatch):
     root = tmp_path / "nest" / "proj"
     (root / "docs").mkdir(parents=True)
     (root / "docs" / "guide.md").write_text("# Title\n\nA sentence.\n", encoding="utf-8")
+    # A backend that is guaranteed to refuse, because two tests in this file walk
+    # **every documented GET** and `GET /api/models` is the first endpoint on this
+    # surface that opens an outbound connection. Without this the merged default
+    # applies — `routing.draft` is `local` at `http://localhost:11434/v1` — and the
+    # suite would contact whatever is listening on the developer's own machine:
+    # green here, red on a machine running Ollama, and up to `_LIST_TIMEOUT`
+    # seconds per call on a host that black-holes rather than refuses. The
+    # package's red line is that tests use no network.
+    #
+    # Port 9 is discard and nothing binds it; `tests/test_web.py` already uses it
+    # for a dead endpoint. `retries: 0` makes it one attempt with no backoff, so
+    # the refusal is immediate and the `error` sentence is deterministic.
+    (root / "lx.config.json").write_text(json.dumps({
+        "providers": {"offline": {"kind": "openai", "base_url": "http://127.0.0.1:9/v1",
+                                  "model": "test-model", "api_key_env": "",
+                                  "timeout": 1, "retries": 0}},
+        "routing": {"draft": "offline", "polish": "offline", "repair": "offline"},
+    }), encoding="utf-8")
     monkeypatch.chdir(root)
     return root
 
@@ -239,6 +257,26 @@ def test_the_contract_names_every_validator_rule_the_code_can_emit():
     assert documented == emitted, (
         f"{CONTRACT} lists {sorted(documented)} and `checks.check_segment` emits "
         f"{sorted(emitted)}. A new rule is additive and still has to be written down.")
+
+
+def test_the_contract_version_is_three_and_moving_it_is_a_scheduled_act():
+    """The literal, which the three tests below deliberately cannot see.
+
+    Each of those asserts that the document, the module constant and the live
+    reply *agree with each other* — so a bump written into both places leaves
+    every one of them green, and the gate `AGENTS.md` describes ("every further
+    bump is gated behind a work package rather than a commit") had nothing
+    enforcing it. A number in a test is the weakest thing that decides the
+    question: moving it is an edit somebody has to make on purpose, in a file
+    whose diff says what it is.
+
+    When a package *does* own a bump, this line moves with it. Version 3 was the
+    first one through that gate, on 2026-08-19, and carried exactly one item.
+    """
+    assert CONTRACT_VERSION == 3, (
+        "the contract version moved. That is a work package with a decision entry, "
+        "not a commit — see AGENTS.md invariant 8 and the contract's own Versioning "
+        "section. If this is that package, move the number here too.")
 
 
 def test_the_document_declares_exactly_one_contract_version_and_the_module_agrees():
@@ -426,6 +464,15 @@ def test_every_endpoint_returns_exactly_the_keys_the_contract_documents(base, pr
     # both. The same argument `/api/config` already carries.
     record("POST", "/api/sentences", {"texts": ["One sentence. And another."]})
     record("GET", "/api/state", {})
+    # Explicitly, because nothing here is automatic: `_documented_response_keys`
+    # harvests the contract and `actual` is only what these calls record, so a
+    # documented endpoint with no `record` call fails the comparison below with
+    # "an endpoint was not exercised" rather than being skipped. It answers from
+    # the `offline` provider the fixture pins, so `models` is empty and `error`
+    # carries the refusal — which is exactly why `error` is `null` on success
+    # rather than absent: the key set must not depend on whether a backend
+    # answered.
+    record("GET", "/api/models", {})
 
     documented = _documented_response_keys()
     assert set(documented) == set(actual), "an endpoint was not exercised"

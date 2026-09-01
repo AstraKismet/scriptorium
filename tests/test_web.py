@@ -10,7 +10,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from http.server import ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
@@ -1863,3 +1863,210 @@ def test_sentences_reads_neither_src_nor_lang(base, tmp_path, monkeypatch):
                     {"texts": ["a"], "lang": None}):
         code, _body = _try_post(base, "/api/sentences", payload)
         assert code == 403, payload
+
+
+# ── asking a backend what it serves ────────────────────────────────────────
+#
+# `GET /api/models` is the only endpoint on this surface that leaves the
+# machine, so what is tested here is the shell around that: that a failure is an
+# answer rather than a refusal, that the answer still carries what the control
+# needs in order to degrade, and that nothing a backend or a hand-edited file
+# supplies reaches the browser unmasked. The listing itself is `cli.do_models`
+# and is tested in `test_provider.py`.
+
+MODEL_ROWS = {"payload": None}
+
+
+class _ModelsBackend(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        body = json.dumps(MODEL_ROWS["payload"]).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+@pytest.fixture(scope="module")
+def backend():
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), _ModelsBackend)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{httpd.server_address[1]}/v1"
+    httpd.shutdown()
+
+
+def _routed(root, backend_url, routing=None, **extra):
+    """A project whose `draft` stage names `live`, with the other backends beside it.
+
+    `dead` is port 9 — discard, nothing binds it — with `retries: 0`, so the
+    refusal is one attempt and immediate. No test in this file may wait on a
+    timeout.
+    """
+    providers = {
+        "live": {"kind": "openai", "base_url": backend_url, "model": "live-model",
+                 "api_key_env": "", "timeout": 2, "retries": 0},
+        "dead": {"kind": "openai", "base_url": "http://127.0.0.1:9/v1",
+                 "model": "dead-model", "api_key_env": "", "timeout": 1, "retries": 0},
+    }
+    providers.update(extra)
+    (root / "lx.config.json").write_text(
+        json.dumps({"providers": providers, "routing": routing or {"draft": "live"}}),
+        encoding="utf-8")
+
+
+def _models(base, query=""):
+    code, body = _get(base, "/api/models" + query)
+    assert code == 200, (code, body)
+    return json.loads(body)
+
+
+def test_a_listing_reaches_the_wire_sorted_with_the_configured_model_beside_it(
+        base, tmp_path, monkeypatch, backend):
+    root = _config_project(tmp_path, monkeypatch)
+    _routed(root, backend)
+    MODEL_ROWS["payload"] = {"data": [{"id": "zeta"},
+                                      {"id": "alpha", "status": {"value": "sleeping"}}]}
+    assert _models(base) == {
+        "provider": "live", "configured": "live-model", "error": None,
+        "models": [{"id": "alpha", "status": "sleeping"}, {"id": "zeta", "status": ""}]}
+
+
+def test_a_backend_that_cannot_be_reached_is_an_answer_and_not_a_refusal(
+        base, tmp_path, monkeypatch, backend):
+    """The whole reason this endpoint answers 200.
+
+    The control it feeds degrades to a free-text field carrying *the model the
+    configuration resolved*, so `configured` has to survive the failure. A 400
+    carries a sentence and nothing else, and the page would then have to resolve
+    routing a second time to recover it.
+    """
+    root = _config_project(tmp_path, monkeypatch)
+    _routed(root, backend)
+    d = _models(base, "?provider=dead")
+    assert d["provider"] == "dead"
+    assert d["configured"] == "dead-model", "the degradation path lost `configured`"
+    assert d["models"] == []
+    assert d["error"] and "dead" in d["error"]
+
+
+def test_the_key_set_is_the_same_whether_the_listing_worked_or_not(
+        base, tmp_path, monkeypatch, backend):
+    """`error` is `null` on success rather than absent, and this is why.
+
+    A key present only on failure makes `tests/test_contract.py`'s exact-key
+    comparison depend on whether a backend happened to answer — which, under the
+    merged default, means whether anything is listening on `localhost:11434`.
+    """
+    root = _config_project(tmp_path, monkeypatch)
+    _routed(root, backend)
+    MODEL_ROWS["payload"] = {"data": [{"id": "m"}]}
+    assert set(_models(base)) == set(_models(base, "?provider=dead"))
+
+
+def test_a_provider_override_reaches_another_backend_and_drops_the_entry_model(
+        base, tmp_path, monkeypatch, backend):
+    """A model id belongs to the backend that serves it — `config.resolve_route`.
+
+    This is the answer the page is forbidden to compute for itself, and the
+    reason a failed listing still carries `configured`: it is neither
+    `routing.draft.model` nor any single field `/api/state` holds.
+    """
+    root = _config_project(tmp_path, monkeypatch)
+    _routed(root, backend, routing={"draft": {"provider": "live", "model": "pinned"}})
+    MODEL_ROWS["payload"] = {"data": [{"id": "m"}]}
+    assert _models(base)["configured"] == "pinned"
+    assert _models(base, "?provider=dead")["configured"] == "dead-model"
+
+
+def test_an_empty_provider_parameter_means_the_routed_backend(
+        base, tmp_path, monkeypatch, backend):
+    """`parse_qs` drops a blank value, so this is the absent case, not an error."""
+    root = _config_project(tmp_path, monkeypatch)
+    _routed(root, backend)
+    MODEL_ROWS["payload"] = {"data": [{"id": "m"}]}
+    assert _models(base, "?provider=")["provider"] == "live"
+
+
+def test_a_malformed_routing_block_is_reported_rather_than_raised(
+        base, tmp_path, monkeypatch):
+    root = _config_project(tmp_path, monkeypatch)
+    (root / "lx.config.json").write_text(
+        json.dumps({"providers": ["not", "a", "block"]}), encoding="utf-8")
+    d = _models(base)
+    assert d["models"] == [] and d["error"]
+    assert d["provider"] == "" and d["configured"] == ""
+
+
+def test_a_hand_edited_userinfo_base_url_is_never_printed_into_the_browser(
+        base, tmp_path, monkeypatch, backend):
+    """The leak this endpoint was measured to have, 2026-09-01.
+
+    `http.client.InvalidURL` is neither a `ValueError` nor an `OSError`, so it
+    became no `ProviderError`, reached none of the masked messages in
+    `Provider._request`, and arrived at the outer handler as a `400` whose
+    sentence quoted the netloc it choked on — password included, in a body a
+    browser renders.
+    """
+    secret = "SUPERSECRETPASSWORD"
+    root = _config_project(tmp_path, monkeypatch)
+    _routed(root, backend, leaky={
+        "kind": "openai", "base_url": f"https://user:{secret}@example.invalid/v1",
+        "model": "m", "api_key_env": "", "timeout": 1, "retries": 0})
+    code, body = _get(base, "/api/models?provider=leaky")
+    assert code == 200
+    assert secret not in body.decode("utf-8")
+    assert "example.invalid" in json.loads(body)["error"], "masked into uselessness"
+
+
+def test_a_hostile_model_id_never_reaches_the_page(base, tmp_path, monkeypatch, backend):
+    """Dropped at the boundary rather than escaped at the print.
+
+    The last assertion is the one worth keeping: the browser has a category the
+    terminal does not, and the boundary filter does **not** cover it. `<` and `>`
+    are legal in a model id, so escaping is the page's job and the contract says
+    so. Narrowing the filter here would hide that from a rebuild.
+    """
+    root = _config_project(tmp_path, monkeypatch)
+    _routed(root, backend)
+    MODEL_ROWS["payload"] = {"data": [{"id": "good"},
+                                      {"id": "evil\x1b[2Kforged"},
+                                      {"id": "flip‮esrever"},
+                                      {"id": "<img src=x onerror=alert(1)>"}]}
+    ids = [m["id"] for m in _models(base)["models"]]
+    assert "evil\x1b[2Kforged" not in ids and "flip‮esrever" not in ids
+    assert "good" in ids
+    assert "<img src=x onerror=alert(1)>" in ids
+
+
+def test_the_provider_row_carries_the_four_numbers_a_settings_form_prefills(
+        base, tmp_path, monkeypatch, backend):
+    """Additive on the *provider* shape, and `null` means inherited, not broken.
+
+    A string a `float`/`int` accepts is coerced rather than refused, because
+    `Provider.__init__` coerces it too and `"timeout": "300"` translates
+    perfectly today — calling that unreadable would be a false accusation on a
+    working configuration.
+    """
+    root = _config_project(tmp_path, monkeypatch)
+    _routed(root, backend, stringy={"kind": "openai", "base_url": "http://x/v1",
+                                    "api_key_env": "", "timeout": "300",
+                                    "max_tokens": "4096"})
+    rows = {p["name"]: p for p in json.loads(_get(base, "/api/state")[1])["providers"]}
+    assert rows["live"]["timeout"] == 2 and rows["live"]["retries"] == 0
+    assert rows["live"]["temperature"] is None, "an absent key is null, not a default"
+    assert rows["live"]["max_tokens"] is None
+    assert rows["stringy"]["timeout"] == 300 and rows["stringy"]["max_tokens"] == 4096
+    assert "error" not in rows["stringy"], "a working configuration was called unreadable"
+
+
+def test_a_number_no_coercion_accepts_is_null_and_is_named(
+        base, tmp_path, monkeypatch, backend):
+    root = _config_project(tmp_path, monkeypatch)
+    _routed(root, backend, broken={"kind": "openai", "base_url": "http://x/v1",
+                                   "api_key_env": "", "timeout": "soon"})
+    rows = {p["name"]: p for p in json.loads(_get(base, "/api/state")[1])["providers"]}
+    assert rows["broken"]["timeout"] is None
+    assert "timeout" in rows["broken"]["error"]

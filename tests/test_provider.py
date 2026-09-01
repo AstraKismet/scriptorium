@@ -1010,3 +1010,102 @@ def test_do_models_takes_a_provider_override(models_server):
     name, configured, rows = cli.do_models(cfg, provider="b")
     assert (name, configured) == ("b", "b-model"), "a's model did not follow the override"
     assert rows == [{"id": "m", "status": ""}]
+
+
+# ── what a backend may put in front of a person ────────────────────────────
+
+class RudeHandler(BaseHTTPRequestHandler):
+    """A 4xx whose *body* is hostile, which is a different surface from a row.
+
+    `Provider._sane` filters a listing's `id` and `status`. It never saw an error
+    body, so a backend that wanted to erase a terminal line or reverse the
+    display of the advice printed under it only had to answer 400 and say so in
+    prose. Measured 2026-09-01.
+    """
+
+    def log_message(self, *a):
+        pass
+
+    def _rude(self):
+        body = RUDE["body"].encode("utf-8")
+        self.send_response(400)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    do_GET = do_POST = _rude
+
+
+RUDE = {"body": ""}
+
+
+@pytest.fixture(scope="module")
+def rude():
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), RudeHandler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{httpd.server_address[1]}/v1"
+    httpd.shutdown()
+
+
+@pytest.mark.parametrize("ch,what", [
+    ("\x1b[2K", "an ANSI erase-line"),
+    ("‮", "a bidirectional override"),
+    (" ", "a line separator"),
+    ("\n", "a newline"),
+])
+@pytest.mark.parametrize("call", ["list_models", "complete"])
+def test_a_hostile_error_body_reaches_no_one_with_its_control_characters(
+        rude, ch, what, call):
+    """The same rule `_sane` states for a row, on the path that had no filter.
+
+    Both entry points, because the body is `_request`'s and neither
+    `list_models` nor `complete` owns it — a fix that covered only the listing
+    would leave `lx translate` printing whatever a backend chose to send.
+    """
+    RUDE["body"] = f"refused: before{ch}after"
+    p = build("local", _cfg(rude, retries=0))
+    with pytest.raises(ProviderError) as e:
+        getattr(p, call)() if call == "list_models" else p.complete("s", "u")
+    msg = str(e.value)
+    assert "refused: before" in msg, f"the body was dropped rather than tamed ({what})"
+    assert ch not in msg, f"{what} survived into the message a person reads"
+    assert "�" in msg
+
+
+def test_a_listing_is_capped_so_a_row_count_cannot_grow_without_bound(models_server):
+    """`_MAX_FIELD` bounds one field and says nothing about how many there are.
+
+    The cut is after the sort, so which rows survive is a property of the ids
+    rather than of the order the backend answered in.
+    """
+    from scriptorium.providers.base import _MAX_ROWS
+
+    MODELS["payload"] = {"data": [{"id": f"m{i:06d}"} for i in range(_MAX_ROWS + 50)]}
+    rows = build("local", _cfg(models_server, retries=0)).list_models()
+    assert len(rows) == _MAX_ROWS
+    assert rows[0]["id"] == "m000000", "the cut was taken before the sort"
+
+
+def test_a_base_url_carrying_userinfo_is_refused_without_printing_the_password():
+    """`http.client.InvalidURL` is neither a `ValueError` nor an `OSError`.
+
+    So it descended from none of the three masked branches in `_request`,
+    `urllib` did not wrap it in a `URLError`, and the exception's own message
+    quotes the netloc it choked on — which for a hand-edited
+    `https://user:SECRET@host/v1` is `SECRET@host`. Measured 2026-09-01 by a
+    probe over `GET /api/models`, which answered
+    `400 {"error": "nonnumeric port: 'SECRET@host'"}`.
+
+    `lx config set` refuses to write such a URL, so reaching this needs a
+    hand-edited file — which is the case every other `printable_url` call site
+    in this project exists for.
+    """
+    secret = "SUPERSECRETPASSWORD"
+    cfg = {"providers": {"p": {"kind": "openai", "api_key_env": "", "retries": 0,
+                               "base_url": f"https://user:{secret}@example.invalid/v1"}}}
+    for call in (lambda p: p.list_models(), lambda p: p.complete("s", "u")):
+        with pytest.raises(ProviderError) as e:
+            call(build("p", cfg))
+        assert secret not in str(e.value)
+        assert "example.invalid" in str(e.value), "masked into uselessness"

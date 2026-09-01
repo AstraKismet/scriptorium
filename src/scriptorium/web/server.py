@@ -36,6 +36,7 @@ from ..cli import (
     do_config_value,
     do_extract,
     do_hold,
+    do_models,
     do_render,
     do_routing_set,
     do_select,
@@ -47,7 +48,7 @@ from ..cli import (
 )
 from ..config import ROUTING_STAGES, ConfigError, load_config, resolve_route
 from ..docio import write_document
-from ..providers import available
+from ..providers import ProviderError, available
 from ..store import load_doc, target_token, tracked
 
 STATIC = os.path.join(os.path.dirname(__file__), "static")
@@ -141,6 +142,50 @@ def _stage_route(cfg, stage, provider=None, model=None):
 def _routing_state(cfg):
     """Every stage resolved, in `_stage_route`'s shape."""
     return {stage: _stage_route(cfg, stage) for stage in ROUTING_STAGES}
+
+
+def _models(cfg, provider):
+    """What a backend says it serves — and never a refusal that blocks the run.
+
+    **The only endpoint here that leaves the machine.** Every other one touches
+    the project directory; this one opens a request to whatever `base_url` names
+    and sends the credential built from `api_key_env` with it. What that costs,
+    and why it is bounded, is in the contract's own section for it.
+
+    **It answers `200` whatever happens, with `error` carrying the sentence.**
+    Not a courtesy: the control this feeds has to degrade to a free-text field
+    *carrying the model the configuration resolved*, and that value is
+    `config.resolve_route`'s answer — a `provider` naming a different backend
+    drops the routing entry's model, so it is not `routing.draft.model` and not
+    `providers[name].model` either. A `400` carries a sentence and nothing else,
+    so the page would have to resolve routing a second time, in JavaScript. That
+    is the third site resolving one rule, which is the whole reason
+    `resolve_route` exists. `POST /api/job` and the *routing stage* shape both
+    answer a failure inside a `200` already.
+
+    **`error` is `null` rather than absent on success**, which is `/api/job`'s
+    spelling and not the *provider* row's. The two conventions differ for a
+    reason that is invisible until it bites: a nested shape is not seen by
+    `tests/test_contract.py`'s exact-key comparison and a top-level key is, so a
+    key present only on failure makes that test pass or fail according to
+    whether anything happens to answer on `localhost:11434` — which is where
+    `DEFAULT_CONFIG` points `routing.draft`. Found before it shipped, by the
+    review of this endpoint's design, 2026-09-01.
+
+    Only `ProviderError` and `ConfigError` become a `200`. A blanket catch would
+    dress a real defect — a `TypeError`, a changed signature — as "the backend
+    could not be reached", and it would never surface as the `400` the outer
+    handler exists to produce.
+    """
+    try:
+        name, configured, rows = do_models(cfg, provider)
+    except (ProviderError, ConfigError) as e:
+        # `_stage_route` for the degraded half, so the answer a failed listing
+        # still carries comes from the same function a successful one does.
+        route = _stage_route(cfg, "draft", provider)
+        return {"provider": route["provider"], "configured": route["model"],
+                "models": [], "error": str(e)}
+    return {"provider": name, "configured": configured, "models": rows, "error": None}
 
 
 def _config():
@@ -571,6 +616,14 @@ class _Handler(BaseHTTPRequestHandler):
             return {"text": "".join(b["text"] for b in blocks),
                     "blocks": blocks, "missing": missing,
                     "default_out": default_output(src, lang, cfg)}
+        if path == "/api/models":
+            # `provider` is a name out of the configuration, never an address:
+            # `providers.build` refuses one that is not already in the file, so
+            # this parameter selects among configured backends and cannot carry
+            # a destination of its own. An absent or empty one means the same
+            # thing — `parse_qs` drops a blank value and `resolve_route` treats
+            # a falsy provider as "use the routing entry".
+            return _models(cfg, q.get("provider"))
         raise ValueError(f"unknown endpoint {path}")
 
     # -- write ------------------------------------------------------------

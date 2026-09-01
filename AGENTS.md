@@ -158,6 +158,20 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    value at all, so it has none to leak. What the fields *beside* those two do
    with one is `docs/contracts/workbench-http.md` divergence (29), open.
 
+   It was wrong a **fourth** time on 2026-09-01, and this one had been reachable
+   from a terminal long before any of the three above. A `base_url` a hand-edited
+   file carries userinfo in makes `urllib` raise `http.client.InvalidURL`, whose
+   own message quotes the netloc it choked on — password included. That class
+   descends from `HTTPException` and is **neither a `ValueError` nor an
+   `OSError`**, so `urllib` never wrapped it in a `URLError`, none of
+   `providers/base.py`'s three masked branches applied, it never became a
+   `ProviderError`, and `lx models` and `lx translate` answered a traceback
+   carrying it. `GET /api/models` is what put it in front of a *browser*, and a
+   probe over that endpoint is what found it — no design review did. It is masked
+   in `_request` beside the other three now. Note what the first attempt at the
+   guard got wrong: it caught `ValueError`, which is `InvalidURL`'s nearest
+   *plausible* base and not its real one. Catch the class; never name the member.
+
    A rule is enforced where a field **lands**. A key may not be addressed *inside*
    something that holds one value, whether the field table says so or the merged
    configuration's own type does: without that, `providers.new.api_key_env.x`
@@ -256,6 +270,20 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    The same day, `POST /api/commit` stopped being the one endpoint with no
    `cli.do_*` behind it: what may be banked stopped being "has a target", and a
    policy with two homes is what this invariant exists to stop.
+   (32) and (33) were appended on 2026-09-01 by `GET /api/models`, the fourteenth
+   endpoint and **the only one that leaves the machine** — every other touches
+   the project directory alone. Both are **open** and neither is leaked logic.
+   (32) is the shape this invariant usually catches, arriving honestly: the wire
+   answers `200` with `error` where `lx models` exits 2, because the endpoint
+   feeds a control that must degrade rather than block and a terminal has no such
+   control — the listing itself is `cli.do_models` on both surfaces, and what
+   lives only in the server is the degradation policy. (33) is not this
+   invariant's at all and is recorded there because that is where a reader will
+   look: `urllib` keeps `Authorization` across a redirect to another host, so a
+   backend answering `302` moves the credential. It predates the endpoint and
+   lands in the transport every completion shares, so it is its own package.
+   Two divergences on one endpoint is also the argument for the endpoint's own
+   section being written before it shipped rather than after.
    `contract_version` moved to **2** on 2026-08-14, once, carrying five items: the `candidates` → `untracked` rename,
    the identity label normalized, `status` derived from the target text, an empty
    target refused, and a lost-update token. It closed (13)'s wire half, (14), (17)
@@ -364,7 +392,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 1677 tests; no network (one is POSIX-only,
+python -m pytest -q                 # 1700 tests; no network (one is POSIX-only,
                                     #   one runs only where the filesystem folds case)
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
