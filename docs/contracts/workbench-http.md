@@ -188,7 +188,7 @@ one is not.
 
 ## Endpoints
 
-Thirteen. Every one is listed here; a test walks the dispatch chain in
+Fourteen. Every one is listed here; a test walks the dispatch chain in
 `web/server.py` and fails if the two lists disagree in either direction.
 
 Common to all of them:
@@ -339,6 +339,80 @@ divergences* (11). One consequence is visible in the block map: `from` is never
 turns off.
 
 Side effects: none.
+
+---
+
+### GET /api/models
+
+What a configured backend says it serves, so a model id can be chosen rather
+than typed. **This is the only GET on this surface that leaves the machine** —
+`POST /api/translate` has always done so, and carries more: the document text as
+well as the credential.
+
+Backed by: `cli.do_models`, and `config.resolve_route` for the answer a *failed*
+listing still carries. Equivalent to `lx models [--provider P] --json`, with one
+deliberate difference stated under *Known divergences* (32): the command exits
+non-zero when a backend cannot be reached and this endpoint answers `200`.
+
+**Request** — `provider` (optional, query string). A provider **name** out of the
+project's configuration, never an address: `providers.build` refuses a name that
+is not already in the file, so this parameter selects among configured backends
+and cannot carry a destination of its own. Absent, or present and empty, means
+the backend `routing.draft` resolves to. `src` and `lang` are accepted and
+validated if sent, then discarded.
+
+**Response**
+
+| Key | Type | Meaning |
+|---|---|---|
+| `provider` | string | The backend that was asked, resolved through `config.resolve_route`. **It echoes the `provider` you sent even when no such backend is configured** — `resolve_route` does not validate the name, and `providers.build` is what refuses it, so an unknown name comes back here with the refusal in `error`. `""` only when the whole `routing` block is unreadable. |
+| `configured` | string | The model id this project would send **today**, resolved most-specific-first — the caller's `provider`, then the routing entry's model, then the provider's own. `""` when unknown. Present on the failure path too, and that is what it is for. |
+| `models` | array of *model* | Sorted by id. **Present and empty** when the listing failed. |
+| `error` | string \| null | The sentence when the listing failed, `null` when it did not. **Always present**, like `POST /api/job`'s. |
+
+**model** — `{"id": string, "status": string}`. `status` is `""` unless the
+backend volunteers one; llama.cpp's router reports `unloaded` / `loading` /
+`sleeping` / `loaded`, and every plain OpenAI-compatible API reports nothing.
+
+**It answers `200` whatever happens.** A backend that is unreachable, that
+answers something other than a model list, that needs a key it has not been
+given, or a `routing` entry that is malformed — all of them are a `200` carrying
+`error`, because the control this feeds must degrade to a free-text field
+*carrying `configured`* rather than block a run. A `400` carries a sentence and
+nothing else, so a client would have to resolve routing a second time to recover
+`configured`, and that rule has one home. Only a malformed *request* is anything
+else: the confinement rules above still answer `403`.
+
+**The listing is advisory and gates nothing.** A backend may serve a model it
+does not enumerate — a single-model `llama-server` ignores the `model` field
+entirely and still answers — so a client that refused to run because
+`configured` is absent from `models` would refuse a working configuration. Show
+the list; do not enforce it.
+
+**The reply is untrusted input.** Ids and statuses come from whatever `base_url`
+names. Every row is filtered at the boundary — any field carrying a character in
+Unicode category `Cc`, `Cf`, `Zl` or `Zp`, or longer than 120 characters, is
+dropped, the list is capped at 1000 rows, and the reply is refused unread past
+4 MB — and `error` has the same categories replaced with `U+FFFD`. The three are
+separate controls and each was added because the other two do not cover it: the
+field cap bounds one value, the row cap bounds what is serialized back, and the
+byte cap bounds what is *parsed to get there*, which a hostile backend was
+measured driving to roughly 910 MB on one request thread. **That filter is about control characters and
+says nothing about markup**: `<`, `>`, `"` and `'` all pass it, because they are
+legal in a model id. A client escapes them, or builds the DOM node rather than a
+string.
+
+Side effects: **one outbound HTTP request** to the configured backend, carrying
+the `Authorization` header built from that provider's `api_key_env` when one is
+set. Nothing on disk. The budget is `min(timeout, 30) s` per attempt with at
+most one retry, plus at most 20 s of backoff a slow backend can ask for with
+`Retry-After` — so a hung backend occupies one server thread for up to about 80
+seconds. That bound is on a backend that stops *answering*; one that answers
+slowly but continuously — a byte at a time — is bounded by nothing here, because
+the timeout is per socket operation rather than per request. A client shows a
+spinner either way. **Never a "retrying" message**: a
+llama.cpp router *blocks* the caller while it loads a model rather than
+answering `503`, so a slow first request is a slow request.
 
 ---
 
@@ -978,9 +1052,11 @@ client shows what is configured and whether the variable is set.
 
 **There is no `GET /api/config`.** `/api/state` already projects what a settings
 screen draws — `providers` and the resolved `routing` — and a second read
-surface is a second thing to keep in step. The one thing it does not project is
-`timeout`, `temperature`, `max_tokens` and `retries`, which this endpoint's
-`value` answers only after a write.
+surface is a second thing to keep in step. It projected everything a form needs
+**except** `timeout`, `temperature`, `max_tokens` and `retries`, which this
+endpoint's `value` answered only after a write; since 2026-09-01 the *provider*
+shape carries those four as well, so the exception is closed and the argument
+against a second read surface no longer has one.
 
 ## Shared shapes
 
@@ -1059,7 +1135,22 @@ an entry in `docs/decisions.md`.
 | `needs_key` | boolean | Whether an `api_key_env` is configured. |
 | `key_present` | boolean | Whether that variable is set in the server's environment. `true` when no key is needed. |
 | `key_env` | string | The variable's **name**. Never its value. |
-| `error` | string | **Present only when this provider's block cannot be read** — the shape the *routing stage* below already had. The other seven keys are still there and still hold values of the type above, so a client can render the row either way; what it must not do is treat a row carrying `error` as configured. A spec whose `api_key_env` is unreadable reports `needs_key: true` and `key_present: false` rather than the "no key needed" pair, which would be a green light nobody earned. Added by the change that closed (15). |
+| `timeout` | number \| null | Seconds. |
+| `temperature` | number \| null | |
+| `max_tokens` | number \| null | |
+| `retries` | number \| null | |
+| `error` | string | **Present only when this provider's block cannot be read** — the shape the *routing stage* below already had. The other eleven keys are still there and still hold values of the type above, so a client can render the row either way; what it must not do is treat a row carrying `error` as configured. A spec whose `api_key_env` is unreadable reports `needs_key: true` and `key_present: false` rather than the "no key needed" pair, which would be a green light nobody earned. Added by the change that closed (15). |
+
+The four numeric knobs were added on 2026-09-01 so that a settings form can
+prefill them; they are additive and did not bump. **Their `null` is a value and
+not a failure**: it means the key is absent from the spec, so the transport's own
+default applies — 120 s, 0.2, 4096, 3 — and a client must render a blank rather
+than write those numbers into a box, or pressing Save pins an inherited value.
+What is reported is what a run will actually use: a string a `float`/`int`
+accepts is *coerced*, exactly as `Provider.__init__` coerces it, because
+`"timeout": "300"` translates perfectly today and calling it unreadable would be
+a false accusation on a working configuration. A value no coercion accepts is
+`null` **and** named in `error`, because that one really cannot be built.
 
 **routing stage** — a value of `GET /api/state`'s `routing`.
 
@@ -1202,6 +1293,25 @@ absence closes.
   That is a property of every connection this project opens, not of the GET, and
   it touches no document content — but "no GET writes anything" would be a false
   sentence, so it is not the sentence written here.
+
+  **A second honest exception, since 2026-09-01: a GET that leaves the
+  machine.** `GET /api/models` opens an outbound request to whatever `base_url`
+  names and sends the `Authorization` header built from that provider's
+  `api_key_env` with it. Nothing on disk changes, and the sentence above stays
+  true of *project state* — but a GET on this surface is no longer confined to
+  the project directory, and a rebuild reading the absolute form would conclude
+  that it is. What bounds it: the destination comes only from the project's own
+  configuration, because `providers.build` refuses a `?provider=` that is not
+  already in the file, so the parameter chooses among configured backends and
+  cannot supply an address; the effect is a bounded read against a backend the
+  person configured, costing no tokens; and the reply is unreadable to a
+  cross-origin script, because no `Access-Control-Allow-*` header is emitted
+  anywhere. What is *not* bounded away is request amplification — a page that
+  gets past the admission gate can make the workbench ask its own backend for a
+  listing, and each such request occupies a thread for up to about 80 seconds.
+  `POST` was the alternative and would have gained the `Origin` rule; it lost
+  because a listing is a read and HANDOFF-035 specifies the method. See
+  `docs/decisions.md`, 2026-09-01.
 - **No way to cancel a running job.** `/api/translate` starts a daemon thread with
   no cancellation flag and there is no endpoint that could set one. A run that
   takes an hour and spends money takes an hour and spends money. A Stop control is
@@ -1900,6 +2010,24 @@ today. What the endpoint changes is who can reach them.
     are never logged — but "the value appears nowhere in the response body" is
     true of `api_key_env` and false of these.
 
+    **Two further reachable paths, appended 2026-09-01 by the package that put a
+    model control and a backend editor on the page.** Neither is a new class and
+    neither is repaired here; both are recorded because that package is what
+    makes them reachable by clicking rather than by typing a dotted key.
+
+    - `GET /api/models`'s `?provider=` reaches the same `unknown provider '…'`
+      echo through `providers.build`, **and the bound stated above does not hold
+      for it**: this value is in a query string, and *Transport* says query
+      strings are logged to the server's stdout while request bodies are not. So
+      a value mispasted here also lands in the scrollback of the terminal running
+      `lx web`, which outlives a response body. Its size is bounded by the 64 KB
+      request line `http.server` accepts.
+    - The toolbar's **model** box rides on `POST /api/translate` as `model`,
+      which `providers.build` puts into `Provider.describe()`, which is the first
+      line of the job log — so it comes back through `POST /api/job`'s `log` and
+      is rendered into the page. It is not stored; the editor's model box is the
+      one that reaches `lx.config.json`, and that is the path recorded above.
+
     **Recorded rather than repaired, because the repair is a decision and not a
     patch.** Widening the doctrine to every field means either dropping the value
     from refusals that are more useful with it — `kind` has three legal values
@@ -1963,6 +2091,51 @@ Appended 2026-09-01 by the package that closed (27) and the wrong-entity half of
     branch as the one a stored translation takes, so counting "no *usable*
     target" changes what two documented values mean. Scheduled as **HANDOFF-036**,
     which owns the bump.
+
+Appended 2026-09-01 by the package that added `GET /api/models`. Both open.
+
+32. **The wire degrades where the command exits.** `GET /api/models` answers
+    `200` with `error` when a backend cannot be reached, still carrying
+    `provider` and `configured`; `lx models` against the same backend exits 2
+    and prints one sentence to stderr, `--json` or not — the flag never gets to
+    run, so there is no JSON at all rather than a three-key object without an
+    `error`. One question, two shapes and two behaviours — divergence (8)'s
+    family, in a stronger form.
+
+    **It is not leaked logic**, which is the distinction that decides whether it
+    has to be repaired: the listing itself is `cli.do_models` on both surfaces
+    and there is no second implementation of anything. What lives only in
+    `web/server.py` is the *degradation policy* — catch, resolve the route
+    anyway, answer 200 — and it lives there because it exists to serve a control
+    that must not block, which a terminal does not have. A command that answered
+    0 and printed nothing when the server was down would be the worse artifact:
+    an exit code is how CI and an agent find out.
+
+    The repair, if it is ever wanted, is a `cli.do_models_report(cfg, provider)`
+    returning the four-key dict that both surfaces call, with `cmd_models`
+    keeping its non-zero exit by reading `error` rather than by catching. That is
+    an addition to the CLI and a `Backed by` line, not a version move.
+
+33. **A listing follows a redirect with the credential attached.** `Provider.
+    _request` uses `urllib.request.urlopen` with the stock opener, and CPython's
+    `HTTPRedirectHandler` strips `Content-*` on a redirect and **keeps
+    `Authorization`**, including across a change of host. So a backend that
+    answers `302` — or a man in the middle on a plaintext `base_url` — moves the
+    `Bearer` token built from `api_key_env` to an address the person never
+    configured.
+
+    Older than this endpoint and not introduced by it: the same opener carries
+    every completion. It is recorded here rather than under invariant 6's list
+    because `GET /api/models` is the first **GET** on which it happens — a
+    request that acquires no state, carries no `Origin`, and still sends the
+    credential outbound. It is *not* the first browser gesture that does: the
+    Translate button has since the workbench existed, which is what makes this
+    divergence older and broader than the endpoint that got it a number. Not repaired here because the fix lands in the shared transport that
+    every completion also uses — either a redirect handler that drops
+    `Authorization` when the host changes, or refusing redirects on a listing,
+    which has no legitimate reason to follow one — and changing what every
+    request in the project does is its own package with its own tests. Found by
+    the security-tier pass over this endpoint's design, 2026-09-01.
 
 ## What is not frozen
 

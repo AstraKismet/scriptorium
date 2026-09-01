@@ -18,7 +18,7 @@ said "verified" of all six, and five of them had never been run.
 """
 
 from ..config import printable_url
-from .base import Provider, ProviderError
+from .base import Provider, ProviderError, _tame
 
 
 class OpenAICompatProvider(Provider):
@@ -58,7 +58,7 @@ class OpenAICompatProvider(Provider):
             # the rule and never its definition".
             raise ProviderError(
                 f"{self.name}: {printable_url(base)}/models did not answer an OpenAI "
-                f"model list (expected a `data` array): {str(data)[:300]}")
+                f"model list (expected a `data` array): {_tame(str(data)[:300])}")
         return self._listing(rows)
 
     def complete(self, system, user):

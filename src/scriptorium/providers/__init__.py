@@ -1,5 +1,6 @@
 """Backend registry."""
 
+import math
 import os
 
 from ..config import printable_url
@@ -32,12 +33,37 @@ def build(name, cfg, model=None):
         raise ProviderError(
             f"unknown provider {name!r}. Configured: {', '.join(sorted(specs)) or 'none'}")
     spec = specs[name]
+    # **A malformed spec is a `ProviderError`, like every other refusal here.**
+    # It used to be whatever Python raised on the way past: a scalar block gave
+    # `AttributeError: 'int' object has no attribute 'get'`, a non-numeric knob
+    # gave `ValueError: could not convert string to float: 'soon'` — *with the
+    # value in it* — and neither is in `cli.main`'s exit-2 tuple, so `lx models`
+    # answered a traceback and `GET /api/models` answered a 400 whose body
+    # echoed a configured value into a browser. Measured 2026-09-01 by the
+    # adversarial pass; `providers.available` beside this has reported all of
+    # these shapes gracefully since 2026-08-20, and the two disagreed.
+    #
+    # No message here repeats a value. The field is named, and `lx providers`
+    # is where the row is read — the reason `_field_api_key_env` gives, applied
+    # to the knobs beside it, because a mispasted key lands in whichever box the
+    # hand slipped into.
+    if not isinstance(spec, dict):
+        raise ProviderError(
+            f"providers.{name} is a block of settings — `kind`, `base_url`, `model` and "
+            f"so on — and this one holds a single value. `lx providers` says the same.")
     if model and model != spec.get("model"):
         spec = {**spec, "model": model}
     kind = spec.get("kind", "openai")
     if kind not in KINDS:
         raise ProviderError(f"unknown provider kind {kind!r}; expected one of {sorted(KINDS)}")
-    return KINDS[kind](name, spec)
+    try:
+        return KINDS[kind](name, spec)
+    except (TypeError, ValueError) as e:
+        raise ProviderError(
+            f"providers.{name} cannot be read ({type(e).__name__}). `timeout`, "
+            f"`temperature`, `max_tokens` and `retries` are numbers, and `headers` is a "
+            f"block of name to value. `lx providers` names the field that is wrong; the "
+            f"value is not repeated here, in case it is a key.") from None
 
 
 def _summary(name, spec):
@@ -54,7 +80,10 @@ def _summary(name, spec):
 
     `error` is present only when there is one, exactly as the routing-stage shape
     beside it does it. Every other key is always there and holds a value of the
-    documented type, so a client can render the row without testing each field.
+    documented type, so a client can render the row without testing each field —
+    with one distinction the four numeric knobs add: their `null` is a *value*,
+    meaning the key is absent from the spec and the transport's own default
+    applies, and it is not the "cannot be read" signal `error` carries.
 
     **A spec whose credential field cannot be read never reports "no key
     needed".** `needs_key: False` with `key_present: True` is how a local runtime
@@ -65,7 +94,8 @@ def _summary(name, spec):
     untrue by a malformed `model`.
     """
     row = {"name": name, "kind": "", "model": "", "base_url": "",
-           "needs_key": True, "key_present": False, "key_env": ""}
+           "needs_key": True, "key_present": False, "key_env": "",
+           "timeout": None, "temperature": None, "max_tokens": None, "retries": None}
     if not isinstance(spec, dict):
         row["error"] = (f"providers.{name} is a block of settings — `kind`, `base_url`, "
                         f"`model` and so on — and this one holds a single value.")
@@ -83,6 +113,37 @@ def _summary(name, spec):
             # all three as strings, and echoing a number here would put a value
             # outside the documented type on the wire rather than saying so.
             problems.append(f"`{field}` is text")
+    # The four numeric knobs, **coerced the way `Provider.__init__` coerces
+    # them** rather than type-checked. `float("300")` and `int("4096")` both
+    # succeed, so a hand-edited `"timeout": "300"` translates perfectly today —
+    # reporting it as unreadable would be a false accusation on a working
+    # configuration, which is the one failure a projection like this must not
+    # produce. What is reported is what the run will actually use.
+    #
+    # `None` means the key is absent, and it is **not** the class default:
+    # `Provider.__init__` falls back to 120/0.2/4096/3 and a form prefilled with
+    # those would let somebody pin an inherited value by pressing Save. A blank
+    # box means "inherited"; the numbers stay in one place, which is the class.
+    for field, cast in (("timeout", float), ("temperature", float),
+                        ("max_tokens", int), ("retries", int)):
+        if field not in spec:
+            continue
+        try:
+            value = cast(spec[field])
+            # `float("Infinity")` and `float("nan")` both succeed, and
+            # `json.dumps` writes them as the bare tokens `Infinity` and `NaN` —
+            # which are **not JSON**. `JSON.parse` rejects the whole body, so one
+            # hand-edited knob took `/api/state` down for the entire page rather
+            # than marking one row. Measured 2026-09-01. Refused here rather than
+            # at the serializer, because this is where the value stops being text.
+            if isinstance(value, float) and not math.isfinite(value):
+                raise ValueError("not a finite number")
+            row[field] = value
+        except (TypeError, ValueError):
+            # Left `None` and named. This one really cannot be read: the same
+            # call inside `Provider.__init__` raises, so the backend cannot be
+            # built at all and the row is not a configured backend.
+            problems.append(f"`{field}` is a number")
     env = spec.get("api_key_env") or ""
     if isinstance(env, str):
         row["key_env"] = env

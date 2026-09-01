@@ -407,6 +407,26 @@ repair, check, preview and commit from the toolbar. A field saves when it loses
 focus, and the text is normalized on the way in, including repairing placeholder
 brackets a model mangled.
 
+**Backends are chosen here too, without editing a file.** The toolbar picks the
+backend and — from a list the backend itself publishes — the model for the next
+run; left alone, the model box sends nothing and each stage uses its own
+configured model. *Backends…* adds or edits one: `kind`, `base_url`, `model`,
+`api_key_env`, `timeout`, `temperature`, and which backend runs `draft`,
+`polish` and `repair`. A local runtime, a server elsewhere on your network and a
+cloud API are all reachable from that form.
+
+Every rule it enforces is the CLI's. The page sends one key per request and
+renders whatever `lx config set` would have said, so the two surfaces cannot
+disagree about what is writable — and **no field is meant to hold an API key**:
+`api_key_env` takes the *name* of an environment variable, and a value shaped
+like a key is refused there and in `base_url` without being repeated back. The
+honest caveat is that the *model* box stores whatever you type, a key pasted into
+the wrong field included; `docs/contracts/workbench-http.md` records that as a
+known divergence rather than pretending otherwise. Changing `base_url` needs an
+explicit acknowledgement, because it decides where the document and the
+credential are sent. A backend cannot be deleted from the browser; that is
+`lx config unset` or the file.
+
 It is a shell over the same functions the CLI calls, so there is no second
 implementation to drift.
 
@@ -507,10 +527,16 @@ repair, render, and a translation memory that survives revisions. Working state
 is SQLite, and a translation run commits each batch as it lands — an interrupted
 100k-word document keeps what it had translated and resumes on the rest.
 
-Queued, roughly in that order: a written and versioned HTTP contract for the
-workbench; EPUB, which is how novels actually circulate; a writable configuration that can point two pipeline stages at
-different models; and a rebuilt review workbench, which is the largest item by
-far and cannot start until the contract is frozen.
+The workbench's HTTP surface is written down and versioned
+(`docs/contracts/workbench-http.md`), configuration is writable from both the CLI
+and the browser, and either surface can point each pipeline stage at a different
+backend. Naming a *model* per stage is `lx routing set draft <provider>:<id>` or
+the file — the browser writes the backend, and a model chosen there applies to
+the run in front of you rather than being stored.
+
+Queued: EPUB, which is how novels actually circulate; and a rebuilt review
+workbench, which is the largest item by far and is what the frozen contract
+exists to make possible.
 
 `docs/decisions.md` records what was decided and, for each entry, the alternative
 that lost.
@@ -518,7 +544,7 @@ that lost.
 ## Development
 
 ```bash
-python -m pytest -q                # 1414 tests, no network
+python -m pytest -q                # 1726 tests, no network
 python -m ruff check src tests
 ```
 

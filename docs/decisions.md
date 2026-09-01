@@ -3,6 +3,279 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-09-01 · Choosing a backend and a model, on both surfaces — and the fourth display surface nobody had counted
+
+Closing HANDOFF-035. `GET /api/models` lands, the workbench gains a model control
+and a backend editor, `providers.available` widens by four numbers, and
+**`contract_version` stays at 3** — a new endpoint and new response keys are
+additive by the contract's own rule.
+
+Three things found while building it are worth more than the feature: a
+credential leak on a path no review predicted, a design that would have silently
+defeated per-stage routing, and a recorded decision this work reverses.
+
+### The settings surface no longer waits for the rebuilt workbench
+
+`docs/decisions.md`, 2026-07-28, "Per-stage backend selection is written by the
+CLI; its settings surface belongs to the rebuilt workbench", decided the
+opposite, on two reasons. **This entry supersedes it**, and the two reasons did
+not expire together:
+
+- *"That endpoint is not written until the origin and path hardening exists"* —
+  **expired.** The hardening landed 2026-07-29 and `POST /api/config` on
+  2026-08-20, with its allowlist closed by arithmetic.
+- *"The current one is a 369-line shell that A6 already schedules for
+  replacement; building a settings panel into it spends the work twice"* —
+  **overruled**, by the maintainer's
+  requirement of 2026-08-20 that both CLI and GUI must let a person choose a
+  local, self-hosted or cloud backend. The cost is real and is paid: the controls
+  in `index.html` are disposable and HANDOFF-204 will delete them.
+
+  What made it payable is that the halves are not the same size. The endpoint,
+  its contract section and the widened projection are **durable** and survive the
+  rebuild untouched; only the markup is thrown away. HANDOFF-035 anticipated this
+  and required the durable half to be built first, which is what was done.
+
+*Lost:* waiting for HANDOFF-204. It loses because 204 is the largest item in the
+queue and the requirement is not conditional on it.
+
+### A listing answers 200 even when it fails
+
+`GET /api/models` never refuses. An unreachable backend, a reply that is not a
+model list, a missing key, a malformed `routing` block — all are `200` carrying
+`error`, with `models: []` and **`configured` still filled in**.
+
+That last word is the whole argument. The control has to degrade to a free-text
+field carrying the model this project would actually send, and that value is
+`config.resolve_route`'s answer: a `provider` naming a different backend *drops
+the routing entry's model*, so it is neither `routing.draft.model` nor
+`providers[name].model`. A `400` carries a sentence and nothing else, so the page
+would have to resolve routing itself — a second spelling of the rule
+`resolve_route` exists to keep in one place.
+
+**The reason is a policy, not an impossibility**, and the first draft of this
+argued it as an impossibility. It is refutable: a page *can* compute `configured`
+from `/api/state` in one line. It is forbidden to, and the measured cost of doing
+it is a spec whose `model` is a non-string, where `providers.available` reports
+`""` and `resolve_route` returns `"5"` — the page would display a model the run
+does not use. Stating a policy as a physical limit is how a decision gets
+reopened by the first person who tests it.
+
+*Lost:* a `400` on a failed listing. It loses on the paragraph above, and
+independently on `tests/test_contract.py`, which walks every documented GET and
+asserts `200`.
+
+**`error` is `null` on success rather than absent**, which is `POST /api/job`'s
+spelling and *not* the *provider* row's. The two conventions look
+interchangeable and are not: a nested shape is invisible to
+`test_contract.py`'s exact-key comparison and a top-level key is not, so a key
+present only on failure makes that test pass or fail according to whether
+anything happens to be listening on `localhost:11434` — which is where
+`DEFAULT_CONFIG` points `routing.draft`. The house rule was already written down
+at `web/server.py`'s `/api/extract` branch and was reached for the wrong
+precedent.
+
+*Cost, accepted:* a client tests truthiness rather than presence. One line, and
+`/api/job` already asks it of every client.
+
+### The model box is empty, and its placeholder is the answer
+
+The obvious control seeds itself with `configured` and sends `model` on every
+run. It is wrong, and quietly: `cli.do_models` resolves stage **`draft`** and
+nothing else, `config.resolve_route` puts the caller's model *first*, and the
+toolbar has three run buttons. So a project routing `polish` to a stronger model
+— the case the object form of `routing` exists for — would have had that model
+replaced by draft's, by a box nobody touched.
+
+The field is therefore empty by default and `model` is omitted from the request,
+so each stage resolves its own routing entry on the server. `configured` appears
+as the head option's label, which is information rather than a value.
+
+*Lost:* seeding the field, then clearing and re-fetching per `mode`. Three
+listings and a control per button, to arrive where an empty field already is.
+
+*Known limit, named rather than fixed:* there is still no way to persist a model
+*for one stage* from the workbench. `routing.<stage>` is written as a bare
+provider name — the object form stays writable by `lx routing set` and by hand,
+and a screen that always emitted it would migrate every configuration on disk.
+
+### A `<select>` with an escape hatch, not a datalist
+
+A native `<input list=…>` combobox was the first choice and it lost on
+discoverability: with an empty input it is indistinguishable from a plain text
+field, so a person who does not know the suggestions exist never opens them —
+which defeats the entire premise, since a router's ids are 47 characters and
+nobody types one. Filtering is prefix-versus-substring by engine, and with
+sixteen ids sharing a `mradermacher/` prefix, typing `gemma` can show an empty
+list.
+
+A `<select>` shows all sixteen with no gesture, carries each model's `status` in
+the option text reliably, and has a *renderable* empty state rather than a
+behaviour to hope for. The `Type an id…` option is the escape hatch, and it is
+required rather than decorative: the listing is advisory, and a single-model
+`llama-server` ignores the `model` field entirely and still answers.
+
+*Cost, accepted:* about eight lines of show/hide, which the datalist would not
+have needed.
+
+### A refusal must leave nothing behind, so `base_url` is written first
+
+The editor sends **one `POST /api/config` per changed field** — a payload of
+several keys is a block write, and no block is writable, which is what makes the
+allowlist sufficient. So a refusal can land in the middle of a sequence.
+
+The order is therefore chosen so that **any prefix of it is a coherent
+configuration**: `base_url`, `api_key_env`, `kind`, `model`, `timeout`,
+`temperature`. Writing `kind` first was the obvious order and is the worst one:
+`config.set_in` opens the provider block on the first key written, so a `base_url`
+refused straight after — a typo, userinfo, a query string, or a missing
+acknowledgement, all common — leaves a backend that appears configured in every
+list, resolves to the hardcoded `http://localhost:11434/v1`, and **cannot be
+deleted over HTTP at all**, because block removal is not on the allowlist. Written
+`base_url` first, a refusal at step one creates nothing. Measured both ways.
+
+The editor stops at the first refusal and names what was written and what was
+not. And the acknowledgement is **sent, never pre-checked**: the checkbox's state
+rides along as `confirm_base_url` and the server is the only gate, so the CLI and
+the page cannot come to disagree about what needs one.
+
+*Lost:* a delete control. It would `403` every time, and a control that always
+fails is worse than an absent one; the UI says so and names `lx config unset`.
+
+### `providers.available` gains four numbers, and their `null` is a value
+
+`timeout`, `temperature`, `max_tokens`, `retries`, so a settings form can
+prefill. Additive, so no bump.
+
+`null` means the key is absent and the transport's own default applies — it is
+**not** the class default written out. A form prefilled with 120/0.2/4096/3 lets
+somebody pin an inherited value by pressing Save, and puts a second copy of those
+numbers in the page.
+
+A string that `float`/`int` accepts is **coerced**, exactly as
+`Provider.__init__` coerces it, and not refused: `"timeout": "300"` translates
+perfectly today, and reporting it through `error` — documented as "this block
+cannot be read" — would be a false accusation on a working configuration. A value
+no coercion accepts is `null` *and* named in `error`, because that one genuinely
+cannot be built.
+
+*Lost:* reporting the class default. *Lost:* type-checking rather than coercing.
+
+### The fourth display surface: `http.client.InvalidURL`
+
+Found by a probe over the new endpoint, not by any of the four design reviews
+that ran before it.
+
+`GET /api/models?provider=<a backend whose hand-edited base_url carries
+userinfo>` answered:
+
+```
+400 {"error": "nonnumeric port: 'SECRETPW@example.invalid'"}
+```
+
+The password, in full, in a body a browser renders. `http.client.InvalidURL`
+descends from `HTTPException` — it is **neither a `ValueError` nor an
+`OSError`** — so `urllib` does not wrap it in a `URLError`, none of
+`Provider._request`'s `printable_url`-masked branches applied to it — there were
+two of them, the not-JSON one and the `URLError` one, and this repair made a
+third — it never became a `ProviderError`, and it was not in `cli.main`'s exit-2
+tuple either. `lx models` and `lx translate` printed the same string in a traceback
+long before this endpoint existed.
+
+This is invariant 6's own clause rather than a new rule: *the enumerated list of
+display surfaces is a symptom and never the definition.* The list has now been
+wrong five times — `describe()` and the transport message in 2026-08-13 (two),
+`POST /api/config`'s reply and `list_models`' wrong-shape message in 2026-08-20
+(two), and this. Every one was a *new path to an old value*, which is the only
+shape this failure has ever taken.
+
+Fixed in `_request` beside the other three, catching the **class** and not the
+member: the first version of the guard caught `ValueError` alone, which is
+`InvalidURL`'s nearest plausible base and not its actual one — the same mistake
+one level down, caught only because the probe was re-run.
+
+### Two controls at a new boundary, and two open items
+
+`GET /api/models` is the first **GET** on this surface that leaves the machine.
+Not the first endpoint — `POST /api/translate` has always reached a backend, with
+the manuscript as well as the credential — and the first draft of this entry said
+"endpoint", which would have sent a future auditor to the wrong one. Two controls
+were added because a browser is a softer audience than a terminal:
+
+- **A hostile error *body* is scrubbed.** `Provider._sane` filters a listing's
+  `id` and `status` and never saw an error body, so a backend answering `400`
+  with `U+202E` or an ANSI erase in its prose could reverse or erase what a
+  person reads. `_tame` replaces those categories with `U+FFFD` — replaced rather
+  than dropped, because an error body is the whole of what the reader has.
+- **A listing is capped at 1000 rows.** `_MAX_FIELD` bounds one field and said
+  nothing about how many there are.
+
+Two are recorded and not repaired, as contract divergences (32) and (33):
+the wire degrades where `lx models` exits non-zero, which is not leaked logic but
+is a real asymmetry; and **a redirect carries `Authorization` to another host**,
+because CPython's `HTTPRedirectHandler` strips `Content-*` and keeps
+`Authorization`. The second is older than this endpoint and lands in the shared
+transport every completion uses, so it is its own package rather than a patch
+here — but this is the first **GET** on which it happens. Not the first browser
+gesture: the Translate button has caused a credential-bearing outbound request
+since the workbench existed, so (33) is older and broader than this endpoint, and
+the entry above says so.
+
+### What the adversarial pass found, after all of the above was written
+
+Four read-only lenses over the finished commit returned thirty-two findings, of
+which two were blockers and six were security-relevant. They are recorded here
+rather than summarized away, because the pattern in them is more useful than any
+one of them.
+
+**Both blockers were controls that existed and were not applied twice.**
+`loadModels` in the toolbar guards its reply with a request token, and
+`loadModelsInto` in the editor — written twenty lines below it, from the same
+shape — had none, so a slow reply overwrote the form and the next Save wrote
+*another backend's* model id into this one. And the model box was fixed to send
+nothing by default while the **provider** box beside it went on sending
+unconditionally, which `resolve_route` treats as an override that drops the
+stage's model with it: every Polish and Repair from this toolbar went to draft's
+backend, on exactly the projects that route stages apart. The commit message
+claimed the opposite. Both are fixed and pinned; the lesson is that a fix written
+once has to be *searched for* at its second site, because the second site is
+always the one that reads as already correct.
+
+**The credential guard was in the right function and the wrong place.**
+`Request.__init__` raises `ValueError` quoting the whole URL, and it was
+constructed one line *above* the `try` that masks — so the sibling of the
+measured leak walked straight past the new handler. Catching the class rather
+than the member was necessary and not sufficient; the class also has to be
+reachable.
+
+**A masking function crashed inside the mask.** `config.printable_url` wraps
+`urlsplit` in a `try`, and `SplitResult.port` is a *lazy property* that parses on
+access — so `if parsed.port:`, one line below the guard, raised on
+`https://user:SECRET@host:notaport/v1`. `/api/state` answered 400 for that
+configuration, which means the whole workbench failed to load on a project the
+backend editor exists to repair.
+
+**A mutation run refuted one of this package's own tests.** The test named for
+the `Request` placement passed with the placement reverted: the scheme check
+added beside it was catching the case first. The placement is kept as depth and
+both the test and the comment now say which guard each row exercises — a row that
+passes for a neighbouring reason stops testing anything the day the neighbour
+moves. A second test could not fail at all, because its payload was already
+sorted and the cut it meant to pin was taken from the same rows either way.
+
+**Six documentation claims were false**, and the load-bearing one was "the only
+endpoint that leaves the machine" — written in five places, and wrong, because
+`POST /api/translate` has always reached a backend and carries the manuscript as
+well as the credential. A future auditor reading "which endpoints leave the
+machine" would have audited the wrong one. It is "the only **GET**" everywhere
+now.
+
+*Lost:* spelling the endpoint `POST` to keep a mispasted `?provider=` out of the
+server's stdout log and to gain the `Origin` rule. It loses because a listing is
+a read and HANDOFF-035 specifies the method; the cost is recorded under
+*Deliberately not in the contract*, which now carries a second honest exception
+saying exactly what this GET does.
+
 ## 2026-09-01 · What `lx commit` may bank, which wording a memory hit may answer over, and the map a stored `⟦n⟧` actually means
 
 Closing HANDOFF-031. Three decisions and one repair found while measuring them.

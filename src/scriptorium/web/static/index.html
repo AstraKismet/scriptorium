@@ -27,8 +27,31 @@ button:hover:not(:disabled){border-color:var(--faint);background:#2B2637}
 button:disabled{opacity:.4;cursor:default}
 button.key{border-color:var(--gold);color:var(--gold)}
 button.key:hover:not(:disabled){background:rgba(192,154,72,.1)}
-select{background:var(--panel-2);border:1px solid var(--rule);border-radius:3px;padding:5px 8px}
+/* `input` joins `select` here rather than inheriting: the only rule that ever
+   matched an input was `color:inherit`, which resolves to --vellum on a field
+   the user agent paints white, and this page had never used one. */
+select,input{background:var(--panel-2);border:1px solid var(--rule);border-radius:3px;
+  padding:5px 8px}
+input::placeholder{color:var(--faint)}
 :focus-visible{outline:2px solid var(--lapis);outline-offset:1px}
+
+/* ── settings dialog ───────────────────────────────────────── */
+.form{padding:16px 18px;display:grid;gap:11px;max-height:66vh;overflow:auto}
+.form label{display:grid;grid-template-columns:150px 1fr;align-items:center;gap:10px}
+.form label>span{color:var(--muted);font-size:12px}
+.form h4{margin:8px 0 0;font:400 14px var(--display);color:var(--vellum);
+  border-top:1px solid var(--rule);padding-top:13px}
+.form .hint{color:var(--faint);font-size:11.5px;grid-column:1/-1;margin:-4px 0 0}
+.form .hint.bad{color:var(--rubric)}
+.form .hint.good{color:var(--gold)}
+.form footer{display:flex;gap:9px;align-items:center;grid-column:1/-1;
+  border-top:1px solid var(--rule);padding-top:13px}
+.ack{grid-column:1/-1;display:flex;gap:8px;align-items:flex-start;
+  color:var(--amber);font-size:11.5px}
+.ack input{width:auto}
+#modelWrap{display:flex;gap:6px;align-items:center}
+#modelNote{color:var(--faint);font-size:11px;max-width:26ch;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
 
 /* ── left rail ─────────────────────────────────────────────── */
 aside{background:var(--panel);border-right:1px solid var(--rule);
@@ -135,6 +158,14 @@ dialog pre{margin:0;padding:18px;max-height:62vh;overflow:auto;
 <main>
   <div class="bar">
     <select id="provider" title="Backend for this run"></select>
+    <span id="modelWrap">
+      <select id="model" title="Model for this run. Left alone, each stage uses its own configured model."></select>
+      <input id="modelText" hidden size="26" spellcheck="false" autocomplete="off"
+             placeholder="model id" title="An id this backend did not list">
+      <span id="modelNote"></span>
+    </span>
+    <button id="bBackends" title="Add or edit a backend">Backends…</button>
+    <span style="width:1px;height:20px;background:var(--rule)"></span>
     <button id="bDraft">Translate pending</button>
     <button id="bPolish">Polish prose</button>
     <button id="bRepair">Repair failing</button>
@@ -161,13 +192,69 @@ dialog pre{margin:0;padding:18px;max-height:62vh;overflow:auto;
 <dialog id="dlg"><header><h3 id="dlgTitle"></h3><span class="spacer" style="flex:1"></span>
   <button onclick="dlg.close()">Close</button></header><pre id="dlgBody"></pre></dialog>
 
+<dialog id="cfg">
+  <header><h3>Backends</h3><span class="spacer" style="flex:1"></span>
+    <button onclick="cfg.close()">Close</button></header>
+  <div class="form">
+    <label><span>Backend</span><select id="cName"></select></label>
+    <label id="cNewRow" hidden><span>New name</span>
+      <input id="cNew" spellcheck="false" autocomplete="off" placeholder="llamacpp"></label>
+    <label><span>Kind</span><select id="cKind">
+      <option value="openai">openai</option>
+      <option value="openai-compatible">openai-compatible</option>
+      <option value="anthropic">anthropic</option>
+    </select></label>
+    <label><span>Base URL</span>
+      <input id="cUrl" spellcheck="false" autocomplete="off"
+             placeholder="http://127.0.0.1:8080/v1"></label>
+    <div class="ack"><input type="checkbox" id="cAck">
+      <label for="cAck" style="display:block">Changing the base URL changes where the
+        document under translation is sent, and the key named below goes with it.
+        Tick to confirm — the server refuses the change without it.</label></div>
+    <label><span>Model</span><select id="cModel"></select></label>
+    <label id="cModelTextRow" hidden><span>Model id</span>
+      <input id="cModelText" spellcheck="false" autocomplete="off"></label>
+    <label><span>API key variable</span>
+      <input id="cEnv" spellcheck="false" autocomplete="off" placeholder="OPENAI_API_KEY"></label>
+    <p class="hint" id="cKeyNote"></p>
+    <p class="hint" id="cErr"></p>
+    <label><span>Timeout (s)</span><input id="cTimeout" type="number" min="1" step="1"></label>
+    <label><span>Temperature</span><input id="cTemp" type="number" min="0" max="2" step="0.05"></label>
+    <p class="hint">A blank number is inherited, not unset — leave it alone unless you
+      mean to pin it. A backend cannot be removed from here; use
+      <code>lx config unset providers.&lt;name&gt;</code> or edit
+      <code>lx.config.json</code>.</p>
+
+    <h4>Which backend runs which stage</h4>
+    <label><span>draft</span><select id="rDraft"></select></label>
+    <label><span>polish</span><select id="rPolish"></select></label>
+    <label><span>repair</span><select id="rRepair"></select></label>
+
+    <footer><button id="cSave" class="key">Save changes</button>
+      <span class="spacer" style="flex:1"></span></footer>
+    <p class="hint" id="cLog"></p>
+  </div>
+</dialog>
+
 <script>
 const $ = s => document.querySelector(s);
+// Throws on a **non-2xx**, and carries the status with it. It used to throw on
+// the presence of `error` in the body regardless of status, which is wrong on
+// this surface in both directions: `GET /api/models` answers 200 with `error`
+// beside the data precisely so the model control can degrade rather than block,
+// and that throw discarded the whole body including the `configured` the
+// degradation needs. It also made `/api/job`'s own `if (s.error)` unreachable —
+// a failed run was reported through the catch instead, which worked by accident
+// and stopped working the moment a second endpoint answered this shape.
+//
+// `e.status` is what the settings form branches on: 403 means the key is never
+// writable and 400 means fix the payload and resend. The contract forbids
+// parsing the sentence, so the status is the only discriminator there is.
 const api = async (path, body) => {
   const r = await fetch(path, body ? {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify(body)} : undefined);
   const d = await r.json();
-  if (d.error) throw new Error(d.error);
+  if (!r.ok) { const e = new Error(d.error || `HTTP ${r.status}`); e.status = r.status; throw e; }
   return d;
 };
 // The quote and the apostrophe are in the set because most of what this file
@@ -186,6 +273,25 @@ const marks = s => esc(s).replace(/⟦(\d+)⟧/g, '<ph>⟦$1⟧</ph>');
 const phs = s => (s.match(/⟦\d+⟧/g) || []).sort().join(',');
 
 let doc = null, cur = null, dirty = new Map();
+// The last `/api/state` projections, kept so the settings form can redraw from a
+// write's own reply. `/api/state` loads every segment of every document to
+// answer, which is a strange price for repainting one dropdown.
+let providers = [], routing = {};
+
+// Build an <option> rather than concatenating markup. Every value here is either
+// remote text (a model id) or a configuration key (a provider name), and the
+// boundary filter that cleaned the first one is about *control* characters — `<`,
+// `>`, `"` and `'` are legal in a model id and pass it untouched. Setting
+// `.value` and `.textContent` cannot be got wrong the way a template can; see
+// contract divergence (21), whose lesson was that an audit's list of unescaped
+// sites was short by one.
+function opt(value, label) {
+  const o = document.createElement('option');
+  o.value = value;
+  o.textContent = label === undefined ? value : label;
+  return o;
+}
+const fill = (el, options) => { el.replaceChildren(...options); };
 
 function say(msg, cls) {
   const el = document.createElement('div');
@@ -200,16 +306,7 @@ async function loadState() {
   const s = await api('/api/state');
   $('#ver').textContent = 'v' + s.version;
   $('#cwd').textContent = s.cwd;
-  $('#provider').innerHTML = s.providers.map(p => {
-    const bad = p.needs_key && !p.key_present;
-    return `<option value="${esc(p.name)}"${bad?' disabled':''}>${esc(p.name)} · ${esc(p.model)}${bad?' (no key)':''}</option>`;
-  }).join('');
-  // `/api/state` reports routing resolved — {provider, model} per stage — because
-  // the configured value is two shapes and assigning the object form here would
-  // set the control to "[object Object]", leaving it blank and sending the run
-  // to whichever backend sorted first.
-  const routed = s.routing.draft && s.routing.draft.provider;
-  if (routed) $('#provider').value = routed;
+  paintProviders(s.providers, s.routing, true);
 
   $('#docs').innerHTML = s.docs.map(d => {
     const pct = Math.round(100 * d.done / Math.max(d.total,1));
@@ -242,6 +339,346 @@ async function loadState() {
   if (cur) document.querySelectorAll('.doc').forEach(b =>
     b.setAttribute('aria-current', b.dataset.src === cur.src && b.dataset.lang === cur.lang));
 }
+
+// ── backends and models ────────────────────────────────────
+
+// Redraw every control that names a provider, from `/api/state`'s own
+// projections — which `POST /api/config` returns too, so a write repaints
+// without a second bootstrap call.
+//
+// `snap` is only true on first load. Afterwards the toolbar keeps whatever
+// backend the person selected: snapping back to `routing.draft` under someone
+// who chose otherwise is the kind of thing that silently sends a run to the
+// wrong place.
+function paintProviders(list, routes, snap) {
+  providers = list; routing = routes;
+  const keep = $('#provider').value;
+  // **The head option sends no `provider` at all, and it is the default.** The
+  // control used to be seeded with `routing.draft.provider` and sent on every
+  // run — and `config.resolve_route` treats a `provider` that differs from the
+  // stage's own as an override *and drops that stage's model with it*. So every
+  // Polish and Repair started from this toolbar went to draft's backend with
+  // draft's model, silently, on exactly the projects that route stages apart.
+  // Fixing the model box alone did not fix it; the box beside it did the same
+  // thing one level up.
+  const stages = ['draft', 'polish', 'repair']
+    .map(k => k + ' → ' + ((routes[k] && routes[k].provider) || '?')).join(', ');
+  fill($('#provider'), [opt('', 'each stage’s own backend  (' + stages + ')')].concat(
+    list.map(p => {
+      const bad = p.needs_key && !p.key_present;
+      const o = opt(p.name, p.name + (bad ? ' — ' + p.key_env + ' not set' : ''));
+      o.disabled = bad;
+      return o;
+    })));
+  // Deliberately no `· model` suffix any more: there is a model control beside
+  // this one now, and the provider's own default is not what a run resolves —
+  // a routing entry naming a model outranks it. Two answers to "what will run"
+  // on one bar, with the wrong one in bigger type.
+  const want = snap ? '' : keep;
+  if (!want || list.some(p => p.name === want)) $('#provider').value = want || '';
+  ['draft', 'polish', 'repair'].forEach(stage => {
+    const el = $('#r' + stage[0].toUpperCase() + stage.slice(1));
+    const now = routes[stage] && routes[stage].provider;
+    fill(el, list.map(p => opt(p.name, p.name)));
+    // Assigned, not left to a `selected` attribute on the option. Both spell the
+    // same thing in a browser; only this one is unambiguous, and a control that
+    // reports no value here would save a routing change nobody asked for.
+    if (now && list.some(p => p.name === now)) el.value = now;
+    delete el.dataset.touched;
+    el.onchange = () => { el.dataset.touched = '1'; };
+    if (!now) {
+      // Say it rather than swallow it: this stage's configured entry could not be
+      // read, the select is showing a guess, and nothing is written unless the
+      // person chooses. `routes[stage].error` is the projection's own sentence.
+      const why = (routes[stage] && routes[stage].error) || '';
+      el.title = why || 'this stage has no readable routing entry';
+    } else { el.title = ''; }
+  });
+  fill($('#cName'), [opt('__new', 'New backend…')].concat(list.map(p => opt(p.name))));
+}
+
+// A monotonic token, because a listing against a black-holed backend can take
+// most of a minute and a person can change the dropdown twice in that time.
+// Without it the last reply to *arrive* wins, and the field ends up holding one
+// backend's models while the select reads another — the stale-model hazard this
+// control clears the field to prevent, arriving through a different door.
+let modelSeq = 0;
+// Which backend the model list on screen came from. A model id belongs to the
+// backend that serves it, so choosing one from a listing chooses that backend
+// for the run — otherwise a model picked while the provider box says "each
+// stage's own" would be sent to whichever backend each stage happens to name.
+let listedProvider = '';
+
+async function loadModels(target) {
+  const el = target || $('#model');
+  const provider = $('#provider').value;
+  const mine = ++modelSeq;
+  fill(el, [opt('', 'asking the backend…')]);
+  $('#modelText').hidden = true;
+  if (!target) $('#modelNote').textContent = '';
+  let d;
+  try {
+    d = await api('/api/models?provider=' + encodeURIComponent(provider));
+  } catch (e) {
+    d = {models: [], configured: '', error: e.message};
+  }
+  if (mine !== modelSeq) return;          // superseded by a later provider change
+  listedProvider = d.provider || '';
+  // **Empty by default, with `configured` as the placeholder.** Seeding the
+  // value would send `model` on every run — and `configured` is *draft's*
+  // answer, so pressing Polish would silently override whatever `routing.polish`
+  // names. Left empty, each stage resolves its own model on the server, which is
+  // the behaviour the routing table exists for.
+  const head = d.configured ? 'configured: ' + d.configured : 'each stage’s own model';
+  fill(el, [opt('', head)].concat(
+    d.models.map(m => opt(m.id, m.status ? m.id + '  · ' + m.status : m.id)),
+    [opt('__other', 'Type an id…')]));
+  if (target) return d;
+  $('#modelNote').textContent = d.error ? 'listing unavailable'
+    : (d.models.length ? d.models.length + ' models' : 'no list published');
+  $('#modelNote').title = d.error || '';
+  if (d.error) say('  models: ' + d.error, 'warn');
+  return d;
+}
+
+// The escape hatch for an id a backend did not list — which is legal: the
+// listing is advisory and a single-model server ignores the field entirely, so a
+// control that only offered what came back would refuse a working setup.
+function otherId(sel, input, row) {
+  sel.onchange = () => {
+    const other = sel.value === '__other';
+    input.hidden = !other;
+    if (row) row.hidden = !other;
+    if (other) input.focus();
+  };
+}
+const chosenModel = () =>
+  ($('#model').value === '__other' ? $('#modelText').value : $('#model').value).trim();
+
+otherId($('#model'), $('#modelText'), null);
+$('#provider').onchange = () => loadModels();
+$('#bBackends').onclick = () => openBackends();
+
+// ── the backend editor ─────────────────────────────────────
+//
+// Every rule it enforces is the server's. The page sends one key per request and
+// renders the refusal; `cli.writable_key` and the field table behind
+// `cli.do_config_set` decide what may be written and what a value may be. A
+// second copy of those rules in JavaScript is how two surfaces come to disagree
+// about what is writable, and it is why even the base-URL acknowledgement is
+// *sent* rather than pre-checked here: the checkbox's state rides along as
+// `confirm_base_url` and the server is the only gate.
+
+const FIELDS = [
+  // Ordered so that **any prefix of it is a coherent configuration**, which is
+  // what a refusal in the middle leaves behind. `base_url` first because it has
+  // the most ways to be refused — no scheme, no host, userinfo, a query string,
+  // and the acknowledgement — so a rejection at step one creates nothing at all.
+  // Writing `kind` first was the obvious order and is the worst one: it opens
+  // the provider block, and a `base_url` refused straight after leaves a backend
+  // that looks configured in every list and silently resolves to the hardcoded
+  // Ollama URL, with no way to delete it from here.
+  ['base_url', () => $('#cUrl').value.trim()],
+  ['api_key_env', () => $('#cEnv').value.trim()],
+  ['kind', () => $('#cKind').value],
+  ['model', () => ($('#cModel').value === '__other'
+                   ? $('#cModelText').value : $('#cModel').value).trim()],
+  ['timeout', () => $('#cTimeout').value],
+  ['temperature', () => $('#cTemp').value],
+];
+
+let editing = null;   // the row the form was filled from, to diff against
+
+function fillForm(name) {
+  const p = providers.find(x => x.name === name);
+  editing = p || null;
+  $('#cNewRow').hidden = !!p;
+  $('#cNew').value = '';
+  $('#cKind').value = (p && p.kind) || 'openai';
+  $('#cUrl').value = (p && p.base_url) || '';
+  $('#cEnv').value = (p && p.key_env) || '';
+  // Blank when the key is absent. The transport's own defaults apply then, and
+  // writing them into the box would let somebody pin an inherited value by
+  // pressing Save — the numbers live in `Provider.__init__` and this page must
+  // not carry a second copy.
+  $('#cTimeout').value = p && p.timeout != null ? p.timeout : '';
+  $('#cTemp').value = p && p.temperature != null ? p.temperature : '';
+  $('#cAck').checked = false;
+  $('#cModelTextRow').hidden = true;
+  fill($('#cModel'), [opt(p && p.model ? p.model : '', p && p.model ? p.model : '(none)'),
+                      opt('__other', 'Type an id…')]);
+  $('#cModel').value = (p && p.model) || '';
+  $('#cModelText').value = '';
+  // `key_present` is read from **this server process's** environment, which was
+  // fixed when `lx web` started. Exporting the variable in another terminal and
+  // reloading the page changes nothing, so "(no key)" would read as "you have
+  // not configured this" when the real next step is a restart.
+  const note = $('#cKeyNote');
+  note.className = 'hint';
+  // The projection's own sentence for a block it could not read. Without it the
+  // configuration this form exists to repair is the one thing the form does not
+  // show — the row is drawn from `available()`, which already says what is wrong.
+  const bad = $('#cErr');
+  bad.textContent = (p && p.error) || '';
+  bad.className = p && p.error ? 'hint bad' : 'hint';
+  if (!p || !p.needs_key) note.textContent = 'Empty means this backend needs no key.';
+  else if (p.key_present) note.textContent = p.key_env + ' is set in this workbench’s environment.';
+  else {
+    note.className = 'hint bad';
+    note.textContent = p.key_env + ' is not set in the environment this workbench was '
+      + 'started in. Export it and restart lx web — a running process cannot re-read it.';
+  }
+  editorSeq++;                   // any listing still out belongs to the old row
+  if (p) loadModelsInto(name);
+}
+
+// The editor's model box is fed by the same listing the toolbar uses, so a
+// 47-character id is picked rather than copied by hand between two controls on
+// one page.
+let editorSeq = 0;
+
+async function loadModelsInto(name) {
+  const el = $('#cModel');
+  const own = ((providers.find(x => x.name === name) || {}).model) || '';
+  const mine = ++editorSeq;
+  // **The placeholder carries the stored id, and that is not cosmetic.**
+  // Replacing a `<select>`'s options resets its value, so a blank placeholder
+  // made `saveBackends` read `want === ''` — which this form spells
+  // `unset: true`. Pressing Save while the listing was in flight therefore
+  // *deleted* `providers.<name>.model` from a backend nobody meant to touch, and
+  // reported it as "Saved: model". The window is the whole round trip — up to
+  // about eighty seconds against a backend that has stopped answering, and the
+  // person in this form is the one whose backend has stopped answering.
+  fill(el, [opt(own, own ? own + '  · asking the backend…' : 'asking the backend…')]);
+  el.value = own;
+  let models = [];
+  try {
+    models = (await api('/api/models?provider=' + encodeURIComponent(name))).models;
+  } catch (e) { /* the listing is advisory; the stored id stands without it */ }
+  // Superseded — by another backend being chosen, or by the form being refilled.
+  // Without this the slow reply overwrote the form under somebody who had already
+  // moved on, and the next Save wrote *another backend's* model id into this one.
+  // It is the hazard `modelSeq` guards in the toolbar: the fix was written once
+  // and this second call site did not get it.
+  if (mine !== editorSeq || !editing || editing.name !== name) return;
+  fill(el, [opt(own, own || '(none)')].concat(
+    models.filter(m => m.id !== own).map(m => opt(m.id, m.status ? m.id + '  · ' + m.status : m.id)),
+    [opt('__other', 'Type an id…')]));
+  el.value = own;
+}
+
+function openBackends() {
+  fillForm($('#cName').value === '__new' ? null : $('#cName').value);
+  $('#cLog').textContent = '';
+  $('#cfg').showModal();
+}
+
+$('#cName').onchange = () => fillForm($('#cName').value === '__new' ? null : $('#cName').value);
+otherId($('#cModel'), $('#cModelText'), $('#cModelTextRow'));
+
+async function saveBackends() {
+  const name = editing ? editing.name : $('#cNew').value.trim();
+  const log = $('#cLog');
+  log.className = 'hint';
+  if (!name) { log.className = 'hint bad'; log.textContent = 'Name the backend first.'; return; }
+  const done = [];
+  // **Which of the two credential fields goes first depends on which risk is
+  // live.** On a *new* backend `base_url` leads, so a refusal creates nothing at
+  // all. On an *existing* one, if both change, `api_key_env` leads: the
+  // acknowledgement the person ticked says the key named below goes with the new
+  // URL, and writing the URL first and then having the key refused leaves the
+  // backend pointing at the new host with the *old* credential — the one
+  // sentence of the acknowledgement that no ordering of two requests can keep,
+  // unless the credential half lands first.
+  const order = editing
+    ? FIELDS.slice().sort((a, b) => (a[0] === 'api_key_env' ? -1 : b[0] === 'api_key_env' ? 1 : 0))
+    : FIELDS;
+  for (const [field, read] of order) {
+    const want = read();
+    const had = editing ? (field === 'api_key_env' ? editing.key_env
+                         : editing[field] == null ? '' : String(editing[field])) : '';
+    // Compared as numbers where the field is one: an input reports a string and
+    // the projection reports a number, so `"300"` against `300.0` is a spurious
+    // write of a value that did not change — and every write here is a request.
+    const num = field === 'timeout' || field === 'temperature';
+    const same = num && want !== '' && had !== ''
+      ? Number(want) === Number(had) : String(want) === String(had);
+    if (same || (!want && !editing)) continue;   // unchanged, or blank on a new backend
+    // **An emptied box removes the key; it does not write a falsy value.** A
+    // cleared timeout meant `Number('')` — zero — which is a legal number and a
+    // useless one, and a cleared base_url meant the empty string rather than the
+    // provider's own default coming back. `api_key_env` is the exception and the
+    // only one: an empty value there is the documented way to say this backend
+    // needs no credential, so it is written rather than removed.
+    const body = {key: `providers.${name}.${field}`};
+    if (!want && field !== 'api_key_env') body.unset = true;
+    else body.value = (field === 'timeout' || field === 'temperature') ? Number(want) : want;
+    // Sent whatever its state, never pre-checked: the acknowledgement is the
+    // server's gate and the checkbox only carries the person's answer to it.
+    // Removal needs it too — dropping a `base_url` redirects the credential just
+    // as writing one does.
+    if (field === 'base_url') body.confirm_base_url = $('#cAck').checked;
+    try {
+      const r = await api('/api/config', body);
+      paintProviders(r.providers, r.routing);
+      done.push(field);
+    } catch (e) {
+      // Stop rather than carry on: the fields after this one would land on a
+      // backend whose earlier field was refused. Say what did get written, or
+      // the person cannot tell how far it got. The sentence is the server's and
+      // is rendered as text — never parsed, and the value is never echoed back
+      // into the field it came from.
+      log.className = 'hint bad';
+      log.textContent = (e.status === 403
+        ? `${field} cannot be written from here. `
+        : `${field} was refused. `) + e.message
+        + (done.length ? ` — ${done.join(', ')} had already been saved.` : ' Nothing was saved.');
+      return;
+    }
+  }
+  // **Read all three before writing any of them.** Every successful write
+  // repaints from its own reply, and that repaint rebuilds these selects — which
+  // resets their values to the server's state and clears the touched marks. So
+  // changing all three and pressing Save wrote only the first: the repaint after
+  // it discarded the other two choices before the loop reached them. Reported
+  // from the acceptance run, 2026-09-02, and it is the same class as the two
+  // listing races above — a control read *after* an await is a control somebody
+  // else may have rewritten.
+  const wanted = [['draft', '#rDraft'], ['polish', '#rPolish'], ['repair', '#rRepair']]
+    .filter(([, el]) => $(el).dataset.touched)
+    .map(([stage, el]) => [stage, $(el).value]);
+  // **Touched, not merely different**, which is what the filter above is for. A
+  // stage whose configured entry is malformed resolves to `{provider: "", …}`,
+  // so *every* value in the select differs from it — and a Save that changed
+  // only a timeout silently rewrote that stage to whichever backend happened to
+  // be showing. The person came to this form to repair the file, not to have it
+  // decided for them.
+  for (const [stage, want] of wanted) {
+    if (!want || (routing[stage] && routing[stage].provider === want)) continue;
+    try {
+      // The bare provider name, never `{provider, model}`: both spellings are
+      // legal and every configuration on disk uses the bare one, so a screen
+      // that always emitted the object form would migrate them all.
+      const r = await api('/api/config', {key: 'routing.' + stage, value: want});
+      paintProviders(r.providers, r.routing);
+      done.push('routing.' + stage);
+    } catch (e) {
+      log.className = 'hint bad';
+      log.textContent = `routing.${stage} was refused. ` + e.message;
+      return;
+    }
+  }
+  log.className = 'hint good';
+  log.textContent = done.length ? 'Saved: ' + done.join(', ') + '.' : 'Nothing had changed.';
+  fillForm(name);
+  fill($('#cName'), [opt('__new', 'New backend…')].concat(providers.map(p => opt(p.name))));
+  $('#cName').value = name;
+  if ($('#provider').value === name) loadModels();
+}
+
+$('#cSave').onclick = () => saveBackends().catch(e => {
+  $('#cLog').className = 'hint bad'; $('#cLog').textContent = e.message;
+});
 
 // ── ledger ─────────────────────────────────────────────────
 async function open(src, lang) {
@@ -360,12 +797,30 @@ async function job(mode) {
   busy(true);
   say(`— ${mode} —`);
   try {
-    const j = await api('/api/translate', {...cur, mode, provider: $('#provider').value});
+    // **Neither key is sent unless it was chosen.** With both omitted the server
+    // resolves this stage's own routing entry, which is what makes one pair of
+    // controls on a bar with three run buttons safe — a seeded value in either
+    // box is draft's answer riding on Polish and Repair.
+    const model = chosenModel();
+    const provider = $('#provider').value || (model ? listedProvider : '');
+    const j = await api('/api/translate', {...cur, mode,
+      ...(provider ? {provider} : {}), ...(model ? {model} : {})});
+    // What the server actually resolved, which is the only place this answer
+    // appears outside a log line the contract forbids parsing. Without it a
+    // reviewer cannot tell which backend produced the wording in front of them.
+    if (j.route) say(`  ${j.route.error || j.route.provider + ' · ' + (j.route.model || 'default')}`);
     if (!j.total) { say('nothing to do'); return; }
     let seen = 0;
     for (;;) {
       await new Promise(r => setTimeout(r, 700));
       const s = await api('/api/job', {id: j.id});
+      // A job record, or a 200 carrying `error` alone — the contract's
+      // divergence (5). It used to arrive as a throw from `api()`; now that only
+      // a non-2xx throws, the two have to be told apart here, and by the absence
+      // of `done` rather than by the presence of `error`, because a live record
+      // carries `error: null` throughout and a failed one carries a sentence
+      // while still being a record.
+      if (!('done' in s)) { say('  ' + s.error, 'bad'); break; }
       s.log.slice(seen).forEach(l => say('  ' + l));
       seen = s.log.length;
       if (s.done) {
@@ -425,7 +880,10 @@ $('#bCommit').onclick = async () => {
 };
 
 window.addEventListener('beforeunload', e => { if (dirty.size) e.preventDefault(); });
-loadState().catch(e => say(e.message, 'bad'));
+// The listing is fired after the bootstrap and not awaited with it: it leaves
+// the machine and can block for most of a minute against an unreachable backend,
+// and the document list must not wait on that.
+loadState().then(() => loadModels()).catch(e => say(e.message, 'bad'));
 </script>
 </body>
 </html>
