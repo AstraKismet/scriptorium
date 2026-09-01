@@ -284,6 +284,20 @@ The fourth was the workbench: `POST /api/commit`'s only shipped client printed
 `translation memory += 12` and dropped the arrays, which is the "report nobody
 can act on" shape the gate's own docstring names. It names them now.
 
+**The mutation pass killed eighteen of twenty and the two survivors were the
+same hole seen twice**, which is the thing worth keeping: both were on the *warn*
+path. A gate refusing on any issue rather than on error severity survived,
+because every commit test had either no issues or an error and none had a
+warn-only segment; and relaxing the `numbering` rule's `and` to an `or` survived,
+which is not a same-result mutant at all — with one map absent, one side of the
+comparison leaves every ⟦n⟧ bare while the other substitutes, so the rule would
+fire on nearly every ordinary segment carrying markup. It survived because
+warnings are lightly asserted across the suite. Two tests close both, and each
+was checked against its own mutant rather than merely written. The suite tested
+that an error blocks, that a hold blocks, that `checks_disabled` is honoured and
+that the warning fires; it did not test that a warning *lets the wording
+through*, which is half of the rule the gate's docstring states.
+
 The security lens found **no new exposure**: the two arrays carry segment ids
 `GET /api/doc` already gives the same caller, `src` and `lang` are confined by
 field presence before the dispatch reaches this endpoint, and the

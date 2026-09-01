@@ -1812,3 +1812,52 @@ def test_containment_reads_the_target_against_the_map_the_render_uses(
     assert text == "Note 說。\n", "the rendered line opens no list"
     report, _ = do_check("d.md", "zh-TW", CFG)
     assert report["errors"] == 0 and report["by_rule"] == {"numbering": 1}
+
+
+def test_a_warning_is_not_a_refusal_and_the_wording_is_still_banked(
+        tmp_path, monkeypatch):
+    """The other half of "what `lx check` does not call an error".
+
+    Found by the mutation pass, 2026-09-01: a gate refusing on *any* issue
+    rather than on error severity survived the whole suite, because every commit
+    test either had no issues at all or an error. The rule this project runs on
+    is that warn reports and never blocks — `held`, `bare_term`, `numbering`,
+    `punct`, `length` are all warn on purpose — so a segment whose only issue is
+    one of those has to bank, and nothing said so.
+    """
+    _project(tmp_path, monkeypatch, dnt="Celurion\n", doc=b"Celurion ships today.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    sid = _only(doc)["id"]
+    # `bare_term`: the protected name is behind its placeholder once and stands
+    # in the target as plain text as well. Warn, because at the level of the text
+    # a defect and a legitimate repeat are the same string.
+    do_apply("d.md", "zh-TW", CFG, {sid: "⟦1⟧ 今天出貨，Celurion 準時。"}, origin="human")
+
+    report, _ = do_check("d.md", "zh-TW", CFG)
+    assert report["errors"] == 0 and report["by_rule"] == {"bare_term": 1}
+    assert _commit() == (1, [], [], []), "a warning does not withhold the wording"
+    assert [r["target"] for r in load_tm("zh-TW").values()] == ["⟦1⟧ 今天出貨，Celurion 準時。"]
+
+
+def test_numbering_says_nothing_about_a_segment_that_was_never_stranded(
+        tmp_path, monkeypatch):
+    """The `numbering` rule needs **both** maps, and the `and` is the whole rule.
+
+    Found by the mutation pass, 2026-09-01: relaxing that `and` to an `or`
+    survived the suite. It is not a same-result mutant — with only one map
+    present, one side of the comparison unmasks against nothing and leaves every
+    ⟦n⟧ bare while the other substitutes, so the rule would fire on essentially
+    every ordinary translated segment carrying markup. It survived because
+    warnings are lightly asserted, which is exactly the kind of hole a mutation
+    pass exists to find.
+    """
+    _project(tmp_path, monkeypatch, doc=b"Run `make build` now.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    seg = _only(doc)
+    assert seg["masked"] == "Run ⟦1⟧ now.", "the segment carries a placeholder"
+    do_apply("d.md", "zh-TW", CFG, {seg["id"]: "現在執行 ⟦1⟧。"}, origin="human")
+
+    stored = load_doc("d.md", "zh-TW")["segments"][0]
+    assert "target_slots" not in stored, "nothing stranded it"
+    report, _ = do_check("d.md", "zh-TW", CFG)
+    assert "numbering" not in report["by_rule"], report["by_rule"]
