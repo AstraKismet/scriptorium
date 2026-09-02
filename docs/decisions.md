@@ -3,6 +3,286 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-09-02 · How much of a document goes to the model, and what it cost coming back
+
+Closing HANDOFF-042. `limit` stops being a draft-queue detail and becomes the one
+answer to "how much of this document goes to the model this time", on both
+surfaces; and the completion reply's `usage` object is read, which nothing in
+this project had ever done. `contract_version` stays at **3**: a new optional
+request field and a new response key are both additive by the contract's own
+Versioning rule.
+
+### `limit` bounds every branch, and that overturns a tested decision
+
+It reached the pending branch alone. `tests/test_select.py` pinned that, and its
+docstring gave the reason: applying a bound to a repair round "would leave a
+document failing `lx check` with no sign of why". The rule is now one cap applied
+once to whatever the branch selected, and the test is rewritten.
+
+Three things decided it.
+
+The stated reason **applies equally to the draft branch**, which has had a limit
+since it was written: a bounded draft leaves exactly the same `missing` errors.
+So the argument was never about repair; it was about a run not saying why it
+stopped, and that is answered by saying why — `cli._report_limit` on the
+translate and repair paths, and a sentence of its own in `lx run`.
+
+What it cost meanwhile is in `_model_writable`'s own docstring, measured on
+2026-08-16 for a different reason: `lx translate --mode polish` on a
+2000-paragraph reviewed novel selects all two thousand. A reviewer pressing
+**Polish prose** or **Repair failing** in the workbench spends a whole book's
+tokens and no control on that bar could stop it — the wire could not express a
+bound at all, since `POST /api/translate` dropped `limit` on the floor. One
+control beside three run buttons has to bind all three, or it lies about two of
+them; and a documented wire field that is silently inert for two of four
+documented modes is the shape this contract's *Known divergences* section keeps
+recording as a defect, arriving deliberately.
+
+And the red line HANDOFF-042 set — "add the parameter's route, never a second
+predicate" — is **satisfied by fewer rules, not more**. One cap at the end of
+`do_select` replaces a cap the pending branch carried privately; nothing else
+decides membership. What would have breached it is a slice in `web/server.py`
+after `do_select` returns, a bounded twin of `translate.failing_segments`, or a
+slice in the frontend. None was built.
+
+Two defects fell out of the restructure, both reachable on the parent build
+`67629fd` and both fixed by it:
+
+- **The cap ran before the exclusions.** `pending_segments` sliced, then
+  `do_select` dropped what a model may not write, so
+  `lx translate --all --limit 20` on a document whose first thirty segments are
+  a person's wording selected **nothing** while the unbounded call selected ten.
+  This is the argument that file already makes for a hold — "filtering
+  afterwards would let a run of held segments eat a `--limit 20` and hand back
+  four" — applied to the other rule that removes work. The cap is last now.
+- **A negative bound translated almost everything.** `out[:-5]` is *everything
+  except the last five*: `lx translate --limit -5` on a 100-segment document
+  translated 95 and exited 0.
+
+`cli.checked_limit` refuses a non-integer, a `bool` and a negative;
+`0`/`false`/`null`/absent are one value meaning unbounded. `isinstance(True,
+int)` is true, so `{"limit": true}` sliced to exactly one segment. It is a
+`UnusableTarget`, so the CLI answers one sentence and exit 2 and the endpoint
+answers `400`, and it lives in `do_select` so neither surface can walk around it
+— `do_apply`'s empty-target refusal set that precedent.
+
+**The check runs before `ids` short-circuits, and the bound is applied after.**
+Shape and precedence are two questions: a malformed field is malformed whether
+or not this call reaches it, and accepting `{"ids": [...], "limit": "5"}`
+silently means the client's bug surfaces on the day they stop sending `ids`, as
+a run that translates a whole book. Strictness is free here for a reason the
+open divergence (28) makes precise: refusing a value an endpoint *already*
+accepts narrows an accepted value set and bumps, and a field that did not exist
+yesterday has nothing to narrow.
+
+*Lost:* `do_select` returning `(segments, selectable)` so both surfaces could
+report how much was left behind. It is the better report — "a run that says
+'translated 40' while having skipped four is a report nobody can act on" is this
+project's own standard — and the count is free, since the full list is built
+before it is truncated. It loses on blast radius: the return type of the one
+shared selection seam changes for six production call sites and some fifteen
+test assertions, to add a number the workbench already shows in its tally and
+the CLI can approximate honestly. `cli._report_limit` says "stopped at the
+--limit of N" when the selection came back exactly at the cap — which can be one
+off when the queue held exactly that many, and says nothing it did not measure.
+A later package can take `selectable`; nothing here forecloses it.
+
+### The bound is on spend, not on progress — and the first version said otherwise
+
+**Found by the adversarial pass, reproduced against a live backend, and it is
+the correction this entry most needs to carry.** A bound takes the *front* of
+the selection. Whether running again gets you different segments depends on
+whether working on them changes what the mode selects — and that is true of
+`draft` and false of `polish`:
+
+```
+lx translate --mode polish --limit 3   -> asked s0001 s0002 s0003
+lx translate --mode polish --limit 3   -> asked s0001 s0002 s0003
+lx translate --mode polish --limit 3   -> asked s0001 s0002 s0003
+```
+
+A polished segment is still translated prose, so it is selected again. `repair`
+sits between the two: a segment that is repaired leaves the failing set, one
+that keeps failing does not.
+
+The first version of this work shipped three sentences that read the bound as
+progress and were therefore false on two of the four modes: `_report_limit` said
+"run the same command again for the rest", the workbench labelled its control
+"Next 25", and `lx run`'s refusal said "the rest of the document is still
+untranslated" whenever `--limit` was set — that last one measured saying it to
+somebody whose document was **12 of 12 translated**, with a remedy ("run the
+same command again") that did nothing. A message naming the wrong cause is worse
+than the general one it replaced, because it sends the reader somewhere that
+cannot help.
+
+All three are corrected to state the bound and promise nothing: "anything past
+it was not sent", "At most 25", and a refusal that **asks** the draft queue
+whether anything is left before claiming there is. `lx run`'s message is gated
+on that answer rather than on the flag.
+
+*Considered and refused:* making a bounded polish advance. It needs per-mode
+progress state — which segment was polished at which version — and that is a
+second queue this project does not have and this package did not schedule. What
+a person wanting specific segments has instead is `ids`, which no bound
+truncates.
+
+*Lost:* the page offering **"up to the next chapter"**, which HANDOFF-042 named
+as the most useful shape for a novel. To compute it client-side the page must
+predict which segments `do_select` will return — the held exclusion, the
+origin-precedence drop, the status rule — which is precisely the pipeline logic
+invariant 8 keeps out of the frontend. To do it server-side, `do_select` needs a
+truncation rule that is not a count, in *document* coordinates rather than
+selection coordinates, and for `mode: "polish"` a heading is never in the
+selection at all. The page offers counts. A future package wanting chapters owns
+that second rule and its own entry.
+
+### A bounded `lx run` needed no new rule about rendering
+
+HANDOFF-042 framed this as a choice: either a bounded run stops before
+rendering, or it renders with the untranslated marker. **There was a third
+option and it is the one already in the code.** `cmd_run` refuses to render
+while errors remain, and the work a bound deliberately left undone *is* an error
+— `missing`, at error severity. So a bounded run that left work does not render,
+a bounded run that happened to finish the document does, and neither needed a
+line. Only the sentence changed: "inspect with `lx check` or fix in `lx web`" is
+wrong advice when the reason is that somebody asked for fifty of three hundred,
+and sends a reader to a command that lists hundreds of errors they created on
+purpose.
+
+The exit code stays **1**. *Lost:* exiting 0 when every segment the run itself
+touched passes check. It is more comfortable, and it collapses "the document is
+finished and written" and "this bounded pass went fine" into one code a caller
+cannot tell apart — where invariant 10 rests on that code meaning something.
+
+*A sentence that stood here is withdrawn, and it is worth keeping the correction
+rather than the claim.* It said that as it stands `until lx run --limit 50; do
+:; done` is a working idiom, and offered that as the argument against exiting 0.
+**It is false, and the adversarial pass over this change reproduced it**: on a
+document holding one failing segment a person wrote, that loop never terminates
+— repeat runs translate the rest, reach 12 of 12, and keep exiting 1, because
+origin precedence means no run may repair the segment that is failing. The loop
+is not a bounded run's property at all; an *unbounded* `lx run` on the same
+document exits 1 forever too, which is the pre-existing "errors remain" contract
+and is correct. So the exit code stands on the first argument alone. What the
+bound really broke was the *message* beside it — see below.
+
+**What did need building is the repair loop.** An untranslated segment fails
+`checks.check_segment`'s `missing` rule at error severity, so
+`do_select(mode="repair")` returns every segment the bound left alone — verified
+on `67629fd`. Without a fix, repair round 1 translates the entire remainder:
+the same money, stamped `llm:repair` instead of `llm:draft`, printing "repair
+round 1/3: 980 failing segment(s)" as though that were normal. `--limit` would
+have been worse than inert.
+
+`cmd_run` narrows each repair round to the ids this command itself sent. It is
+the command scoping its own work, not a second answer to what `repair` means —
+`do_select` is still asked, and its answer is filtered. **Only under `--limit`**,
+so an unbounded run keeps repairing a carryover wording it did not write, which
+is behaviour a build that narrowed unconditionally would have silently dropped.
+Both directions are pinned by a test.
+
+*Lost:* narrowing `repair` itself to exclude never-translated segments. It reads
+well and it changes the contract's own selection table on both surfaces —
+divergence (2) territory, and a version move this package was scheduled not to
+make. *Lost:* skipping the repair rounds entirely under a bound, which leaves the
+segments the person actually paid for unrepaired and deletes the reason to use
+`lx run` over `lx translate --limit N`.
+
+`--limit` bounds **each model pass** rather than the whole command, so
+`--polish --limit 20` drafts twenty and polishes twenty. The per-command reading
+is tidier and answers badly on the case the flag most exists for: on an already
+translated book it drafts nothing, so a per-command budget leaves nothing for
+the polish pass and `lx run --polish --limit 20` does nothing at all.
+
+### `usage` is read off the reply, and invariant 7 is not touched
+
+Nothing here had ever read it: at the parent commit `67629fd`,
+`grep -rn "usage\|prompt_tokens" src/` returned nothing. It is now accumulated in `providers/base.Provider`, one `_UsageTotals`
+per instance — and `translate_segments` builds exactly one provider per run, so
+that is a run's total with no counter threaded through the batch loop.
+
+**Counted in `_post`, not in `complete()`.** `_post`'s two callers are exactly
+the two `complete()` implementations, so a reply cannot be counted twice and a
+third backend is counted without its author knowing this exists. `_get` does not
+count: a model listing is not a completion.
+
+**A subclass supplies two field names and nothing else.** Reading, validating,
+bounding and accumulating live in `Provider`; `AnthropicProvider` overrides
+`USAGE_FIELDS` to `("input_tokens", "output_tokens")` and that is all. This is
+the `_sane`/`_listing` correction applied in advance rather than after — that
+docstring records a rule about an untrusted reply written private to
+`openai_compat.py` leaving the Anthropic path unprotected for a day, because a
+`kind: "anthropic"` `base_url` is configurable and LiteLLM serves the Messages
+API.
+
+**`total` is `prompt + completion`, computed here and never read from the
+reply.** A gateway's `total_tokens` may count cached or reasoning tokens that
+are in neither of the other two, and the Anthropic shape publishes no total at
+all — so reading it where it exists would make one key mean "what the backend
+said" on one backend and "what we added up" on the other. The reply's
+`total_tokens` is dropped from the read set entirely.
+
+The reading rule: `int`, not `bool`, `0 <= v <= 10**12`, **both fields or
+neither**. Floats are refused outright, `42.0` included, because accepting
+floats means accepting `NaN` and `Infinity` — which `json.loads` produces from
+the bare tokens it takes as an extension and `json.dumps` writes back as those
+same bare tokens, the invalid JSON `providers.base._finite` records taking
+`/api/state` down, arriving from the wire this time instead of a hand-edited
+config. Partial credit is refused because one good half would move a total the
+run then calls complete. The 4300-digit hazard needs nothing new: `json.loads`
+itself raises on such a literal, inside the handler that already turns it into a
+`ProviderError`, so the completion is refused before any usage read.
+
+**No part of the remote object is ever formatted as text.** Only validated
+integers are, and only after summation — so `_sane` and `_tame` have nothing to
+do on this path, and that absence is the property rather than an oversight.
+
+Three report lines, from one function, `translate.usage_line`, reaching a
+terminal and the job log through the existing `progress` sink — so
+`web/server.py` formats nothing and the two surfaces cannot word it differently.
+Every reply counted: the number is the cost. Some counted: the sentence opens
+"at least" and names the ratio, because a floor that reads as a total is the one
+output worse than no output. None counted — the llama.cpp case — it says the
+cost is unknown rather than printing a zero that reads as a free run. No reply at
+all: no line, since "0 of 0" under a command that called nothing is worse than
+silence.
+
+*Lost:* carrying the totals out by widening the returns —
+`translate_segments` to a 3-tuple, `do_translate` to a 4-tuple. It is the more
+discoverable design and it **loses the failure path**: a run that dies at 90%
+has spent 90% of the money, and a tuple is not returned when something raises.
+`on_usage` is called from a `finally`, which is the property version 2
+established for `applied` and for the same reason. The twelve mechanical call
+sites it would have edited are the smaller half of the argument.
+
+`translate_segments` reads the counter with `getattr(provider, "usage", None)`,
+which is why this landed without editing one existing test: every stub provider
+in the suite is duck-typed with `describe` and `complete`, reports nothing, and
+therefore exercises the degradation branch for real rather than by pretending.
+
+`POST /api/job` gains `usage`, present on every answer with all five fields `0`
+until a reply arrives — the shape never changes, so a client reads five integers
+rather than branching on a null, and `replies: 0` is what says no model was
+called. It is the one field there that is **not** accumulated as the run goes: it
+is written once at the end.
+
+**Invariant 7 is untouched and gains a sentence** so the next reader does not
+take this as permission: reading the reply is free, asking for more of it is
+not. `stream_options: {"include_usage": true}` is a request field and is
+refused whatever it would buy. The two tests pinning the request body to
+`{model, messages, temperature, max_tokens, stream}` are unedited, and a third
+now asserts the same set *while usage is being collected*, so a build that
+started asking for it fails on the feature rather than somewhere unrelated.
+
+*Not done, deliberately:* a pre-run estimate. It needs a tokenizer, which is a
+compiled dependency under invariant 1, and `lx translate --dry-run` keeps its
+"source characters" line unchanged — the honest proxy this command already
+chose. A bounded run is the control. Recorded here so the next person does not
+go shopping for one.
+
+Where the numbers are *persisted* is HANDOFF-040's question, and this entry is
+what that package inherits rather than deciding again.
+
 ## 2026-09-02 · Chinese has a second numeral system, and the rule that did not know it
 
 Closing HANDOFF-038. `checks.py`'s `numbers` rule stops differencing ASCII digit

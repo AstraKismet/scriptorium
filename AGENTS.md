@@ -200,6 +200,18 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    through. Measured 2026-08-20 by the adversarial pass over the change that
    introduced this.
 
+   **Reading the reply is free; asking for more of it is not.** Since 2026-09-02
+   a completion's `usage` object is read off the response and reported as what
+   the run cost. That adds no field to the body, and the two tests pinning it are
+   unedited — a third asserts the same five keys *while* usage is being
+   collected. `stream_options: {"include_usage": true}`, and any `usage` or
+   `metadata` request field a hosted API offers, is a **request** field and is
+   refused by this invariant whatever it would buy. A backend that reports
+   nothing reports nothing, and the run says so rather than asking for it. The
+   reply is untrusted like any other: only integers that pass
+   `Provider._token_count` are ever formatted, so no part of a remote `usage`
+   object reaches a terminal as text. `docs/decisions.md`, 2026-09-02.
+
 8. **The CLI is the product.** The skill, the adapters, and the web UI are all
    callers of `cli.py`. Nothing may implement pipeline logic of its own — if the
    web UI needs behaviour the CLI lacks, add it to the CLI first. The frontend
@@ -404,12 +416,13 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 1827 tests; no network (one is POSIX-only,
+python -m pytest -q                 # 1885 tests; no network (one is POSIX-only,
                                     #   one runs only where the filesystem folds case)
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
 
 lx run docs/guide.md --lang zh-TW   # extract -> translate -> check -> repair -> render
+lx run book/ch1.md --lang zh-TW --limit 50    # at most 50 segments per pass; run it again to continue
 lx models --provider llamacpp       # ask a backend which models it serves
 lx blocks docs/guide.md --lang zh-TW --json   # the rendered document, block by block
 lx sentences docs/guide.md --lang zh-TW       # where its sentences begin and end
@@ -588,6 +601,39 @@ own.
   both sides and every gate here compares ids. `checks.py`'s `numbering` rule
   reports the segment at warn, since the wording still does not speak the
   numbering its source has.
+- **How much of a document goes to the model in one run is `limit`, and it is one
+  cap applied once.** Since 2026-09-02 it bounds every branch of `do_select`
+  except an explicitly named `ids` — it reached the pending branch alone before
+  that, so a bound was silently inert on `polish` and on `repair` and the wire
+  could not express one at all. The cap runs **after** the held and
+  origin-precedence exclusions, which is the rule `pending_segments` already
+  stated for holds: a run of segments no model may write must not eat a
+  `--limit 20` and hand back four. `cli.checked_limit` is the one rule for what a
+  bound may be — not a `bool` (`isinstance(True, int)` is true), not negative
+  (`out[:-5]` is *everything except the last five*) — and it is checked before
+  `ids` short-circuits and applied after, because shape and precedence are two
+  questions and a field a client got wrong should not wait for the day they stop
+  sending `ids`. A bounded `lx run` needs no rule about rendering: the gate that
+  refuses to render while errors remain already answers it, since the work a
+  bound left undone is a `missing` error. What it does need is the repair loop
+  narrowed to the ids that run itself sent — otherwise round one translates the
+  whole remainder — and that narrowing applies **only** under `--limit`, so an
+  unbounded run still repairs a carryover wording it did not write.
+
+  **The bound is on spend, not on progress, and nothing may say "the next N".**
+  It takes the front of the selection; whether running again reaches different
+  segments depends on whether the work *changes what the mode selects*. `draft`
+  drains its queue, so it does. `polish` does not — a polished segment is still
+  translated prose — so three bounded polish runs ask for the same three
+  segments and bill for each, measured 2026-09-02. Three sentences shipped
+  reading it as progress and were false on two of the four modes: "run the same
+  command again for the rest", a workbench control labelled "Next 25", and
+  `lx run` claiming "the rest of the document is still untranslated" whenever
+  the flag was set — that one measured saying it to a document **12 of 12
+  translated**, whose errors were on a segment a person wrote. A message that
+  names the wrong cause is worse than the general one it replaces. `lx run`'s
+  refusal now **asks the draft queue** whether anything is left rather than
+  assuming from the flag. See `docs/decisions.md`, 2026-09-02.
 - **Where a sentence ends is `sentences.py`, and nowhere else.** Not `checks.py`
   (invariant 4 — it is not decidable without judgement), not the frontend, and
   not the translation-memory key or `store.SEGMENTATION_VERSION`, which a test

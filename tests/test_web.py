@@ -1230,6 +1230,227 @@ def test_a_job_reports_the_segments_it_left_alone(base, tmp_path, monkeypatch, j
     assert segs[ids[1]]["origin"] == "human"
 
 
+class _Echoing:
+    """A provider that answers every id it was asked for, carrying placeholders back.
+
+    Duck-typed with `describe` and `complete` and nothing else, like every other
+    stub in this suite — which is also what makes it the *unreported usage*
+    case, since it has no counter for `translate_segments` to read.
+    """
+
+    def describe(self):
+        return "stub"
+
+    def complete(self, system, user):
+        items = json.loads(user[user.index("["):])
+        return json.dumps(
+            {i["id"]: "山丘上站著一段文字。" + "".join(re.findall(r"⟦\d+⟧", i["text"]))
+             for i in items}, ensure_ascii=False)
+
+
+def _no_network(monkeypatch):
+    """Every test below starts a real job, so every one of them needs this.
+
+    Not a nicety: `POST /api/translate` returns the moment the thread is
+    spawned, so a test asserting only on `total` still leaves a run dialling the
+    configured backend. Against a dead port that is a batch failure followed by
+    `translate.retry_one` for **every segment in the batch**, each with its own
+    retries and backoff — minutes of daemon thread per job, holding the SQLite
+    file open under `tmp_path` while pytest tries to remove it. Measured while
+    writing this file: one twenty-segment test did not finish in three minutes.
+    `AGENTS.md` says tests use no network, and this is what that costs when it
+    is forgotten on a surface whose work happens off-thread.
+    """
+    monkeypatch.setattr(translate_mod, "build_provider",
+                        lambda name, cfg, model=None: _Echoing())
+
+
+def _finish(base, job_id):
+    """Poll one job to a terminal state and hand back its record.
+
+    **Every test that starts a job calls this**, including the ones that assert
+    only on the number `POST /api/translate` answered with. A job is a daemon
+    thread holding a relative `src`, and `monkeypatch` undoes both the `chdir`
+    and the stubbed factory the moment the test returns — so an unwaited run
+    resolves its path against the wrong directory and dials the configured
+    backend, then keeps the SQLite file open while pytest tries to remove
+    `tmp_path`. Measured while writing this file: two twenty-segment tests that
+    only read `total` did not finish in sixty seconds each.
+    """
+    for _ in range(200):
+        job = json.loads(_post(base, "/api/job", {"id": job_id})[1])
+        if job["done"]:
+            return job
+        time.sleep(0.05)
+    raise AssertionError(f"{job_id} never finished")
+
+
+def _wide_project(base, tmp_path, monkeypatch, paragraphs=20):
+    """A document with `paragraphs` pending prose segments and nothing else.
+
+    Twenty rather than the four `_translate_project` builds, because a bound has
+    to be shown *bounding*: on a four-segment document `limit: 5` and no limit
+    at all answer the same number, which is how a plumbing change that drops the
+    field on the floor passes a test written against the small fixture.
+    """
+    _no_network(monkeypatch)
+    root = tmp_path / "nest" / "proj"
+    root.mkdir(parents=True)
+    monkeypatch.chdir(root)
+    body = "".join(f"Paragraph number {n} stood alone on the hill.\n\n"
+                   for n in range(1, paragraphs + 1))
+    (root / "wide.md").write_bytes(body.encode("utf-8"))
+    assert _post(base, "/api/extract", {"src": "wide.md", "lang": "zh-TW"})[0] == 200
+    segments = json.loads(_get(base, "/api/doc?src=wide.md&lang=zh-TW")[1])["segments"]
+    assert len(segments) == paragraphs, "the fixture must hold what this file claims"
+    return [s["id"] for s in segments]
+
+
+#: `(request, expected total)` against a fresh twenty-segment document.
+#:
+#: **One translate call per case, and each case gets its own `tmp_path`.** The
+#: first version of this asserted several bounds against one document and
+#: failed at the second: a `POST /api/translate` does not merely *answer* a
+#: selection, it runs it, so `limit: 5` translated five and the unbounded call
+#: after it answered 15. A test that reads a queue it is also draining measures
+#: the order its assertions happen to be in.
+_BOUNDS = [
+    ({"limit": 5}, 5),
+    ({}, 20),
+    # 0, null and absent are one value and mean the whole selection.
+    ({"limit": 0}, 20),
+    ({"limit": None}, 20),
+    # Above the selection is not an error, it is simply not a bound.
+    ({"limit": 99}, 20),
+    ({"limit": 1}, 1),
+]
+
+
+@pytest.mark.parametrize("extra,want", _BOUNDS)
+def test_a_limit_bounds_what_the_endpoint_selects(base, tmp_path, monkeypatch, extra, want):
+    """The wire could not express a bound at all before 2026-09-02.
+
+    `total` is the endpoint's own answer to "which segments", fixed at creation,
+    so it is what a bound has to move. Asserted against the fixture's own size
+    rather than against `do_select`'s return value: an oracle that calls the
+    code under test moves with it and passes for a mutant that breaks both
+    surfaces at once.
+    """
+    _wide_project(base, tmp_path, monkeypatch)
+    body = json.loads(_post(base, "/api/translate",
+                            {"src": "wide.md", "lang": "zh-TW", **extra})[1])
+    assert body["total"] == want
+    _finish(base, body["id"])
+
+
+@pytest.mark.parametrize("mode,translated,extra,want", [
+    # `polish` needs wording to polish; `repair` needs something failing, and an
+    # untranslated segment is failing on `missing` at error severity — which is
+    # also the trap `lx run --limit` has to work around. See
+    # `cli.cmd_run`'s docstring.
+    ("polish", True, {}, 20),
+    ("polish", True, {"limit": 3}, 3),
+    ("repair", False, {}, 20),
+    ("repair", False, {"limit": 4}, 4),
+])
+def test_a_limit_bounds_every_mode_and_not_only_the_draft_queue(
+        base, tmp_path, monkeypatch, mode, translated, extra, want):
+    """The half that was inert, and the reason the field is worth having.
+
+    A reviewer pressing Polish or Repair on a novel spends a whole book's tokens
+    and no control on the bar could stop it. One control beside three run
+    buttons has to bind all three, or it lies about two of them.
+
+    The unbounded count is asserted in the first case of each pair, so a fixture
+    that stopped producing twenty fails here rather than quietly making the
+    bounded case pass for the wrong reason.
+    """
+    ids = _wide_project(base, tmp_path, monkeypatch)
+    if translated:
+        assert _post(base, "/api/save", {
+            "src": "wide.md", "lang": "zh-TW",
+            "targets": {i: f"山丘上站著第 {n} 段文字。" for n, i in enumerate(ids, 1)}})[0] == 200
+    body = json.loads(_post(base, "/api/translate", {
+        "src": "wide.md", "lang": "zh-TW", "mode": mode,
+        "overwrite_human": True, **extra})[1])
+    assert body["total"] == want
+    _finish(base, body["id"])
+
+
+def test_a_named_id_outranks_a_limit_on_the_wire_too(base, tmp_path, monkeypatch):
+    ids = _wide_project(base, tmp_path, monkeypatch)
+    body = json.loads(_post(base, "/api/translate", {
+        "src": "wide.md", "lang": "zh-TW", "ids": ids[:6], "limit": 2})[1])
+    assert body["total"] == 6, "naming ids is a person pointing at segments"
+    _finish(base, body["id"])
+
+
+@pytest.mark.parametrize("bad", [True, "5", 2.5, [5], {"n": 5}, -1])
+def test_a_bound_that_is_not_a_count_is_a_400_and_starts_no_job(
+        base, tmp_path, monkeypatch, jobs, bad):
+    """Refused rather than coerced, and refused *before* a job is minted.
+
+    A new field narrows no accepted value set, which is the whole difference
+    between this and divergence (28) — `reset` is read for truthiness and stays
+    that way because tightening it would turn a documented 200 into a 400.
+    There is nothing here to tighten.
+
+    `true` and `-1` are the two that are silent in Python: `isinstance(True,
+    int)` is true, and `list[:-1]` is everything except the last one.
+
+    The control requests name a segment that does not exist, so they select
+    nothing and dispatch nothing — the point is the id they are handed, and a
+    control that translated twenty segments would be racing the assertion it
+    exists to make. **The refused request carries `ids` too**, which is the
+    interesting half: `ids` outranks `limit`, so this call would never have
+    *used* the bound — and it is refused anyway, because a malformed field is
+    malformed whether or not this call reaches it. Accepting it here means the
+    client's bug surfaces on the day they stop sending `ids`.
+    """
+    _wide_project(base, tmp_path, monkeypatch, paragraphs=2)
+    nowhere = {"src": "wide.md", "lang": "zh-TW", "ids": ["no-such-segment"]}
+    before = json.loads(_post(base, "/api/translate", nowhere)[1])["id"]
+    code, body = _try_post(base, "/api/translate", {**nowhere, "limit": bad})
+    assert code == 400, f"{bad!r} was accepted"
+    assert "limit" in json.loads(body)["error"], "the refusal names the field"
+    # The id sequence only ever rises, so a refused request that had minted a
+    # job would show up as a gap here. `+ 1` and not `+ 2`.
+    after = json.loads(_post(base, "/api/translate", nowhere)[1])["id"]
+    assert int(after[3:]) == int(before[3:]) + 1, "a refused request started a job"
+
+
+def test_a_job_carries_the_usage_shape_on_every_answer(base, tmp_path, monkeypatch, jobs):
+    """Five integers, always, and zeros until a real backend says otherwise.
+
+    The stub is duck-typed with `describe` and `complete` like every other one in
+    this suite, so it has no counter — which is exactly what
+    `translate_segments` reads with `getattr` and exactly what a backend
+    publishing no `usage` object leaves behind. So this pins the *shape*, on the
+    two paths a client actually polls: a run that translated, and a run that
+    selected nothing. What the counters do when a backend does answer is
+    `tests/test_provider.py`'s, against a real provider and a real mock server —
+    asserting it here would be asserting the fake.
+    """
+    _wide_project(base, tmp_path, monkeypatch, paragraphs=4)
+    zeros = {"prompt": 0, "completion": 0, "total": 0, "replies": 0, "reported": 0}
+
+    started = json.loads(_post(base, "/api/translate",
+                               {"src": "wide.md", "lang": "zh-TW"})[1])
+    assert started["total"] == 4
+    # Present, and zeros, before anything has finished.
+    assert json.loads(_post(base, "/api/job", {"id": started["id"]})[1])["usage"] == zeros
+    job = _finish(base, started["id"])
+    assert job["applied"] == 4
+    assert job["usage"] == zeros
+
+    # And on the path `tests/test_contract.py` exercises, where no model is
+    # reached at all: still the shape, still never a null.
+    idle = json.loads(_post(base, "/api/translate", {
+        "src": "wide.md", "lang": "zh-TW", "ids": ["no-such-segment"]})[1])
+    assert idle["total"] == 0
+    assert _finish(base, idle["id"])["usage"] == zeros
+
+
 # ── the register a reset has to name, and what the reply reports ────────────
 
 def _extract(base, **body):

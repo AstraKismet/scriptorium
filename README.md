@@ -137,10 +137,10 @@ It does not mean the translation is good; that is what review is for.
 | `lx apply SRC --lang L --file F` | ingest translations, auto-normalize |
 | `lx hold SRC --lang L --ids A,B` | keep segments out of every queue that selects work |
 | `lx unhold SRC --lang L --ids A,B` | return held segments to the queues |
-| `lx translate SRC --lang L` | translate with a configured model (`--mode draft\|polish\|repair`) |
+| `lx translate SRC --lang L` | translate with a configured model (`--mode draft\|polish\|repair`, `--limit N`) |
 | `lx check SRC --lang L` | validate; exit 1 on error (`--json` for the full report) |
-| `lx repair SRC --lang L` | re-translate only failing segments |
-| `lx run SRC --lang L` | the whole loop, with `--polish` for a fluency pass |
+| `lx repair SRC --lang L` | re-translate only failing segments (`--limit N`) |
+| `lx run SRC --lang L` | the whole loop, with `--polish` for a fluency pass and `--limit N` to bound it |
 | `lx render SRC --lang L -o OUT` | rebuild the target document |
 | `lx blocks SRC --lang L` | the rebuilt document block by block, without writing it |
 | `lx sentences SRC --lang L` | how a segment's text divides into sentences |
@@ -546,7 +546,7 @@ that lost.
 ## Development
 
 ```bash
-python -m pytest -q                # 1827 tests, no network
+python -m pytest -q                # 1885 tests, no network
 python -m ruff check src tests
 ```
 

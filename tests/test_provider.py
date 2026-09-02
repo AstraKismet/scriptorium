@@ -1290,3 +1290,217 @@ def test_an_ordinary_listing_is_nowhere_near_the_read_cap(models_server):
     rows = build("local", _cfg(models_server, retries=0)).list_models()
     assert len(rows) == 200
     assert len(json.dumps(MODELS["payload"])) * 20 < _MAX_LIST_BYTES
+
+
+# ── what a run cost, read off the reply and never asked for ────────────────
+
+#: What `UsageHandler` puts in the next reply's `usage` slot. A sentinel rather
+#: than `None`, so a case can distinguish "send no usage key at all" — which is
+#: what a backend that does not publish one does — from "send a null".
+_NO_KEY = object()
+USAGE = {"send": _NO_KEY}
+
+
+class UsageHandler(BaseHTTPRequestHandler):
+    """A completion whose `usage` object each test dictates.
+
+    Against the real provider, not a stub: the counters live in
+    `providers/base.py` and are fed from `_post`, so a duck-typed fake would be
+    asserting the fake. Same three-line shape as every other scenario here.
+    """
+
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        SEEN["payload"] = json.loads(self.rfile.read(n))
+        reply = {"choices": [{"message": {"content": '{"s1": "ok"}'}}]}
+        if USAGE["send"] is not _NO_KEY:
+            reply["usage"] = USAGE["send"]
+        body = json.dumps(reply).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+@pytest.fixture(scope="module")
+def usage_server():
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), UsageHandler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{httpd.server_address[1]}/v1"
+    httpd.shutdown()
+
+
+def test_reading_usage_adds_no_field_to_the_request(usage_server):
+    """Invariant 7, on the change that most tempts a breach of it.
+
+    The way to *ask* for usage on a streaming API is
+    `stream_options: {"include_usage": true}` — a request field, and refused.
+    This reads the reply, which costs the body nothing. The two pins earlier in
+    this file assert the same set on the ordinary path; this one asserts it
+    while usage is actually being collected, so a build that started asking for
+    it fails here rather than in a test nobody connected to the feature.
+    """
+    USAGE["send"] = {"prompt_tokens": 11, "completion_tokens": 22}
+    build("local", _cfg(usage_server)).complete("sys", "user")
+    assert set(SEEN["payload"]) == {"model", "messages", "temperature",
+                                    "max_tokens", "stream"}
+
+
+def test_the_openai_shape_is_counted_and_the_total_is_computed(usage_server):
+    """`total` is `prompt + completion` and is never read from the reply.
+
+    The reply here claims a `total_tokens` of 9999 — which is what a gateway
+    counting cached or reasoning tokens looks like — and it is ignored. One key
+    cannot mean "what the backend said" on one backend and "what we added up"
+    on another, or the number is not comparable with itself.
+    """
+    USAGE["send"] = {"prompt_tokens": 11, "completion_tokens": 22, "total_tokens": 9999}
+    p = build("local", _cfg(usage_server))
+    p.complete("sys", "user")
+    p.complete("sys", "user")
+    assert p.usage.snapshot() == {"prompt": 22, "completion": 44, "total": 66,
+                                  "replies": 2, "reported": 2}
+
+
+def test_the_anthropic_shape_is_counted_by_the_same_reader(usage_server):
+    """A subclass supplies two names and nothing else.
+
+    Reading, validating, bounding and accumulating all live in `Provider`, which
+    is the correction `providers/anthropic.py` already records: a rule about an
+    untrusted reply written private to `openai_compat.py` left that backend
+    unprotected for a day. So this drives the *Anthropic* field names through
+    the shared reader, rather than through the Messages API's own transport,
+    which is a different endpoint with a different body.
+    """
+    from scriptorium.providers.anthropic import AnthropicProvider
+
+    assert AnthropicProvider.USAGE_FIELDS == ("input_tokens", "output_tokens")
+    USAGE["send"] = {"input_tokens": 7, "output_tokens": 5}
+    p = build("local", _cfg(usage_server))
+    p.USAGE_FIELDS = AnthropicProvider.USAGE_FIELDS
+    p.complete("sys", "user")
+    assert p.usage.snapshot() == {"prompt": 7, "completion": 5, "total": 12,
+                                  "replies": 1, "reported": 1}
+
+
+@pytest.mark.parametrize("sent", [
+    _NO_KEY,                                              # a backend that publishes none
+    None,
+    {},
+    {"prompt_tokens": 11},                                # one half only
+    {"prompt_tokens": 11, "completion_tokens": None},
+    {"prompt_tokens": True, "completion_tokens": 22},     # isinstance(True, int)
+    {"prompt_tokens": 11.0, "completion_tokens": 22.0},   # a float admits NaN
+    {"prompt_tokens": float("nan"), "completion_tokens": 1},   # and here it is
+    {"prompt_tokens": float("inf"), "completion_tokens": 1},
+    {"prompt_tokens": "11", "completion_tokens": "22"},
+    {"prompt_tokens": -11, "completion_tokens": 22},
+    {"prompt_tokens": 10 ** 13, "completion_tokens": 22},
+    {"prompt_tokens": {"n": 11}, "completion_tokens": 22},
+    [11, 22],                                             # not an object at all
+])
+def test_a_reply_this_project_cannot_read_reports_nothing_rather_than_something(
+        usage_server, sent):
+    """The run completes, the reply counts, and the totals do not move.
+
+    Partial credit is refused on purpose: a reply whose prompt count reads and
+    whose completion count does not would move one axis while the run still
+    called itself fully counted. `replies` moving while `reported` stays 0 is
+    what lets a caller say "nobody told me" instead of "it was free".
+
+    The float cases are not pedantry. Accepting floats means accepting `NaN` and
+    `Infinity`, which `json.loads` produces from the bare tokens it takes as an
+    extension and `json.dumps` writes back as those same bare tokens — invalid
+    JSON, and precisely the shape `providers.base._finite` records taking
+    `/api/state` down. From the wire it is a strictly worse source than a
+    hand-edited config.
+    """
+    USAGE["send"] = sent
+    p = build("local", _cfg(usage_server))
+    assert p.complete("sys", "user") == '{"s1": "ok"}', "the run must still complete"
+    assert p.usage.snapshot() == {"prompt": 0, "completion": 0, "total": 0,
+                                  "replies": 1, "reported": 0}
+
+
+def test_a_model_listing_is_not_counted_as_a_completion(models_server):
+    """`_get` deliberately does not record. A listing has no cost to report, and
+    counting one would put a `replies` on a run that never translated."""
+    MODELS["payload"] = {"data": [{"id": "m1"}],
+                         "usage": {"prompt_tokens": 5, "completion_tokens": 5}}
+    p = build("local", _cfg(models_server, retries=0))
+    p.list_models()
+    assert p.usage.snapshot()["replies"] == 0
+
+
+def test_two_providers_do_not_share_a_counter(usage_server):
+    """Per instance, never per class: `lx run` reaches draft and repair through
+    two providers, and a workbench can serve two jobs at once."""
+    USAGE["send"] = {"prompt_tokens": 3, "completion_tokens": 4}
+    first = build("local", _cfg(usage_server))
+    second = build("local", _cfg(usage_server))
+    first.complete("sys", "user")
+    assert first.usage.snapshot()["total"] == 7
+    assert second.usage.snapshot() == {"prompt": 0, "completion": 0, "total": 0,
+                                       "replies": 0, "reported": 0}
+
+
+def test_a_run_says_what_it_cost_through_the_one_sink_both_surfaces_read(usage_server):
+    """The sentence is formatted once, in `translate.usage_line`, and reaches a
+    terminal and the job log through the same `progress` callable.
+
+    Driven through a real `translate_segments` run rather than by calling the
+    formatter, because the thing that can break is the wiring: the totals live
+    on a provider that function builds and nobody outside it can reach.
+    """
+    USAGE["send"] = {"prompt_tokens": 100, "completion_tokens": 50}
+    lines, spent = [], {}
+    segments = [{"id": "s1", "kind": "para", "masked": "One."}]
+    doc = {"lang": "zh-TW", "tone": "literary", "segments": segments}
+    cfg = dict(_cfg(usage_server), glossary="", dnt="",
+               batch={"size": 25, "concurrency": 1, "context": 0})
+
+    translate_segments(segments, doc, cfg, provider_name="local",
+                       progress=lines.append, on_usage=spent.update)
+    assert spent == {"prompt": 100, "completion": 50, "total": 150,
+                     "replies": 1, "reported": 1}
+    said = [line for line in lines if line.startswith("tokens:")]
+    assert said == ["tokens: 100 in · 50 out · 150 total (1 of 1 reply reported usage)"]
+
+
+def test_a_run_nobody_told_says_so_rather_than_implying_it_was_free(usage_server):
+    """The degradation a backend publishing no `usage` object produces, worded
+    so a reader cannot mistake it for a zero."""
+    USAGE["send"] = _NO_KEY
+    lines = []
+    segments = [{"id": "s1", "kind": "para", "masked": "One."}]
+    doc = {"lang": "zh-TW", "tone": "literary", "segments": segments}
+    cfg = dict(_cfg(usage_server), glossary="", dnt="",
+               batch={"size": 25, "concurrency": 1, "context": 0})
+
+    translate_segments(segments, doc, cfg, provider_name="local", progress=lines.append)
+    said = [line for line in lines if line.startswith("tokens:")]
+    assert said == ["tokens: not reported — none of 1 reply carried a usage "
+                    "object, so this run's cost is unknown"]
+    assert "0" not in said[0], "a zero here would read as a free run"
+
+
+def test_a_partial_count_is_a_floor_and_says_the_word():
+    """A number that is not the whole cost must not be presentable as though it
+    were — the first six words say so, so a reader does not have to notice a
+    flag."""
+    from scriptorium.translate import usage_line
+
+    assert usage_line({"prompt": 9, "completion": 2, "total": 11,
+                       "replies": 8, "reported": 5}) == (
+        "tokens: at least 9 in · 2 out · 11 total — 5 of 8 replies reported "
+        "usage, so this is a floor and not the run's cost")
+    # Nothing at all when no reply arrived: a dry run, an empty selection, or a
+    # run whose every request died before a body. "0 of 0" under a command that
+    # called nothing is worse than silence.
+    assert usage_line({"prompt": 0, "completion": 0, "total": 0,
+                       "replies": 0, "reported": 0}) is None
+    assert usage_line(None) is None
