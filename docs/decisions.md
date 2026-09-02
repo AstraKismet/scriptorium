@@ -87,6 +87,45 @@ the CLI can approximate honestly. `cli._report_limit` says "stopped at the
 off when the queue held exactly that many, and says nothing it did not measure.
 A later package can take `selectable`; nothing here forecloses it.
 
+### The bound is on spend, not on progress — and the first version said otherwise
+
+**Found by the adversarial pass, reproduced against a live backend, and it is
+the correction this entry most needs to carry.** A bound takes the *front* of
+the selection. Whether running again gets you different segments depends on
+whether working on them changes what the mode selects — and that is true of
+`draft` and false of `polish`:
+
+```
+lx translate --mode polish --limit 3   -> asked s0001 s0002 s0003
+lx translate --mode polish --limit 3   -> asked s0001 s0002 s0003
+lx translate --mode polish --limit 3   -> asked s0001 s0002 s0003
+```
+
+A polished segment is still translated prose, so it is selected again. `repair`
+sits between the two: a segment that is repaired leaves the failing set, one
+that keeps failing does not.
+
+The first version of this work shipped three sentences that read the bound as
+progress and were therefore false on two of the four modes: `_report_limit` said
+"run the same command again for the rest", the workbench labelled its control
+"Next 25", and `lx run`'s refusal said "the rest of the document is still
+untranslated" whenever `--limit` was set — that last one measured saying it to
+somebody whose document was **12 of 12 translated**, with a remedy ("run the
+same command again") that did nothing. A message naming the wrong cause is worse
+than the general one it replaced, because it sends the reader somewhere that
+cannot help.
+
+All three are corrected to state the bound and promise nothing: "anything past
+it was not sent", "At most 25", and a refusal that **asks** the draft queue
+whether anything is left before claiming there is. `lx run`'s message is gated
+on that answer rather than on the flag.
+
+*Considered and refused:* making a bounded polish advance. It needs per-mode
+progress state — which segment was polished at which version — and that is a
+second queue this project does not have and this package did not schedule. What
+a person wanting specific segments has instead is `ids`, which no bound
+truncates.
+
 *Lost:* the page offering **"up to the next chapter"**, which HANDOFF-042 named
 as the most useful shape for a novel. To compute it client-side the page must
 predict which segments `do_select` will return — the held exclusion, the
@@ -113,8 +152,19 @@ purpose.
 The exit code stays **1**. *Lost:* exiting 0 when every segment the run itself
 touched passes check. It is more comfortable, and it collapses "the document is
 finished and written" and "this bounded pass went fine" into one code a caller
-cannot tell apart — where invariant 10 rests on that code meaning something. As
-it stands `until lx run --limit 50; do :; done` is a working idiom.
+cannot tell apart — where invariant 10 rests on that code meaning something.
+
+*A sentence that stood here is withdrawn, and it is worth keeping the correction
+rather than the claim.* It said that as it stands `until lx run --limit 50; do
+:; done` is a working idiom, and offered that as the argument against exiting 0.
+**It is false, and the adversarial pass over this change reproduced it**: on a
+document holding one failing segment a person wrote, that loop never terminates
+— repeat runs translate the rest, reach 12 of 12, and keep exiting 1, because
+origin precedence means no run may repair the segment that is failing. The loop
+is not a bounded run's property at all; an *unbounded* `lx run` on the same
+document exits 1 forever too, which is the pre-existing "errors remain" contract
+and is correct. So the exit code stands on the first argument alone. What the
+bound really broke was the *message* beside it — see below.
 
 **What did need building is the repair loop.** An untranslated segment fails
 `checks.check_segment`'s `missing` rule at error severity, so
@@ -146,8 +196,8 @@ the polish pass and `lx run --polish --limit 20` does nothing at all.
 
 ### `usage` is read off the reply, and invariant 7 is not touched
 
-Nothing here had ever read it: `grep -rn "usage\|prompt_tokens" src/` returned
-nothing. It is now accumulated in `providers/base.Provider`, one `_UsageTotals`
+Nothing here had ever read it: at the parent commit `67629fd`,
+`grep -rn "usage\|prompt_tokens" src/` returned nothing. It is now accumulated in `providers/base.Provider`, one `_UsageTotals`
 per instance — and `translate_segments` builds exactly one provider per run, so
 that is a run's total with no counter threaded through the batch loop.
 

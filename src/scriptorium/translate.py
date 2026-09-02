@@ -710,11 +710,16 @@ def translate_segments(segments, doc, cfg, provider_name=None, mode="draft",
         # test written to pretend.
         spent = getattr(provider, "usage", None)
         spent = spent.snapshot() if spent is not None else dict(NO_USAGE)
+        # `on_usage` first, and the printed line second. The structured value is
+        # what `POST /api/job` serves and what `lx run` totals; the sentence is a
+        # convenience. `progress` is a caller's sink and may raise — a browser
+        # closing its job log, a broken pipe on a terminal — and ordering it
+        # first would lose the numbers to a failure in the reporting of them.
+        if on_usage:
+            on_usage(spent)
         line = usage_line(spent)
         if line:
             progress(line)
-        if on_usage:
-            on_usage(spent)
 
     return results, failures
 

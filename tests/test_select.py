@@ -386,6 +386,67 @@ def test_lx_run_bounded_does_not_let_the_repair_rounds_undo_the_bound(book, monk
         "sent to `lx check` a reader finds errors they created on purpose")
 
 
+def test_a_bounded_polish_asks_for_the_same_segments_every_time(book, monkeypatch, capsys):
+    """The bound is on spend, not on progress, and nothing may promise otherwise.
+
+    A polished segment is still translated prose, so `polish` selects it again —
+    where a drafted segment leaves the pending queue and the next run gets the
+    next ones. Measured 2026-09-02: three consecutive bounded polish runs asked
+    for the same head of the document and billed for each.
+
+    So this pins the behaviour **and** the sentence beside it. The first version
+    printed "run the same command again for the rest", which is an instruction
+    that silently does nothing here and costs money to follow.
+    """
+    doc, ids = book
+    do_apply("d.md", "zh-TW", CFG,
+             {i: "已翻譯。" for i in ids["pending"]}, origin="agent")
+    asked = [_through_the_parser(
+        monkeypatch, ["translate", "d.md", "--lang", "zh-TW",
+                      "--mode", "polish", "--limit", "1"]) for _ in range(3)]
+    assert asked[0] == asked[1] == asked[2], f"the selection advanced: {asked}"
+    assert len(asked[0]) == 1
+
+    out = capsys.readouterr().out
+    assert "stopped at the --limit of 1" in out
+    assert "for the rest" not in out, "a bounded polish has no 'rest' to come back for"
+
+
+def test_a_bound_is_not_announced_when_ids_named_the_work(book, monkeypatch, capsys):
+    """`ids` outranks the bound, so a message about the bound describes a rule
+    that did not apply. Reachable whenever the id count equals the limit."""
+    doc, ids = book
+    _through_the_parser(monkeypatch, ["translate", "d.md", "--lang", "zh-TW",
+                                      "--ids", ids["pending"][0], "--limit", "1"])
+    assert "stopped at the --limit" not in capsys.readouterr().out
+
+
+def test_a_bounded_run_does_not_claim_untranslated_work_that_is_not_there(
+        book, monkeypatch, capsys):
+    """The message is gated on the draft queue, never on the flag being set.
+
+    Measured 2026-09-02 on the first version of this work: a document translated
+    12 of 12, still failing because a person had written one of the segments and
+    origin precedence means no run may replace it, was told "the rest of the
+    document is still untranslated. Run the same command again to continue" —
+    naming the wrong cause and prescribing a remedy that does nothing. The
+    general sentence, which names the blockers, is the right one there.
+    """
+    doc, ids = book
+    # Everything translated, and the failing one is a person's — so nothing is
+    # pending, `repair` may not touch it, and no further run changes anything.
+    do_apply("d.md", "zh-TW", CFG,
+             {i: "已翻譯。" for i in ids["pending"]}, origin="agent")
+    do_apply("d.md", "zh-TW", CFG, {ids["broken"]: "沒有標記。"}, origin="human")
+
+    _through_the_parser(monkeypatch, ["run", "d.md", "--lang", "zh-TW",
+                                      "--limit", "3"], exits=1)
+    out = capsys.readouterr().out
+    assert "still untranslated" not in out, "it claimed work that does not exist"
+    assert "not rendering while errors remain" in out, "the general sentence is the true one"
+    assert "written by a person" in out, "and the blocker must still be named"
+
+
 def test_lx_run_unbounded_still_repairs_what_it_did_not_write(book, monkeypatch):
     """The narrowing is conditional, and this is what it must not cost.
 

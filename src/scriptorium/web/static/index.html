@@ -173,12 +173,18 @@ dialog pre{margin:0;padding:18px;max-height:62vh;overflow:auto;
          which segments `cli.do_select` returns — the held exclusion, the
          origin-precedence drop, the status rule — which is exactly the
          pipeline logic invariant 8 keeps out of the frontend. -->
-    <select id="limit" title="How much of the document goes to the model in one run">
+    <!-- "At most", never "Next". The bound takes the front of the selection and
+         does not advance: Translate pending drains its queue so the next run
+         does get the next ones, but a polished segment is still translated
+         prose and so is still selected — three bounded Polish runs ask for the
+         same three segments. Labelling this "Next 25" made a promise two of the
+         three buttons cannot keep. -->
+    <select id="limit" title="Most segments this run sends to the model. Taken from the top of the list, so this bounds spend rather than walking through the document.">
       <option value="0">All of it</option>
-      <option value="10">Next 10</option>
-      <option value="25">Next 25</option>
-      <option value="50">Next 50</option>
-      <option value="100">Next 100</option>
+      <option value="10">At most 10</option>
+      <option value="25">At most 25</option>
+      <option value="50">At most 50</option>
+      <option value="100">At most 100</option>
     </select>
     <button id="bDraft">Translate pending</button>
     <button id="bPolish">Polish prose</button>

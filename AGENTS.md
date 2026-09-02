@@ -416,7 +416,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 1882 tests; no network (one is POSIX-only,
+python -m pytest -q                 # 1885 tests; no network (one is POSIX-only,
                                     #   one runs only where the filesystem folds case)
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
@@ -618,8 +618,22 @@ own.
   bound left undone is a `missing` error. What it does need is the repair loop
   narrowed to the ids that run itself sent — otherwise round one translates the
   whole remainder — and that narrowing applies **only** under `--limit`, so an
-  unbounded run still repairs a carryover wording it did not write. See
-  `docs/decisions.md`, 2026-09-02.
+  unbounded run still repairs a carryover wording it did not write.
+
+  **The bound is on spend, not on progress, and nothing may say "the next N".**
+  It takes the front of the selection; whether running again reaches different
+  segments depends on whether the work *changes what the mode selects*. `draft`
+  drains its queue, so it does. `polish` does not — a polished segment is still
+  translated prose — so three bounded polish runs ask for the same three
+  segments and bill for each, measured 2026-09-02. Three sentences shipped
+  reading it as progress and were false on two of the four modes: "run the same
+  command again for the rest", a workbench control labelled "Next 25", and
+  `lx run` claiming "the rest of the document is still untranslated" whenever
+  the flag was set — that one measured saying it to a document **12 of 12
+  translated**, whose errors were on a segment a person wrote. A message that
+  names the wrong cause is worse than the general one it replaces. `lx run`'s
+  refusal now **asks the draft queue** whether anything is left rather than
+  assuming from the flag. See `docs/decisions.md`, 2026-09-02.
 - **Where a sentence ends is `sentences.py`, and nowhere else.** Not `checks.py`
   (invariant 4 — it is not decidable without judgement), not the frontend, and
   not the translation-memory key or `store.SEGMENTATION_VERSION`, which a test

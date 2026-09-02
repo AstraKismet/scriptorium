@@ -766,7 +766,7 @@ surface invariant 8 calls the product the riskier of the two.
 | `model` | no | string | the routing entry's model, else the provider's own | The model id for this run only. Most specific first, exactly as `lx translate --model`: this value, then the routing entry's, then the provider's. A `provider` naming a **different** backend drops the entry's model, because a model id belongs to the backend that serves it — this field survives that, because it was named for this run and for this provider. |
 | `batch` | no | integer | `batch.size` from config, else 25 | |
 | `concurrency` | no | integer | `batch.concurrency` from config, else 2 | |
-| `limit` | no | integer ≥ 0 | `0` | **How many segments this run may send to the model.** `0`, `null` and an absent key are one value and mean the whole selection. Applied after `mode` has chosen and after the held and origin-precedence exclusions have run, so a run of segments nobody may translate cannot eat the bound. **Ignored entirely when `ids` is present and non-empty**, because naming ids is a person pointing at segments. Anything else — a string, a float, a boolean, a negative — is refused with a `400` and **no job is started**; `true` and `-5` are called out because both are silent in Python (`isinstance(True, int)` is true, and `list[:-5]` is *everything except the last five*). |
+| `limit` | no | integer ≥ 0 | `0` | **The most segments this run may send to the model.** `0`, `false`, `null` and an absent key are one value and mean the whole selection. Applied after `mode` has chosen and after the held and origin-precedence exclusions have run, so a run of segments nobody may translate cannot eat the bound. It takes the **front** of the selection and does not advance — see the note below the mode table. **Not applied when `ids` is present and non-empty**, because naming ids is a person pointing at segments; the value is still *checked*, so a malformed one is refused even on a request that would not have used it. Every other value — a string, a float, `true`, a negative, an array, an object — is refused with a `400`, and **no job is started**. `true` and `-5` are named because both are silent in Python: `isinstance(True, int)` is true, and `list[:-5]` is *everything except the last five*. |
 | `overwrite_human` | no | boolean | `false` | Let this run replace segments whose stored `origin` is `human`. Off by default — see *Origin precedence* below. |
 
 What each `mode` selects, which the response's `total` is a count of:
@@ -785,6 +785,17 @@ all. The bound is one cap applied once to whatever the row selected — not a
 per-mode rule — so `{"mode": "polish", "limit": 20}` and
 `{"mode": "repair", "limit": 20}` each mean twenty segments. The `ids` row above
 is the one exception and states it. `docs/decisions.md`, 2026-09-02.
+
+⚠️ **`limit` bounds spend, not progress, and a client must not label it "the
+next N".** It takes the front of the selection, and whether a later run gets
+different segments depends on whether working on them *changes what the mode
+selects*. For `draft` it does — a translated segment leaves the pending queue —
+so repeated bounded runs walk the document. For `polish` it does not: a polished
+segment is still translated prose and is selected again, so three consecutive
+`{"mode": "polish", "limit": 3}` runs send the **same three segments** and bill
+for each. Measured 2026-09-02 against a live backend. `repair` sits between the
+two: a segment that is repaired leaves the failing set, one that keeps failing
+does not. A client wanting specific segments sends `ids`.
 
 This table is `cli.do_select`, and since 2026-08-15 it is the CLI's answer too.
 `lx translate --mode repair` used to select *pending* segments, because
@@ -863,10 +874,10 @@ This is a real gap in the CLI, and it is structural rather than an oversight —
 | `failures` | array | Each entry is a **two-element array** `[segment_id, reason]`. Empty on the failure path. |
 | `refused` | array of string | Segments this run left alone because a person had written them — see *Origin precedence* on `/api/translate`. Accumulated per batch as they land, like `applied`, so it moves during the run rather than appearing at the end. Empty unless the guard fired. |
 | `error` | string \| null | `str(exception)` if the run raised. |
-| `usage` | object | What the backend said this run cost, in tokens: `{"prompt": integer, "completion": integer, "total": integer, "replies": integer, "reported": integer}`. **Always present**, with every field `0` until a completion reply arrives — like `GET /api/models`'s fields, and for the same reason: a client reads five integers on every answer rather than branching on a null. `total` is `prompt + completion`, **computed here and never read from the reply**, so it means the same thing on every backend; a gateway's own `total_tokens` may count cached or reasoning tokens that are in neither of the other two. `replies` counts completion responses whose body was parsed; `reported` counts how many of those carried a usage object this project could read. **`total` is a floor, not a cost, unless `reported == replies`** — and `replies: 0` with `reported: 0` means no model was called at all, which is not the same as a run that cost nothing. A backend that omits `usage`, or sends anything but a non-negative integer below 10^12 for either field, is counted in `replies` and not in `reported`; a reply whose two fields do not *both* read counts as reporting nothing, so one good half can never move a total the run then calls complete. Written once when the run reaches a terminal state, including the failure path — an interrupted run has already spent what it spent. |
+| `usage` | object | What the backend said this run cost, in tokens: `{"prompt": integer, "completion": integer, "total": integer, "replies": integer, "reported": integer}`. **Always present**, with every field `0` until a completion reply arrives — like `GET /api/models`'s fields, and for the same reason: a client reads five integers on every answer rather than branching on a null. `total` is `prompt + completion`, **computed here and never read from the reply**, so it means the same thing on every backend; a gateway's own `total_tokens` may count cached or reasoning tokens that are in neither of the other two. `replies` counts completion responses whose body was parsed; `reported` counts how many of those carried a usage object this project could read. **`total` is a floor, not a cost, unless `reported == replies`** — and `replies: 0` with `reported: 0` means no model was called at all, which is not the same as a run that cost nothing. A backend that omits `usage`, or sends anything but a non-negative integer of at most 10^12 for either field, is counted in `replies` and not in `reported`; a reply whose two fields do not *both* read counts as reporting nothing, so one good half can never move a total the run then calls complete. Written once when the run reaches a terminal state, including the failure path — an interrupted run has already spent what it spent. |
 
 **An id with no record answers `200` with a body carrying `error` and nothing
-else** — that one key and none of the eight above, not `404` and not `400`. A
+else** — that one key and none of the nine above, not `404` and not `400`. A
 *failed* job is also `200`; failure is visible only in the body. *Known
 divergences* (5).
 

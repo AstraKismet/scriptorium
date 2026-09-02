@@ -3835,31 +3835,47 @@ def _run_translate(src, lang, cfg, segments, mode, args):
     return applied, failures, spent or None
 
 
-def _report_limit(selected, limit, more):
-    """Say that a bound stopped this run, and what to do about it.
+def _report_limit(selected, limit, ids=None):
+    """Say that a bound stopped this run, without promising what a next one does.
 
-    Only when the selection came back **exactly** at the cap, because that is
-    the one thing decidable without a second pass — and a second pass is not
-    free: `mode="repair"` selection runs every validator over every segment, so
-    asking twice doubles that on a novel. It can be one off, when the queue
-    happened to hold exactly `limit` segments and nothing is left; saying "run
-    again" then costs a person one command that answers "nothing to do".
-    Claiming a remainder this run never counted would be the worse error.
+    **The bound takes the front of the selection; it does not advance.** For the
+    draft queue the two look identical, because translating a pending segment
+    removes it — so the next run gets the next N and "run again for the rest" is
+    true. For `polish` it is false: a polished segment is still translated
+    prose, so it is still selected, and a bounded polish asks for the *same*
+    head every time. Measured 2026-09-02 against a real backend: three
+    consecutive `--mode polish --limit 3` runs asked for `s0001, s0002, s0003`
+    on each of them. The first version of this sentence said "run the same
+    command again for the rest" for every mode, which is an instruction that
+    silently does nothing on two of the four and bills for it.
+
+    So this states the fact and stops. Making a bounded polish *advance* would
+    need per-mode progress state — which segment was polished at which version —
+    and that is a queue this project does not have.
+
+    Only when the selection came back **exactly** at the cap, because that is the
+    one thing decidable without a second pass, and a second pass is not free:
+    `mode="repair"` selection runs every validator over every segment, so asking
+    twice doubles that on a novel.
+
+    Silent when `ids` named the work: the bound is documented as ignored there,
+    so announcing it would describe a rule that did not apply.
     """
-    if limit and len(selected) == limit:
-        _out(f"stopped at the --limit of {limit}; {more}")
+    if ids or not limit or len(selected) != limit:
+        return
+    _out(f"stopped at the --limit of {limit}; anything past it was not sent")
 
 
 def cmd_translate(args, cfg):
     doc = load_doc(args.src, args.lang)
-    segments = do_select(doc, cfg, args.mode,
-                         ids=args.ids.split(",") if args.ids else None,
+    ids = args.ids.split(",") if args.ids else None
+    segments = do_select(doc, cfg, args.mode, ids=ids,
                          include_all=args.all, limit=args.limit,
                          over_human=args.overwrite_human)
     applied, failures, _usage = _run_translate(
         args.src, args.lang, cfg, segments, args.mode, args)
     _out(f"translated {applied} segment(s)" + (f", {len(failures)} unresolved" if failures else ""))
-    _report_limit(segments, args.limit, "run the same command again for the rest")
+    _report_limit(segments, args.limit, ids)
 
 
 def _unrepairable(doc, cfg):
@@ -3912,7 +3928,7 @@ def cmd_repair(args, cfg):
     # that errors remaining is what they asked for rather than a repair that
     # failed. This is the "with no sign of why" the old pending-branch-only rule
     # was defending against, answered by saying why.
-    _report_limit(segments, args.limit, "the errors left are the ones it did not reach")
+    _report_limit(segments, args.limit)
 
 
 def cmd_run(args, cfg):
@@ -3988,13 +4004,22 @@ def cmd_run(args, cfg):
         if not report["errors"]:
             break
         bad = do_select(load_doc(args.src, args.lang), cfg, "repair",
-                        over_human=args.overwrite_human)
+                        limit=args.limit, over_human=args.overwrite_human)
         if args.limit:
             # Narrowing the answer, never asking a different question:
             # `do_select` is still the one place that decides what "failing"
             # means, and this is the command scoping the round to its own work.
             # Only under `--limit`, so an unbounded run keeps repairing a
             # carryover wording it did not write.
+            #
+            # The bound is passed to `do_select` **as well as** this filter, and
+            # both are needed. `touched` can hold up to 2N after a draft pass and
+            # a `--polish` pass, so the filter alone would let a repair round
+            # send 2N and make "at most N per pass" false — the promise in this
+            # flag's own help text. The filter alone is also not enough the other
+            # way: without it the round selects every failing segment in the
+            # document, which after a bounded draft is the whole untranslated
+            # remainder.
             bad = [s for s in bad if s["id"] in touched]
         if not bad:
             break
@@ -4020,14 +4045,25 @@ def cmd_run(args, cfg):
         # Named before the general advice, because "inspect with `lx check`"
         # sends a reviewer to a command that will show them errors on a segment
         # every repair round silently skipped.
-        held, by_hand = _unrepairable(load_doc(args.src, args.lang), cfg)
+        doc = load_doc(args.src, args.lang)
+        held, by_hand = _unrepairable(doc, cfg)
         _report_blockers(args.src, args.lang, held, by_hand)
-        if args.limit:
-            # The bounded run's own sentence, in place of the general one. Sent
-            # to `lx check` a reader would find hundreds of `missing` errors
-            # they created on purpose, and conclude the run had gone wrong.
+        # **Asked, not assumed.** The bounded sentence is only true while a
+        # further run would still take something, so it is gated on the draft
+        # queue rather than on `--limit` being set. The first version of this
+        # gated on the flag alone and was measured saying "the rest of the
+        # document is still untranslated. Run the same command again to
+        # continue" to somebody whose document was **12 of 12 translated** and
+        # for whom running again did nothing at all — the errors were on a
+        # segment a person had written, which no run may replace. A message
+        # that names the wrong cause is worse than the general one it replaced,
+        # because it sends the reader to a remedy that cannot work.
+        more = do_select(doc, cfg, "draft", over_human=args.overwrite_human)
+        if args.limit and more:
+            # Sent to `lx check` here a reader would find errors they created on
+            # purpose and conclude the run had gone wrong.
             _out(f"not rendering: this run was bounded to {args.limit} segment(s) per pass, "
-                 f"so the rest of the document is still untranslated. Run the same command "
+                 f"and {len(more)} segment(s) are still untranslated. Run the same command "
                  f"again to continue, or pass --force to render what there is.")
         else:
             _out("not rendering while errors remain — inspect with `lx check` or fix in `lx web`, "
@@ -4057,7 +4093,11 @@ def cmd_web(args, cfg):
 #: so. `lx todo --limit` is deliberately not one of these: it truncates a
 #: listing and spends nothing.
 _LIMIT_HELP = ("most segments this run sends to the model; 0 for all of them. "
-               "Ignored when --ids names the work")
+               "Taken from the top of the selection, so it bounds spend rather "
+               "than walking through the document: the draft queue drains and "
+               "the next run takes the next ones, but a bounded --mode polish "
+               "asks for the same segments every time. Ignored when --ids "
+               "names the work")
 
 
 def _add_llm_flags(p):
@@ -4276,7 +4316,7 @@ def build_parser():
     rn.add_argument("--limit", type=int, default=0,
                     help="most segments each model pass sends; 0 for all of them. "
                          "The repair rounds only revisit what this run itself sent, "
-                         "and the document is not rendered while the rest is "
+                         "and the document is not rendered while segments remain "
                          "untranslated — run the same command again to continue")
     rn.add_argument("--force", action="store_true", help="render even if errors remain")
     _add_llm_flags(rn)
