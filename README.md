@@ -409,6 +409,20 @@ repair, check, preview and commit from the toolbar. A field saves when it loses
 focus, and the text is normalized on the way in, including repairing placeholder
 brackets a model mangled.
 
+**One paragraph at a time, and a source that changed under you.** Each row
+carries its own small button, labelled with the stage it will send — `polish` on
+a segment that already has a translation, `draft` on one that does not — so
+disliking a single paragraph costs one press instead of a whole run. Naming a
+segment reaches it whatever state it is in, including one you have held; what it
+does not do is quietly replace wording *you* wrote, which the page asks about
+first, because a run that is refused at the write still calls the model and still
+costs tokens. *Re-extract* reads the source file again for a document already
+being tracked: unchanged paragraphs keep their translation, their provenance and
+their hold, and a paragraph whose text changed comes back untranslated. It asks
+first when there is something to lose, and it never changes the register the
+document is frozen in — that is `lx extract --reset --tone <register>`, which has
+to be told which register and is deliberately not a button.
+
 **Backends are chosen here too, without editing a file.** The toolbar picks the
 backend and — from a list the backend itself publishes — the model for the next
 run; left alone, the model box sends nothing and each stage uses its own
@@ -546,7 +560,7 @@ that lost.
 ## Development
 
 ```bash
-python -m pytest -q                # 1885 tests, no network
+python -m pytest -q                # 1886 tests, no network
 python -m ruff check src tests
 ```
 
