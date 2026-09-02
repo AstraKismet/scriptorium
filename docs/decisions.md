@@ -3,6 +3,173 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-09-02 · One paragraph, named; and a source file that changed underneath
+
+Closing HANDOFF-039. Two acts the CLI has had all along and `POST /api/translate`
+and `POST /api/extract` have always accepted, with no control on the page able to
+send either. No endpoint moved and `contract_version` stays at **3**; what is
+recorded here is the four things that were actually decided, because a control
+that sends what an endpoint already accepts is not one.
+
+### The per-segment control is one button per row, and its label is the mode
+
+Not a selection model plus a toolbar action. A selection introduces a second
+piece of page state — what is selected — that has to survive a repaint, a filter
+change and a document switch, and the ledger has no machinery for any of that:
+`paint()` rewrites `#ledger.innerHTML` wholesale and nothing DOM-resident lives
+through it. The button is rebound in the same requery loop that already rebinds
+the textareas, and costs no state at all.
+
+It sits in the **gutter**, which is column 1 of both grids — the 900px rule
+collapses `.row` to two columns and hides `.src`, so a control in either of the
+other two moves out from under itself — and the `.tgt` corner was the other
+candidate and is taken by the unsaved-edit dot.
+
+**The label is the word it sends**: `polish` on a row that has a translation,
+`draft` on one that does not. A glyph lost twice over. `↻` sits beside an
+editable field, where a circular arrow reads as *revert my edit*, and it says
+nothing without a hover a keyboard cannot perform. And the label is what keeps
+the mode rule honest: choosing between the two is the page deciding something,
+which is the shape invariant 8 exists to watch, so it is written on the face of
+the control rather than hidden in a handler. `polish` hands the model the
+existing wording as a draft to improve, so an untranslated segment would be sent
+`"draft": ""` — the alternative was to send `polish` always, and it is worse in
+exactly the case a reviewer hits first.
+
+`limit` is **not** sent beside `ids`. It is documented as ignored there and it is
+still *checked*, so the only thing sending it can do is refuse a request that
+would have ignored it.
+
+### It asks before spending on wording a person wrote
+
+`ids` outranks the selection and not the write. A named id reaches a segment the
+mode table, the hold exclusion and `_model_writable` would each have dropped —
+but `store.save_targets` still refuses an `llm:*` write over `human`. Measured
+against a live backend: **765 tokens for one paragraph, `translated 0`**. And the
+reviewer's own edits in this page are written `origin: "human"`, so the row most
+likely to be pointed at is exactly the one that fails.
+
+Sending and reporting afterwards was the alternative, and it spends money to
+produce a log line. The control asks, and only a yes sends `overwrite_human`.
+`/api/job`'s `refused` array is read for the first time here — the run's own log
+already says *that* it happened, in free text this contract forbids parsing, and
+the structured field is what lets the page say what to do next.
+
+A **held** segment is not asked about. Holding says no *queue* may take this, and
+naming an id is a person pointing; the hold survives the write, because
+`save_targets` writes `target`, `status` and `origin` and never `review`. It is
+named in the run's header instead of swallowed.
+
+### The re-extract confirmation states a mechanism, because no number exists
+
+A plain re-extract keeps the register, and keeps a person's wording that no
+longer fits rather than deleting it. What it does destroy is quieter than that:
+a paragraph whose source text changed loses its translation **and any hold on
+it**, and appears in none of `kept`, `ambiguous` or `replaced` — `align`
+produces no candidate at all and `save_doc` deletes and reinserts the whole
+segment table. Reproduced on a held, translated segment: back to `pending`, hold
+gone, all three arrays empty.
+
+So the dialog cannot promise a count. The cost is knowable only *after* the call,
+and by then the row is written — the same limit the contract already records for
+a register change. It states what the mechanism does and names `Commit to memory`
+as the only thing that makes wording recoverable.
+
+**It is skipped when `report.translated` is 0.** There is nothing to lose, and
+nothing is held either, since holding requires a non-empty target. A dialog that
+fires every time is a dialog people learn to click through, which costs exactly
+the case it was built for.
+
+Afterwards the page calls `open()`, not `refresh()`, and that is load-bearing:
+ids are reassigned from `s0001` on every parse, so a leftover `dirty` edit keyed
+`s0007` would be written against whatever text now sits there — and
+`store.target_token` hashes `None` and `""` alike, so between two *untranslated*
+segments the lost-update token would not catch it either.
+
+### No "start over" control, and the handoff's own instruction was stale
+
+`reset` is not sent, and neither is `tone`. Either alone changes the register:
+`reset` is type-checked by nothing, so the string `"false"` is a reset, and a
+bare `tone` resolves ahead of the stored value and refreezes the document, which
+drops every translation because nothing crosses a register.
+
+HANDOFF-039 said a "start over" control "sends the document's current `tone`,
+which `GET /api/doc` reports". That is the instruction
+`docs/contracts/workbench-http.md` **withdrew** at version 3, on two grounds the
+package had not carried across: nothing validates a register value, so a client
+that guesses is handed the wrong one rather than refused; and the two surfaces
+carrying the current register both refuse a state row from a newer build, which
+is precisely the case `reset` exists for. A correct control asks a person. That
+is a decision, not plumbing, and it is not in this package.
+
+It is held by `tests/test_web.py`, which reads the page and refuses either word
+shaped like a request-body key. A mutation pass kills eleven literal spellings and
+survives one — a computed key, which nothing short of executing the JavaScript
+can see, and **nothing in this repository executes it**. Both controls were
+verified by driving a real browser against a live `lx web` and a live backend.
+That is the honest state of the frontend's test surface and it did not change
+here.
+
+### What the adversarial pass changed, and the shape it kept finding
+
+Five read-only lenses over the first version of this work, then a refutation
+round. The security lens came back clean. What the others found was **one shape,
+five times**: *a decision taken from one snapshot and acted on against another*.
+
+The worst of them defeated this package's own central claim. `redo()` read the
+segment's `origin` out of `doc`, and `mark()` puts an edit in `dirty` without
+touching `doc` — so a reviewer who retyped a paragraph and pressed that row's own
+button was measured against the machine `origin` it had *before* the edit, the
+confirmation did not appear, and `job()`'s own `save()` then wrote `human` a
+moment later and the run was refused at the write. The model called and billed
+for a segment the page had every reason to know it could not write, which is
+precisely what the dialog exists to prevent, arriving through the back door.
+`redo()` flushes first and re-reads now.
+
+The same shape, four more times. `running` was raised *after* `await save()`, so
+two clicks during one round trip started two runs. `where` was captured after
+that await, and the comment above it claimed otherwise. `cur === where` compared
+object identity while `open()` mints a fresh `{src, lang}` every call, so
+reopening a document during its own run skipped the refresh and told the reviewer
+to reopen what they were already looking at — reproduced in a browser. And
+`open()` assigns `cur` synchronously and only then awaits `/api/doc`, so
+`cur` and `doc` name different documents for the length of that read, on a
+surface where the left rail is never disabled.
+
+The settlement is one predicate and one accessor, `settled()` and `shown()`:
+every entry point refuses to start while the two disagree, and the address of a
+request is read from `doc` — what is on screen — rather than from `cur`. A click
+dropped inside a sub-second window is the cheaper failure.
+
+**Three claims in the confirmation dialog were false**, which is worse than a
+bug in a control that asks for consent. It said wording a person wrote is kept
+rather than deleted "when it no longer fits the new text" — but `kept` is
+appended only where a candidate existed, which means the *key still matched*,
+which means the text did **not** change; when the text changes there is no
+candidate at all and the wording is simply gone. It promised an unchanged
+paragraph keeps its hold, which a *moved* paragraph does not: `align`'s fallback
+drops `review` deliberately, and so does a memory hit replacing a machine draft.
+And the `ambiguous` line named one of the diff's three causes as the cause, which
+sends a reviewer looking for a repetition their document may not have.
+
+Two smaller ones worth the record. `open()` cleared `dirty` *after* its fetch, so
+a failed read left edits keyed on the old document's ids armed under the new
+`cur` — it clears before now. And the guard test's regex missed
+`body.reset = true`, an ordinary property assignment that is neither an
+object-literal key nor a quoted one; the mutation pass that found it now kills
+eleven spellings and survives only a computed key.
+
+### One run at a time, as a flag rather than a wider selector
+
+`busy()` is a sweep, not a lock: it disables the controls that exist when it
+runs, and `paint()` rebuilds the ledger. `$('#filter')` is a `<select>` it never
+disabled, so a filter change mid-run repaints a ledger of live per-row buttons.
+Widening the selector alone does not fix that; a module-level flag `paint()`
+reads does. It matters because two `llm:*` runs on one segment are
+last-write-wins with no token and no check — concurrency here is a correctness
+rule, not tidiness. The same argument put *Re-extract* on the toolbar rather than
+in the left rail, which `busy()` has never covered.
+
 ## 2026-09-02 · How much of a document goes to the model, and what it cost coming back
 
 Closing HANDOFF-042. `limit` stops being a draft-queue detail and becomes the one

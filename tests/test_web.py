@@ -2385,3 +2385,63 @@ def test_a_port_already_taken_is_one_sentence_and_not_a_traceback(tmp_path, monk
     # and every sentence there ends with what to do next.
     assert "--port 8788" in msg
     assert "another program" in msg
+
+
+def test_the_page_never_sends_a_register_key_to_the_extract_endpoint():
+    """The re-extract control is a *plain* re-extract, and this is what holds it.
+
+    **Both keys, because either one alone changes the register.** `reset` is read
+    for truthiness and type-checked by nothing -- contract *Known divergences*
+    (28) -- so the string `"false"` is a reset, and a reset discards a document's
+    translations. It is refused without a `tone` since contract version 3, but
+    only when `tone` is blank, so a control that grew the two together sails past
+    that guard. And `tone` **on its own** needs no `reset` to do the damage:
+    `cli.do_extract` resolves `tone or stored or config`, so one sent on a
+    `literary` novel refreezes it, and nothing crosses a register -- the whole
+    book comes back untranslated. The contract *withdrew* the instruction to
+    forward `GET /api/doc`'s `tone` for the same reason: nothing validates a
+    register value, so a client that guesses is not refused, it is handed the
+    wrong one.
+
+    So the page may not carry either **in the shape of an object key**, which is
+    the narrowest thing still decidable without executing the JavaScript -- and
+    nothing in this repository does execute it. The bare word was the first
+    spelling and matched prose: "replacing a `<select>`'s options resets its
+    value" is a comment about a different bug, and `doc.tone` is read to *show*
+    the register in a dialog, which is the one use that is correct. What must not
+    exist is a key in a request body.
+
+    Three spellings, not one: the object-literal key, the quoted form, and the
+    property assignment `body.reset = true` -- which is neither of the first two
+    and is ordinary JavaScript. The last was missed by the first version of this
+    check and found by an adversarial pass over it.
+
+    **What it still cannot see**, said rather than left to be discovered: a
+    computed key. `{[k]: true}` is invisible to anything that does not run the
+    code, and a mutation pass over this guard confirms that mutant survives while
+    eleven literal spellings die. It is the residual, and closing it means a
+    JavaScript harness this repository does not have.
+
+    Adding a "start over" control is therefore an edit to this test as well,
+    which is the gate: that control has to ask a person which register, and that
+    is a decision rather than a line of plumbing.
+
+    A false positive is cheap and self-explanatory; the failure it prevents is
+    silent and destroys a book's worth of work.
+    """
+    with open(os.path.join(web_server.STATIC, "index.html"), encoding="utf-8") as f:
+        page = f.read()
+    # `\bkey\s*:` is the object-literal spelling, the quoted forms are the
+    # computed one, and `.key =` is the property assignment. `--reset` in prose
+    # and a bare read of `doc.tone` are none of the three.
+    found = re.findall(
+        r"""(?:\b(?:reset|tone)\s*:|["'](?:reset|tone)["']|\.\s*(?:reset|tone)\s*=[^=])""",
+        page)
+    assert not found, (
+        f"web/static/index.html carries {found} -- a `reset` or a `tone` shaped "
+        "like a request-body key. Either one changes the register a document is "
+        "frozen in, and nothing carries across a register change, so this is "
+        "either a start-over control -- which must ask a person which register, "
+        "and needs this test updated with that decision recorded -- or an "
+        "accident."
+    )
