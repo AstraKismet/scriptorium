@@ -103,12 +103,61 @@ is precisely the case `reset` exists for. A correct control asks a person. That
 is a decision, not plumbing, and it is not in this package.
 
 It is held by `tests/test_web.py`, which reads the page and refuses either word
-shaped like a request-body key. A mutation pass kills eight literal spellings and
+shaped like a request-body key. A mutation pass kills eleven literal spellings and
 survives one — a computed key, which nothing short of executing the JavaScript
 can see, and **nothing in this repository executes it**. Both controls were
 verified by driving a real browser against a live `lx web` and a live backend.
 That is the honest state of the frontend's test surface and it did not change
 here.
+
+### What the adversarial pass changed, and the shape it kept finding
+
+Five read-only lenses over the first version of this work, then a refutation
+round. The security lens came back clean. What the others found was **one shape,
+five times**: *a decision taken from one snapshot and acted on against another*.
+
+The worst of them defeated this package's own central claim. `redo()` read the
+segment's `origin` out of `doc`, and `mark()` puts an edit in `dirty` without
+touching `doc` — so a reviewer who retyped a paragraph and pressed that row's own
+button was measured against the machine `origin` it had *before* the edit, the
+confirmation did not appear, and `job()`'s own `save()` then wrote `human` a
+moment later and the run was refused at the write. The model called and billed
+for a segment the page had every reason to know it could not write, which is
+precisely what the dialog exists to prevent, arriving through the back door.
+`redo()` flushes first and re-reads now.
+
+The same shape, four more times. `running` was raised *after* `await save()`, so
+two clicks during one round trip started two runs. `where` was captured after
+that await, and the comment above it claimed otherwise. `cur === where` compared
+object identity while `open()` mints a fresh `{src, lang}` every call, so
+reopening a document during its own run skipped the refresh and told the reviewer
+to reopen what they were already looking at — reproduced in a browser. And
+`open()` assigns `cur` synchronously and only then awaits `/api/doc`, so
+`cur` and `doc` name different documents for the length of that read, on a
+surface where the left rail is never disabled.
+
+The settlement is one predicate and one accessor, `settled()` and `shown()`:
+every entry point refuses to start while the two disagree, and the address of a
+request is read from `doc` — what is on screen — rather than from `cur`. A click
+dropped inside a sub-second window is the cheaper failure.
+
+**Three claims in the confirmation dialog were false**, which is worse than a
+bug in a control that asks for consent. It said wording a person wrote is kept
+rather than deleted "when it no longer fits the new text" — but `kept` is
+appended only where a candidate existed, which means the *key still matched*,
+which means the text did **not** change; when the text changes there is no
+candidate at all and the wording is simply gone. It promised an unchanged
+paragraph keeps its hold, which a *moved* paragraph does not: `align`'s fallback
+drops `review` deliberately, and so does a memory hit replacing a machine draft.
+And the `ambiguous` line named one of the diff's three causes as the cause, which
+sends a reviewer looking for a repetition their document may not have.
+
+Two smaller ones worth the record. `open()` cleared `dirty` *after* its fetch, so
+a failed read left edits keyed on the old document's ids armed under the new
+`cur` — it clears before now. And the guard test's regex missed
+`body.reset = true`, an ordinary property assignment that is neither an
+object-literal key nor a quoted one; the mutation pass that found it now kills
+eleven spellings and survives only a computed key.
 
 ### One run at a time, as a flag rather than a wider selector
 

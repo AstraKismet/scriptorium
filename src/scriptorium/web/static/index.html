@@ -135,10 +135,11 @@ ph{color:var(--lapis);background:rgba(110,143,232,.11);border-radius:2px;padding
 .log:empty{display:none}
 .log .bad{color:var(--rubric)}
 .log .good{color:var(--gold)}
-/* `say(msg, 'warn')` predates this rule — the identity collisions on
-   `/api/state` have used it since they were added — and it had no colour, so a
-   warning was rendered as ordinary progress. The extract notes below are the
-   second caller and the first whose whole point is that they are not routine. */
+/* `say(msg, 'warn')` predates this rule by two call sites — the identity
+   collisions on `/api/state` and the unavailable model listing — and it had no
+   colour, so both were rendered as ordinary progress. This commit adds three
+   more, whose whole point is that they are not routine; the two that came
+   before are corrected by the same line. */
 .log .warn{color:var(--amber)}
 
 .empty{padding:70px 30px;text-align:center;color:var(--muted);max-width:520px;margin:0 auto}
@@ -374,11 +375,15 @@ function ask(title, body, yes) {
   $('#askBody').textContent = body;
   $('#askYes').textContent = yes;
   return new Promise(done => {
-    // `onclose` covers Escape and fires after `close()` too; a promise ignores
-    // the second settle, so the button handlers do not have to detach it.
+    // `onclose` is what covers Escape and the backdrop. It is detached before a
+    // button closes the dialog rather than left to be out-raced: the `close`
+    // event is queued rather than dispatched synchronously, so relying on that
+    // ordering works and depends on a spec detail no reader of this file should
+    // have to know. Detached, the only path to `true` is the button that says so.
+    const finish = v => { $('#ask').onclose = null; $('#ask').close(); done(v); };
     $('#ask').onclose = () => done(false);
-    $('#askNo').onclick = () => { $('#ask').close(); done(false); };
-    $('#askYes').onclick = () => { $('#ask').close(); done(true); };
+    $('#askNo').onclick = () => finish(false);
+    $('#askYes').onclick = () => finish(true);
     $('#ask').showModal();
   });
 }
@@ -765,8 +770,14 @@ $('#cSave').onclick = () => saveBackends().catch(e => {
 // ── ledger ─────────────────────────────────────────────────
 async function open(src, lang) {
   cur = {src, lang};
-  doc = await api(`/api/doc?src=${encodeURIComponent(src)}&lang=${encodeURIComponent(lang)}`);
+  // **Cleared before the fetch, not after.** `cur` is already the new document
+  // by this line, so an edit left in `dirty` is keyed on ids belonging to the
+  // old one — and the next `save()` would post them under the new `cur`. On the
+  // success path the two spellings are indistinguishable; on a failed fetch the
+  // old one left exactly that cross-document write armed, and after a re-extract
+  // it is armed against renumbered ids in the same document.
   dirty.clear();
+  doc = await api(`/api/doc?src=${encodeURIComponent(src)}&lang=${encodeURIComponent(lang)}`);
   document.querySelectorAll('.doc').forEach(b =>
     b.setAttribute('aria-current', b.dataset.src === src && b.dataset.lang === lang));
   paint();
@@ -904,6 +915,21 @@ function busy(on) {
   document.querySelectorAll('.bar button, .ledger button').forEach(b => b.disabled = on);
 }
 
+// **Is the ledger showing the document `cur` names?** `open()` assigns `cur`
+// synchronously and only *then* awaits `/api/doc` — which runs a full check over
+// every segment, seconds on a novel — and the left rail is outside `busy()`'s
+// reach. So between a rail click and its reply, `cur` names the document being
+// opened while `doc` and every row on screen are still the previous one. An act
+// decided from `doc` and addressed with `cur` would then run against a document
+// nobody was looking at, and a re-extract is destructive.
+//
+// A click dropped inside a sub-second window is the cheaper failure, so every
+// entry point tests this rather than trying to reconcile the two.
+const settled = () => !!(cur && doc && doc.source === cur.src && doc.lang === cur.lang);
+// The one place that turns "what is on screen" into a request address. Reading
+// it from `doc` rather than `cur` is what makes the two impossible to disagree.
+const shown = () => ({src: doc.source, lang: doc.lang});
+
 // `ids` names one or more segments and **outranks everything else in the
 // selection**: the mode's own table, the hold exclusion, and the pre-filter that
 // drops segments a person wrote (`cli.do_select`). `mode` still chooses the
@@ -915,13 +941,19 @@ function busy(on) {
 // being said before it. A caller that printed its own line first put it above
 // the separator, where it reads as the tail of the previous run.
 async function job(mode, ids, over, note) {
-  if (!cur || running) return;
-  await save();
+  if (!settled() || running) return;
+  // The document this run is about, and it really is read before the first
+  // await now: `refresh()` reads the live global, so a run finishing after
+  // somebody opened another document would repaint that one and let its tally be
+  // read as this run's result.
+  const where = shown();
+  // **Raised before the await, not after it.** The `running` test above is only
+  // a guard if nothing can pass it twice, and `save()` is a full round trip
+  // whenever anything is dirty — with every run control still enabled and
+  // `running` still false. Two clicks during that window started two runs, and
+  // two `llm:*` writes to one segment are last-write-wins with no token and no
+  // check.
   busy(true);
-  // The document this run is about, read before the first await. `refresh()`
-  // reads the live global, so a run finishing after somebody opened another
-  // document would repaint that one and imply the numbers were its own.
-  const where = cur;
   // The bound is named in the header rather than after the fact, so a reader
   // scrolling back knows why a run stopped where it did. What is *left* is the
   // tally above the ledger, which `refresh()` repaints when the job ends — the
@@ -936,6 +968,7 @@ async function job(mode, ids, over, note) {
             + `${note ? ' · ' + note : ''} —`
           : `— ${mode}${bound ? ` · at most ${bound}` : ''} —`);
   try {
+    await save();
     // **Neither key is sent unless it was chosen.** With both omitted the server
     // resolves this stage's own routing entry, which is what makes one pair of
     // controls on a bar with three run buttons safe — a seeded value in either
@@ -979,21 +1012,26 @@ async function job(mode, ids, over, note) {
         // next, and on a one-segment run that a reviewer just asked for, "the
         // model was called and nothing changed" is the whole outcome.
         if (s.refused && s.refused.length) {
+          // The real path and language, not placeholders: the page knows both,
+          // and `report_extract` sets the precedent of printing a command a
+          // reader can paste. Rendered through `say()`, so it is text.
           say(`  ${s.refused.join(', ')}: a person wrote this, so the run was not `
               + `allowed to replace it — the model was still called and still cost `
               + `tokens. Use the row's own polish button and confirm, or `
-              + `\`lx translate <src> --lang <lang> --ids ${s.refused.join(',')} `
-              + `--overwrite-human\`.`, 'bad');
+              + `\`lx translate ${where.src} --lang ${where.lang} `
+              + `--ids ${s.refused.join(',')} --overwrite-human\`.`, 'bad');
         }
         if (s.error) say('  ' + s.error, 'bad');
         break;
       }
     }
-    // Only when the ledger is still showing the document this run was about.
-    // `refresh()` reads the live `cur`, so without this a run finishing after
-    // somebody opened another document repaints *that* one — and the tally it
-    // draws would be read as this run's result.
-    if (cur === where) await refresh();
+    // Only when the ledger is still showing the document this run was about,
+    // and compared **by value**: `open()` mints a fresh `{src, lang}` on every
+    // call, so an identity test called the same document a different one — and
+    // reopening a document while its own run finished then skipped the refresh
+    // and told the reviewer to reopen what they were already looking at.
+    // Reproduced in a browser, 2026-09-02.
+    if (cur && cur.src === where.src && cur.lang === where.lang) await refresh();
     else say(`  ${where.src} [${where.lang}] finished; reopen it to see the result`, 'warn');
   } catch (e) { say('  ' + e.message, 'bad'); }
   finally { busy(false); }
@@ -1002,6 +1040,20 @@ async function job(mode, ids, over, note) {
 // **One segment, named.** `do_apply`'s own refusal message points a reviewer at
 // `lx translate --ids <id>`; this is that sentence with a button in front of it.
 async function redo(id) {
+  if (!settled() || running) return;
+  // **Flush first, then read the origin — in that order, and it is the whole
+  // point.** `mark()` puts an edit in `dirty` and does not touch `doc`, so a
+  // segment the reviewer has just retyped still reports the machine `origin` it
+  // had before. Deciding from that skipped the confirmation below, and then
+  // `job()`'s own `save()` wrote `origin: "human"` a moment later and the run
+  // was refused at the write — the model called and billed for a segment the
+  // page had every reason to know it could not write. Which is the exact case
+  // this control exists to prevent, arriving through the back door.
+  //
+  // `save()` refreshes `doc` when it sends anything, and returns immediately
+  // when there is nothing to send, so this costs a round trip only when one was
+  // owed anyway. `job()` calls it again and it is then a no-op.
+  await save();
   const seg = doc && doc.segments.find(s => s.id === id);
   if (!seg || running) return;
   // Naming an id reaches a segment the queue would not, and the write is where
@@ -1054,39 +1106,59 @@ $('#filter').onchange = paint;
 // validates a register value, so a client that guesses is not refused, it is
 // given the wrong one. A person has to choose.
 $('#bExtract').onclick = async () => {
-  if (!cur || running) return;
-  // Before the dialog, not after: an edit still in the ledger is written against
-  // the ids this parse produced, and the next parse reassigns them from `s0001`.
-  await save();
-  const where = cur;
-  // **Asked only when there is something to lose.** On a document with nothing
-  // translated a re-extract cannot discard a translation, and it cannot drop a
-  // hold either — holding requires a non-empty target, so `translated === 0`
-  // means no segment on this document is held. A dialog there would be a
-  // ceremony over an act with no cost, and one that fires every time teaches
-  // people to click through the one that matters.
-  const ok = !doc.report.translated || await ask(`Re-extract ${where.src}?`, [
-    'The source file is read again and the document re-parsed.',
-    '',
-    'A paragraph whose text has not changed keeps its translation, its origin',
-    'and any hold on it.',
-    '',
-    'A paragraph whose text HAS changed comes back untranslated. Its translation',
-    'and any hold on it are gone, and nothing in the reply names it — the only',
-    'sign is the count moving.',
-    '',
-    'Wording a person wrote that no longer fits the new text is kept rather than',
-    'deleted, and reported as failing.',
-    '',
-    `The register this document is frozen in (${(doc && doc.tone) || 'the one it was extracted in'})`,
-    'is not touched — starting over in another register is `lx extract --reset`,',
-    'which has to be told which register, and is not this button.',
-    '',
-    'Only wording already banked with Commit to memory can be recovered.',
-  ].join('\n'), 'Re-extract');
-  if (!ok) return;
-  busy(true);
+  if (!settled() || running) return;
+  const where = shown();
+  busy(true);                       // before the flush, for `job()`'s reason
   try {
+    // Before the dialog, not after: an edit still in the ledger is written
+    // against the ids *this* parse produced, and the next parse reassigns them
+    // from `s0001`.
+    await save();
+    // **What `save()` could not write, this must not discard.** `save()` reports
+    // a refusal to the log and keeps the entry in `dirty`; `open()` below then
+    // clears it. Those edits can never be applied afterwards, because the ids
+    // they are keyed on will name different text. So the act stops here instead,
+    // with the reviewer holding the only copy.
+    if (dirty.size) {
+      say(`  ${[...dirty.keys()].join(', ')} could not be saved, and a re-extract `
+          + `renumbers segments — copy that wording somewhere before trying again`, 'bad');
+      return;
+    }
+    // **Re-read before deciding what to warn about.** `doc.report.translated` is
+    // a client snapshot, and `save()` refreshes it only when it had something to
+    // send — so a book translated by `lx run` in a terminal while this page sat
+    // open still reported 0 here, and the confirmation this act needs would have
+    // been skipped. One extra read on a deliberate, rare, destructive press.
+    await refresh();
+    // **Asked only when there is something to lose.** On a document with nothing
+    // translated a re-extract cannot discard a translation, and it cannot drop a
+    // hold either — holding requires a non-empty target, so `translated === 0`
+    // means no segment on this document is held. A dialog there would be a
+    // ceremony over an act with no cost, and one that fires every time teaches
+    // people to click through the one that matters.
+    const ok = !doc.report.translated || await ask(`Re-extract ${where.src}?`, [
+      'The source file is read again and the document re-parsed.',
+      '',
+      'A paragraph whose text has not changed, and has not moved, keeps its',
+      'translation, its origin and any hold on it.',
+      '',
+      'A paragraph whose text HAS changed comes back untranslated. Its translation',
+      'and any hold on it are gone, and nothing in the reply names it — the only',
+      'sign is the count moving. Moving a paragraph does not lose the translation,',
+      'but it does lose the hold, and so does a banked wording replacing a machine',
+      'draft that no longer fits.',
+      '',
+      'Wording that no longer fits for some other reason — a change to the masking',
+      'or to config/dnt.txt, with the paragraph itself untouched — is kept rather',
+      'than deleted, and reported as failing.',
+      '',
+      `The register this document is frozen in (${(doc && doc.tone) || 'the one it was extracted in'})`,
+      'is not touched — starting over in another register is `lx extract --reset`,',
+      'which has to be told which register, and is not this button.',
+      '',
+      'Only wording already banked with Commit to memory can be recovered.',
+    ].join('\n'), 'Re-extract');
+    if (!ok) return;
     say(`— re-extract ${where.src} [${where.lang}] —`);
     const r = await api('/api/extract', {src: where.src, lang: where.lang});
     say(`  ${r.segments} segments, ${r.reused} reused`
@@ -1100,11 +1172,19 @@ $('#bExtract').onclick = async () => {
           + `match this document — fix the wording, or re-translate the row on its own`, 'bad');
     if (r.replaced && r.replaced.length)
       say(`  ${r.replaced.join(', ')}: a banked wording replaced a machine draft that no `
-          + `longer fits; their origin is now tm`, 'warn');
+          + `longer fits; their origin is now tm, and a hold on one of them is gone`, 'warn');
+    // All the causes, not the first one. The flag is set for anything the
+    // position diff could not place — a sentence this document already had
+    // elsewhere, a paragraph that moved, a member of a run of identical
+    // paragraphs that changed size — and for every carried segment at once when
+    // the diff is skipped for exceeding its work budget. Naming only the third
+    // sends a reviewer looking for a repetition their document does not have.
     if (r.ambiguous && r.ambiguous.length)
-      say(`  ${r.ambiguous.join(', ')}: this document repeats a sentence and that run `
-          + `changed size, so which stored wording belongs here is not established. Check `
-          + `their wording and origin — a hold on one of them was not carried over`, 'warn');
+      say(`  ${r.ambiguous.join(', ')}: the position diff could not place these — a `
+          + `paragraph that moved, a new occurrence of a sentence this document already `
+          + `had, or a member of a run of identical paragraphs that changed size. They `
+          + `took the last stored wording under their key, without its hold, so check `
+          + `their wording and origin`, 'warn');
     await loadState();
     // `open()` and not `refresh()`: it clears `dirty` as well as refetching, and
     // that is load-bearing here rather than tidy. Ids are reassigned from

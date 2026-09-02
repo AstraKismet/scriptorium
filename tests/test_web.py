@@ -2411,11 +2411,16 @@ def test_the_page_never_sends_a_register_key_to_the_extract_endpoint():
     the register in a dialog, which is the one use that is correct. What must not
     exist is a key in a request body.
 
-    **What it cannot see**, said rather than left to be discovered: a computed
-    key. `{[k]: true}` is invisible to any check that does not run the code, and
-    a mutation pass over this guard confirms that mutant survives while six
-    literal spellings die. It is the residual, and closing it means a JavaScript
-    harness this repository does not have.
+    Three spellings, not one: the object-literal key, the quoted form, and the
+    property assignment `body.reset = true` -- which is neither of the first two
+    and is ordinary JavaScript. The last was missed by the first version of this
+    check and found by an adversarial pass over it.
+
+    **What it still cannot see**, said rather than left to be discovered: a
+    computed key. `{[k]: true}` is invisible to anything that does not run the
+    code, and a mutation pass over this guard confirms that mutant survives while
+    eleven literal spellings die. It is the residual, and closing it means a
+    JavaScript harness this repository does not have.
 
     Adding a "start over" control is therefore an edit to this test as well,
     which is the gate: that control has to ask a person which register, and that
@@ -2426,9 +2431,12 @@ def test_the_page_never_sends_a_register_key_to_the_extract_endpoint():
     """
     with open(os.path.join(web_server.STATIC, "index.html"), encoding="utf-8") as f:
         page = f.read()
-    # `\bkey\s*:` is the object-literal spelling and the quoted forms are the
-    # computed one. `--reset` in prose and `doc.tone` are neither.
-    found = re.findall(r"""(?:\b(?:reset|tone)\s*:|["'](?:reset|tone)["'])""", page)
+    # `\bkey\s*:` is the object-literal spelling, the quoted forms are the
+    # computed one, and `.key =` is the property assignment. `--reset` in prose
+    # and a bare read of `doc.tone` are none of the three.
+    found = re.findall(
+        r"""(?:\b(?:reset|tone)\s*:|["'](?:reset|tone)["']|\.\s*(?:reset|tone)\s*=[^=])""",
+        page)
     assert not found, (
         f"web/static/index.html carries {found} -- a `reset` or a `tone` shaped "
         "like a request-body key. Either one changes the register a document is "
