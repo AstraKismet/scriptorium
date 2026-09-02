@@ -124,10 +124,10 @@ CI 上有一組語料庫在把關，裡面收了 55 份刻意刁難的輸入（M
 | `lx apply SRC --lang L --file F` | 收回譯文，自動正規化 |
 | `lx hold SRC --lang L --ids A,B` | 把 segment 排除在所有挑工作的佇列之外 |
 | `lx unhold SRC --lang L --ids A,B` | 讓被保留的 segment 回到佇列 |
-| `lx translate SRC --lang L` | 用設定好的模型翻譯（`--mode draft\|polish\|repair`） |
+| `lx translate SRC --lang L` | 用設定好的模型翻譯（`--mode draft\|polish\|repair`、`--limit N`） |
 | `lx check SRC --lang L` | 驗證；有 error 時以 1 結束（`--json` 可拿到完整報告） |
-| `lx repair SRC --lang L` | 只重譯失敗的 segment |
-| `lx run SRC --lang L` | 跑完整條流程；加 `--polish` 會多跑一次流暢度潤稿 |
+| `lx repair SRC --lang L` | 只重譯失敗的 segment（`--limit N`） |
+| `lx run SRC --lang L` | 跑完整條流程；加 `--polish` 會多跑一次流暢度潤稿，加 `--limit N` 可限制每一輪的量 |
 | `lx render SRC --lang L -o OUT` | 重建目標文件 |
 | `lx blocks SRC --lang L` | 重建後的文件，逐區塊列出，不寫檔 |
 | `lx sentences SRC --lang L` | 一個 segment 的文字如何切成句子 |
@@ -471,7 +471,7 @@ Markdown 與純文字目前都可以端到端跑完：抽取、翻譯、驗證�
 ## 開發
 
 ```bash
-python -m pytest -q                # 1827 tests，不碰網路
+python -m pytest -q                # 1882 tests，不碰網路
 python -m ruff check src tests
 ```
 

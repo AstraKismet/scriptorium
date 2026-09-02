@@ -166,6 +166,20 @@ dialog pre{margin:0;padding:18px;max-height:62vh;overflow:auto;
     </span>
     <button id="bBackends" title="Add or edit a backend">Backends…</button>
     <span style="width:1px;height:20px;background:var(--rule)"></span>
+    <!-- A count, and one control for all three run buttons, because `limit`
+         bounds every selection mode since 2026-09-02. A control that bound
+         only Translate pending would lie about the two beside it.
+         "Up to the next chapter" was refused: the page would have to predict
+         which segments `cli.do_select` returns — the held exclusion, the
+         origin-precedence drop, the status rule — which is exactly the
+         pipeline logic invariant 8 keeps out of the frontend. -->
+    <select id="limit" title="How much of the document goes to the model in one run">
+      <option value="0">All of it</option>
+      <option value="10">Next 10</option>
+      <option value="25">Next 25</option>
+      <option value="50">Next 50</option>
+      <option value="100">Next 100</option>
+    </select>
     <button id="bDraft">Translate pending</button>
     <button id="bPolish">Polish prose</button>
     <button id="bRepair">Repair failing</button>
@@ -795,7 +809,12 @@ async function job(mode) {
   if (!cur) return;
   await save();
   busy(true);
-  say(`— ${mode} —`);
+  // The bound is named in the header rather than after the fact, so a reader
+  // scrolling back knows why a run stopped where it did. What is *left* is the
+  // tally above the ledger, which `refresh()` repaints when the job ends — the
+  // endpoint deliberately does not carry a remainder, since counting it costs a
+  // second selection pass and for Repair that pass runs every validator.
+  say(`— ${mode}${Number($('#limit').value) ? ` · at most ${Number($('#limit').value)}` : ''} —`);
   try {
     // **Neither key is sent unless it was chosen.** With both omitted the server
     // resolves this stage's own routing entry, which is what makes one pair of
@@ -803,8 +822,14 @@ async function job(mode) {
     // box is draft's answer riding on Polish and Repair.
     const model = chosenModel();
     const provider = $('#provider').value || (model ? listedProvider : '');
+    // Sent as a number, never the option's string: the endpoint refuses a
+    // non-integer rather than coercing it, which is what stops `"25"` and
+    // `true` from meaning something a caller did not ask for. Omitted at 0, so
+    // an unbounded run sends the field it always did and nothing more.
+    const limit = Number($('#limit').value) || 0;
     const j = await api('/api/translate', {...cur, mode,
-      ...(provider ? {provider} : {}), ...(model ? {model} : {})});
+      ...(provider ? {provider} : {}), ...(model ? {model} : {}),
+      ...(limit ? {limit} : {})});
     // What the server actually resolved, which is the only place this answer
     // appears outside a log line the contract forbids parsing. Without it a
     // reviewer cannot tell which backend produced the wording in front of them.

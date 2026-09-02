@@ -512,6 +512,59 @@ def accept(seg, text, lang, cfg, slots=None):
     return reseat_outer_blanks(seg["masked"], normalize(text, lang, cfg)), None
 
 
+#: A run that called no model. Not `None`: the shape is stable everywhere it is
+#: read, so `POST /api/job` answers the same five keys on its first poll, on the
+#: "nothing to do" path and after a failure, and a client never has to branch on
+#: a null before it can read a number.
+NO_USAGE = {"prompt": 0, "completion": 0, "total": 0, "replies": 0, "reported": 0}
+
+
+def usage_add(left, right):
+    """Two usage snapshots summed. What `lx run`'s several passes cost together."""
+    return {key: left.get(key, 0) + right.get(key, 0) for key in NO_USAGE}
+
+
+def usage_line(usage, label="tokens"):
+    """What this run cost, in one sentence — or ``None`` when there is nothing
+    to say.
+
+    **One formatter, and the sentence reaches both surfaces through the
+    `progress` sink** — `_out` on the CLI and the job's `log` on the wire — so
+    `web/server.py` formats nothing and the two cannot come to word it
+    differently. That the wire *also* carries the numbers structurally is not a
+    duplicate: the contract says the log is free text and forbids parsing it, so
+    a client that wants the figure has to be handed it.
+
+    Three cases, and they are three because a floor that reads as a total is the
+    one output worse than no output:
+
+    * every reply counted — the number is the run's cost;
+    * some counted — the number is a **floor**, and the sentence says so in its
+      first six words, so a reader does not have to notice a flag;
+    * none counted — no number at all. A backend that publishes no `usage`
+      object is a real and supported configuration, and inventing a `0` for it
+      would read as a free run.
+
+    ``None`` when no reply arrived at all: nothing was selected, a dry run, or
+    every request died before a body. Reporting `0 of 0` there would put a cost
+    line under a command that never called anything.
+    """
+    if not usage or not usage["replies"]:
+        return None
+    replies, reported = usage["replies"], usage["reported"]
+    if not reported:
+        return (f"{label}: not reported — none of {replies} repl"
+                f"{'y' if replies == 1 else 'ies'} carried a usage object, so "
+                f"this run's cost is unknown")
+    counts = (f"{usage['prompt']:,} in · {usage['completion']:,} out · "
+              f"{usage['total']:,} total")
+    if reported == replies:
+        return (f"{label}: {counts} ({reported} of {replies} repl"
+                f"{'y' if replies == 1 else 'ies'} reported usage)")
+    return (f"{label}: at least {counts} — {reported} of {replies} replies "
+            f"reported usage, so this is a floor and not the run's cost")
+
+
 class Progress:
     """Minimal thread-safe reporter; the web UI swaps in its own sink."""
 
@@ -526,12 +579,20 @@ class Progress:
 
 def translate_segments(segments, doc, cfg, provider_name=None, mode="draft",
                        batch_size=None, concurrency=None, progress=None, on_batch=None,
-                       model=None):
+                       model=None, on_usage=None):
     """Translate ``segments`` in place-safe fashion; returns (results, failures).
 
     ``results`` maps segment id to text. ``failures`` is a list of
     ``(segment_id, reason)`` for segments the model could not produce a usable
     answer for after an individual retry.
+
+    ``on_usage`` is handed this run's token totals once, and it is a callback
+    rather than a third element of the return **because it has to survive the
+    failure path**. A run that dies at 90% has spent 90% of the money, and the
+    contract already settled this shape for `applied`: it "moves during the run
+    and it is right on the failure path", where before version 2 it stayed `0`
+    for a run that raised after changing the document. A returned tuple is not
+    returned when something raises; a `finally` is.
 
     ``on_batch`` is called with each batch's accepted results as they land, and
     it is what makes a long run survivable. A 100k-word novel is on the order of
@@ -632,12 +693,28 @@ def translate_segments(segments, doc, cfg, provider_name=None, mode="draft",
         progress(f"batch {idx + 1}/{len(batches)} · {len(local_ok)} ok"
                  + (f" · {len(local_bad)} unresolved" if local_bad else ""))
 
-    if workers == 1:
-        for i, batch in enumerate(batches):
-            run_batch(i, batch)
-    else:
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            list(pool.map(lambda p: run_batch(*p), enumerate(batches)))
+    try:
+        if workers == 1:
+            for i, batch in enumerate(batches):
+                run_batch(i, batch)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                list(pool.map(lambda p: run_batch(*p), enumerate(batches)))
+    finally:
+        # `getattr`, not `provider.usage`, and that is the whole reason this
+        # landed without editing a single existing test: every stub provider in
+        # the suite is duck-typed with `describe` and `complete` and nothing
+        # else, so it reports nothing and the run says so. A backend that
+        # publishes no `usage` object degrades down exactly the same branch,
+        # which means the degradation is exercised by the suite rather than by a
+        # test written to pretend.
+        spent = getattr(provider, "usage", None)
+        spent = spent.snapshot() if spent is not None else dict(NO_USAGE)
+        line = usage_line(spent)
+        if line:
+            progress(line)
+        if on_usage:
+            on_usage(spent)
 
     return results, failures
 

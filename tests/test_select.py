@@ -166,19 +166,103 @@ def test_an_id_that_names_no_segment_is_dropped_rather_than_refused(book):
     assert _picked(doc, CFG, "draft", ids=["nope", ids["heading"]]) == [ids["heading"]]
 
 
-def test_limit_and_all_reach_the_pending_branch_only(book):
-    """They always did, and the shared function must not quietly widen them.
+def test_all_reaches_the_pending_branch_only(book):
+    """`--all` always did, and the shared function must not quietly widen it.
 
-    `--all` means "everything, not only the pending ones"; the other three
-    branches each already answer that question for themselves, and applying a
-    limit to a repair round would leave a document failing `lx check` with no
-    sign of why.
+    "Everything, not only the pending ones" is a question the other three
+    branches each answer for themselves. Unlike `limit`, which was widened on
+    2026-09-02 — see the test below.
+    """
+    doc, ids = book
+    assert len(_picked(doc, CFG, "draft", include_all=True)) == 4
+    assert _picked(doc, CFG, "polish", include_all=True) == [ids["broken"]]
+
+
+def test_limit_bounds_every_branch_except_a_named_ids(book):
+    """Widened on 2026-09-02; until then it reached the pending branch alone.
+
+    This test replaces `test_limit_and_all_reach_the_pending_branch_only`, whose
+    third assertion pinned `repair, limit=1` returning all three failing
+    segments. Its stated reason was that a bounded repair "would leave a
+    document failing `lx check` with no sign of why" — which is an argument
+    about *reporting*, applies equally to the draft branch that has always had a
+    limit, and is answered by `cli._report_limit` saying so. What it cost
+    meanwhile is in `_model_writable`'s own docstring: `lx translate --mode
+    polish` on a 2000-paragraph novel selects all two thousand, and no bound
+    could reach it from either surface. `docs/decisions.md`, 2026-09-02.
     """
     doc, ids = book
     assert _picked(doc, CFG, "draft", limit=1) == ids["pending"][:1]
-    assert len(_picked(doc, CFG, "draft", include_all=True)) == 4
-    assert _picked(doc, CFG, "repair", limit=1) == [ids["broken"], *ids["pending"]]
-    assert _picked(doc, CFG, "polish", include_all=True) == [ids["broken"]]
+    assert _picked(doc, CFG, "repair", limit=1) == [ids["broken"]]
+    assert _picked(doc, CFG, "repair", limit=2) == [ids["broken"], ids["pending"][0]]
+    assert _picked(doc, CFG, "polish", limit=1) == [ids["broken"]]
+    # An unknown mode selects what draft selects, and is bounded with it.
+    assert _picked(doc, CFG, "audit", limit=1) == ids["pending"][:1]
+    # A limit at or above the selection changes nothing, and neither does 0.
+    assert _picked(doc, CFG, "repair", limit=99) == [ids["broken"], *ids["pending"]]
+    assert _picked(doc, CFG, "repair", limit=0) == [ids["broken"], *ids["pending"]]
+
+
+def test_a_named_id_is_never_truncated_by_a_limit(book):
+    """`ids` is tested before the limit is read, and that is the rule.
+
+    Naming ids is a person pointing at segments, so a bound would silently drop
+    work they asked for — the same argument that makes `ids` outrank `mode`, a
+    hold and origin precedence. It was true by reading the code and pinned by
+    nothing until 2026-09-02: no test passed `limit` alongside `ids`, so a build
+    that threaded the bound into that branch stayed green.
+    """
+    doc, ids = book
+    named = [ids["heading"], ids["broken"], *ids["pending"]]
+    for mode in ("draft", "repair", "polish", "audit"):
+        assert _picked(doc, CFG, mode, ids=named, limit=1) == named, mode
+
+
+@pytest.mark.parametrize("bad", [True, False, "5", 2.0, [5], {"n": 5}, -1, -5])
+def test_a_bound_that_is_not_a_count_is_refused_rather_than_guessed(book, bad):
+    """Both halves are silent in Python, which is why neither is coerced.
+
+    `isinstance(True, int)` is true, so a `bool` would slice to exactly one
+    segment; and `out[:-5]` is *everything except the last five*, so a negative
+    bound is not a smaller run but a nearly complete one — measured on the
+    parent build, `lx translate --limit -5` on a 100-segment document translated
+    95 and exited 0.
+
+    `False` is in the list and is *accepted*, alone among the booleans: it is
+    what `body.get("limit")` yields for a caller that sends `false`, and 0,
+    `null` and absent are already one value meaning unbounded. `True` is not,
+    because there is no reading of "limit: true" that means a number.
+    """
+    doc, ids = book
+    if bad is False:
+        assert _picked(doc, CFG, "draft", limit=bad) == ids["pending"]
+        return
+    with pytest.raises(UnusableTarget):
+        do_select(doc, CFG, "draft", limit=bad)
+
+
+def test_a_bound_is_applied_after_the_exclusions_and_not_before(tmp_path, monkeypatch):
+    """A run of segments no model may write must not eat the bound.
+
+    The argument `pending_segments` already makes for a hold, applied to the
+    other rule that removes work. Measured on the parent build `67629fd`: the
+    slice ran inside `pending_segments`, *before* `_model_writable`, so
+    `--all --limit 2` on a document whose first segments are a person's wording
+    selected **nothing** while the unbounded call selected the rest.
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config").mkdir(exist_ok=True)
+    (tmp_path / "config" / "dnt.txt").write_text("", encoding="utf-8")
+    (tmp_path / "d.md").write_bytes(DOC)
+    do_extract("d.md", "zh-TW", CFG)
+    ids = [s["id"] for s in load_doc("d.md", "zh-TW")["segments"]]
+    # The first two segments become a person's, so `--all` offers four and a
+    # model run may write only the last two.
+    do_apply("d.md", "zh-TW", CFG, {ids[0]: "標題", ids[1]: "請見指南。"}, origin="human")
+    doc = load_doc("d.md", "zh-TW")
+    assert _picked(doc, CFG, "draft", include_all=True) == ids[2:]
+    assert _picked(doc, CFG, "draft", include_all=True, limit=2) == ids[2:]
+    assert _picked(doc, CFG, "draft", include_all=True, limit=1) == ids[2:3]
 
 
 class _Echo:
@@ -204,18 +288,28 @@ class _Echo:
              for i in items}, ensure_ascii=False)
 
 
-def _through_the_parser(monkeypatch, argv):
+def _through_the_parser(monkeypatch, argv, exits=None):
     """Run a command the way a terminal does, and return what the model was asked.
 
     Through `build_parser` rather than a hand-built `Namespace`, because half of
     what this asserts is that the subcommand carries the flags the run reads —
     an omission that is invisible until somebody types that command.
+
+    ``exits`` is the status code the command is expected to leave with, for the
+    commands that end in `sys.exit`. Asserted rather than swallowed: `lx run`
+    answering 1 when it did not render is part of what the caller reads, so a
+    harness that let any exit through would hide a change to it.
     """
     stub = _Echo()
     monkeypatch.setattr(translate_mod, "build_provider",
                         lambda name, cfg, model=None: stub)
     args = cli.build_parser().parse_args(argv)
-    args.fn(args, CFG)
+    if exits is None:
+        args.fn(args, CFG)
+    else:
+        with pytest.raises(SystemExit) as left:
+            args.fn(args, CFG)
+        assert left.value.code == exits
     return stub.seen
 
 
@@ -230,6 +324,78 @@ def test_lx_translate_mode_repair_asks_for_the_failing_segments(book, monkeypatc
     asked = _through_the_parser(
         monkeypatch, ["translate", "d.md", "--lang", "zh-TW", "--mode", "repair"])
     assert sorted(asked) == sorted([ids["broken"], *ids["pending"]])
+
+
+def test_lx_translate_limit_reaches_the_command_through_the_parser(book, monkeypatch):
+    """The flag existed and no test drove it through argparse.
+
+    Every prior limit assertion called `do_select` with a Python keyword, so a
+    subcommand that stopped forwarding `--limit` was invisible. Repair is the
+    mode asserted here because it is the one the bound could not reach at all
+    before 2026-09-02.
+    """
+    _doc, ids = book
+    asked = _through_the_parser(
+        monkeypatch, ["translate", "d.md", "--lang", "zh-TW",
+                      "--mode", "repair", "--limit", "1"])
+    assert asked == [ids["broken"]]
+
+
+def test_lx_repair_takes_a_limit_because_the_wire_does(book, monkeypatch):
+    """Invariant 8, in the direction it is usually not tested.
+
+    `POST /api/translate` can bound a repair run. A `lx repair` that could not
+    would be the CLI-lacks-what-the-wire-has shape that invariant exists to
+    stop — divergence (30) is the standing open example of it.
+    """
+    _doc, ids = book
+    asked = _through_the_parser(
+        monkeypatch, ["repair", "d.md", "--lang", "zh-TW", "--limit", "2"])
+    assert asked == [ids["broken"], ids["pending"][0]]
+
+
+def test_lx_run_bounded_does_not_let_the_repair_rounds_undo_the_bound(book, monkeypatch, capsys):
+    """The trap the flag exists to work around, driven end to end.
+
+    An untranslated segment fails `checks.check_segment`'s `missing` rule at
+    *error* severity, so `do_select(mode="repair")` returns everything the bound
+    left alone. Without the narrowing in `cmd_run`, repair round 1 translates
+    the whole remainder — the same money, stamped `llm:repair` instead of
+    `llm:draft`. Verified on the parent build `67629fd`.
+
+    The fixture has two pending segments and one translated-but-failing one, so
+    `--limit 1` drafts exactly one and the round that follows may revisit only
+    that one. `s0002` is failing throughout and is *not* this run's work, so it
+    must never be asked for.
+    """
+    _doc, ids = book
+    # Exit 1, as `lx run` has always answered when errors remain and it did not
+    # render. The code keeps its meaning — "the document is not finished" —
+    # rather than gaining a second one for a bounded pass that went fine, which
+    # would leave a caller unable to tell the two apart. Invariant 10's
+    # territory: the exit code is the evidence, so it must not start meaning two
+    # things. Only the sentence beside it changes.
+    asked = _through_the_parser(
+        monkeypatch, ["run", "d.md", "--lang", "zh-TW", "--limit", "1"], exits=1)
+    assert ids["pending"][0] in asked
+    assert ids["pending"][1] not in asked, "the bound was undone by a repair round"
+    assert ids["broken"] not in asked, "a bounded run repaired what it did not write"
+    out = capsys.readouterr().out
+    assert "bounded to 1 segment(s) per pass" in out, "the refusal must name the bound"
+    assert "inspect with `lx check`" not in out, (
+        "sent to `lx check` a reader finds errors they created on purpose")
+
+
+def test_lx_run_unbounded_still_repairs_what_it_did_not_write(book, monkeypatch):
+    """The narrowing is conditional, and this is what it must not cost.
+
+    `s0002` was written by an agent and fails; an unbounded `lx run` has always
+    repaired it, and a build that narrowed every run to its own draft pass would
+    silently stop. Same command, one flag apart.
+    """
+    _doc, ids = book
+    asked = _through_the_parser(monkeypatch, ["run", "d.md", "--lang", "zh-TW"])
+    assert ids["broken"] in asked, "an unbounded run must still repair a stale wording"
 
 
 def test_lx_translate_with_ids_asks_for_exactly_those(book, monkeypatch):

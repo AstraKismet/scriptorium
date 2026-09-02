@@ -7,6 +7,11 @@ from .base import Provider, ProviderError
 class AnthropicProvider(Provider):
     kind = "anthropic"
 
+    #: The Messages API spells the two counts differently and publishes no
+    #: total. `Provider` computes the total from these two on every backend, so
+    #: there is nothing else to override — see `Provider.USAGE_FIELDS`.
+    USAGE_FIELDS = ("input_tokens", "output_tokens")
+
     def list_models(self):
         """``GET {base_url}/v1/models`` — the Messages API's own listing.
 

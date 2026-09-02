@@ -12,6 +12,7 @@ import math
 import os
 import random
 import socket
+import threading
 import time
 import unicodedata
 import urllib.error
@@ -68,6 +69,14 @@ _UNSAFE_CATEGORIES = ("Cc", "Cf", "Zl", "Zp")
 _LIST_TIMEOUT = 30.0
 _LIST_RETRIES = 1
 
+#: The largest token count this project will believe from a backend. A real
+#: completion is bounded by a context window measured in hundreds of thousands,
+#: so anything past a trillion is a broken or hostile reply rather than a run
+#: that cost a lot. The value is never *shown* — a count outside the range makes
+#: the whole reply count as unreported, so the reader is told the number is
+#: unknown rather than told a wrong one.
+_MAX_TOKENS_REPORTED = 10 ** 12
+
 
 def _finite(value, cast):
     """`cast(value)`, refusing an infinity or a NaN.
@@ -97,12 +106,87 @@ def _tame(text):
                    for ch in text)
 
 
+class _UsageTotals:
+    """What a run's completions said they cost, accumulated across threads.
+
+    One of these per `Provider`, and `translate.translate_segments` builds
+    exactly one provider per run, so this is a run's total without anything
+    having to thread a counter through the batch loop. The lock is not optional:
+    `run_batch` and `retry_one` both call `complete()` from
+    `batch.concurrency` worker threads.
+
+    **`total` is `prompt + completion`, computed here and never read from the
+    reply.** OpenAI's `total_tokens` may legitimately include tokens in neither
+    of the other two — cached input on some gateways, reasoning tokens on others
+    — and the Anthropic shape has no total at all. Reading it where it exists
+    would make one key mean "what the backend said" on one backend and "what we
+    added up" on the other, which is the enumeration-as-definition mistake
+    `AGENTS.md` records five times.
+
+    `replies` and `reported` are separate on purpose: a floor that reads as a
+    total is the one output worse than no output, so a caller can always tell
+    "this is what the run cost" from "this is at least what the run cost".
+    """
+
+    __slots__ = ("_lock", "prompt", "completion", "replies", "reported")
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.prompt = 0
+        self.completion = 0
+        self.replies = 0
+        self.reported = 0
+
+    def record(self, prompt, completion):
+        """One completion reply. ``None`` for either means it reported nothing.
+
+        Both or neither, never one: a reply whose prompt count reads and whose
+        completion count is garbage would move one axis while the run still
+        called itself fully counted. The caller decides that; this only holds
+        the rule that a partial reply is an unreported reply.
+        """
+        with self._lock:
+            self.replies += 1
+            if prompt is None or completion is None:
+                return
+            self.reported += 1
+            self.prompt += prompt
+            self.completion += completion
+
+    def snapshot(self):
+        """A plain dict, copied under the lock so no reader can tear one."""
+        with self._lock:
+            return {"prompt": self.prompt, "completion": self.completion,
+                    "total": self.prompt + self.completion,
+                    "replies": self.replies, "reported": self.reported}
+
+
 class Provider:
     kind = "base"
+
+    #: Where this backend puts the two token counts inside the reply's `usage`
+    #: object, as `(prompt, completion)`. The OpenAI spelling is the default
+    #: because every OpenAI-compatible runtime uses it; a backend that spells it
+    #: differently overrides **only this pair**.
+    #:
+    #: A two-name tuple and not a method, deliberately. `anthropic.py` records
+    #: what happened the last time a rule about an untrusted reply was written
+    #: private to `openai_compat.py`: the Anthropic path went unprotected for a
+    #: day, because a `kind: "anthropic"` `base_url` is configurable and LiteLLM
+    #: serves the Messages API. So reading, validating, bounding and
+    #: accumulating all live in this class, where a subclass cannot forget to
+    #: call them, and the subclass supplies a fact about its own wire format and
+    #: nothing else.
+    USAGE_FIELDS = ("prompt_tokens", "completion_tokens")
 
     def __init__(self, name, spec):
         self.name = name
         self.spec = spec
+        # Per instance, and `translate_segments` builds one per run, so this is
+        # the run's total. Not a class attribute: two providers in one process
+        # — `lx run` reaching draft and repair, or a workbench serving two jobs
+        # — would share a counter and each would report the other's spend.
+        self.usage = _UsageTotals()
         self.model = spec.get("model", "")
         # `_finite`, not a bare `float`. `float("Infinity")` and `float("nan")`
         # both succeed, so a hand-edited `"timeout": "Infinity"` built a provider
@@ -284,6 +368,51 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
         return (" That path carries no API version segment — many endpoints serve "
                 "this API under one, as /v1.")
 
+    @staticmethod
+    def _token_count(value):
+        """One token count from an untrusted reply, or ``None``.
+
+        `int` and not `bool`, which is the `cli._int` rule and is load-bearing
+        rather than pedantic: `isinstance(True, int)` is true, so a backend
+        answering `{"prompt_tokens": true}` would otherwise add 1 to a total and
+        call the reply counted.
+
+        **A float is refused outright, `42.0` included.** Accepting floats means
+        accepting `NaN` and `Infinity`, which `json.loads` produces from the bare
+        tokens it takes as an extension and `json.dumps` writes back as those
+        same bare tokens — invalid JSON, and precisely the shape `_finite`
+        records taking `/api/state` down from a hand-edited config. Here it
+        would arrive from the wire instead, which is a strictly worse source.
+
+        The upper bound catches the rest. A 4300-digit integer literal never
+        reaches this function — `json.loads` itself raises on one, inside the
+        handler in `_request` that already turns that into a `ProviderError` —
+        so what is left is a merely absurd number, and an absurd number that is
+        shown is worse than one that is refused.
+        """
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        if not 0 <= value <= _MAX_TOKENS_REPORTED:
+            return None
+        return value
+
+    def _record_usage(self, data):
+        """Count one completion reply into this run's totals.
+
+        Nothing from `data` is ever formatted as text by this path — only the
+        two integers that survive `_token_count` are, and only after they are
+        added up. That absence is the property rather than an oversight: `_sane`
+        and `_tame` exist because a listing row and an error body *are* printed,
+        and a rule that has no string to escape needs no escaper.
+        """
+        usage = data.get("usage") if isinstance(data, dict) else None
+        if not isinstance(usage, dict):
+            return self.usage.record(None, None)
+        prompt_key, completion_key = self.USAGE_FIELDS
+        prompt = self._token_count(usage.get(prompt_key))
+        completion = self._token_count(usage.get(completion_key))
+        self.usage.record(prompt, completion)
+
     def _post(self, url, payload, headers):
         """A completion, with the caller's own `timeout` and `retries`."""
         # `method` is explicit rather than inferred from `payload is not None`.
@@ -291,7 +420,15 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
         # silent GET — unreachable from the two callers that exist today and a
         # trap set for the third. A POST with a JSON `null` body is a strange
         # thing to want, but it is not a GET.
-        return self._request(url, headers, payload=payload, method="POST")
+        data = self._request(url, headers, payload=payload, method="POST")
+        # Here rather than in each `complete()`, and that is the whole reason
+        # this counter is trustworthy: `_post`'s two callers are exactly the two
+        # `complete()` implementations, so a reply cannot be counted twice and a
+        # third backend is counted without its author knowing this exists.
+        # `_get` deliberately does not do this — a model listing is not a
+        # completion and has no cost to report.
+        self._record_usage(data)
+        return data
 
     def _get(self, url, headers):
         """A read, through the same retry, backoff and masking as a completion.

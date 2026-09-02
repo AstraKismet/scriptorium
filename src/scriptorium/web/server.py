@@ -51,6 +51,11 @@ from ..docio import write_document
 from ..providers import ProviderError, available
 from ..store import load_doc, target_token, tracked
 
+# `NO_USAGE` at module level, unlike `cli.py`'s function-local reaches into the
+# same module: the `..providers` import above already pays what `cli.py` is
+# deferring, so there is nothing left here to defer.
+from ..translate import NO_USAGE
+
 STATIC = os.path.join(os.path.dirname(__file__), "static")
 
 #: The version of `docs/contracts/workbench-http.md`, reported by `/api/state`.
@@ -860,7 +865,14 @@ def _mint_job(total):
         job_id = f"job{_JOB_SEQ}"
         _JOBS[job_id] = state = {
             "id": job_id, "done": False, "log": [], "applied": 0,
-            "failures": [], "refused": [], "error": None, "total": total}
+            "failures": [], "refused": [], "error": None, "total": total,
+            # Zeros rather than `null`, and present from the first poll: the
+            # shape never changes, so a client reads five integers on every
+            # answer including the "nothing to do" path and the failure path,
+            # and never has to branch on a null before it can read a number.
+            # `replies: 0` is what says no completion happened — the totals
+            # alone cannot, since a run really can cost nothing knowable.
+            "usage": dict(NO_USAGE)}
         return state
 
 
@@ -926,7 +938,18 @@ def _translate_job(src, lang, cfg, body):
                        "person's wording")
     # Selection is given the same flag as the write, or the run pays a model
     # for every segment the write will refuse. See `cli._model_writable`.
-    segments = do_select(doc, cfg, mode, ids=body.get("ids"), over_human=over_human)
+    #
+    # `limit` is handed over unvalidated on purpose: `cli.bounded` owns what a
+    # bound may be, so `lx` and this endpoint refuse the same values with the
+    # same sentence and neither can walk around the other. A refusal is a
+    # `ValueError` subclass and reaches the documented `400` through `_post`'s
+    # catch-all, before `_mint_job`, so a request with a bad bound starts no
+    # job. It is checked here rather than left to a truthiness test because the
+    # field is **new**: divergence (28) is open only because tightening a value
+    # set the endpoint already accepts is a version move, and a field with no
+    # accepted values yet has nothing to narrow.
+    segments = do_select(doc, cfg, mode, ids=body.get("ids"),
+                         limit=body.get("limit"), over_human=over_human)
     # Resolved once, here, and reported back: the only other place the answer
     # appears is a `log` line the contract forbids parsing, so a reviewer had no
     # way to tell which model produced the wording in front of them. One call to
@@ -959,6 +982,18 @@ def _translate_job(src, lang, cfg, body):
             state["applied"] += written
             state["refused"].extend(refused)
 
+    def counted_usage(usage):
+        """What the backend said this run cost, published for `/api/job`.
+
+        `do_translate` calls this on every path including the one that raises —
+        a run that dies at 90% has spent 90% of the money — which is the same
+        property version 2 established for `applied`, and for the same reason.
+        Under `_JOB_LOCK` because `_job_status` reads this dict from a request
+        thread; the value handed over is already a private copy.
+        """
+        with _JOB_LOCK:
+            state["usage"] = usage
+
     def work():
         try:
             if not segments:
@@ -968,7 +1003,7 @@ def _translate_job(src, lang, cfg, body):
                 src, lang, cfg, segments, mode, provider=body.get("provider"),
                 model=body.get("model"), batch=body.get("batch"),
                 concurrency=body.get("concurrency"), progress=log, on_batch=counted,
-                over_human=over_human)
+                over_human=over_human, on_usage=counted_usage)
             with _JOB_LOCK:
                 state["failures"] = failures
                 applied = state["applied"]
