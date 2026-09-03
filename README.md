@@ -134,6 +134,7 @@ mean the translation is good; that is what review is for.
 |---|---|
 | `lx init` | scaffold config and state |
 | `lx extract SRC --lang L` | parse to segments, mask markup, reuse translation memory (`--tone literary` for prose) |
+| `lx extract SRC --lang L --from OLD` | carry another tracked document's translations across, holds and waivers included — what a split or a renamed file needs |
 | `lx todo SRC --lang L` | pending segments as JSON, for an agent to translate |
 | `lx terms SRC --lang L` | propose glossary rows from the source text (`--append` to add them) |
 | `lx apply SRC --lang L --file F` | ingest translations, auto-normalize |
@@ -409,6 +410,59 @@ read.
 `.lx/state.db` is working state — one SQLite database for the project. It is
 regenerable only for wording you have already banked with `lx commit`, so commit
 before you delete it. `.lx/reports/` is always regenerable.
+
+
+## Splitting a book, or renaming a chapter
+
+A novel arrives as one long file and you want it in chapters. Cut it up with an
+editor — this tool does not write source files — and then tell each new file
+where its translations are:
+
+```bash
+lx extract ch1.md --lang zh-TW --from novel.md
+lx extract ch2.md --lang zh-TW --from novel.md
+```
+
+Both come back `reused N | pending 0`. Nothing is re-translated and nothing is
+sent to a model. It works because a segment's identity is its *content*, never
+its position or its filename, so a paragraph that moved to another file is still
+the same paragraph.
+
+`--from` reads the other document's stored state. It copies; `novel.md` keeps
+everything it had, and you can point ten chapters at it. Holds, waivers, `origin`
+and the placeholder map each wording was written against all come across, because
+they live with the segment.
+
+**Use `--from` rather than committing first.** `lx commit` followed by a plain
+`lx extract` mostly works and quietly loses two things. The translation memory is
+keyed on the source text, so a book that says the same sentence twice with two
+different translations banks both and can only give one back — both chapters then
+get the same wording. And `lx commit` deliberately does not bank a **held**
+segment, so wording you were still working on is not there at all and comes back
+untranslated. `--from` loses neither.
+
+The same flag covers a rename: extract the new path with `--from` the old one.
+
+Nothing checks *where* you cut. A heading left at the end of the previous file,
+or a chapter with no heading, reuses every segment perfectly and passes
+`lx check` — the boundaries are yours to get right, and `lx render` is where you
+see them.
+
+If you try to extract a file that is no longer there, the command says so and
+tells you what still works:
+
+```
+$ lx extract novel.md --lang zh-TW
+lx: novel.md is not there, and `lx extract` is the only command that reads the
+    source file — this document's translations are still in .lx/state.db, so
+    `lx render novel.md --lang zh-TW` and `lx check novel.md --lang zh-TW` both
+    still work. If you renamed or split it, extract the new file and carry them
+    across: `lx extract <new-file> --lang zh-TW --from novel.md`.
+```
+
+The old document's row stays in `.lx/state.db` after a split, so it goes on being
+counted by `lx stats` and `lx status --json` until you remove it. There is no
+command for that yet.
 
 ## Review workbench
 

@@ -217,6 +217,27 @@ class UnnamedRegister(ValueError):
     """
 
 
+class UnusableCarryover(ValueError):
+    """A `--from` naming a document this build cannot carry translations out of.
+
+    Its own class rather than a second meaning for `UnsupportedSource`, whose
+    docstring is about *the kind of source a command works on* — `--from` names a
+    document that is not the one being read at all, and the remedy is a different
+    argument rather than a different file to run the command on.
+
+    Four refusals share it, because they share what the caller does about them:
+    the named document has no state in this language, it is the document being
+    extracted, it was frozen in another register, or the pairing was asked for
+    alongside `--reset`. Each is decidable before anything is read or written,
+    and each is answered with the one sentence and exit 2 that every other
+    refusal in this CLI gets — which needs this class to be in `main`'s tuple,
+    where `UnsafePath` and `UnwritableKey` deliberately are not. A new
+    `ValueError` subclass outside it answers a traceback and exit 1, which is the
+    failure shape `main`'s own comment and `docs/contracts/status-json.md`
+    divergence (5) both record.
+    """
+
+
 class GlossaryWriteError(OSError):
     """The glossary could not be replaced, and nothing in it was changed."""
 
@@ -453,7 +474,7 @@ def _protected(seg, proposal, dnt):
                for pid in placeholder_ids(proposal))
 
 
-def do_extract(src, lang, cfg, tone=None, reset=False):
+def do_extract(src, lang, cfg, tone=None, reset=False, carry_from=None):
     # The first statement, above even the lazy import: this is decidable from two
     # arguments, so nothing the document or the database could say changes the
     # answer, and a refused request must not import the provider stack, read the
@@ -484,10 +505,75 @@ def do_extract(src, lang, cfg, tone=None, reset=False):
             f"wire. Nothing was written. The register is part of the "
             f"translation-memory key, so a book refrozen into the wrong one stops "
             f"finding every wording banked in the right one.")
+    # `--from` is decided here, above every read, for the reason the guard above
+    # is: all four refusals are answerable from arguments and one state read, and
+    # a refused command must not have parsed the user's file first.
+    #
+    # **Refused with `--reset` rather than composed with it.** `--reset`'s whole
+    # meaning is that it reads no prior state — that is what its own refusal
+    # message promises, and it is why the register has to be named — so a flag
+    # whose meaning is "read *that* document's prior state" cannot ride with it
+    # without making both sentences false. `lx extract ch1.md --reset --tone
+    # literary` followed by `lx extract ch1.md --from novel.md` is the two-step
+    # spelling, and it is one the person can read.
+    if carry_from and reset:
+        raise UnusableCarryover(
+            f"--from {carry_from} and --reset ask for opposite things: --reset discards "
+            f"prior state without reading any, and --from carries {carry_from}'s across. "
+            f"Run them in two steps if that is what you meant — `lx extract {src} "
+            f"--lang {lang} --reset --tone <register>` first, then `lx extract {src} "
+            f"--lang {lang} --from {carry_from}`. Nothing was written.")
+    from_meta = None
+    if carry_from:
+        if doc_id(carry_from) == doc_id(src):
+            raise UnusableCarryover(
+                f"--from {carry_from} names the document being extracted, so there is "
+                f"nothing to carry across — an ordinary `lx extract {src} --lang {lang}` "
+                f"already carries this document's own translations over. Nothing was "
+                f"written.")
+        # `prior_doc` and not `load_doc`: this is the read `prior_targets` is
+        # about to make anyway, and it refuses state from a newer build with the
+        # upgrade sentence rather than carrying half of it.
+        from_meta = prior_doc(carry_from, lang)
+        if not from_meta:
+            raise UnusableCarryover(
+                f"--from {carry_from} has no state in {lang}, so it holds no translations "
+                f"to carry across. `lx status --json` lists what this project tracks. If "
+                f"you meant a document that was extracted under another language tag, name "
+                f"that one with --lang. Nothing was written.")
     # Lazy, like every other `.translate` import in this file: extract does not
     # talk to a model and should not pull the provider stack in to do so.
     from .translate import accept
 
+    # **Above `formats.for_path`, not above `read_document`.** The format is
+    # resolved from the extension before the file is opened, so a missing
+    # document whose extension this project does not know was answered by
+    # `UnknownFormat` — "has no format this project knows how to read", about a
+    # file that is not there — and never reached the sentence below. Placed here
+    # it is under the two argument refusals above, which is the right order:
+    # those are defects in the command as typed.
+    #
+    # `lx extract` is the ONE command that reads the source file: `do_check`,
+    # `do_render`, `do_blocks`, `do_commit` and `do_apply` all read `load_doc`.
+    # Measured 2026-09-04 — after deleting the source, `lx render` exits 0 and
+    # writes the correct translated document. So a person who has moved or split
+    # a file is not looking at lost work, and the message must not read as though
+    # they were: it names what still works, and it names the flag that carries
+    # the translations to the new file.
+    if not os.path.exists(src):
+        stored = prior_doc(src, lang)
+        if stored:
+            raise FileNotFoundError(
+                f"{src} is not there, and `lx extract` is the only command that reads the "
+                f"source file — this document's translations are still in {db_path()}, so "
+                f"`lx render {src} --lang {lang}` and `lx check {src} --lang {lang}` both "
+                f"still work. If you renamed or split it, extract the new file and carry "
+                f"them across: `lx extract <new-file> --lang {lang} --from {src}`. Nothing "
+                f"was written.")
+        raise FileNotFoundError(
+            f"{src} is not there. `lx extract` reads the source document, so the path has "
+            f"to exist — check the spelling, or run `lx untracked` to see which files "
+            f"matching this project's `sources` have no state yet.")
     # The format is chosen from the path here and frozen onto the document below,
     # so every later command reads the skeleton with the parser that wrote it.
     fmt = formats.for_path(src, cfg)
@@ -516,8 +602,34 @@ def do_extract(src, lang, cfg, tone=None, reset=False):
     # memory hit with it. `--reset` starts from `--tone` or config instead: it
     # does not read the state file at all, because it has to work on one this
     # build cannot read.
-    tone = tone or stored.get("tone") or cfg.get("tone", DEFAULT_TONE)
-    prior = no_carryover() if reset else prior_targets(src, lang)
+    #
+    # **`--from` puts the source document's register third, above the config.**
+    # `store.prior_targets` builds its keys with the register the *stored*
+    # document was frozen in and `Carryover.align` looks them up under this one,
+    # so two different registers carry nothing over — silently, and reported as
+    # `reused 0`, which is indistinguishable from a first extract. A `literary`
+    # novel split into chapters in a project whose config still says `technical`
+    # is the ordinary case, not a corner: without this line the whole point of
+    # the flag fails on it and says nothing.
+    tone = (tone or stored.get("tone")
+            or (from_meta or {}).get("tone") or cfg.get("tone", DEFAULT_TONE))
+    if carry_from and canonical_tone(from_meta.get("tone")) != canonical_tone(tone):
+        # Refused rather than run, because the run would be indistinguishable
+        # from success: every key would miss, `reused` would be 0, and the person
+        # would read "this document had nothing to carry" about a book that has
+        # every sentence of it. The register is a field of the memory key and
+        # `prior_targets` freezes the stored one into its keys, so this is not
+        # recoverable inside the call — it is decidable in front of it.
+        raise UnusableCarryover(
+            f"{carry_from} is frozen in the {from_meta.get('tone')} register and this "
+            f"extract is in {tone}, so nothing would carry across — the register is part "
+            f"of the key the carryover matches on. Extract {src} in the same register: "
+            f"`lx extract {src} --lang {lang} --from {carry_from} --tone "
+            f"{from_meta.get('tone')}`. Nothing was written.")
+    if reset:
+        prior = no_carryover()
+    else:
+        prior = prior_targets(carry_from or src, lang)
 
     tm = load_tm(lang)
     reused, rejected = 0, 0
@@ -527,7 +639,13 @@ def do_extract(src, lang, cfg, tone=None, reset=False):
     #: and `POST /api/extract` — keep ignoring one thing, and the next entry
     #: costs a key rather than an arity change at every call site.
     notes = {"kept": [], "ambiguous": [], "replaced": [], "waived_source": [],
-             "register": None}
+             "register": None,
+             # Which document the carryover was read out of, when it was not this
+             # one. Reported rather than left to the flag the person typed,
+             # because `lx run` takes the same argument and prints the same
+             # block: a reader who sees `reused 12` needs to know the twelve came
+             # from somewhere other than the file named on the line above it.
+             "carried_from": doc_label(carry_from) if carry_from else None}
     # Which stored entry each segment inherits, decided for the document at once:
     # two positions holding the same sentence can only be told apart by looking
     # at both, which is what a map of one entry per key could not do.
@@ -723,6 +841,23 @@ def report_extract(src, lang, notes):
     surfaces of one product, each with its own idea of what is worth saying, is
     the shape `AGENTS.md` keeps naming.
     """
+    if notes.get("carried_from"):
+        # First, because it reframes every line under it: the counts on the line
+        # above were carried out of another document, and `reused 12` about
+        # `ch1.md` is otherwise read as twelve of ch1.md's own.
+        #
+        # It names what the memory could not have done, because that is the whole
+        # reason the flag exists rather than "run `lx commit` first": a memory
+        # line carries the wording and nothing else, and `store.load_tm` keeps
+        # only the last record per key — so a book with two byte-identical
+        # paragraphs translated differently loses one of them through the memory
+        # and neither through this.
+        _out(f"  translations carried from {notes['carried_from']}, not from "
+             f"`.lx/tm.{lang}.jsonl` — so holds, waivers, `origin` and the map each "
+             f"wording's placeholders were written against came with them, and two "
+             f"identical paragraphs translated differently both survived. "
+             f"{notes['carried_from']} still holds its own state; nothing was taken from "
+             f"it.")
     if notes["kept"]:
         # Its own line rather than a field in the counts, because this one is not
         # a memory problem: these segments held a stored target that no longer
@@ -784,7 +919,7 @@ def report_extract(src, lang, notes):
 
 def cmd_extract(args, cfg):
     doc, reused, rejected, notes = do_extract(
-        args.src, args.lang, cfg, args.tone, args.reset)
+        args.src, args.lang, cfg, args.tone, args.reset, args.carry_from)
     pending = sum(1 for s in doc["segments"] if s["status"] == "pending")
     _out(f"{args.src} [{args.lang}] -> {db_path()}")
     line = f"  segments {len(doc['segments'])} | reused {reused} | pending {pending}"
@@ -4358,6 +4493,13 @@ def build_parser():
                         "over. It does not read the old state at all, which is why it "
                         "cannot recover the register: pass --tone with it, or the command "
                         "is refused")
+    # `dest` spelled out because `from` is a Python keyword and argparse would
+    # otherwise produce an attribute nothing can read.
+    e.add_argument("--from", dest="carry_from", metavar="SRC",
+                   help="carry translations across from another tracked document instead "
+                        "of only from this one — what a file that was split or renamed "
+                        "needs. Holds, waivers and `origin` travel with the wording, which "
+                        "is what `lx commit` plus the translation memory cannot do")
     e.set_defaults(fn=cmd_extract)
 
     t = sub.add_parser("todo", help="emit pending segments as JSON")
@@ -4548,7 +4690,7 @@ def main(argv=None):
     except (FileNotFoundError, StateVersionError, UnsupportedSource,
             GlossaryWriteError, UnknownFormat, UndecodableDocument,
             StyleSheetError, ConfigError, UnusableTarget, UnnamedRegister,
-            ProviderError) as e:
+            UnusableCarryover, ProviderError) as e:
         print(f"lx: {e}", file=sys.stderr)
         sys.exit(2)
     except BrokenPipeError:

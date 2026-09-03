@@ -448,3 +448,246 @@ def test_hold_and_unhold_report_what_they_did_and_refuse_an_empty_segment(tmp_pa
     assert "released 1 segment(s)" in r.stdout.decode("utf-8")
     assert "review" not in statedb.segments(tmp_path)[0]
     assert _lx(["check", "d.md", "--lang", "zh-TW"], tmp_path, env).returncode == 0
+
+
+# --- `lx extract --from`, and the two things the memory route loses ----------
+
+#: A book whose two chapters share one byte-identical paragraph, translated
+#: **differently** in each. That is the whole population: `store.tm_key` excludes
+#: position and `doc_id`, so both wordings bank under one key and `store.load_tm`
+#: keeps the last. A novel reaches it through repeated dialogue and chapter
+#: formulae; the fixture reaches it in six segments.
+_SPLIT_DOC = (b"# Chapter One\n\nAlpha sentence.\n\nA repeated line.\n\n"
+              b"# Chapter Two\n\nBeta sentence.\n\nA repeated line.\n")
+_SPLIT_CH1 = b"# Chapter One\n\nAlpha sentence.\n\nA repeated line.\n"
+_SPLIT_CH2 = b"# Chapter Two\n\nBeta sentence.\n\nA repeated line.\n"
+_SPLIT_TARGETS = {"s0001": "第一章", "s0002": "阿爾法句。", "s0003": "重複的一行甲",
+                  "s0004": "第二章", "s0005": "貝塔句。", "s0006": "重複的一行乙"}
+
+
+def _split_project(tmp_path, hold=None):
+    """A translated two-chapter book, split on disk, ready to re-extract."""
+    env = {**os.environ, "PYTHONPATH": SRC}
+    (tmp_path / "novel.md").write_bytes(_SPLIT_DOC)
+    assert _lx(["init"], tmp_path, env).returncode == 0
+    assert _lx(["extract", "novel.md", "--lang", "zh-TW", "--tone", "literary"],
+               tmp_path, env).returncode == 0
+    (tmp_path / "t.json").write_bytes(
+        json.dumps(_SPLIT_TARGETS, ensure_ascii=False).encode("utf-8"))
+    assert _lx(["apply", "novel.md", "--lang", "zh-TW", "--file", "t.json"],
+               tmp_path, env).returncode == 0
+    if hold:
+        assert _lx(["hold", "novel.md", "--lang", "zh-TW", "--ids", hold],
+                   tmp_path, env).returncode == 0
+    (tmp_path / "ch1.md").write_bytes(_SPLIT_CH1)
+    (tmp_path / "ch2.md").write_bytes(_SPLIT_CH2)
+    return env
+
+
+def _rendered(tmp_path, env, name):
+    r = _lx(["render", name, "--lang", "zh-TW", "-o", "-"], tmp_path, env)
+    assert r.returncode == 0, r.stderr.decode("utf-8")
+    return r.stdout.decode("utf-8")
+
+
+def test_extract_from_carries_a_split_across_with_no_commit_at_all(tmp_path):
+    """The property the whole re-aiming of HANDOFF-041 rests on.
+
+    `lx commit` is not run. Both halves come back fully translated out of the
+    other document's state, which is what makes a split lossless rather than
+    merely cheap.
+    """
+    env = _split_project(tmp_path)
+    (tmp_path / "novel.md").unlink()
+    for half in ("ch1.md", "ch2.md"):
+        r = _lx(["extract", half, "--lang", "zh-TW", "--from", "novel.md"], tmp_path, env)
+        out = r.stdout.decode("utf-8")
+        assert r.returncode == 0, r.stderr.decode("utf-8")
+        assert "segments 3 | reused 3 | pending 0" in out, out
+        # The line that reframes the counts above it. `lx run` prints the same
+        # block, so a reader is never left reading another document's numbers as
+        # this one's.
+        assert "carried from novel.md" in out, out
+        assert _lx(["check", half, "--lang", "zh-TW"], tmp_path, env).returncode == 0
+
+
+def test_extract_from_keeps_two_identical_paragraphs_apart_where_the_memory_cannot(tmp_path):
+    """The measured reason `--from` exists rather than "run `lx commit` first".
+
+    `store.load_tm` is `tm[record_key(rec)] = rec` — last write wins, over a key
+    that carries no position and no `doc_id`. Two byte-identical sources with
+    different targets bank two lines and read back as one, so the memory route
+    gives *both* halves the same wording and one translation is gone. The
+    carryover is a diff over a position sequence and keeps them apart.
+    """
+    env = _split_project(tmp_path)
+    (tmp_path / "novel.md").unlink()
+    for half in ("ch1.md", "ch2.md"):
+        assert _lx(["extract", half, "--lang", "zh-TW", "--from", "novel.md"],
+                   tmp_path, env).returncode == 0
+    assert "重複的一行甲" in _rendered(tmp_path, env, "ch1.md")
+    assert "重複的一行乙" in _rendered(tmp_path, env, "ch2.md")
+
+
+def test_the_memory_route_collapses_them_and_drops_a_held_wording(tmp_path):
+    """What `--from` is measured *against*. This test pins the defect, not a fix.
+
+    It is here because HANDOFF-041 arrived asserting that a split is free once
+    `lx commit` has run, and that is false in two independent ways. If either
+    ever stops being true this test goes red and the decision entry that cites it
+    has to be re-read — which is the point of pinning a loss.
+    """
+    env = _split_project(tmp_path, hold="s0002")
+    r = _lx(["commit", "novel.md", "--lang", "zh-TW"], tmp_path, env)
+    assert r.returncode == 0, r.stderr.decode("utf-8")
+    # Banked five of six: `lx commit` refuses a held segment, deliberately.
+    assert "+= 5 entries" in r.stdout.decode("utf-8")
+    (tmp_path / "novel.md").unlink()
+    for half in ("ch1.md", "ch2.md"):
+        assert _lx(["extract", half, "--lang", "zh-TW", "--tone", "literary"],
+                   tmp_path, env).returncode == 0
+    # One wording answered for both positions: the first is gone from the project.
+    assert "重複的一行乙" in _rendered(tmp_path, env, "ch1.md")
+    assert "重複的一行甲" not in _rendered(tmp_path, env, "ch1.md")
+    # And the held segment was never banked, so it comes back untranslated and
+    # `lx check` fails — a reviewer's in-progress wording, lost by this route.
+    assert _lx(["check", "ch1.md", "--lang", "zh-TW"], tmp_path, env).returncode == 1
+
+
+def test_extract_from_carries_a_hold_across(tmp_path):
+    """A hold is about the wording, so it travels with it. The memory cannot."""
+    env = _split_project(tmp_path, hold="s0002")
+    (tmp_path / "novel.md").unlink()
+    assert _lx(["extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md"],
+               tmp_path, env).returncode == 0
+    r = _lx(["check", "ch1.md", "--lang", "zh-TW"], tmp_path, env)
+    out = r.stdout.decode("utf-8")
+    assert r.returncode == 0, out          # a hold is a warning, never an error
+    assert "held" in out, out
+
+
+def test_extract_from_leaves_the_document_it_read_untouched(tmp_path):
+    """It is a copy, not a move. Nothing about `--from` is destructive."""
+    env = _split_project(tmp_path)
+    before = {s["id"]: s["target"] for s in statedb.segments(tmp_path)}
+    assert _lx(["extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md"],
+               tmp_path, env).returncode == 0
+    kept = {s["id"]: s["target"] for s in statedb.segments(tmp_path)}
+    for seg_id, target in before.items():
+        assert kept[seg_id] == target
+
+
+def test_extract_from_never_writes_to_the_translation_memory(tmp_path):
+    """Invariant 9: the memory is a source of truth and this path is not a writer."""
+    env = _split_project(tmp_path)
+    assert _lx(["commit", "novel.md", "--lang", "zh-TW"], tmp_path, env).returncode == 0
+    tm = tmp_path / ".lx" / "tm.zh-TW.jsonl"
+    before = tm.read_bytes()
+    assert _lx(["extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md"],
+               tmp_path, env).returncode == 0
+    assert tm.read_bytes() == before, "byte-identical, not merely equivalent"
+
+
+def test_extract_from_refuses_a_document_with_no_state(tmp_path):
+    env = {**os.environ, "PYTHONPATH": SRC}
+    (tmp_path / "a.md").write_bytes(b"# T\n\nOne.\n")
+    assert _lx(["init"], tmp_path, env).returncode == 0
+    r = _lx(["extract", "a.md", "--lang", "zh-TW", "--from", "gone.md"], tmp_path, env)
+    err = r.stderr.decode("utf-8")
+    assert r.returncode == 2, err
+    assert "Traceback" not in err, "in `main`'s tuple, or it exits 1 with a stack trace"
+    assert "no state in zh-TW" in err
+    # Nothing was written, and the state database was never even created: the
+    # refusal is above `store._connect`. Asserted on the file rather than by
+    # reading the tables, because `sqlite3.connect` would create the file to
+    # look — the probe is what would falsify the property.
+    assert not (tmp_path / ".lx" / "state.db").exists()
+
+
+def test_extract_from_refuses_the_document_being_extracted(tmp_path):
+    env = _split_project(tmp_path)
+    r = _lx(["extract", "novel.md", "--lang", "zh-TW", "--from", "novel.md"], tmp_path, env)
+    err = r.stderr.decode("utf-8")
+    assert r.returncode == 2, err
+    assert "names the document being extracted" in err
+
+
+def test_extract_from_refuses_a_register_that_would_carry_nothing(tmp_path):
+    """The silent-failure case: mismatched registers miss every key and say `reused 0`."""
+    env = _split_project(tmp_path)
+    r = _lx(["extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md",
+             "--tone", "technical"], tmp_path, env)
+    err = r.stderr.decode("utf-8")
+    assert r.returncode == 2, err
+    assert "register" in err and "literary" in err
+
+
+def test_extract_from_takes_the_register_of_the_document_it_reads(tmp_path):
+    """No `--tone`, and a config that says otherwise: the carryover still lands.
+
+    Without this the flag fails on the ordinary case — a `literary` novel in a
+    project whose config still says `technical` — and reports `reused 0`, which
+    reads exactly like a first extract.
+    """
+    env = _split_project(tmp_path)
+    r = _lx(["extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md"], tmp_path, env)
+    out = r.stdout.decode("utf-8")
+    assert r.returncode == 0, r.stderr.decode("utf-8")
+    assert "reused 3" in out and "tone literary" in out, out
+
+
+def test_extract_from_and_reset_are_refused_together(tmp_path):
+    env = _split_project(tmp_path)
+    r = _lx(["extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md",
+             "--reset", "--tone", "literary"], tmp_path, env)
+    err = r.stderr.decode("utf-8")
+    assert r.returncode == 2, err
+    assert "opposite things" in err
+
+
+# --- the message a missing source gets --------------------------------------
+
+
+def test_a_missing_source_names_what_still_works_and_the_flag_that_moves_it(tmp_path):
+    """The first door a person hits after moving a file.
+
+    It used to be a bare `[Errno 2] No such file or directory: 'novel.md'`, which
+    reads as lost work about a document whose translations are intact — `lx
+    render` on it still writes the correct file, measured 2026-09-04.
+    """
+    env = _split_project(tmp_path)
+    (tmp_path / "novel.md").unlink()
+    r = _lx(["extract", "novel.md", "--lang", "zh-TW"], tmp_path, env)
+    err = r.stderr.decode("utf-8")
+    assert r.returncode == 2, err
+    assert "Traceback" not in err
+    assert "lx render novel.md --lang zh-TW" in err, "names what still works"
+    assert "--from novel.md" in err, "names the flag that carries them to the new file"
+
+
+def test_a_missing_source_with_no_state_gets_the_plain_message(tmp_path):
+    """A typo is not a moved book, and must not be told it has translations."""
+    env = {**os.environ, "PYTHONPATH": SRC}
+    assert _lx(["init"], tmp_path, env).returncode == 0
+    r = _lx(["extract", "typo.md", "--lang", "zh-TW"], tmp_path, env)
+    err = r.stderr.decode("utf-8")
+    assert r.returncode == 2, err
+    assert "lx untracked" in err
+    assert "--from" not in err, "there is nothing to carry across"
+
+
+def test_a_missing_source_is_reported_before_its_extension_is_judged(tmp_path):
+    """Placement, not wording. `formats.for_path` runs before `read_document`.
+
+    A guard sitting above `read_document` is below the format lookup, so a
+    missing file whose extension this project does not know was answered with
+    "has no format this project knows how to read" — about a file that is not
+    there.
+    """
+    env = {**os.environ, "PYTHONPATH": SRC}
+    assert _lx(["init"], tmp_path, env).returncode == 0
+    r = _lx(["extract", "gone.xyz", "--lang", "zh-TW"], tmp_path, env)
+    err = r.stderr.decode("utf-8")
+    assert r.returncode == 2, err
+    assert "is not there" in err
+    assert "no format" not in err, "the absent file is named first"

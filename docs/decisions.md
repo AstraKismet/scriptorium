@@ -3,6 +3,152 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-09-04 · A split carries across from the document it came from, and the memory route that was going to do it is lossy
+
+Closing HANDOFF-041. The package asked whether this project should split a source
+file by chapter. It should not, and that decision is unchanged and recorded
+below. What changed is the deliverable: the package scheduled `lx forget`, and
+executing it found that the premise underneath — "a split is already free, you
+just have to `lx commit` first" — is **false in two independent ways**. The
+package is closed on `lx extract --from` instead, and `lx forget` is HANDOFF-047.
+
+### The splitter decision, which stands
+
+**Do not build one.** Three reasons, in the order that matters. The expensive
+part is already free: the memory key is `(content_hash, context,
+segmentation_version)` plus `variant` and the register and is **never position**,
+so moving a segment between files cannot invalidate it. Nothing in this project
+authors a source document — invariant 2a is about reproducing bytes the pipeline
+did not change, and a splitter would be the first thing here that *writes* one.
+And where to cut is judgement: `textparse`'s chapter detection is a heuristic and
+`config.py` makes it configurable precisely because a heuristic is a project's
+call rather than a rule `checks.py` may enforce (invariant 4).
+
+Measured while deciding it, and it is the sharpest of the three: a deliberately
+bad cut — the chapter heading left at the end of the previous file, the next file
+headless — is **mechanically invisible**. Both halves report `reused N | pending
+0`, both `lx check` exit 0. Nothing in extract or check inspects chapter
+structure, and nothing can: the memory is keyed on content and answers correctly
+for a heading that landed in the wrong file. Only the rendered text shows it. A
+tool that silently cut a novel at a wrong boundary would produce exactly this
+signature, and there is no gate downstream that would catch it.
+
+### What the package believed, and what it costs
+
+HANDOFF-041 arrived carrying its own measurement: commit, split by hand,
+re-extract each half, `reused 3 | pending 0` on both. That reproduces exactly.
+The premise it rests on does not.
+
+**One.** `store.load_tm` is `tm[record_key(rec)] = rec` — last write wins — over
+a key that carries neither position nor `doc_id`. A book with two byte-identical
+paragraphs translated differently banks two lines and reads back one:
+
+```
+lx commit                     translation memory += 5 entries
+wc -l .lx/tm.zh-TW.jsonl                                    5
+len(load_tm("zh-TW"))                                       4
+```
+
+After the split both halves render the *same* wording and the other translation
+is gone from the project. This is the population
+`docs/contracts/workbench-http.md` divergence (26) names, and (26) is open. For a
+novel it is not a corner: repeated dialogue and chapter formulae are what the
+shape is made of.
+
+**Two.** `lx commit` refuses a held segment, correctly and by design — a hold
+says the segment is the reviewer's to finish. So the wording a reviewer had in
+progress is not banked, comes back `pending`, and `lx check` exits 1 on a
+document that was complete before the split. The one segment most likely to be
+mid-judgement is the one this route drops.
+
+Neither is a defect in `lx commit`. Both are the memory being asked to do a job
+it was not built for: it carries *wording*, keyed on content, deliberately blind
+to which document produced it. `origin`, `review`, `waived` and `target_slots`
+live in the segment `body` and were never going to travel on a memory line.
+
+### The primitive that was missing
+
+`store.prior_targets(src, lang)` already returns a `Carryover` whose `align`
+diffs the stored key sequence against the fresh one, and it already carries
+`review`, the waiver, `origin` and the map each wording's placeholders were
+written against. It was hard-bound to the same `src`. `--from` unbinds it:
+
+```
+lx extract ch1.md --lang zh-TW --from novel.md
+  segments 3 | reused 3 | pending 0 | tone literary
+  translations carried from novel.md, not from `.lx/tm.zh-TW.jsonl` — ...
+```
+
+No `lx commit` at all. Both identical paragraphs keep their own wording, the hold
+survives, and `novel.md` is untouched — it is a copy, not a move. Everything
+below the one changed line is unchanged, so a carried wording still goes through
+`translate.accept`: a stale mask configuration is still refused rather than
+written, which is the whole reason reuse is a proposal and not a result.
+
+### The four refusals, and why the register is one of them
+
+All decidable before anything is read, which is the placement rule the
+`--reset`/`--tone` guard above it already follows. Not with `--reset`, whose
+meaning is that it reads no prior state — composing them makes both sentences
+false, and the two-step spelling is one a person can read. Not the document being
+extracted. Not a document with no state in this language. And **not across
+registers**: `prior_targets` freezes the *stored* register into its keys and
+`align` looks them up under the new one, so a mismatch matches nothing, reports
+`reused 0`, and is indistinguishable from a first extract. Refused rather than
+run, because that failure is silent and its success looks like what was asked
+for.
+
+That is also why the register is resolved from the source document when neither
+`--tone` nor the target's own state answers it. Without that line the flag fails
+on the ordinary case — a `literary` novel split inside a project whose config
+still says `technical` — and says nothing.
+
+*Lost:* `lx repoint OLD NEW`, re-keying the row in place with three `UPDATE`s. It
+is lossless in the same way and genuinely attractive, but it answers only a
+rename; a split is one document becoming two and there is nothing to re-key.
+`--from` covers the rename as well — extract the new path, then forget the old
+one — so the narrower primitive would have been a second way to do a subset.
+*Lost:* making `lx run` take it. `lx run` re-extracts on every invocation, so
+`lx extract --from` followed by an ordinary `lx run` already works, and the flag
+would have been a second place for the same argument to be got wrong.
+*Lost:* putting it on `POST /api/extract`. It is a CLI argument today, which is
+invariant 11's named exception; on the wire it is a second path in a request and
+goes through `cli.confined_path` first. That is a contract edit, so it is
+scheduled rather than smuggled in.
+
+### The message a missing source gets, and where the guard sits
+
+`lx extract` on a moved file answered `lx: [Errno 2] No such file or directory:
+'novel.md'` — a raw errno, against the project Style rule that an error message
+says what to do next, and read as lost work about a document whose translations
+are intact. Measured the same day: **`lx extract` is the only command that reads
+the source file.** `do_check`, `do_render`, `do_blocks`, `do_commit` and
+`do_apply` all read `load_doc`, so after deleting the source `lx render` exits 0
+and writes the correct translated document. The message now names that, and names
+`--from`.
+
+It sits **above `formats.for_path`**, not above `read_document`. The format is
+resolved from the extension before the file is opened, so a guard in the obvious
+place let a missing `gone.xyz` be answered with "has no format this project knows
+how to read" — about a file that is not there. A test pins the ordering, the way
+the `--reset` guard's own test does.
+
+### How this was reached, because the method is the point
+
+Three independent designs were produced for the command the package scheduled,
+and all three answered the question the package asked. A separate completeness
+pass — asked only "what option is missing, and what do all three wrongly assume"
+— is what found both defects above and named `--from`. Every one of the three
+designs had written "run `lx commit` first" into its own refusal message as the
+safe escape, and the coordinating session had read all three and agreed with
+them.
+
+`docs/conventions/delegated-work.md` §5 states the rule that saved it: *the gate
+for anything feeding a decision is before the decision, never after. An option
+set with a gap in it looks complete from the inside, and no later review recovers
+the option that was never written.* The gap here was not a detail. It was the
+deliverable.
+
 ## 2026-09-03 · A target the render cannot substitute is not a translation
 
 Closing HANDOFF-036. `skeleton.render_blocks` asks `mask.unrenderable(seg)`
