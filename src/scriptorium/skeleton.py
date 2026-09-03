@@ -16,7 +16,7 @@ it. The registry has a slot for that; both formats that exist today point it
 here.
 """
 
-from .mask import target_map, unmask
+from .mask import target_map, unmask, unrenderable
 
 __all__ = ["MARKDOWN_MARKER", "render", "render_blocks"]
 
@@ -54,6 +54,19 @@ def render_blocks(doc, cfg, polish=None, fallback=False, marker=MARKDOWN_MARKER)
     in ``missing``. Nor is ``missing`` it, which is a count and stays one — this
     is the per-block form that lets it stay an integer.
 
+    **A truthy target is not enough**, since ``contract_version`` 4: a wording
+    :func:`mask.unrenderable` refuses takes the same branch as one that was never
+    written, so ``missing`` counts it and ``from`` says ``marker`` or ``source``.
+    A target naming a ``⟦n⟧`` this document has no slot for used to be written
+    into the file token and all — divergence (31) — and a gate is what invariant 2
+    asks for where a downstream check was all there was. The predicate lives in
+    :mod:`.mask` rather than here because `checks.check_segment` decides
+    waivability with the *same call on the same segment*, so the exit code and
+    the delivered bytes cannot come to disagree about which wording is writable.
+    Its domain is what the placeholder substitution does and nothing wider: a
+    target that opens a list where the source had a paragraph is `containment`'s,
+    is an error at `lx check`, and is still written here.
+
     ``text`` is neither ``seg["target"]``, which is stored masked, nor
     ``seg["masked"]``: it is what this position contributes to the rendered file,
     after unmasking and after ``polish``. **Unmasked against the map the wording's
@@ -71,7 +84,7 @@ def render_blocks(doc, cfg, polish=None, fallback=False, marker=MARKDOWN_MARKER)
             blocks.append({"id": None, "kind": None, "from": None, "text": node["v"]})
             continue
         seg = by_id[node["id"]]
-        if seg.get("target"):
+        if seg.get("target") and not unrenderable(seg):
             # **The map this wording's ids actually mean, which is not always the
             # segment's own.** `save_doc` rewrites `slots` from the fresh parse on
             # every extract, and the divergence (24) keep path leaves an older

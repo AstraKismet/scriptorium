@@ -1,7 +1,7 @@
 # The workbench HTTP contract
 
 ```text
-contract_version = 3
+contract_version = 4
 ```
 
 The request and response surface `lx web` speaks. It is frozen here so that a
@@ -44,6 +44,28 @@ them needed the move**: a new response key is additive. They ride here because t
 same section was being rewritten, and two packages editing one section is how they
 collide. The gate is unchanged and still stands: the next bump is the next work
 package. See `docs/decisions.md`, 2026-08-19.
+
+**Version 4** is the second bump through the gate, scheduled as HANDOFF-036, and
+it carries **two** items, both of them consequences of one change — the render
+now refuses a stored wording it cannot substitute without malforming the file,
+which closes *Known divergences* (31):
+
+1. `missing` counts a segment with no **usable** target, not only one with no
+   target. Both rows change — `GET /api/preview` and `POST /api/render`.
+2. `from` reports the branch that actually ran, so a segment holding an unusable
+   target answers `"marker"` or `"source"` where it answered `"target"`. No new
+   value is introduced; the three that exist keep their meanings.
+
+There is no additive spelling of either. Both are changes to what a documented
+value *means*, which the rules below put on the bump list, and a client that
+draws a progress bar from `missing` or a badge from `from` reads a different
+answer for the same document. `text`, `wrote` and the block `text` row are
+untouched: the bytes of an unusable segment change, and `text` never promised
+which branch produced them.
+
+What the package deliberately did **not** carry, so the next reader does not
+look for it: refusing to render a document whose `lx check` fails, divergence
+(26), and divergence (28). See `docs/decisions.md`, 2026-09-03.
 
 > **Provenance.** *Request admission*, *Path and language confinement* and the
 > security half of *Deliberately not in the contract* state a trust boundary,
@@ -243,7 +265,7 @@ then discarded.
 
 | Key | Type | Meaning |
 |---|---|---|
-| `contract_version` | integer | The version of *this document*. `3`. |
+| `contract_version` | integer | The version of *this document*. `4`. |
 | `version` | string | Package version. Not the contract version. |
 | `cwd` | string | `os.getcwd()`. The confinement root is `os.path.realpath` of it, which is **not always the same string** — under a junction or an 8.3 short name they differ. Treat `cwd` as a label to show a person, never as an input to a path comparison. |
 | `targets` | array of string | Configured target language tags. |
@@ -322,7 +344,7 @@ to `lx blocks <src> --lang <lang> --fallback --json` for `blocks` and `missing`.
 |---|---|---|
 | `text` | string | The rendered document, with the document's own line terminator re-imposed. |
 | `blocks` | array of *block* | The same document, cut at the positions the skeleton already has. Unconditional — there is no `?blocks=` to switch it off. |
-| `missing` | integer | **A count**, not a list — how many segments fell back to their source instead of a target. The list form is `blocks`: the segments this counts are exactly those whose block carries `from` other than `"target"`. |
+| `missing` | integer | **A count**, not a list — how many segments fell back to their source instead of a target. Since version 4 that is a segment with no **usable** target, not only one with no target at all: a stored wording whose placeholders cannot be substituted without malforming the document is counted here and its text comes from the source, because writing it would put a bare `⟦n⟧`, a duplicated tag or an inverted pair into the file. The list form is `blocks`: the segments this counts are exactly those whose block carries `from` other than `"target"`. |
 | `default_out` | string | Where `POST /api/render` would write if given no `out`. |
 
 `"".join(b["text"] for b in blocks)` **is** `text`, byte for byte, and the server
@@ -1047,7 +1069,7 @@ same three-call sequence as `lx render`.
 | Key | Type | Meaning |
 |---|---|---|
 | `wrote` | string | The path actually written — the confined `out`, or the default. |
-| `missing` | integer | A **count** of segments rendered from their source instead of a target. |
+| `missing` | integer | A **count** of segments rendered from their source, or from the format's untranslated marker, instead of from a target. Since version 4 that is a segment with no **usable** target: one with no target at all, and one whose stored wording cannot be substituted without malforming the document. `GET /api/preview`'s row says which wordings those are. |
 
 The file is written as UTF-8 whatever encoding the source was detected in, which
 is `lx render`'s behaviour too.
@@ -1240,7 +1262,7 @@ top-level key set.
 |---|---|---|
 | `id` | string \| null | The *segment* id this block renders, or `null` for a run of skeleton the pipeline did not translate. `null` **is** the discriminator — there is no `type` tag — and it is spelled the same way `GET /api/doc`'s segment `id` is, so the two join on it. |
 | `kind` | string \| null | The segment's block kind, the same enum as *segment*'s `kind`. `null` for skeleton. Without it a reading view cannot typeset a chapter opening as a chapter opening: `# Chapter One` is a skeleton run of `# ` beside a `heading` segment, and the alternative is a client parsing Markdown out of the neighbouring skeleton text. |
-| `from` | string \| null | Which branch of the render produced `text`: `target` (the stored translation), `source` (the masked source, unmasked, because the caller asked for a fallback), or `marker` (the format's untranslated marker). `null` for skeleton. It names the branch outright rather than leaving a client to reconstruct it from `status`, the `fallback` it asked for and the marker string, and it is the key that lets `missing` stay an integer. **Where the two answers actually part company is a row an older build left behind**, and the sentence used to imply a reachable state: the render branches on a *truthy* target while `status` is derived from a *stripped* one, so a target of three spaces renders its own text, reports `pending`, and is not counted by `missing` — but no writer produces one now. `do_apply` refuses a blank target at the door (2026-08-14) and `translate.accept` refuses it as an empty translation, so a state file written before those is the way that row is reached. |
+| `from` | string \| null | Which branch of the render produced `text`: `target` (the stored translation), `source` (the masked source, unmasked, because the caller asked for a fallback), or `marker` (the format's untranslated marker). `null` for skeleton. It names the branch outright rather than leaving a client to reconstruct it from `status`, the `fallback` it asked for and the marker string, and it is the key that lets `missing` stay an integer. **Since version 4 a stored translation does not always take the `target` branch**: a wording whose placeholders cannot be substituted without malforming the document — a `⟦n⟧` the document has no slot for, a repeated or orphaned tag, an inverted pair — answers `source` or `marker` like a segment that was never translated, and `GET /api/doc` still reports it `translated` with its text intact, because nothing was deleted and `lx check` names it. A client that renders "untranslated" from this field alone will say so about a segment somebody wrote; join on `id` and read `issues` to tell the two apart. **Where the two answers used to part company is a row an older build left behind**, and the sentence used to imply a reachable state: the render branches on a *truthy* target while `status` is derived from a *stripped* one, so a target of three spaces renders its own text, reports `pending`, and is not counted by `missing` — but no writer produces one now. `do_apply` refuses a blank target at the door (2026-08-14) and `translate.accept` refuses it as an empty translation, so a state file written before those is the way that row is reached. |
 | `text` | string | What this position contributes to the rendered document, with the document's line terminator already re-imposed — so `"".join(b["text"])` is `/api/preview`'s `text`. It is neither `segment.source` (masked) nor `segment.target` (stored masked): placeholders are gone and real markup is back — **against the map the wording's ids mean**, which for an ordinary segment is its own and for one a re-parse stranded is the map it was written in. Before 2026-09-01 it was always the segment's own, so a stranded wording rendered the wrong original with nothing reporting it; the field's meaning did not change and this sentence says which map so that a reader does not have to assume the other one. **It may be empty**, rarely; nothing here promises otherwise. |
 
 `status`, `origin`, `review`, `token` and `issues` are deliberately **absent**. All
@@ -1669,8 +1691,12 @@ were decided at version 2 and each entry says how.
     trusted because it is hand-edited. Invariant 11 names this: the moment
     anything writes configuration over HTTP, that trust is gone.
 11. **`/api/preview` hardcodes `fallback=true`; `/api/render` defaults it to
-    `false`.** The same document previews with its untranslated segments showing
-    source text and renders with them showing a marker.
+    `false`.** The same document previews with the segments `missing` counts
+    showing source text and renders with them showing a marker. Since version 4
+    that population is wider than "untranslated", which is how this entry read
+    until then: it also holds a segment whose stored wording the render refuses
+    to substitute, so a reviewer's own paragraph can appear as the English source
+    in the preview and as a marker in the file.
 12. **A POST body is read with no size cap.** `Content-Length` bytes are read
     whole. The cap that exists — 1 MiB — is only on the *refused*-request drain
     path, and exists to keep the socket clean rather than to bound a request.
@@ -2201,7 +2227,8 @@ rule. Open.
     wire moves when it lands: `Backed by` already names `cli.do_sentences`.
 
 Appended 2026-09-01 by the package that closed (27) and the wrong-entity half of
-(24)'s cost. Open, and older than that change.
+(24)'s cost. **Closed 2026-09-03** at `contract_version` 4, and older than the
+change that recorded it.
 
 31. **A rendered document can still carry a bare placeholder.** `mask.unmask`
     returns an id it has no slot for verbatim, and `skeleton.render_blocks` takes
@@ -2226,6 +2253,26 @@ Appended 2026-09-01 by the package that closed (27) and the wrong-entity half of
     branch as the one a stored translation takes, so counting "no *usable*
     target" changes what two documented values mean. Scheduled as **HANDOFF-036**,
     which owns the bump.
+
+    **Closed 2026-09-03, at `contract_version` 4** — `mask.unrenderable`, asked
+    inside `skeleton.render_blocks`, so an unusable wording takes the same branch
+    as a segment nobody translated. `missing` counts it and `from` says `marker`
+    or `source`.
+
+    Two corrections the closing package owes this entry, because both sentences
+    above were measured wrong and a reader following them would look in the
+    wrong place. **The paragraph beginning "It is loud" is false.** A re-parse
+    that renumbers a kept wording can leave the two id multisets the same size
+    while the map the wording is unmasked against has lost one of them: the
+    `tags` rule never fires, `lx check` exits **0**, and `lx render` writes the
+    token. That is a *silent* instance of this entry, reachable through
+    `POST /api/save` followed by `POST /api/extract` with an edited
+    `config/dnt.txt`, and it is why the same package added an unwaivable `tags`
+    finding for it — a new finding on an existing rule, which is additive and did
+    not need the bump. **And the first named population is over-stated:** a kept
+    wording no seating can place does *not* generally write a bare token, because
+    the render unmasks it against the map it was written in. The measured cases
+    that do write one all carry an id neither map explains.
 
 Appended 2026-09-01 by the package that added `GET /api/models`. Both open.
 

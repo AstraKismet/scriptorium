@@ -85,7 +85,7 @@ STATIC = os.path.join(os.path.dirname(__file__), "static")
 #:     three arrays that landed beside it — `kept`, `ambiguous`, `replaced` — are
 #:     new response keys and did not need the move; they rode along because the
 #:     same section was being rewritten. See `docs/decisions.md`, 2026-08-19.
-CONTRACT_VERSION = 3
+CONTRACT_VERSION = 4
 
 #: The three spellings of loopback. `serve()` binds one and the browser may be
 #: pointed at any of them, so the bound literal alone is not the answer.

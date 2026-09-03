@@ -1218,7 +1218,7 @@ $('#bWrite').onclick = async () => {
   if (!cur) return;
   await save();
   const r = await api('/api/render', {...cur, fallback:false});
-  say(`wrote ${r.wrote}` + (r.missing ? ` (${r.missing} untranslated)` : ''), 'good');
+  say(`wrote ${r.wrote}` + (r.missing ? ` (${r.missing} without a usable translation)` : ''), 'good');
 };
 
 $('#bCommit').onclick = async () => {
