@@ -44,7 +44,7 @@ from scriptorium.cli import (  # noqa: E402
     do_waive,
 )
 from scriptorium.config import DEFAULT_CONFIG  # noqa: E402
-from scriptorium.store import load_doc, tm_path  # noqa: E402
+from scriptorium.store import load_doc, save_targets, tm_path  # noqa: E402
 
 CFG = dict(DEFAULT_CONFIG)
 
@@ -218,6 +218,14 @@ def test_the_status_surface_counts_a_waiver_without_a_check(book):
      _seg("s", "A line.", "- 一行。")),
     ("a carriage return the target invents",
      _seg("s", "A line.", "一行。\r")),
+    # No format produces an XML host today — `escaping` activates with EPUB —
+    # so this shape is unreachable through `lx extract` and reachable here.
+    # Covered anyway, because the rule ships and a mutation round found it was
+    # the one unwaivable answer nothing asserted.
+    ("a raw '<' in an XML host",
+     dict(_seg("s", "A line.", "一行 < 兩行。"), host="xml")),
+    ("a raw '&' in an XML host",
+     dict(_seg("s", "A line.", "一行 & 兩行。"), host="xhtml")),
 ])
 def test_a_waiver_cannot_reach_an_issue_about_the_bytes(name, seg):
     """The line the whole design is drawn on, case by case.
@@ -251,6 +259,77 @@ def test_a_waiver_reaches_the_shapes_whose_bytes_are_well_formed():
                    for i in check_segment(seg, "zh-TW", CFG, [], ["Ana"]))
         assert not any(i["severity"] == "error" for i in
                        check_segment(dict(seg, waived=True), "zh-TW", CFG, [], ["Ana"]))
+
+
+def test_only_an_error_is_downgraded_whatever_severity_a_row_carries():
+    """The `sev == "error"` half of the downgrade, which a mutation round found
+    nothing asserting.
+
+    It looks like a no-op — downgrading a warning to a warning changes nothing —
+    and it is not, because two severities are **data**: `glossary` passes column
+    four of `config/glossary.csv` through unvalidated and `lexicon_extra` does the
+    same, so a hand-edited configuration can put any string there, and the
+    workbench contract says so out loud. Without this clause a waiver would
+    rewrite such a row to `warn`, quietly narrowing a severity the project chose.
+    """
+    row = {"source": "gate", "target": "大門", "forbidden": [], "severity": "critical"}
+    seg = _seg("s", "The gate stood open.", "門開著。")
+    for waived in (False, True):
+        found = check_segment(dict(seg, waived=waived), "zh-TW", CFG, [row], [])
+        assert ("critical", "glossary") in [(i["severity"], i["rule"]) for i in found]
+
+
+def test_lifting_a_waiver_removes_the_key_rather_than_storing_false(book):
+    """One row for "never waived" and "waiver lifted", the rule `save_review`
+    follows.
+
+    `is_waived` reads `bool(...)`, so a stored `false` would behave the same and
+    a mutation round says no test could tell them apart. It still matters: the
+    body blob is compared and diffed, and two spellings of one state is how a
+    later reader comes to believe there are two.
+    """
+    import sqlite3
+
+    from scriptorium.store import db_path, doc_id, save_waived
+
+    def body(sid):
+        conn = sqlite3.connect(db_path())
+        try:
+            row = conn.execute("SELECT body FROM segments WHERE doc_id=? AND seg_id=?",
+                               (doc_id("d.md"), sid)).fetchone()
+        finally:
+            conn.close()
+        return json.loads(row[0])
+
+    ids = [s["id"] for s in load_doc("d.md", "zh-TW")["segments"]]
+    assert "waived" not in body(ids[0])
+    save_waived("d.md", "zh-TW", {ids[0]: True})
+    assert body(ids[0])["waived"] is True
+    save_waived("d.md", "zh-TW", {ids[0]: False})
+    assert "waived" not in body(ids[0])
+
+
+def test_a_waiver_survives_a_carryover_the_acceptance_path_takes(book, tmp_path):
+    """The branch the other carryover test does not reach.
+
+    `test_a_waiver_survives_the_re_extract_every_run_performs` exercises the
+    *kept* branch, because the wording it waives drops a placeholder and
+    `translate.accept` refuses it. A waiver over a rule that judges the text —
+    `lexicon` here — is accepted instead and lands through the winning-candidate
+    branch, which is a different line and had no test until a mutation round
+    removed it and nothing failed.
+    """
+    (tmp_path / "book" / "h.md").write_bytes(b"Check the network.\n")
+    do_extract("h.md", "zh-TW", CFG)
+    hid = load_doc("h.md", "zh-TW")["segments"][0]["id"]
+    do_apply("h.md", "zh-TW", CFG, {hid: "看一下網絡。"}, origin="human")
+    do_waive("h.md", "zh-TW", CFG, [hid])
+
+    _doc, reused, _rejected, _notes = do_extract("h.md", "zh-TW", CFG)
+    assert reused == 1
+    assert is_waived(load_doc("h.md", "zh-TW")["segments"][0])
+    report, _ = do_check("h.md", "zh-TW", CFG)
+    assert report["errors"] == 0
 
 
 def test_every_finding_declares_whether_it_may_be_waived():
@@ -330,6 +409,28 @@ def test_a_waiver_does_not_survive_the_wording_it_was_granted_on(book):
     assert is_waived(load_doc("d.md", "zh-TW")["segments"][0])
 
     do_apply("d.md", "zh-TW", CFG, {book[0]: "⟦1⟧在門邊等著。"}, origin="human")
+    assert not is_waived(load_doc("d.md", "zh-TW")["segments"][0])
+
+
+def test_a_model_run_lifts_the_waiver_on_the_wording_it_replaces(book):
+    """The other writer, which `do_apply` never reaches.
+
+    `store.save_targets` is what a translation run commits each batch through,
+    and it is the only writer `do_apply` does not go past — so the test above
+    covers `save_segments` and this one covers the drop that would otherwise have
+    no test at all. It is unconditional there on purpose: every caller feeds this
+    function `translate.accept`'s output, so the text is never the wording that
+    was waived, and a run that silenced its own fresh draft would be the waiver
+    doing the one thing it must not.
+    """
+    do_apply("d.md", "zh-TW", CFG, {book[0]: FOLDED}, origin="agent")
+    do_waive("d.md", "zh-TW", CFG, [book[0]])
+    assert is_waived(load_doc("d.md", "zh-TW")["segments"][0])
+
+    written, refused = save_targets("d.md", "zh-TW",
+                                    {book[0]: "⟦1⟧在門邊等著，⟦2⟧沒有動。"},
+                                    origin="llm:draft")
+    assert (written, refused) == (1, [])
     assert not is_waived(load_doc("d.md", "zh-TW")["segments"][0])
 
 
