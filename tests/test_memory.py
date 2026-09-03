@@ -10,6 +10,7 @@ The end-to-end commands are covered in `test_cli.py`, and the properties asserte
 here are about identity, which a process boundary only makes slower to read.
 """
 
+import ast
 import json
 import os
 import pathlib
@@ -21,16 +22,19 @@ import statedb
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from scriptorium import mask  # noqa: E402
 from scriptorium import store as store_mod  # noqa: E402
 from scriptorium.cli import (  # noqa: E402
     UnnamedRegister,
     UnusableTarget,
     do_apply,
+    do_blocks,
     do_check,
     do_commit,
     do_extract,
     do_hold,
     do_render,
+    do_waive,
 )
 from scriptorium.config import DEFAULT_CONFIG, DEFAULT_TONE  # noqa: E402
 from scriptorium.mdparse import parse  # noqa: E402
@@ -1139,6 +1143,372 @@ def test_a_kept_wording_remembers_which_numbering_it_was_written_in(
             assert state == first, "the second extract accepted what the first refused"
 
 
+# --- what a render may not write: divergence (31), contract_version 4 --------
+#
+# The gate is `mask.unrenderable`, asked inside `skeleton.render_blocks`. These
+# tests are the whole of this package's evidence: measured 2026-09-03, the suite
+# as it stood went green over every version of the gate that was built, because
+# no fixture anywhere stored a wording whose substitution is malformed and then
+# rendered it. Six cases, and they are paired on purpose — three that must become
+# missing and three that must not, because a gate is as wrong when it refuses a
+# reviewer's correct sentence as when it writes a broken one, and only the first
+# half of that is obvious from the defect it was written for.
+
+
+def _rendered(src="d.md", lang="zh-TW"):
+    """``(marker text, fallback text, blocks, missing)`` for one document.
+
+    Both branches every time. The gate moves two documented values at once —
+    which bytes reach the file, and which branch `from` names — and a test that
+    reads one of them passes over a build that got the other wrong.
+    """
+    marker, missing = do_render(src, lang, CFG)
+    fallback, fallback_missing = do_render(src, lang, CFG, fallback=True)
+    blocks, blocks_missing = do_blocks(src, lang, CFG)
+    assert missing == fallback_missing == blocks_missing, \
+        "one count, whichever branch the caller asked for"
+    return marker, fallback, blocks, missing
+
+
+def _froms(blocks):
+    return [b["from"] for b in blocks if b["id"]]
+
+
+def test_an_unusable_target_is_not_written_into_the_rendered_document(
+        tmp_path, monkeypatch):
+    """Divergence (31)'s first named population, closed.
+
+    `lx apply` takes a person's words without a placeholder check, deliberately
+    (`docs/decisions.md`, 2026-07-29), so a hand-typed `⟦99⟧` reaches storage.
+    Until 2026-09-03 `skeleton.render_blocks` took the target branch on any
+    truthy target and `mask.unmask` returned the unknown id verbatim, so the
+    token was written into the delivered file with `missing` counting none of it.
+
+    **What must not change with it**: the wording is still on the segment, with
+    its origin and its status. The refusal is at the render; deleting what the
+    segment held is what 2026-08-17 rejected and this may not reopen.
+    """
+    _project(tmp_path, monkeypatch, dnt="Celurion\n", doc=b"Celurion ships today.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    sid = _only(doc)["id"]
+    do_apply("d.md", "zh-TW", CFG, {sid: "⟦1⟧ 今天出貨。⟦99⟧"}, origin="human")
+
+    marker, fallback, blocks, missing = _rendered()
+    assert "⟦" not in marker and "⟦" not in fallback, "a bare token reached the file"
+    assert marker == "<!-- untranslated s0001 -->\n"
+    assert fallback == "Celurion ships today.\n"
+    assert (missing, _froms(blocks)) == (1, ["marker"])
+
+    kept = _only(load_doc("d.md", "zh-TW"))
+    assert kept["target"] == "⟦1⟧ 今天出貨。⟦99⟧", "the render refused it; nothing deleted it"
+    assert (kept["origin"], kept["status"]) == ("human", "translated")
+    report, _ = do_check("d.md", "zh-TW", CFG)
+    assert report["errors"] == 1 and report["by_rule"]["tags"] == 1
+
+
+def test_a_stranded_wording_is_not_an_unusable_target(tmp_path, monkeypatch):
+    """The regression guard for the 2026-09-01 repair, and the one this package
+    was most likely to break.
+
+    A wording the divergence (24) keep path stranded renders against the map it
+    was written in, so every id resolves and the bytes are the reviewer's own
+    words. The gate must not touch it — and it is exactly the shape a gate built
+    from the id *multiset* refuses, because `⟦1⟧` and `⟦2⟧` mean different terms
+    on the two sides while the multisets agree.
+    """
+    _project(tmp_path, monkeypatch, dnt="Alpha\nBeta\n", doc=b"Alpha met Beta.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    sid = _only(doc)["id"]
+    assert _only(doc)["masked"] == "⟦1⟧ met ⟦2⟧."
+    do_apply("d.md", "zh-TW", CFG, {sid: "⟦1⟧ 遇見 ⟦2⟧。"}, origin="human")
+
+    # `met` becomes protected and `Beta` stops being: the fresh parse numbers a
+    # different pair of originals and the seating refuses, so the wording is kept
+    # with `target_slots` naming the map it speaks.
+    (tmp_path / "config" / "dnt.txt").write_text("Alpha\nmet\n", encoding="utf-8")
+    _doc, _reused, _rejected, notes = do_extract("d.md", "zh-TW", CFG)
+    assert notes["kept"] == [sid]
+    stranded = _only(load_doc("d.md", "zh-TW"))
+    assert {k: v["original"] for k, v in stranded["target_slots"].items()} == \
+        {"1": "Alpha", "2": "Beta"}
+    assert not mask.unrenderable(stranded)
+
+    marker, fallback, blocks, missing = _rendered()
+    assert marker == fallback == "Alpha 遇見 Beta。\n", "the reviewer's own words"
+    assert (missing, _froms(blocks)) == (0, ["target"])
+
+
+def test_a_waiver_does_not_make_an_unusable_target_renderable(
+        tmp_path, monkeypatch):
+    """A waiver answers a report; it cannot make malformed bytes well formed.
+
+    The first half of the bound on the exemption HANDOFF-036 was written with.
+    There is no exemption in the end — the gate never reads the flag — and this
+    is what that has to mean at the render: `lx waive` is accepted here, because
+    `do_waive` refuses only an untranslated segment and one nothing fails on, and
+    the segment is still not written.
+    """
+    _project(tmp_path, monkeypatch, dnt="Celurion\n", doc=b"Celurion ships today.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    sid = _only(doc)["id"]
+    do_apply("d.md", "zh-TW", CFG, {sid: "⟦1⟧ 今天出貨。⟦99⟧"}, origin="human")
+    assert do_waive("d.md", "zh-TW", CFG, [sid]) == (1, [], [])
+
+    marker, fallback, blocks, missing = _rendered()
+    assert "⟦" not in marker and "⟦" not in fallback
+    assert (missing, _froms(blocks)) == (1, ["marker"])
+    report, _ = do_check("d.md", "zh-TW", CFG)
+    assert report["errors"] == 1, "the `tags` finding is unwaivable and stayed one"
+
+
+def test_a_tag_half_lost_from_a_neighbour_is_an_unusable_target_when_waived(
+        tmp_path, monkeypatch):
+    """The second half of the bound, and the shape that was a live defect.
+
+    `mask` pairs markup within a segment, so a `<span>` opened in one paragraph
+    and closed in the next leaves both halves `standalone` with no `pair_id`.
+    A predicate keyed on `pair_id` calls losing one waivable; this one asks the
+    tag text, so the wording is refused at the render however the flag stands.
+
+    The fallback branch is what puts the closing tag back, and the marker branch
+    does not — a partial render of a document with an unclosed `<span>` is still
+    an unclosed `<span>`. That is asserted rather than glossed: the gate stops
+    the pipeline claiming a translation it cannot write, not every consequence of
+    a document being half rendered.
+    """
+    _project(tmp_path, monkeypatch,
+             doc=b'<span class="note">One.\n\nTwo.</span>\n')
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    first, second = [s["id"] for s in doc["segments"]]
+    do_apply("d.md", "zh-TW", CFG, {first: "⟦1⟧一。", second: "二。"}, origin="human")
+    assert do_waive("d.md", "zh-TW", CFG, [second]) == (1, [], [])
+
+    marker, fallback, blocks, missing = _rendered()
+    assert (missing, _froms(blocks)) == (1, ["target", "marker"])
+    assert marker == '<span class="note">一。\n\n<!-- untranslated s0002 -->\n'
+    assert fallback == '<span class="note">一。\n\nTwo.</span>\n'
+    report, _ = do_check("d.md", "zh-TW", CFG)
+    assert report["errors"] == 1 and report["by_rule"]["waived"] == 1
+
+
+def test_a_wording_the_render_map_cannot_resolve_is_an_unusable_target(
+        tmp_path, monkeypatch):
+    """The silent instance of (31): the multisets agree and a token still leaks.
+
+    Measured 2026-09-03, and it defeats every predicate built from `lost`/`extra`
+    — including the one HANDOFF-036 distilled. Type an id the segment has no slot
+    for, then widen `config/dnt.txt` so the re-parse renumbers: `load_dnt` orders
+    longer terms first, so `Yttrium` takes `⟦1⟧` and `Xenon` takes `⟦2⟧`, the
+    seating refuses, and the kept wording is unmasked against `{1: Xenon}`. Two
+    ids on each side, no mismatch to report, and `Xenon 和 ⟦2⟧ 在此。` in the file
+    under a green `lx check`.
+
+    So the question is asked of `mask.target_map` — the map the render actually
+    substitutes from — and of every id the wording carries. Both halves are
+    asserted here, because either one alone lets this through.
+    """
+    _project(tmp_path, monkeypatch, dnt="Xenon\n", doc=b"Xenon and Yttrium here.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    sid = _only(doc)["id"]
+    do_apply("d.md", "zh-TW", CFG, {sid: "⟦1⟧ 和 ⟦2⟧ 在此。"}, origin="human")
+    (tmp_path / "config" / "dnt.txt").write_text("Xenon\nYttrium\n", encoding="utf-8")
+    _doc, _reused, _rejected, notes = do_extract("d.md", "zh-TW", CFG)
+    assert notes["kept"] == [sid]
+
+    seg = _only(load_doc("d.md", "zh-TW"))
+    src = sorted(mask.placeholder_ids(seg["masked"]))
+    assert src == sorted(mask.placeholder_ids(seg["target"])) == ["1", "2"], \
+        "the multisets agree, so no rule built on lost/extra can see this"
+    assert mask.unresolved(seg) == ["2"]
+
+    marker, fallback, blocks, missing = _rendered()
+    assert "⟦" not in marker and "⟦" not in fallback
+    assert (missing, _froms(blocks)) == (1, ["marker"])
+    report, _ = do_check("d.md", "zh-TW", CFG)
+    assert report["errors"] == 1 and report["by_rule"]["tags"] == 1, \
+        "`lx check` exited 0 over this document until 2026-09-03"
+
+    # **And a reviewer cannot answer it.** The finding reports the bytes, so it is
+    # raised `waivable=False` — which nothing asserted until a mutation pass
+    # flipped that argument and every test stayed green. A waiver is *accepted*
+    # here, because `do_waive` refuses only a segment nothing fails on and this
+    # one now fails; what it may not do is move the exit code.
+    assert do_waive("d.md", "zh-TW", CFG, [sid]) == (1, [], [])
+    report, _ = do_check("d.md", "zh-TW", CFG)
+    assert report["errors"] == 1, "a waiver cannot make a token writable"
+    assert report["by_rule"]["waived"] == 1, "and it still says a waiver is in force"
+    marker, fallback, blocks, missing = _rendered()
+    assert (missing, _froms(blocks)) == (1, ["marker"])
+
+
+def test_an_inverted_pair_is_an_unusable_target(tmp_path, monkeypatch):
+    """`⟦2⟧粗體⟦1⟧` renders `</b>粗體<b>` — malformed, and no id is missing.
+
+    The multisets agree and both ids resolve, so the resolution half of the gate
+    is blind to it; `checks.pair_problems` is what sees it, at error severity and
+    unwaivable, and it has since 2026-07-28. The render asks the same function,
+    of the same map, so what a reviewer may not overrule and what the file may
+    not carry are one set.
+    """
+    _project(tmp_path, monkeypatch, doc=b"A <b>bold</b> C.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    sid = _only(doc)["id"]
+    do_apply("d.md", "zh-TW", CFG, {sid: "A ⟦2⟧粗體⟦1⟧ C。"}, origin="human")
+
+    seg = _only(load_doc("d.md", "zh-TW"))
+    assert mask.unresolved(seg) == [], "every id resolves; only the order is wrong"
+    marker, fallback, blocks, missing = _rendered()
+    assert (missing, _froms(blocks)) == (1, ["marker"])
+    assert marker == "<!-- untranslated s0001 -->\n"
+    assert fallback == "A <b>bold</b> C.\n"
+
+
+def test_which_map_the_pair_rule_reads_cannot_matter_on_a_stranded_segment(
+        tmp_path, monkeypatch):
+    """Why `mask.unrenderable` may ask `target_map` for the pair clause.
+
+    A mutation pass on 2026-09-03 killed nine of the ten guards this package
+    added and left one standing: swapping `pair_problems(target,
+    target_map(seg))` for `pair_problems(target, seg["slots"])` failed nothing.
+    It is an **equivalent** mutant rather than an untested guard, and this test is
+    the proof, written down so the equivalence is guarded instead of assumed.
+
+    The reason: a carryover matches on the content hash, so a stranded segment's
+    source text is byte-identical to the one its wording was written against, and
+    `mask` numbers every inline match before any do-not-translate term. Tag ids —
+    the only ids that carry a `pair_id` — are therefore a pure function of the
+    source text and cannot move when `config/dnt.txt` changes. Only term slots
+    are added, dropped or renumbered, and every one of them is `standalone`.
+
+    So the two maps always agree about pairs. If that ever stops being true this
+    test goes red, and whoever reads it should re-examine which map the pair
+    clause reads — `target_map` stays the right answer either way, because it is
+    the map the bytes are substituted from.
+    """
+    _project(tmp_path, monkeypatch, dnt="Alpha\n",
+             doc=b"A <b>bold</b> and Alpha.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    sid = _only(doc)["id"]
+    assert _only(doc)["masked"] == "A ⟦1⟧bold⟦2⟧ and ⟦3⟧."
+    # An inverted pair *and* a dropped term id, so the seating has to refuse at
+    # the next extract and the keep path pins the older map.
+    do_apply("d.md", "zh-TW", CFG, {sid: "A ⟦2⟧粗體⟦1⟧。"},
+             origin="human")
+
+    (tmp_path / "config" / "dnt.txt").write_text("Alpha\nbold\n", encoding="utf-8")
+    _doc, _reused, _rejected, notes = do_extract("d.md", "zh-TW", CFG)
+    assert notes["kept"] == [sid]
+
+    seg = _only(load_doc("d.md", "zh-TW"))
+    assert seg["target_slots"], "the maps differ, which is what makes this a test"
+    assert set(seg["slots"]) - set(seg["target_slots"]) == {"4"}, "a term was added"
+
+    def paired(slot_map):
+        return {key: (rec["original"], rec["role"], rec["pair_id"])
+                for key, rec in (slot_map or {}).items() if rec.get("pair_id")}
+
+    assert paired(seg["slots"]) == paired(seg["target_slots"]) != {}
+    assert mask.pair_problems(seg["target"], seg["slots"]) == \
+        mask.pair_problems(seg["target"], mask.target_map(seg))
+    assert mask.unrenderable(seg), "and it is refused either way"
+
+
+def test_a_wording_that_merely_dropped_a_term_is_not_an_unusable_target(
+        tmp_path, monkeypatch):
+    """The other half of the gate, and the half a defect-driven test forgets.
+
+    Chinese names a person once where English repeats them, so a correct
+    translation of `Alpha met Alpha again.` carries one `⟦n⟧` where the source
+    has two. `lx check` reports it on the `tags` rule — a reviewer should look —
+    but the substituted bytes are ordinary prose, and a gate that refused this
+    would replace a translator's sentence with the untranslated marker, or under
+    `--fallback` with the English. Measured on a fourteen-segment chapter: seven
+    of them.
+
+    The legal repetition beside it is the same argument from the other side.
+    """
+    _project(tmp_path, monkeypatch, dnt="Alpha\n", doc=b"Alpha met Alpha again.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    sid = _only(doc)["id"]
+    assert _only(doc)["masked"] == "⟦1⟧ met ⟦2⟧ again."
+    do_apply("d.md", "zh-TW", CFG, {sid: "⟦1⟧ 再次遇見自己。"}, origin="human")
+
+    marker, fallback, blocks, missing = _rendered()
+    assert marker == fallback == "Alpha 再次遇見自己。\n"
+    assert (missing, _froms(blocks)) == (0, ["target"])
+    report, _ = do_check("d.md", "zh-TW", CFG)
+    assert report["errors"] == 1, "still reported, and still rendered"
+
+
+def test_a_repeated_code_span_is_not_an_unusable_target(tmp_path, monkeypatch):
+    """A translation may name a code span twice; the bytes are legal Markdown.
+
+    Refusing every repeated id was the first spelling of the waivability
+    predicate and it made `lx run` permanently decline a correct document. The
+    render inherits that decision by asking the same function: what is refused is
+    a repeated id whose original is a **tag**, and `` `alpha` `` is not one.
+    """
+    _project(tmp_path, monkeypatch, doc=b"Run `alpha` now.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    sid = _only(doc)["id"]
+    do_apply("d.md", "zh-TW", CFG, {sid: "先執行 ⟦1⟧ 再執行 ⟦1⟧。"}, origin="human")
+
+    marker, fallback, blocks, missing = _rendered()
+    assert marker == fallback == "先執行 `alpha` 再執行 `alpha`。\n"
+    assert (missing, _froms(blocks)) == (0, ["target"])
+
+
+def test_a_dropped_autolink_is_not_an_unusable_target(tmp_path, monkeypatch):
+    """`mask.tag_shape` reads `<https://…>` as an open `https` element.
+
+    It is right for its own caller — `_pair_tags` only ever sees text the
+    `htmltag` pattern matched — and wrong for an arbitrary slot original, because
+    `mask` masks an autolink under its own earlier pattern and it is never a tag
+    slot. Left unasked, a translation that simply dropped a link became an
+    **unwaivable** `tags` error, and once the render consulted the same predicate
+    it would have taken the whole paragraph out of the file. Measured 2026-09-03;
+    the misread is answered from `mask`'s own pattern table.
+    """
+    _project(tmp_path, monkeypatch,
+             doc=b"See <https://example.com/guide> for details.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    seg = _only(doc)
+    assert seg["slots"]["1"]["original"] == "<https://example.com/guide>"
+    assert mask.tag_shape(seg["slots"]["1"]["original"]) == ("open", "https"), \
+        "the misread this test exists for; if it goes away, so does the case"
+    do_apply("d.md", "zh-TW", CFG, {seg["id"]: "詳情請參閱文件。"}, origin="human")
+
+    marker, fallback, blocks, missing = _rendered()
+    assert marker == fallback == "詳情請參閱文件。\n"
+    assert (missing, _froms(blocks)) == (0, ["target"])
+    report, _ = do_check("d.md", "zh-TW", CFG)
+    assert [(i["rule"], i["severity"]) for i in report["issues"]] == [("tags", "error")]
+
+
+def test_one_predicate_answers_the_render_and_the_waiver(tmp_path, monkeypatch):
+    """The property the whole design rests on, asserted rather than assumed.
+
+    `skeleton.render_blocks` and `checks.check_segment` must not be able to
+    disagree about which wording is writable, and the structural reason they
+    cannot is that both call `mask.unrenderable(seg)` with the segment itself —
+    there are no maps to hand it differently. Read by `ast` rather than by
+    running the two, because what this pins is that neither module grew a second
+    copy of the question.
+    """
+    src_dir = os.path.join(os.path.dirname(__file__), "..", "src", "scriptorium")
+    calls = {}
+    for name in ("skeleton.py", "checks.py"):
+        tree = ast.parse(pathlib.Path(src_dir, name).read_text(encoding="utf-8"))
+        calls[name] = [
+            [ast.unparse(a) for a in node.args]
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == "unrenderable"
+        ]
+    assert calls["skeleton.py"] == [["seg"]], calls["skeleton.py"]
+    assert calls["checks.py"] == [["seg"]], calls["checks.py"]
+
+
 def test_a_register_change_says_what_it_left_behind(tmp_path, monkeypatch):
     """A re-extract into another register carries nothing over — deliberately,
     because the alternative banks a documentation voice under the literary key
@@ -1587,7 +1957,7 @@ def test_the_gate_is_lx_checks_rule_and_not_a_second_copy_of_half_of_it(
 
     `translate.accept` compares placeholder ids as a *multiset*, so
     `⟦2⟧粗體⟦1⟧` against `<b>bold</b>` satisfies it — it is accepted, it renders
-    `</b>粗體<b>`, and it reaches a second document intact. `checks.pair_problems`
+    `</b>粗體<b>`, and it reaches a second document intact. `mask.pair_problems`
     is what sees it, at the same `tags` rule and the same error severity. A gate
     written as its own placeholder comparison in `store.tm_records` would bank
     this; the gate that asks `checks.py` does not.

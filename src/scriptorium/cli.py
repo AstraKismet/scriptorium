@@ -732,11 +732,14 @@ def report_extract(src, lang, notes):
         # refused", which names the memory rather than the sentence.
         ids = ", ".join(notes["kept"])
         _out(f"  {len(notes['kept'])} segment(s) kept a stored target whose placeholders no "
-             f"longer match this document: {ids}. Nothing was lost — `lx render` writes each "
-             f"one against the numbering it was written in, and `lx check` reports it: an "
-             f"error where the placeholders no longer balance, a `numbering` warning where "
-             f"they balance but have stopped meaning the same terms — and a warning either "
-             f"way on a segment you have waived. Fix the wording, or "
+             f"longer match this document: {ids}. Nothing was deleted, and `lx check` reports "
+             f"each one: an error where the placeholders no longer balance, a `numbering` "
+             f"warning where they balance but have stopped meaning the same terms — and a "
+             f"warning rather than an error on a segment you have waived, wherever a reviewer "
+             f"can be right about it. `lx render` writes the wording against the numbering it "
+             f"was written in wherever substituting it is well formed, and the untranslated "
+             f"marker — counted in `missing` — where it is not: a ⟦n⟧ this document has no "
+             f"slot for, a repeated or orphaned tag, an inverted pair. Fix the wording, or "
              f"re-translate with "
              f"`lx translate {src} --lang {lang} --ids {','.join(notes['kept'])}` "
              f"(--overwrite-human if a person wrote it).")
@@ -1530,11 +1533,17 @@ def do_waive(src, lang, cfg, ids, waived=True):
     issue is waivable or not where it is raised, beside its severity
     (`checks.check_segment`), and the unwaivable ones are those that report the
     substituted *bytes* are malformed rather than that the wording may be wrong:
-    the placeholder pair rules, containment, host escaping, the invented carriage
-    return, and a `tags` mismatch carrying an id the segment has no slot for or
-    dropping one half of a pair. Measured 2026-09-03: without that last clause a
-    wording dropping only ``⟦2⟧`` of ``⟦1⟧very⟦2⟧`` gets `pair_problems() == []`,
-    would have been waived, and renders an ``<em>`` that never closes.
+    containment, host escaping, the invented carriage return, and every `tags`
+    finding `mask.unrenderable` names — an id this document has no slot for, a
+    repeated or orphaned tag, an inverted or crossed pair. Measured 2026-09-03:
+    without that last group a wording dropping only ``⟦2⟧`` of ``⟦1⟧very⟦2⟧``
+    gets `pair_problems() == []`, would have been waived, and renders an ``<em>``
+    that never closes.
+
+    That predicate is the render's own, since `contract_version` 4: a finding it
+    names is a wording `skeleton.render_blocks` refuses to write, so the set a
+    waiver cannot reach and the set the delivered file cannot carry are one set
+    by construction rather than two lists that agree today.
 
     **Waiving requires a non-empty target**, whole-request and before anything is
     written — the rule :func:`do_hold` follows, for the same reason and with one
@@ -1831,7 +1840,8 @@ def cmd_render(args, cfg):
         return
     out = args.out or default_output(args.src, args.lang, cfg)
     write_document(out, text)
-    _out(f"wrote {out}" + (f" ({missing} untranslated)" if missing else ""))
+    _out(f"wrote {out}"
+         + (f" ({missing} without a usable translation)" if missing else ""))
 
 
 #: How much of a block's text one terminal line shows. Long enough that a
@@ -1864,7 +1874,7 @@ def cmd_blocks(args, cfg):
         if len(body) > _BLOCK_PREVIEW:
             body = body[:_BLOCK_PREVIEW] + "…"
         _out(f"{head}{body}")
-    _out(f"{len(blocks)} block(s), {missing} untranslated")
+    _out(f"{len(blocks)} block(s), {missing} without a usable translation")
 
 
 def cmd_sentences(args, cfg):
@@ -1916,7 +1926,7 @@ def do_commit(src, lang, cfg):
     placeholder gate `translate.accept` applies is an id *multiset*, and a
     swapped pair satisfies it: measured the same day, `這是⟦2⟧粗體⟦1⟧文字。`
     against `This is <b>bold</b> text.` is accepted, renders `</b>粗體<b>`, and
-    reaches a second document intact. `checks.pair_problems` is what sees it, at
+    reaches a second document intact. `mask.pair_problems` is what sees it, at
     the same `tags` rule and the same error severity — so the rule that already
     owns this question answers it here too, `checks_disabled` is honoured
     because there is one rule and not a copy of half of it, and a project that
@@ -4244,7 +4254,8 @@ def cmd_run(args, cfg):
     # a bounded run wrote a document whose untranslated segments fell back to
     # the *source text* — an English book with twenty Chinese paragraphs in it,
     # which is not something to discover by reading the file.
-    _out(f"wrote {out}" + (f" ({missing} untranslated)" if missing else ""))
+    _out(f"wrote {out}"
+         + (f" ({missing} without a usable translation)" if missing else ""))
     _out("review the rendered file, then `lx commit` to bank the wording in the translation memory")
 
 
@@ -4418,7 +4429,7 @@ def build_parser():
     r.add_argument("--lang", required=True)
     r.add_argument("-o", "--out", help="'-' for stdout; default from output_pattern")
     r.add_argument("--fallback", action="store_true",
-                   help="untranslated segments fall back to source")
+                   help="segments with no usable target fall back to source")
     r.set_defaults(fn=cmd_render)
 
     # Beside `render` and sharing its spellings, because it answers the same
@@ -4428,7 +4439,7 @@ def build_parser():
     bl.add_argument("src")
     bl.add_argument("--lang", required=True)
     bl.add_argument("--fallback", action="store_true",
-                    help="untranslated segments fall back to source")
+                    help="segments with no usable target fall back to source")
     bl.add_argument("--json", action="store_true")
     bl.set_defaults(fn=cmd_blocks)
 

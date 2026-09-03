@@ -275,11 +275,14 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    list of arbitrary strings since it was written. What the CLI lacks is a way to
    hand it one from a terminal, which is a flag and a scheduled item. (31) was
    appended on 2026-09-01 by the package that closed (27) and the silent half of
-   (24)'s recorded cost, and is **open**: a stored
-   wording carrying a `⟦n⟧` the segment has no slot for still writes that token
-   into a rendered file, and `missing` counts none of it. Every case is an
-   `lx check` error and `lx run` refuses to render, so closing it by construction
-   is a version decision rather than a repair — **HANDOFF-036** owns the bump.
+   (24)'s recorded cost — a stored wording carrying a `⟦n⟧` the segment has no
+   slot for wrote that token into a rendered file with `missing` counting none of
+   it — and **closed on 2026-09-03** by the bump to **4**. Its own text was wrong
+   twice, which is the part worth carrying forward: it called the defect loud
+   because every case it had found was an `lx check` error, and a renumbering
+   that leaves the two id multisets the same size is not — `lx check` exited 0
+   over a file carrying the token. An enumeration read as a definition, for the
+   sixth recorded time.
    The same day, `POST /api/commit` stopped being the one endpoint with no
    `cli.do_*` behind it: what may be banked stopped being "has a target", and a
    policy with two homes is what this invariant exists to stop.
@@ -310,8 +313,12 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    silently to the configured default, and the register is a field of the memory
    key. The three arrays that landed beside it — `kept`, `ambiguous`, `replaced`
    — are new response keys and did not need the move; they rode along because the
-   same section was being rewritten. Every further bump is gated behind a work
-   package rather than a commit, and that gate is unchanged.
+   same section was being rewritten. It moved to **4** on 2026-09-03, the second
+   bump through the gate and scheduled as HANDOFF-036, carrying **two** items
+   that are one change seen twice: `missing` counts a segment with no *usable*
+   target, and `from` reports `marker` or `source` for a wording the render
+   refuses to substitute. Every further bump is gated behind a work package
+   rather than a commit, and that gate is unchanged.
 
    **A second contract froze on 2026-08-19, and it is this invariant's rather
    than the workbench's**: `docs/contracts/status-json.md` covers
@@ -435,7 +442,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 1921 tests; no network (one is POSIX-only,
+python -m pytest -q                 # 1932 tests; no network (one is POSIX-only,
                                     #   one runs only where the filesystem folds case)
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
@@ -720,10 +727,16 @@ own.
   as licence to delete what was there. The refused wording stays with its
   `origin` and its `review`, the segment comes back `translated` and failing, and
   `lx check` reports it — the rule below for a person's words, applied to the
-  path that was destroying them. The cost is that `lx render` on a document
-  `lx check` has failed writes the stale `⟦n⟧` into the output; `lx run` refuses
-  to render at all. `docs/decisions.md`, 2026-08-17, and
-  `docs/contracts/workbench-http.md` divergence (24).
+  path that was destroying them. The cost was that `lx render` on a document
+  `lx check` has failed wrote the stale `⟦n⟧` into the output; `lx run` refuses
+  to render at all. Since 2026-09-03 it does not: `mask.unrenderable` is asked in
+  `skeleton.render_blocks`, so a kept wording whose substitution would be
+  malformed renders the untranslated marker and is counted in `missing`, while a
+  kept wording that substitutes cleanly still writes the words their author
+  wrote. **The refusal is at the render and never at the store** — deleting the
+  wording is what 2026-08-17 rejected and this does not reopen it.
+  `docs/decisions.md`, 2026-08-17 and 2026-09-03, and
+  `docs/contracts/workbench-http.md` divergence (24) and (31).
 
   **Which stored entry a re-parsed segment inherits is decided by position**, in
   the one place that has one — the document's own prior state, never the memory
@@ -881,12 +894,28 @@ own.
   so a `<div>` opened in one paragraph and closed in the next leaves both halves
   `standalone` with no `pair_id` — and the first predicate called that waivable.
   Measured 2026-09-03 on an ordinary Markdown file: `lx check` exited 0 over a
-  document that rendered an unclosed `<span>`. `checks.unbalanced_markup` reads
-  `mask.tag_shape`, made public for it so the two answers cannot differ. The same
+  document that rendered an unclosed `<span>`. `mask.unrenderable` reads the tag
+  text through `mask._is_tag_original`, which is `mask.tag_shape` minus the
+  autolink it misreads as an open `https` element — made public for this so the
+  two answers cannot differ. The same
   pass found the mirror: refusing every `extra` id made `lx run` permanently
   decline a *correct* document whose Chinese repeats a code span, which renders
-  legally — so what is refused is an id with no slot, an id whose original is a
-  tag, and a lost tag half, and nothing else.
+  legally — so what is refused is an id the render's own map cannot resolve, an
+  id whose original is a tag, a lost tag half, and a pair the wording inverted or
+  crossed, and nothing else.
+
+  **The predicate is the render's, and that is why it is in `mask.py`.** Since
+  the same day `skeleton.render_blocks` asks the identical call on the identical
+  segment to decide whether a stored wording may be written into a document at
+  all, so the set a reviewer may not overrule and the set a delivered file may
+  not carry are one set by construction rather than two lists that agree today.
+  It could not live in `checks.py`: `skeleton` → `checks` → `mdparse` →
+  `skeleton` is a cycle that raises `ImportError` from every entry point, and
+  `mask.target_map` is already there for this reason. Its domain is what the
+  placeholder substitution does and nothing wider — `containment` and `escaping`
+  are unwaivable too and are still written into the file, which is stated here
+  because "the render refuses what a reviewer cannot waive" is the sentence a
+  reader will otherwise reconstruct, and it is not true.
 
   It is pinned to the wording twice over. The stored value is the **token of the
   target** it was granted on, compared at `store._segment` on the way out, so a

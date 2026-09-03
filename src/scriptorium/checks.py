@@ -17,11 +17,13 @@ from .mask import (
     CJK,
     CJK_RE,
     PH_RE,
+    pair_problems,
     strip_placeholders,
-    tag_shape,
     target_map,
     term_pattern,
     unmask,
+    unrenderable,
+    unresolved,
 )
 from .mdparse import (
     FENCE_RE,
@@ -347,53 +349,6 @@ def spells_numbers_in_cjk(lang):
     if not isinstance(lang, str):
         return False
     return lang.lower().replace("_", "-").split("-")[0] in _CJK_NUMERAL_LANGS
-
-
-def pair_problems(target, slots):
-    """Messages for paired placeholders the target broke; empty when it did not.
-
-    Two rules, both decidable: an open comes before its close, and two pairs
-    either nest or stay apart. Standalone slots keep multiset semantics, because
-    moving a URL or a code span is an ordinary thing for a translation to do — a
-    pair is not. Until 2026-07-28 a target of ``⟦2⟧粗體⟦1⟧`` against a source of
-    ``⟦1⟧粗體⟦2⟧`` reported zero issues and rendered ``</b>粗體<b>``: a layout
-    defect in Markdown, and in XHTML a file that does not open.
-
-    Deliberately *not* checked: a pair that stops containing another without
-    crossing it. Reassociating emphasis is a meaning decision a translator is
-    allowed to make, and a rule against it would fail correct work — the
-    false-positive trap the zh-TW lexicon was audited for on the same date.
-
-    Messages name slot ids and never slot contents. Validator messages are fed
-    back to the model as ``problems`` by ``translate._user_message``, so putting
-    the original ``<b>`` in one would show it markup, against invariant 3.
-    """
-    pos = {}
-    for m in PH_RE.finditer(target):
-        pos.setdefault(m.group(1), m.start())
-
-    halves = {}
-    for sid, rec in slots.items():
-        if rec.get("pair_id"):
-            halves.setdefault(rec["pair_id"], {})[rec.get("role")] = sid
-
-    out, spans = [], []
-    for pid in sorted(halves):
-        o, c = halves[pid].get("open"), halves[pid].get("close")
-        if o is None or c is None or o not in pos or c not in pos:
-            continue          # a half that never arrived is already a mismatch
-        if pos[o] > pos[c]:
-            out.append(f"placeholder pair inverted: ⟦{o}⟧ opens and must come "
-                       f"before ⟦{c}⟧")
-        else:
-            spans.append((pos[o], pos[c], o, c))
-
-    for i, (a_open, a_close, a1, a2) in enumerate(spans):
-        for b_open, b_close, b1, b2 in spans[i + 1:]:
-            if a_open < b_open < a_close < b_close or b_open < a_open < b_close < a_close:
-                out.append(f"placeholder pairs cross: ⟦{a1}⟧…⟦{a2}⟧ and "
-                           f"⟦{b1}⟧…⟦{b2}⟧ must nest or stay apart")
-    return out
 
 
 # ── containment and host escaping (invariant 2b) ────────────────────────────
@@ -753,82 +708,6 @@ def is_waived(seg):
     return bool(seg.get(WAIVED))
 
 
-def unbalanced_markup(lost, extra, target, maps):
-    """Placeholder ids whose loss or repetition leaves the rendered bytes wrong.
-
-    This is the whole of what a reviewer may not overrule, expressed as a
-    property of the bytes rather than as a list of rule names. Three ways a
-    `tags` mismatch stops being a claim about the wording and becomes one about
-    the document:
-
-    1. **An id the segment has no slot for.** `mask.unmask` leaves the literal
-       ``⟦99⟧`` in the file — divergence (31), which HANDOFF-036 closes at the
-       render.
-    2. **A repeated id whose original is a tag.** ``⟦1⟧x⟦1⟧`` over an ``<b>``
-       renders ``<b>x<b>``. A repeated *term* or code span renders twice and is
-       perfectly legal, which is why this asks what the original is rather than
-       refusing every repetition — refusing every repetition was the first
-       spelling and it made `lx run` permanently refuse a correct document.
-    3. **A lost tag half whose partner is still standing.** ``<em>`` that never
-       closes, or ``</em>`` that never opened.
-
-    Case 3 is why this reads the tag text through :func:`mask.tag_shape`
-    instead of trusting ``pair_id``. `mask._pair_tags` pairs only *within* a
-    segment, so a ``<span>`` opened in one paragraph and closed in the next
-    leaves both halves ``role: "standalone", pair_id: None`` — and the first
-    version of this predicate, which keyed on ``pair_id``, called that waivable.
-    Measured 2026-09-03 on an ordinary Markdown file: waive the closing segment,
-    `lx check` exits **0**, and `lx render` writes an unclosed
-    ``<span class="note">``. A whole pair lost together is still fine, and stays
-    waivable, because nothing is left standing.
-
-    *Cost, deliberate:* a void element written bare — ``<br>``, ``<img …>`` —
-    reads as an open whose close never arrives, so losing one is called
-    unbalanced when the bytes would in fact be fine. Erring that way is the
-    point: :func:`mask.tag_shape` says a void list here "would be a second place
-    to be wrong about HTML", and the cost of the false negative is a reviewer
-    re-wording one segment where the cost of the false positive is a broken file
-    under a green check.
-
-    ``maps`` is every slot map that could explain an id in play — the map the
-    wording's ids mean **and** the segment's own, because a lost id is a
-    source-side id and an extra one is a target-side id, and on a stranded
-    segment those are different maps. An id is a tag if either says so.
-    """
-    present = Counter(PH_RE.findall(target))
-    merged = {}
-    for m in maps:
-        for sid, rec in (m or {}).items():
-            if isinstance(rec, dict):
-                merged.setdefault(sid, []).append(rec)
-
-    def is_tag(sid):
-        return any(tag_shape(rec.get("original") or "")[0] in ("open", "close")
-                   for rec in merged.get(sid, ()))
-
-    partners = {}
-    for sid, recs in merged.items():
-        for rec in recs:
-            if rec.get("pair_id"):
-                partners.setdefault(rec["pair_id"], set()).add(sid)
-
-    bad = set()
-    for sid in extra:
-        if sid not in merged or is_tag(sid):
-            bad.add(sid)
-    for sid in lost:
-        if not is_tag(sid):
-            continue
-        pair = set()
-        for rec in merged.get(sid, ()):
-            pair |= partners.get(rec.get("pair_id"), set())
-        # The whole pair went together, so nothing is left standing.
-        if pair and not any(present.get(other) for other in pair):
-            continue
-        bad.add(sid)
-    return sorted(bad)
-
-
 def workable(segments):
     """The segments a run may touch: everything not held.
 
@@ -923,23 +802,50 @@ def check_segment(seg, lang, cfg, glossary, dnt):
 
     # 1. placeholder integrity — presence as a multiset, then pair order
     a, b = Counter(PH_RE.findall(src)), Counter(PH_RE.findall(tgt))
+    # **One question, one home, and both surfaces ask it of the segment.**
+    # `skeleton.render_blocks` asks the same call with the same argument to
+    # decide whether this wording may be written into a document at all, so
+    # the exit code and the rendered file cannot come to disagree about
+    # which targets are usable — which is the drift `mask.target_map` was
+    # extracted to remove, one layer up.
+    malformed = unrenderable(seg)
+    loose = unresolved(seg)
     if a != b:
         lost = sorted((a - b).elements())
         extra = sorted((b - a).elements())
         # **Waivable only where the render is well formed whatever the reviewer
         # decided**, and that question is asked of the bytes rather than of a
-        # rule name: see `unbalanced_markup`, which is the whole of the line.
+        # rule name: see `mask.unrenderable`, which is the whole of the line.
         # Everything it does not name — a term, a URL, a code span, a whole pair
         # dropped together, a legal repetition — renders as ordinary prose that
         # may be missing something, which is the judgement call a reviewer is
-        # for. Both maps are handed over because a lost id is a source-side id
-        # and an extra one is a target-side id, and on a segment a re-parse
-        # stranded those are two different maps.
-        unbalanced = unbalanced_markup(lost, extra, tgt,
-                                       (target_map(seg), seg.get("slots")))
+        # for, and is still an error here.
         add("tags", "error", f"placeholder mismatch lost={lost} extra={extra}",
-            waivable=not unbalanced)
-    for msg in pair_problems(tgt, seg.get("slots") or {}):
+            waivable=not malformed)
+    elif loose:
+        # **The multisets agree and the wording still names something this
+        # document cannot substitute.** Reachable, and silent until 2026-09-03: a
+        # re-parse that renumbers a kept wording can leave the two sides the same
+        # size while the map the wording is unmasked against has lost one of the
+        # ids, so the rule above never fires. Measured on `Xenon and Yttrium
+        # here.` — `lx check` exited 0 and `lx render` wrote `Xenon 和 ⟦2⟧ 在此。`
+        # into the file, which is divergence (31) with none of the loudness that
+        # entry claimed for it.
+        #
+        # The same rule name, because it is the same defect the `tags` rule
+        # exists for and a second name would put one question in two places on a
+        # frozen surface. Never waivable: it reports the bytes.
+        named = ", ".join("⟦" + sid + "⟧" for sid in loose)
+        add("tags", "error",
+            f"the target names {named}, which this segment has no slot for, so "
+            f"the token itself would be written into the rendered document",
+            waivable=False)
+    # Against `target_map(seg)`, not the segment's own `slots`, for the reason
+    # `containment_problems` reads that map: a stranded wording's pairs are the
+    # ones it was written against, and asking about pairs it never spoke reports
+    # on bytes nobody writes. `mask.unrenderable` asks the same call, so the
+    # render refuses exactly the swap this reports.
+    for msg in pair_problems(tgt, target_map(seg)):
         add("tags", "error", msg, waivable=False)
 
     # 1a. the wording speaks a numbering the source has moved on from

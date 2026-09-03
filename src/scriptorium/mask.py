@@ -17,6 +17,7 @@ the type lives beside the slot map, never inside the token, which is what the
 
 import re
 import unicodedata
+from collections import Counter
 
 PH_OPEN, PH_CLOSE = "\u27e6", "\u27e7"  # ⟦ ⟧
 PH_RE = re.compile(r"\u27e6(\d+)\u27e7")
@@ -69,10 +70,13 @@ _TAG_SHAPE_RE = re.compile(r"<(/?)([A-Za-z][A-Za-z0-9-]*)")
 def tag_shape(tag):
     """``(role, name)`` for a masked HTML tag, read as written.
 
-    Public since 2026-09-03 because `checks.unbalanced_markup` needs the same
+    Public since 2026-09-03 because :func:`unrenderable` — then
+    `checks.unbalanced_markup`, and moved here the same day — needs the same
     reading: whether losing a slot leaves the document unbalanced is a question
     about the tag text, and asking it twice in two spellings is how the two
-    answers come to differ.
+    answers come to differ. Ask it through :func:`_is_tag_original` rather than
+    directly unless the text is known to have come from the ``htmltag`` pattern;
+    read that function for the autolink it otherwise misreads.
 
     A self-closing tag is standalone whatever its name says. A void element
     written bare — ``<br>``, ``<img …>`` — needs no table here: it is an open
@@ -86,6 +90,31 @@ def tag_shape(tag):
     if tag.endswith("/>"):
         return "standalone", m.group(2).lower()
     return ("close" if m.group(1) else "open"), m.group(2).lower()
+
+
+_AUTOLINK_RE = dict(INLINE_PATTERNS)["autolink"]
+
+
+def _is_tag_original(original):
+    """Whether losing or repeating this slot unbalances the document's markup.
+
+    :func:`tag_shape` reads the text as written, which is right for its own
+    caller — :func:`_pair_tags` only ever hands it text the ``htmltag`` pattern
+    matched. Asked of an arbitrary slot original it over-reaches:
+    ``<https://example.com/a>`` and ``<me@example.com>`` both match
+    :data:`_TAG_SHAPE_RE` and read as an open ``https`` and an open ``me``.
+    :func:`mask` masks both under the ``autolink`` pattern, which is ordered
+    *before* ``htmltag``, so neither is ever a tag slot — and calling one a tag
+    made a translation that simply dropped a link an **unwaivable** `tags` error,
+    and would have taken the whole paragraph out of the rendered file once
+    :func:`unrenderable` reached the render. That is a misread rather than a
+    conservative approximation, so it is answered from this module's own pattern
+    table and there is no second place to be wrong about which of the two a slot
+    holds. Measured 2026-09-03.
+    """
+    if _AUTOLINK_RE.fullmatch(original):
+        return False
+    return tag_shape(original)[0] in ("open", "close")
 
 
 def _pair_tags(slots, tags):
@@ -195,6 +224,233 @@ def target_map(seg):
     is this module's question.
     """
     return seg.get("target_slots") or seg.get("slots") or {}
+
+
+# ── what a stored target would do to the document ──────────────────────────
+#
+# Three functions, and they are here rather than in `checks.py` for
+# :func:`target_map`'s own reason: `checks` and `skeleton` both ask them, both
+# already import this module, and neither may import the other —
+# ``skeleton`` → ``checks`` → ``mdparse`` → ``skeleton`` is a real cycle that
+# raises ``ImportError`` from every entry point (measured 2026-09-03). Two
+# callers asking one question in two modules is how the exit code and the
+# rendered file come to disagree about which wording is writable, which is the
+# defect `target_map` itself was extracted to remove.
+
+
+def pair_problems(target, slots):
+    """Messages for paired placeholders the target broke; empty when it did not.
+
+    Two rules, both decidable: an open comes before its close, and two pairs
+    either nest or stay apart. Standalone slots keep multiset semantics, because
+    moving a URL or a code span is an ordinary thing for a translation to do — a
+    pair is not. Until 2026-07-28 a target of ``⟦2⟧粗體⟦1⟧`` against a source of
+    ``⟦1⟧粗體⟦2⟧`` reported zero issues and rendered ``</b>粗體<b>``: a layout
+    defect in Markdown, and in XHTML a file that does not open.
+
+    Deliberately *not* checked: a pair that stops containing another without
+    crossing it. Reassociating emphasis is a meaning decision a translator is
+    allowed to make, and a rule against it would fail correct work — the
+    false-positive trap the zh-TW lexicon was audited for on the same date.
+
+    Messages name slot ids and never slot contents. Validator messages are fed
+    back to the model as ``problems`` by ``translate._user_message``, so putting
+    the original ``<b>`` in one would show it markup, against invariant 3.
+
+    It moved here from `checks.py` on 2026-09-03, unchanged, because
+    :func:`unrenderable` has to ask it: the swap above is a placeholder
+    substitution that produces malformed bytes, and the render may not write one.
+    `checks.pair_problems` still resolves — the name is imported back — so the
+    rule and its messages have moved module and not home.
+    """
+    pos = {}
+    for m in PH_RE.finditer(target):
+        pos.setdefault(m.group(1), m.start())
+
+    halves = {}
+    for sid, rec in slots.items():
+        if rec.get("pair_id"):
+            halves.setdefault(rec["pair_id"], {})[rec.get("role")] = sid
+
+    out, spans = [], []
+    for pid in sorted(halves):
+        o, c = halves[pid].get("open"), halves[pid].get("close")
+        if o is None or c is None or o not in pos or c not in pos:
+            continue          # a half that never arrived is already a mismatch
+        if pos[o] > pos[c]:
+            out.append(f"placeholder pair inverted: ⟦{o}⟧ opens and must come "
+                       f"before ⟦{c}⟧")
+        else:
+            spans.append((pos[o], pos[c], o, c))
+
+    for i, (a_open, a_close, a1, a2) in enumerate(spans):
+        for b_open, b_close, b1, b2 in spans[i + 1:]:
+            if a_open < b_open < a_close < b_close or b_open < a_open < b_close < a_close:
+                out.append(f"placeholder pairs cross: ⟦{a1}⟧…⟦{a2}⟧ and "
+                           f"⟦{b1}⟧…⟦{b2}⟧ must nest or stay apart")
+    return out
+
+
+def unresolved(seg):
+    """The ids in this segment's stored target that the render's map cannot answer.
+
+    :func:`unmask` returns an id it holds no record for **verbatim**, so every id
+    here is a literal ``⟦n⟧`` in the delivered file —
+    `docs/contracts/workbench-http.md` divergence (31).
+
+    Two halves, and each is a measurement rather than taste, because the obvious
+    other spelling of each was in the code and was wrong.
+
+    **Asked of** :func:`target_map` **alone.** That is the map the bytes are
+    actually substituted from. The predicate this replaced read the segment's own
+    ``slots`` as well — it only had to answer waivability, where the union errs
+    towards refusing — and on a stranded wording that calls an id known which the
+    render never consults.
+
+    **And asked of every id the wording carries**, not of the ids it carries *in
+    excess* of the source. Those are different questions and one document
+    separates them. On ``Xenon and Yttrium here.`` with `config/dnt.txt` naming
+    only ``Xenon``, type a ``⟦2⟧`` the segment has no slot for, then widen the
+    list so the re-parse numbers ``Yttrium`` first: `mask.reseat` refuses, the
+    divergence (24) keep path pins ``target_slots = {1: Xenon}`` against fresh
+    ``slots = {1: Yttrium, 2: Xenon}``, and the two id multisets now agree by
+    coincidence. Measured 2026-09-03: `lx check` exited **0** and `lx render`
+    wrote ``Xenon 和 ⟦2⟧ 在此。`` into the file. Nothing in this project asked
+    either question the right way round before that day.
+    """
+    now = target_map(seg)
+    return sorted({sid for sid in PH_RE.findall(seg.get("target") or "")
+                   if sid not in now})
+
+
+def unrenderable(seg):
+    """Whether substituting this segment's stored target would be malformed.
+
+    This is the whole of what a reviewer may not overrule **and** the whole of
+    what a render may not write, stated once as a property of the substituted
+    *bytes*. `skeleton.render_blocks` decides with it whether a stored wording is
+    a translation at all; `checks.check_segment` decides with it whether a
+    reviewer's judgement can overrule the `tags` finding it made. It takes a
+    **segment** rather than a pre-computed ``(lost, extra, target, maps)`` — the
+    shape it had while it lived in `checks.py` and answered only the second
+    question — because handed the pieces the two callers were free to hand it
+    different ones, and the map is exactly what they would have differed on.
+
+    Four ways a stored wording stops being a claim about the translation and
+    becomes one about the document:
+
+    1. **An id the render's map cannot resolve** — :func:`unresolved`, which
+       carries that half's own measurement.
+
+    2. **A repeated id whose original is a tag.** ``⟦1⟧x⟦1⟧`` over an ``<b>``
+       renders ``<b>x<b>``. A repeated *term* or code span renders twice and is
+       perfectly legal, which is why this asks what the original is rather than
+       refusing every repetition — refusing every repetition was the first
+       spelling and it made `lx run` permanently refuse a correct document.
+
+    3. **A lost tag half whose partner is still standing.** ``<em>`` that never
+       closes, or ``</em>`` that never opened.
+
+    4. **A pair the wording inverted or crossed** — :func:`pair_problems`, asked
+       of the same map the render substitutes from rather than of the segment's
+       own, for the reason `checks.containment_problems` already asks it that
+       way. Without this clause ``⟦2⟧粗體⟦1⟧`` over ``⟦1⟧bold⟦2⟧`` satisfies
+       every other test — the multisets agree and both ids resolve — and writes
+       ``</b>粗體<b>``, which `lx check` has always reported at error severity
+       and never let a reviewer waive. Measured 2026-09-03.
+
+       *The two maps cannot disagree here, and the choice is still not
+       arbitrary.* A carryover matches on the content hash, so a stranded
+       segment's source text is the one its wording was written against, and
+       :func:`mask` numbers every inline match before any do-not-translate term
+       — so a tag's id, and therefore every ``pair_id``, is a pure function of
+       that text. Only term slots move, and they are always standalone. A
+       mutation pass on 2026-09-03 found the other spelling survives for exactly
+       that reason; the equivalence is pinned by
+       `tests/test_memory.py::test_which_map_the_pair_rule_reads_cannot_matter_on_a_stranded_segment`
+       so that a change breaking it is reported rather than silent.
+
+    Case 3 is why this reads the tag text through :func:`tag_shape` instead of
+    trusting ``pair_id``. :func:`_pair_tags` pairs only *within* a segment, so a
+    ``<span>`` opened in one paragraph and closed in the next leaves both halves
+    ``role: "standalone", pair_id: None`` — and the first version of this
+    predicate, which keyed on ``pair_id``, called that waivable. Measured
+    2026-09-03 on an ordinary Markdown file: waive the closing segment,
+    `lx check` exits **0**, and `lx render` writes an unclosed
+    ``<span class="note">``. A whole pair lost together is still fine, and stays
+    waivable, because nothing is left standing.
+
+    *Cost, deliberate:* a void element written bare — ``<br>``, ``<img …>`` —
+    reads as an open whose close never arrives, so losing one is called malformed
+    when the bytes would in fact be fine. Erring that way is the point:
+    :func:`tag_shape` says a void list here "would be a second place to be wrong
+    about HTML", and the cost of the false negative is a reviewer re-wording one
+    segment where the cost of the false positive is a broken file under a green
+    check. An **autolink** is not that cost and is excluded outright: `mask` masks
+    ``<https://example.com/a>`` under its own pattern, before ``htmltag`` ever
+    sees it, so it is never a tag slot — but :func:`tag_shape` reads it as an open
+    ``https`` element, which made losing one unwaivable and, once the render
+    consults this, would have taken the whole paragraph out of the file. That is
+    a misread rather than a conservative approximation, and it is asked of this
+    module's own pattern table so there is no second place to be wrong about it.
+
+    Whether an id names a **tag** is asked of both maps — the wording's and the
+    segment's — and that asymmetry with case 1 is deliberate: a lost id is a
+    source-side id and an extra one is a target-side id, so on a stranded segment
+    those are different maps, and an id is a tag if either says so. Erring wide
+    there refuses; erring wide in case 1 would permit.
+
+    What this deliberately does **not** name is a wording whose placeholders
+    merely do not balance — a translation that dropped a protected term, or that
+    legally names a code span twice. Those render as ordinary prose that may be
+    missing something, which is the judgement call a reviewer is for, and
+    `lx check` reports every one of them on the `tags` rule whatever this answers.
+    Nor does it reach the rest of invariant 2b: a target that opens a list where
+    the source had a paragraph is `containment`'s, and it is written into the file
+    as before. **The domain of this function is what the placeholder substitution
+    does, and nothing wider** — see `docs/decisions.md`, 2026-09-03.
+    """
+    target = seg.get("target") or ""
+    now = target_map(seg)
+    if unresolved(seg) or pair_problems(target, now):
+        return True
+
+    present = Counter(PH_RE.findall(target))
+    source = Counter(PH_RE.findall(seg.get("masked") or ""))
+    if present == source:
+        return False
+
+    merged = {}
+    for slot_map in (now, seg.get("slots")):
+        for sid, rec in (slot_map or {}).items():
+            if isinstance(rec, dict):
+                merged.setdefault(sid, []).append(rec)
+
+    def is_tag(sid):
+        return any(_is_tag_original(rec.get("original") or "")
+                   for rec in merged.get(sid, ()))
+
+    for sid in present - source:
+        if is_tag(sid):
+            return True
+
+    partners = {}
+    for sid, recs in merged.items():
+        for rec in recs:
+            if rec.get("pair_id"):
+                partners.setdefault(rec["pair_id"], set()).add(sid)
+
+    for sid in source - present:
+        if not is_tag(sid):
+            continue
+        pair = set()
+        for rec in merged.get(sid, ()):
+            pair |= partners.get(rec.get("pair_id"), set())
+        # The whole pair went together, so nothing is left standing.
+        if pair and not any(present.get(other) for other in pair):
+            continue
+        return True
+    return False
 
 
 def unmask(text, slots):

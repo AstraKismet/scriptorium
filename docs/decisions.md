@@ -3,6 +3,257 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-09-03 · A target the render cannot substitute is not a translation
+
+Closing HANDOFF-036. `skeleton.render_blocks` asks `mask.unrenderable(seg)`
+before it takes the target branch, `contract_version` moves **3 → 4** on the
+workbench contract, `docs/contracts/status-json.md` stays at **1**, and *Known
+divergences* (31) is closed. Two documented values move and no more: what
+`missing` counts, and when `from` reports each of the three values it already
+had.
+
+The package arrived with its gate already distilled, under the instruction "do
+not re-derive these". It was re-derived anyway, because the first measurement
+contradicted it and the distilled gate turned out to fail the package's own goal.
+That is the entry.
+
+### The distilled gate, and the three ways it lost
+
+HANDOFF-036 specified the placeholder **multiset** — exactly `translate.accept`'s
+terminal check — with one exemption: a segment whose `waived` flag is set and
+whose mismatch `checks.unbalanced_markup` does not name. Built, installed over
+`skeleton.render_blocks` and both registered formats, and measured:
+
+- **It eats correct prose, in the primary use case.** On a fourteen-segment
+  English novel chapter with two protected character names, seven paragraphs name
+  a character twice where Traditional Chinese names them once. Every one is a
+  `tags` error today and every one renders correctly today. Under the multiset
+  gate: `missing 7`, seven `<!-- untranslated -->` comments, and under
+  `--fallback` a Chinese book with seven English paragraphs in it. In plain text
+  — the format novels actually arrive in — the replacement is
+  `[untranslated s0002]` mid-prose, which is the "four words of visible junk"
+  `skeleton.py` names as the reason that format has its own marker at all. No
+  model can produce this population: `accept` refuses it at the door. It is
+  exactly the human and agent translators `AGENTS.md` calls the model's equals
+  whose work is discarded.
+- **A review flag becomes a byte-level control over the artifact.** `lx unwaive`
+  on one segment removes its paragraph from the delivered file — the diff of the
+  two renders is one Chinese sentence replaced by a marker, with no text changed.
+  `AGENTS.md` says of the waiver "**It downgrades and never silences**", and this
+  is neither. Worse in two further directions, both reproduced: a reviewer
+  *fixing a typo* drops the waiver — `store.save_segments` drops it when the
+  target moves, correctly — and takes the paragraph out of the file with it; and
+  under `checks_disabled: ["tags"]`, a supported knob, `lx run` exits 0 printing
+  "0 error(s)", ships the marker book, and `cli.do_waive` **refuses** the only
+  remedy ("`lx check` reports no error on these"). A second arming expression for
+  the waiver, which `AGENTS.md` says there is exactly one of.
+- **It does not close (31).** Below. The gate asks which ids the *source*
+  multiset does not explain; the token that reaches the file is an id the
+  *render's map* does not explain. Those are different questions and one document
+  separates them.
+
+### The measurement that settled it
+
+Divergence (31) said of itself: "**It is loud, and it is already reported.** Every
+case is a `tags` error, so `lx check` exits non-zero." That is false, and the
+counterexample needs two ordinary commands:
+
+```
+config/dnt.txt = "Xenon"          d.md = "Xenon and Yttrium here."
+lx extract                        masked "⟦1⟧ and Yttrium here."   slots {1: Xenon}
+lx apply  "⟦1⟧ 和 ⟦2⟧ 在此。"      a hand-typed id, which `lx apply` takes on purpose
+config/dnt.txt = "Xenon\nYttrium"
+lx extract                        masked "⟦2⟧ and ⟦1⟧ here."  slots {1: Yttrium, 2: Xenon}
+                                  reseat refuses; the (24) keep path pins target_slots {1: Xenon}
+```
+
+`load_dnt` orders longer terms first, so the re-parse gives `Yttrium` the id the
+wording used for `Xenon`. Both sides now carry `['1','2']` — **the multisets agree
+by coincidence** — so no `tags` finding is raised at all. `lx check` exits **0**
+with a single `numbering` warning, and `lx render` writes `Xenon 和 ⟦2⟧ 在此。`
+into the file. Repeat the unknown id once and the multisets differ,
+`unbalanced_markup` still returns `[]` — its case 1 asks `sid not in merged`, the
+union of both maps, and `2` is in the segment's own `slots` while the render never
+consults them — so the `tags` error is **waivable**, one `lx waive` moves
+`lx check` to exit 0, and both candidate gates go blind together.
+
+So the question the render has to ask is the render's own: **does the map this
+substitution will use hold a record for every id the wording carries?** Asked of
+`mask.target_map(seg)` alone, and asked of every id rather than of the ids in
+excess. Both halves are load-bearing and each without the other lets the case
+above through.
+
+Scored over an exhaustive 45650-state enumeration of
+`(slots, target_slots, target)` shapes built from one original of each kind — a
+protected term, a code span, both halves of a tag pair, an autolink — with the
+oracle "the substitution is no worse than rendering the source itself" and all
+three predicates written out independently of the repository, so that a change to
+`mask.py` could not flatter the score:
+
+| | writes a bare `⟦n⟧` | refuses a substitution that is no worse |
+|---|---|---|
+| the distilled multiset gate, unwaived | 1550 / 32385 | 4950 / 6416 |
+| the same, waived | 2888 / 32385 | 2888_CLEAN / 6416 |
+| `unbalanced_markup` alone | 2888 / 32385 | 2888_CLEAN / 6416 |
+| **the shipped gate** | **0 / 32385** | **0_CLEAN / 6416** |
+
+**The bare-token column is exact and the other one is not**, and saying which is
+part of reporting it. A bare token is decidable by looking at the bytes. The
+right-hand column counts against a synthetic universe that contains slot maps the
+real masker cannot build — two unpaired opens in one segment, a close numbered
+before its open — and the shipped gate's 0_CLEAN are all of that shape:
+refusing a repeated tag id on a source that was *already* unbalanced the same
+way. It is the deliberate approximation `tag_shape` documents, not a new cost.
+
+### The waiver exemption dissolved, and that is the result rather than a saving
+
+HANDOFF-036's exemption rested on one claim: that a waiver cannot be in force over
+a wording whose unmasking is malformed, because `unbalanced_markup` refuses to
+make such a finding waivable. `cli.do_extract`'s own comment said the same thing.
+The claim is false as implemented — the case above is waived, malformed, and
+reported at `warn` — and it is false because "is this waivable" was being computed
+against a map the render does not use.
+
+The shipped gate never reads `waived`. It does not need to: on every measured case
+where a waiver was granted over a *well-formed* wording, the gate already renders
+it, because the bytes are fine and that is the only question it asks. `waived` was
+a proxy for "the bytes are sound"; asking the bytes directly is strictly better
+and removes a clause nobody could bound.
+
+*Lost:* keeping the exemption as extra safety. It cannot be one — it can only
+widen what renders, and the population it widens is the one measured above, where
+the wording writes bare tokens.
+
+### One predicate, one home, and why it is in `mask.py`
+
+`mask.unrenderable(seg)` is the whole of what a reviewer may not overrule **and**
+the whole of what a render may not write. `checks.check_segment` calls it for
+`waivable=`; `skeleton.render_blocks` calls it for the branch. Both hand it the
+segment, so there is nothing to hand differently — which is the point, since the
+defect above is exactly two answers to "which slot map" in two modules.
+
+It could not stay in `checks.py`: `skeleton` → `checks` → `mdparse` → `skeleton`
+is a real cycle, reproduced by inserting the import into a copy of the package,
+where all three entry points raise `ImportError`. `mask.target_map` is already in
+`mask.py` for this reason and its docstring says so. `pair_problems` moved with
+it, unchanged, because the gate has to ask it; `checks` imports both names back,
+so every existing citation still resolves.
+
+*Lost:* a function-local `from .checks import …` inside `render_blocks`. It works
+in every import order — `store.py` already does this once — but it inverts the
+layering, putting the renderer behind the validators, and it is invisible to a
+reader of the import block. *Lost:* passing the predicate in as an argument from
+`formats`, which touches both `skeleton` signatures, `formats.Format`'s documented
+slots and both `cli` call sites to buy nothing. *Lost:* writing the markup half
+out again in `skeleton.py` as an open/close delta — measured identical on every
+case, and a second answer to "what are malformed markup bytes", in a different
+module from the rule that already answers it.
+
+### What rode along, and why neither is a third bump item
+
+Two adjacent defects were measured on the way and repaired here rather than
+scheduled, because the gate would otherwise have shipped a *new* silent failure
+and a *new* regression. Neither changes what a documented value means.
+
+- **`lx check` now reports an unresolvable id even when the multisets agree.** A
+  second `add("tags", …)` call site, unwaivable. Without it the gate converts "a
+  bare token in the file under a green check" into "a marker where a reviewer's
+  sentence was, under a green check" — better bytes, and a new disagreement
+  between the exit code and the artifact. A new finding on an existing rule is
+  additive: the rule name is unchanged, no response key moves, and the contract
+  already says the validator set is expected to grow.
+- **An autolink is not a tag.** `mask.tag_shape` reads `<https://example.com/a>`
+  as an open `https` element and `<me@example.com>` as an open `me`. `mask` masks
+  both under the `autolink` pattern, ordered *before* `htmltag`, so neither is
+  ever a tag slot. Left alone it made a translation that simply dropped a link an
+  **unwaivable** `tags` error — already wrong when the waiver shipped — and, once
+  the render consulted the same predicate, would have taken the whole paragraph
+  out of the file. `mask._is_tag_original` asks this module's own pattern table,
+  so there is no second place to be wrong about it. The **void element** cost is
+  *not* repaired and stays deliberate: a bare `<br>` reads as an open whose close
+  never arrives, and `tag_shape`'s own docstring says a void list would be a
+  second place to be wrong about HTML. The difference is that an autolink is a
+  misread and a void element is a conservative approximation.
+
+The pair clause is the third thing the gate gained and it is not adjacent — it is
+the gate's own domain. `⟦2⟧粗體⟦1⟧` over `⟦1⟧bold⟦2⟧` has equal multisets and
+every id resolves, and it writes `A </b>粗體<b> C。`; `checks.pair_problems` has
+reported it at error severity, unwaivable, since 2026-07-28, and the render wrote
+it anyway. Asked of `target_map(seg)` on both surfaces now, for the reason
+`containment_problems` already reads that map.
+
+### The domain of the gate, stated because a reader will otherwise widen it
+
+**What the render refuses is what the placeholder substitution would malform, and
+nothing wider.** It is *not* "everything a reviewer may not waive": `containment`
+and `escaping` are unwaivable too, and a target that opens a list where the source
+had a paragraph is still written into the file exactly as before. Saying so is the
+whole of this entry's honesty — the shorter sentence is the one a future reader
+will reconstruct, and it is false.
+
+Three things the gate cannot see, recorded so nobody looks for them in it:
+
+1. `containment` and `escaping`, above.
+2. A run of identical paragraphs that changed size — divergence (26), open.
+3. **A source that literally contains `⟦n⟧`.** `mask.unmask` runs five
+   substitution rounds, so a slot whose *original* carries a placeholder is
+   re-substituted inside itself: `` `⟦1⟧` `` renders as `` `````⟦1⟧````` ``, and
+   on a multi-slot segment the literal id resolves to a different slot's original.
+   Measured on this repository's own `AGENTS.md`, which is such a document:
+   `lx render --fallback` over it is not a round trip, two lines differ. The ids
+   all resolve and the multisets agree, so no gate in this family can see it. It
+   is a defect in `unmask`, older than any of this, and it is **HANDOFF-045**.
+   *Lost, deliberately:* a fourth clause asking whether any placeholder survives
+   the unmask. It is the only predicate in the option set that sees case 3, and it
+   refuses a document whose source legitimately spells `⟦1⟧` inside backticks —
+   which is this repository's own documentation.
+
+### What the mutation pass found
+
+Fifteen guards removed one at a time against
+`tests/{test_memory,test_blocks,test_waiver,test_contract}.py`: **thirteen
+killed, two survivors, and both survivors are the same equivalent mutant** —
+asking the pair clause of `seg["slots"]` instead of `target_map(seg)`, once in
+`mask.unrenderable` and once in `checks.check_segment`. It fails nothing because
+a carryover matches on the content hash and `mask` numbers every inline match
+before any term, so a tag's id — and therefore every `pair_id` — is a pure
+function of the source text and cannot move when `config/dnt.txt` does. The
+equivalence is pinned by a test of its own now, so a change that breaks it is
+reported rather than silent; `target_map` stays the spelling on the ground that
+it is the map the bytes come from.
+
+The pass paid for itself once, and on the guard that was easiest to believe. The
+new unresolved-id finding is raised `waivable=False`, and **nothing asserted
+that**: flipping the argument to `True` left all 258 selected tests green. A
+waiver on such a segment is *accepted* — `do_waive` refuses only a segment
+nothing fails on, and this one now fails — so without the assertion one `lx
+waive` would have moved `lx check` back to exit 0 over a document carrying a
+token, which is the exact state this package exists to remove. Reproduced,
+asserted, and the mutant dies now. Three reviews and an adversarial workflow had
+read that line and none of them noticed it was untested.
+
+### What moved on the wire
+
+`missing` counts a segment with no *usable* target rather than one with no target,
+on `GET /api/preview` and `POST /api/render`; `from` answers `marker` or `source`
+for a wording the render refuses, on the shared *block* shape. No new value, no
+new key, no new endpoint. `text`, `wrote` and the block `text` row are untouched —
+the bytes of an unusable segment change, and `text` never promised which branch
+produced them. A client that drew "untranslated" from `from` alone will now say it
+about a segment somebody wrote; the contract says to join on `id` and read
+`issues`, and `GET /api/doc` still reports the wording, its `origin` and its
+`status`, because **nothing was deleted**. The refusal is at the render and never
+at the store, which is 2026-08-17's decision and this does not reopen it.
+
+### Cost
+
+`mask.unrenderable` is O(one segment's text) and reuses the `target_map(seg)` the
+walk already computes. The suite moved 1921 → 1932, and the eleven new tests are
+the whole of this package's evidence: measured before any of them was written, the
+existing suite went green over *every* version of the gate that was built —
+including the ones that write bare tokens — because no fixture anywhere stored a
+malformed wording and then rendered it.
+
 ## 2026-09-03 · A reviewer may answer one segment's report, and every place that answer may not reach
 
 Closing HANDOFF-043. `lx waive` / `lx unwaive` and `POST /api/waive` land, a
