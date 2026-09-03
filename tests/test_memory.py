@@ -209,8 +209,8 @@ def test_tone_in_memory_key_keeps_two_registers_apart(tmp_path, monkeypatch):
     tm = load_tm("zh-TW")
     assert len(tm) == 2
     _nodes, segs = parse(LEAVING.decode("utf-8"), [])
-    assert tm_lookup(tm, segs[0]) == (AS_DOCUMENTATION, "tm", None)
-    assert tm_lookup(tm, segs[0], "literary") == (AS_PROSE, "tm", None)
+    assert tm_lookup(tm, segs[0]) == (AS_DOCUMENTATION, "tm", None, False)
+    assert tm_lookup(tm, segs[0], "literary") == (AS_PROSE, "tm", None, False)
 
 
 def test_the_register_is_resolved_from_the_document_and_nowhere_else(monkeypatch):
@@ -416,7 +416,7 @@ def test_a_record_from_before_the_key_existed_is_still_reachable():
     exchange for nothing."""
     tm = {record_key(LEGACY): LEGACY}
     _nodes, segs = parse("A shared sentence.\n", [])
-    target, origin, _slots = tm_lookup(tm, segs[0])
+    target, origin, _slots, _waived = tm_lookup(tm, segs[0])
     assert target == LEGACY["target"]
     assert origin == "tm:legacy"
 
@@ -451,12 +451,12 @@ def test_legacy_tm_survives_tone_for_a_document_in_the_default_register(
 
     # The fully-keyed tier, which carries no `tone` field because it predates one.
     tm = load_tm("zh-TW")
-    assert tm_lookup(tm, segs[0]) == (LEGACY["target"], "tm", None)
-    assert tm_lookup(tm, segs[0], DEFAULT_TONE) == (LEGACY["target"], "tm", None)
+    assert tm_lookup(tm, segs[0]) == (LEGACY["target"], "tm", None, False)
+    assert tm_lookup(tm, segs[0], DEFAULT_TONE) == (LEGACY["target"], "tm", None, False)
 
     # And the unversioned tier below it, reached only through the fallback.
     bare = {record_key(LEGACY): LEGACY}
-    assert tm_lookup(bare, segs[0], DEFAULT_TONE) == (LEGACY["target"], "tm:legacy", None)
+    assert tm_lookup(bare, segs[0], DEFAULT_TONE) == (LEGACY["target"], "tm:legacy", None, False)
 
     # End to end, because that is where a whole-memory invalidation would show.
     doc, reused, rejected, _notes = do_extract("d.md", "zh-TW", CFG)
@@ -474,8 +474,8 @@ def test_a_literary_document_is_not_offered_the_unversioned_tier():
     """
     tm = {record_key(LEGACY): LEGACY}
     _nodes, segs = parse("A shared sentence.\n", [])
-    assert tm_lookup(tm, segs[0], "literary") == (None, None, None)
-    assert tm_lookup(tm, segs[0], DEFAULT_TONE) == (LEGACY["target"], "tm:legacy", None)
+    assert tm_lookup(tm, segs[0], "literary") == (None, None, None, False)
+    assert tm_lookup(tm, segs[0], DEFAULT_TONE) == (LEGACY["target"], "tm:legacy", None, False)
 
 
 def test_a_segment_with_a_variant_is_not_offered_a_pre_variant_record():
@@ -485,7 +485,7 @@ def test_a_segment_with_a_variant_is_not_offered_a_pre_variant_record():
     adding the field before one does."""
     tm = {record_key(LEGACY): LEGACY}
     _nodes, segs = parse("A shared sentence.\n", [])
-    assert tm_lookup(tm, dict(segs[0], variant="plural")) == (None, None, None)
+    assert tm_lookup(tm, dict(segs[0], variant="plural")) == (None, None, None, False)
 
 
 def test_committing_upgrades_an_unversioned_record_instead_of_reusing_it_forever(

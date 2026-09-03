@@ -711,7 +711,7 @@ def test_a_document_row_with_no_source_fails_one_project_and_not_the_command(
     assert failed["documents"] == [] and failed["targets"] == []
     assert failed["totals"] == {"documents": 0, "checked": 0, "segments": 0,
                                 "translated": 0, "pending": 0, "held": 0,
-                                "errors": 0, "warnings": 0}
+                                "waived": 0, "errors": 0, "warnings": 0}
 
 
 @pytest.mark.parametrize("key,value,expected", [

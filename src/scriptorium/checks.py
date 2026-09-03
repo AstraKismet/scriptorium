@@ -722,6 +722,70 @@ def is_held(seg):
     return seg.get("review") == HELD
 
 
+#: A reviewer has read this segment's report and answered it. **Its own body key,
+#: not a second `review` value**, and that is a measurement rather than a
+#: preference: `review` holds one string, so `lx waive` on a held segment would
+#: write `waived` over `held`, `is_held` would go false, and `workable` would
+#: hand the segment back to the very queues the hold took it out of. Reproduced
+#: 2026-09-03 by the adversarial pass. A second `review` value had already been
+#: refused three times on other grounds — `docs/decisions.md` 2026-08-17 and
+#: 2026-09-02, and `docs/contracts/workbench-http.md` divergence (24) — and this
+#: is the fourth, arriving by measurement rather than by precedent.
+#:
+#: A boolean rather than a closed set, because the answer to "did somebody look
+#: at this" has two states and a vocabulary here would be a per-rule enumeration
+#: wearing a different hat. What may be waived is decided at the point each issue
+#: is raised; see `check_segment`.
+WAIVED = "waived"
+
+
+def is_waived(seg):
+    """Whether a reviewer has answered this segment's report on this wording.
+
+    Read off the segment rather than recomputed, and pinned to the wording by the
+    two writers rather than by a fingerprint here: `store.save_targets` drops the
+    flag on every write and `store.save_segments` drops it when the target
+    actually changed, which is the rule `target_slots` already follows in both.
+    A guard that recomputed a hash on read would be a second answer to "is this
+    still the wording that was waived", and the first one is structural.
+    """
+    return bool(seg.get(WAIVED))
+
+
+def dangling_pair_halves(lost, target, slots):
+    """Of the placeholder ids missing from a target, those that break its bytes.
+
+    A lost id whose slot stands alone — a term, a URL, a code span — takes its
+    original out of the rendered text and leaves well-formed bytes behind. A lost
+    id that is *half of a pair* leaves the other half standing: an ``<em>`` that
+    never closes, or a ``</em>`` that never opened.
+
+    The distinction has to be drawn here because :func:`pair_problems` explicitly
+    declines it — "a half that never arrived is already a mismatch" — and
+    delegates the case to the multiset comparison in :func:`check_segment`. That
+    makes the one `tags` message two different findings: one a reviewer can be
+    right about, one nobody can. Measured 2026-09-03: against
+    ``This is ⟦1⟧very⟦2⟧ important, ⟦3⟧.`` a wording dropping only ``⟦2⟧`` gets
+    ``pair_problems() == []`` and renders ``這是<em>非常重要的，Ana。``.
+
+    Returned rather than answered as a boolean so the message can name the ids.
+    """
+    present = set(PH_RE.findall(target))
+    partners = {}
+    for sid, rec in (slots or {}).items():
+        if rec.get("pair_id"):
+            partners.setdefault(rec["pair_id"], []).append(sid)
+    out = []
+    for sid in lost:
+        pair_id = ((slots or {}).get(sid) or {}).get("pair_id")
+        if not pair_id:
+            continue
+        if any(other != sid and other in present
+               for other in partners.get(pair_id, ())):
+            out.append(sid)
+    return out
+
+
 def workable(segments):
     """The segments a run may touch: everything not held.
 
@@ -742,14 +806,66 @@ def check_segment(seg, lang, cfg, glossary, dnt):
     issues = []
     src, tgt = seg["masked"], seg.get("target") or ""
     disabled = set(cfg.get("checks_disabled", []))
+    # **The waiver is armed only while its own rule is reported.** A project that
+    # puts `waived` in `checks_disabled` has turned off the one line that says a
+    # reviewer overrode something, and a downgrade that outlived its marker is
+    # exactly the pair invariant 10 cannot afford: measured 2026-09-03, the cap
+    # still applied while `errors: 0` and `waived: 0` were both true and nothing
+    # on any surface said so. Armed together or not at all — turning the rule off
+    # turns the feature off, which is the honest reading of turning it off.
+    waived = is_waived(seg) and WAIVED not in disabled
 
-    def add(rule, sev, msg):
-        if rule not in disabled:
-            issues.append({"seg": seg["id"], "rule": rule, "severity": sev, "message": msg})
+    def add(rule, sev, msg, waivable):
+        """One issue. ``waivable`` says whether a reviewer can be right about it.
+
+        A **required** fourth argument with no default, so a rule added later
+        cannot inherit an answer by omission — leaving it out is a `TypeError`
+        rather than a silent `False`. That is deliberate and it is the whole
+        defence against the failure this repository has now recorded five times:
+        there is no list of waivable rule names anywhere, because a list is a
+        second place for the answer to live and the enumeration becomes what a
+        reader trusts. The answer is stated once, beside the severity, at the
+        point the finding is made — which is also the only place that knows
+        *which instance* of a rule this is. `tags` is the case that forces it:
+        the same rule name covers a wording that dropped a slot, whose bytes are
+        well formed, and one that dropped half a pair, whose bytes are not.
+
+        The property, so it survives being restated: an issue is waivable when a
+        reviewer's judgement can overrule it — when what it reports is that the
+        *wording* may be wrong. It is not waivable when what it reports is that
+        the substituted *bytes* are malformed, because judgement is not what
+        decides whether a tag closes; that is invariant 2b's half and no reader
+        of a translation is a second opinion on it.
+        """
+        if rule in disabled:
+            return
+        down = waivable and sev == "error" and waived
+        issues.append({"seg": seg["id"], "rule": rule,
+                       "severity": "warn" if down else sev, "message": msg})
 
     if not tgt.strip():
-        add("missing", "error", "no translation")
+        # Unwaivable, and unreachable under a waiver besides: `cli.do_waive`
+        # refuses a segment with no target, whole-request and before anything is
+        # written, the way `do_hold` does. Both halves, because the rule that
+        # closes it at the door and the rule that would answer it here are two
+        # different statements and the second one costs nothing.
+        add("missing", "error", "no translation", waivable=False)
         return issues
+
+    # The waiver says so out loud, at warn, exactly as a hold does — a segment
+    # whose report a person answered is a segment the next reader should know
+    # about, and a severity that failed the build would defeat the flag. Never
+    # waivable: a waiver cannot waive the report of itself.
+    # The rule name is a literal and not `WAIVED`, for the reason `held` above is
+    # one: `tests/test_contract.py` reads the emitted rule names off this
+    # function with `ast` and can only see a string constant, so a name spelled
+    # as an identifier here would drop out of the frozen contract's enumeration
+    # with nothing failing. The constant is the *body key*; they coincide.
+    if waived:
+        add("waived", "warn",
+            "a reviewer waived this wording, so the mechanical rules a reviewer "
+            "can overrule are reported here at warn instead of failing the "
+            "build — `lx unwaive` to put them back", waivable=False)
 
     # A hold is reported and never fails a build. `warn` is the whole design:
     # holding a segment says "leave this to me", and a severity that stopped
@@ -759,16 +875,28 @@ def check_segment(seg, lang, cfg, glossary, dnt):
     # target — a segment with none is answered by `missing`, which is the more
     # useful sentence.
     if is_held(seg):
-        add("held", "warn", "held for review; no queue will select this segment — `lx translate --ids` still will")
+        add("held", "warn", "held for review; no queue will select this segment — `lx translate --ids` still will",
+            waivable=False)
 
     # 1. placeholder integrity — presence as a multiset, then pair order
     a, b = Counter(PH_RE.findall(src)), Counter(PH_RE.findall(tgt))
     if a != b:
         lost = sorted((a - b).elements())
         extra = sorted((b - a).elements())
-        add("tags", "error", f"placeholder mismatch lost={lost} extra={extra}")
+        # **Waivable only where the render is well formed whatever the reviewer
+        # decided.** Two ways it is not, and both are decided from the bytes
+        # rather than from a rule name. An `extra` id is one the segment has no
+        # slot for, so `mask.unmask` leaves the literal `⟦99⟧` in the file —
+        # divergence (31), which HANDOFF-036 is scheduled to close at the render.
+        # A `lost` id whose pair partner survived leaves a tag that never closes.
+        # Everything else that reaches here — a term, a URL, a code span, a whole
+        # pair dropped together — renders as ordinary prose that may be missing
+        # something, which is the judgement call a reviewer is for.
+        dangling = dangling_pair_halves(lost, tgt, seg.get("slots") or {})
+        add("tags", "error", f"placeholder mismatch lost={lost} extra={extra}",
+            waivable=not extra and not dangling)
     for msg in pair_problems(tgt, seg.get("slots") or {}):
-        add("tags", "error", msg)
+        add("tags", "error", msg, waivable=False)
 
     # 1a. the wording speaks a numbering the source has moved on from
     #
@@ -793,7 +921,7 @@ def check_segment(seg, lang, cfg, glossary, dnt):
             add("numbering", "warn",
                 "this wording was written against an older numbering and is "
                 "rendered with it; the source has changed under it, so re-check "
-                "what each ⟦n⟧ names now")
+                "what each ⟦n⟧ names now", waivable=True)
 
     # 1b. a protected term standing bare in the target
     #
@@ -814,13 +942,18 @@ def check_segment(seg, lang, cfg, glossary, dnt):
         if term_pattern(term).search(strip_placeholders(tgt)):
             add("bare_term", "warn",
                 f"{term!r} is protected here and also stands in the target as "
-                f"plain text — check that each ⟦n⟧ still means what it meant")
+                f"plain text — check that each ⟦n⟧ still means what it meant",
+                waivable=True)
 
     # 2. containment and escaping — what the target does to the block it lands in
+    # Unwaivable, all three of them, and this is the line the whole feature is
+    # drawn on: what these report is not that the wording may be wrong but that
+    # the substituted bytes are. A reviewer is a second opinion on a sentence and
+    # never on whether a block starts where the document says it does.
     for msg in containment_problems(seg):
-        add("containment", "error", msg)
+        add("containment", "error", msg, waivable=False)
     for msg in escaping_problems(tgt, seg.get("host") or "markdown"):
-        add("escaping", "error", msg)
+        add("escaping", "error", msg, waivable=False)
     # One-directional, and deliberately not widened. A target that *drops* a CR
     # the source had cannot be flagged — a translation is allowed to rewrap and
     # comparing break counts fails the legitimate case. A target that invents one
@@ -829,11 +962,12 @@ def check_segment(seg, lang, cfg, glossary, dnt):
     # asked to reproduce it, so five different replies all passed before this.
     if "\r" in tgt and "\r" not in src:
         add("eol", "error", "the target adds a carriage return; a document's "
-                            "line terminator is applied once at render")
+                            "line terminator is applied once at render",
+            waivable=False)
 
     # 3. untranslated passthrough
     if tgt.strip() == src.strip() and len(strip_placeholders(src).split()) >= 3:
-        add("untranslated", "warn", "target identical to source")
+        add("untranslated", "warn", "target identical to source", waivable=True)
 
     # 4. glossary
     ls = src.lower()
@@ -841,10 +975,12 @@ def check_segment(seg, lang, cfg, glossary, dnt):
         if re.search(rf"(?<![A-Za-z]){re.escape(row['source'].lower())}(?![A-Za-z])", ls):
             if row["target"] and row["target"] not in tgt:
                 add("glossary", row["severity"],
-                    f"{row['source']!r} should render as {row['target']!r}")
+                    f"{row['source']!r} should render as {row['target']!r}",
+                    waivable=True)
             for bad in row["forbidden"]:
                 if bad in tgt:
-                    add("glossary", "error", f"forbidden rendering {bad!r} for {row['source']!r}")
+                    add("glossary", "error", f"forbidden rendering {bad!r} for {row['source']!r}",
+                        waivable=True)
 
     # 5. locale lexicon
     if lang == "zh-TW":
@@ -859,17 +995,18 @@ def check_segment(seg, lang, cfg, glossary, dnt):
             tail = _LEXICON_UNLESS_FOLLOWED_BY.get(bad)
             if tail and not re.search(f"{re.escape(bad)}(?![{tail}])", tgt):
                 continue
-            add("lexicon", sev, f"{lang} writes this as {good!r}, not {bad!r}")
+            add("lexicon", sev, f"{lang} writes this as {good!r}, not {bad!r}",
+                waivable=True)
 
     # 6. punctuation
     if CJK_RE.search(tgt):
         m = re.search(rf"[{CJK}]\s*([,;:!?])", tgt)
         if m:
-            add("punct", "warn", f"half-width {m.group(1)!r} after CJK")
+            add("punct", "warn", f"half-width {m.group(1)!r} after CJK", waivable=True)
         if re.search(rf'"[^"]*[{CJK}][^"]*"', tgt):
-            add("punct", "warn", "straight quotes around CJK; prefer 「」")
+            add("punct", "warn", "straight quotes around CJK; prefer 「」", waivable=True)
         if re.search(rf"[{CJK}][A-Za-z0-9]|[A-Za-z0-9][{CJK}]", tgt):
-            add("spacing", "warn", "missing space at CJK/Latin boundary")
+            add("spacing", "warn", "missing space at CJK/Latin boundary", waivable=True)
 
     # 7. numeric fidelity
     #
@@ -913,12 +1050,12 @@ def check_segment(seg, lang, cfg, glossary, dnt):
             else:
                 missing.append(figure)
     if missing:
-        add("numbers", "error", f"numbers absent from target: {missing}")
+        add("numbers", "error", f"numbers absent from target: {missing}", waivable=True)
 
     # 8. do-not-translate leakage (terms not masked because they appeared post-hoc)
     for term in dnt:
         if term in strip_placeholders(src) and term not in strip_placeholders(tgt):
-            add("dnt", "warn", f"protected term {term!r} missing in target")
+            add("dnt", "warn", f"protected term {term!r} missing in target", waivable=True)
 
     # 9. length plausibility
     lo, hi = cfg.get("length_ratio", {}).get(lang, [0.2, 2.5])
@@ -926,8 +1063,10 @@ def check_segment(seg, lang, cfg, glossary, dnt):
     if slen >= 40:
         ratio = tlen / slen
         if ratio < lo:
-            add("length", "warn", f"target unusually short (ratio {ratio:.2f} < {lo})")
+            add("length", "warn", f"target unusually short (ratio {ratio:.2f} < {lo})",
+                waivable=True)
         elif ratio > hi:
-            add("length", "warn", f"target unusually long (ratio {ratio:.2f} > {hi})")
+            add("length", "warn", f"target unusually long (ratio {ratio:.2f} > {hi})",
+                waivable=True)
 
     return issues

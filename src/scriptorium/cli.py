@@ -12,7 +12,7 @@ import urllib.parse
 from collections import Counter
 
 from . import __version__, formats, sentences
-from .checks import HELD, check_segment, is_held, workable
+from .checks import HELD, check_segment, is_held, is_waived, workable
 from .config import (
     DEFAULT_TONE,
     GLOSSARY_HEADER,
@@ -79,6 +79,7 @@ from .store import (
     save_review,
     save_segments,
     save_targets,
+    save_waived,
     target_token,
     tm_lookup,
     tm_records,
@@ -525,7 +526,8 @@ def do_extract(src, lang, cfg, tone=None, reset=False):
     #: more elements of the return tuple: the callers that ignore it — `cmd_run`
     #: and `POST /api/extract` — keep ignoring one thing, and the next entry
     #: costs a key rather than an arity change at every call site.
-    notes = {"kept": [], "ambiguous": [], "replaced": [], "register": None}
+    notes = {"kept": [], "ambiguous": [], "replaced": [], "waived_source": [],
+             "register": None}
     # Which stored entry each segment inherits, decided for the document at once:
     # two positions holding the same sentence can only be told apart by looking
     # at both, which is what a map of one entry per key could not do.
@@ -571,18 +573,23 @@ def do_extract(src, lang, cfg, tone=None, reset=False):
         # falls to the branch below, and is reported at `lx check` like any other
         # kept wording.
         hit = hit_origin = hit_slots = None
+        hit_waived = False
         if carried is None or is_regenerable_origin(carried[1]):
-            hit, hit_origin, hit_slots = tm_lookup(tm, seg, tone)
+            hit, hit_origin, hit_slots, hit_waived = tm_lookup(tm, seg, tone)
         if hit is not None and (hit_slots is not None or not _protected(seg, hit, dnt)):
-            # No review state on a memory hit, and that is the design: the memory
-            # is wording banked from somewhere else, and a hold is one reviewer
-            # saying this segment is theirs to finish. Carrying a hold in would
-            # hold a segment nobody has looked at.
+            # No review state and no waiver on a memory hit, and that is one
+            # design rather than two: the memory is wording banked from somewhere
+            # else, a hold is one reviewer saying this segment is theirs to
+            # finish, and a waiver is one reviewer answering a report on a
+            # position they read. Carrying either in would speak for somebody
+            # about a segment they have never seen. A hit *from* a waived record
+            # is named instead, below, so the reader is told rather than left to
+            # find out from a check they did not expect to fail.
             #
             # A line banked before the memory carried its own slot map is offered
             # only where a renumbering could not have moved it — see `_protected`.
-            candidates.append((hit, hit_origin, None, hit_slots))
-        for rank, (proposal, origin, review, written_against) in enumerate(candidates):
+            candidates.append((hit, hit_origin, None, False, hit_slots))
+        for rank, (proposal, origin, review, waived, written_against) in enumerate(candidates):
             # The memory is tried even when this document's own target was
             # refused: the two can differ, and a good banked wording should not be
             # lost to a stale one sitting in front of it.
@@ -598,6 +605,18 @@ def do_extract(src, lang, cfg, tone=None, reset=False):
                 # prior state at all, which is what "start over" means.
                 if review:
                     seg["review"] = review
+                # The waiver rides with the wording it was granted on, and only
+                # from this document's own prior state — a memory hit always
+                # brings `False`, set where the candidate is built.
+                if waived:
+                    seg["waived"] = True
+                if hit is not None and proposal is hit and hit_waived:
+                    # The wording came out of the memory and the line says a
+                    # reviewer had to waive it where it was banked. It arrives
+                    # here unwaived on purpose, so `lx check` reports it and this
+                    # reader decides for themselves — but arriving silently is
+                    # what would make that a surprise instead of a handover.
+                    notes["waived_source"].append(seg["id"])
                 if carried is not None and rank:
                     # The carried entry is always the first candidate, so a later
                     # one winning means the memory answered over wording this
@@ -639,10 +658,19 @@ def do_extract(src, lang, cfg, tone=None, reset=False):
                     # naming the ids on both surfaces, which is cheaper and
                     # answers "which sentence did I lose" with a list instead of
                     # with the sentence.
-                    target, origin, review, written_against = carried
+                    target, origin, review, waived, written_against = carried
                     seg["target"], seg["origin"], seg["status"] = target, origin, "translated"
                     if review:
                         seg["review"] = review
+                    # A kept wording keeps its waiver too: it is the same wording
+                    # at the same position, which is exactly what the waiver was
+                    # granted over. What it does *not* do is silence the reason
+                    # it was kept — an `extra` id or a dangling pair half is
+                    # unwaivable at `checks.check_segment`, so the `tags` error
+                    # that names this segment survives the waiver by
+                    # construction.
+                    if waived:
+                        seg["waived"] = True
                     # **The kept wording keeps its provenance.** `save_doc` is
                     # about to write this segment with the *fresh* parse's
                     # `slots`, so without this the next extract would compare the
@@ -707,7 +735,8 @@ def report_extract(src, lang, notes):
              f"longer match this document: {ids}. Nothing was lost — `lx render` writes each "
              f"one against the numbering it was written in, and `lx check` reports it: an "
              f"error where the placeholders no longer balance, a `numbering` warning where "
-             f"they balance but have stopped meaning the same terms. Fix the wording, or "
+             f"they balance but have stopped meaning the same terms — and a warning either "
+             f"way on a segment you have waived. Fix the wording, or "
              f"re-translate with "
              f"`lx translate {src} --lang {lang} --ids {','.join(notes['kept'])}` "
              f"(--overwrite-human if a person wrote it).")
@@ -720,6 +749,17 @@ def report_extract(src, lang, notes):
              f"this document, and a banked wording replaced it: "
              f"{', '.join(notes['replaced'])}. Their `origin` is now `tm`. Wording a person "
              f"or an agent wrote is never replaced this way — it is kept and reported above.")
+    if notes["waived_source"]:
+        # Named for the same reason `replaced` is: the segment comes back
+        # `translated`, and nothing else on any surface would tell this reader
+        # that the wording they just inherited only passes where somebody
+        # overrode a rule. It arrives unwaived, so `lx check` will report it here
+        # — this line is what makes that expected rather than a surprise.
+        _out(f"  {len(notes['waived_source'])} segment(s) took a banked wording that was "
+             f"waived where it was committed: {', '.join(notes['waived_source'])}. The "
+             f"waiver did not travel with it — one reviewer's judgement about one position "
+             f"is not one about this document — so `lx check` will report it here. Read it "
+             f"and `lx waive` it yourself, or re-word it.")
     if notes["ambiguous"]:
         # The half no alignment can fix: a run of identical paragraphs that
         # gained or lost a member has no evidence left about which wording
@@ -1474,6 +1514,87 @@ def cmd_hold(args, cfg):
          + (f"; unknown ids ignored: {unknown}" if unknown else ""))
 
 
+def do_waive(src, lang, cfg, ids, waived=True):
+    """Answer these segments' reports, or take the answer back. ``(applied, unknown)``.
+
+    The seam `lx waive` / `lx unwaive` and `POST /api/waive` share. A waiver says
+    a person read what `lx check` reports on this wording and decided the wording
+    is right — so the rules a reviewer's judgement can overrule are reported at
+    *warn* on that segment instead of failing the build. It silences nothing:
+    every issue is still in the report, still in ``by_rule``, and a ``waived``
+    warning names the segment.
+
+    **What it cannot reach is the half a reviewer cannot be right about.** An
+    issue is waivable or not where it is raised, beside its severity
+    (`checks.check_segment`), and the unwaivable ones are those that report the
+    substituted *bytes* are malformed rather than that the wording may be wrong:
+    the placeholder pair rules, containment, host escaping, the invented carriage
+    return, and a `tags` mismatch carrying an id the segment has no slot for or
+    dropping one half of a pair. Measured 2026-09-03: without that last clause a
+    wording dropping only ``⟦2⟧`` of ``⟦1⟧very⟦2⟧`` gets `pair_problems() == []`,
+    would have been waived, and renders an ``<em>`` that never closes.
+
+    **Waiving requires a non-empty target**, whole-request and before anything is
+    written — the rule :func:`do_hold` follows, for the same reason and with one
+    more of its own. A waiver on an untranslated segment would answer a report
+    nobody has read on wording nobody has written; and it would aim at
+    ``missing``, which is unwaivable anyway, so the request could only ever be a
+    mistake. Lifting has no such requirement: undoing must never be harder than
+    doing.
+
+    The waiver is pinned to the wording rather than to the position, and
+    structurally rather than by a fingerprint recomputed on read:
+    `store.save_targets` drops it on every write and `store.save_segments` drops
+    it when the target actually changed. So a re-translation, a reviewer's edit
+    and a memory hit each lift it by construction, and `lx run` — which
+    re-extracts every time — keeps it, because a carryover is the same wording at
+    the same position.
+    """
+    if not isinstance(waived, bool):
+        raise UnusableTarget(
+            f"`waived` is true or false, and this request sent "
+            f"{type(waived).__name__}. A string or a null here is a client "
+            f"building the payload wrongly — `null` would read as false and "
+            f"*lift* a waiver, which is the opposite of the default.")
+    if ids is None:
+        ids = []
+    if isinstance(ids, str) or not isinstance(ids, (list, tuple)):
+        raise UnusableTarget(
+            f"`ids` is a list of segment ids, and this request sent "
+            f"{type(ids).__name__}. A bare string would be read one character at "
+            f"a time and answer `applied: 0` while looking like it worked.")
+    ids = [sid for sid in (str(sid).strip() for sid in ids) if sid]
+    doc = load_doc(src, lang)
+    by_id = {s["id"]: s for s in doc["segments"]}
+    wanted = [sid for sid in ids if sid in by_id]
+    unknown = [sid for sid in ids if sid not in by_id]
+    if waived:
+        blank = sorted(sid for sid in wanted if not (by_id[sid].get("target") or "").strip())
+        if blank:
+            raise UnusableTarget(
+                f"{', '.join(blank)}: there is nothing here to waive — a waiver says you "
+                f"read what `lx check` reports on this wording and stand by it, and these "
+                f"segments have no wording yet. Translate them first: "
+                f"`lx translate {src} --lang {lang} --ids {','.join(blank)}`.")
+    return save_waived(src, lang, {sid: waived for sid in wanted}), unknown
+
+
+def cmd_waive(args, cfg):
+    ids = [s for s in args.ids.split(",") if s]
+    applied, unknown = do_waive(args.src, args.lang, cfg, ids, waived=not args.lift)
+    verb = "un-waived" if args.lift else "waived"
+    _out(f"{verb} {applied} segment(s)"
+         + (f"; unknown ids ignored: {unknown}" if unknown else ""))
+    if not args.lift and applied:
+        # Said on the way out rather than left to be discovered, because the one
+        # thing a waiver does not buy is the thing a reviewer is most likely to
+        # assume it buys.
+        _out("  their errors are reported at warn now, not removed: `lx check` still "
+             "prints them and still counts them under warnings. A waived wording is "
+             "banked by `lx commit` and its memory line says it was waived, so the "
+             "next document that takes it is told.")
+
+
 def cmd_apply(args, cfg):
     raw = sys.stdin.read() if args.file == "-" else open(args.file, encoding="utf-8").read()
     data = json.loads(raw)
@@ -2054,6 +2175,14 @@ def _counts(segments):
         "translated": translated,
         "pending": len(segments) - translated,
         "held": sum(1 for s in segments if is_held(s)),
+        # Counted off the live segments beside `held`, and **not** read out of
+        # the persisted report the way `errors` and `warnings` are. A waiver is
+        # state, not a finding: it is true the moment `lx waive` returns, where a
+        # report is only as current as the last `lx check`. Reading it from the
+        # report would also inherit `_check`'s staleness hole — the two integers
+        # `stale` compares do not move when a waiver is placed — so a consumer
+        # would be told `waived: 0` on a document that had just waived four.
+        "waived": sum(1 for s in segments if is_waived(s)),
     }
 
 
@@ -2118,9 +2247,9 @@ def _rollup(rows):
     smallest honest statement of quality this surface can make.
     """
     out = {"documents": len(rows), "checked": 0, "segments": 0, "translated": 0,
-           "pending": 0, "held": 0, "errors": 0, "warnings": 0}
+           "pending": 0, "held": 0, "waived": 0, "errors": 0, "warnings": 0}
     for row in rows:
-        for key in ("segments", "translated", "pending", "held"):
+        for key in ("segments", "translated", "pending", "held", "waived"):
             out[key] += row[key]
         if row["check"] is not None:
             out["checked"] += 1
@@ -2180,6 +2309,7 @@ def _document(doc, cfg, detail=True):
         "translated": counts["translated"],
         "pending": counts["pending"],
         "held": counts["held"],
+        "waived": counts["waived"],
         "check": (_check(doc.get("source"), doc.get("lang"), counts,
                          _as_report(doc["segments"])) if detail else None),
     }
@@ -4225,6 +4355,19 @@ def build_parser():
         # opposite of what it would do. One handler behind both, so the pair
         # cannot drift.
         h.set_defaults(fn=cmd_hold, lift=lift)
+
+    for name, lift, blurb in (
+            ("waive", False, "stand by this wording: report the rules a reviewer "
+                             "can overrule at warn instead of failing the build"),
+            ("unwaive", True, "put a waived segment's errors back")):
+        w = sub.add_parser(name, help=blurb)
+        w.add_argument("src")
+        w.add_argument("--lang", required=True)
+        w.add_argument("--ids", required=True, help="comma-separated segment ids")
+        # The pair `hold`/`unhold` follows, for its reasons: a verb command says
+        # what it does where a `--lift` flag reads as its opposite, and one
+        # handler behind both is what keeps them from drifting.
+        w.set_defaults(fn=cmd_waive, lift=lift)
 
     c = sub.add_parser("check", help="validate; exit 1 on error")
     c.add_argument("src")

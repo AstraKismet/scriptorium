@@ -123,8 +123,10 @@ instructions. Even at a hypothetical 99.5% per segment, a 500-segment document
 comes through intact 8% of the time, and a dropped table pipe or a mangled link
 is exactly the damage that survives review.
 
-A green `lx check` means the structure survived and the mechanical rules passed.
-It does not mean the translation is good; that is what review is for.
+A green `lx check` means the structure survived and the mechanical rules passed
+on every segment except any you have **waived** — see `lx waive` below, which
+reports those findings at warning severity instead of removing them. It does not
+mean the translation is good; that is what review is for.
 
 ## Commands
 
@@ -137,6 +139,8 @@ It does not mean the translation is good; that is what review is for.
 | `lx apply SRC --lang L --file F` | ingest translations, auto-normalize |
 | `lx hold SRC --lang L --ids A,B` | keep segments out of every queue that selects work |
 | `lx unhold SRC --lang L --ids A,B` | return held segments to the queues |
+| `lx waive SRC --lang L --ids A,B` | stand by this wording: report the rules judgement can overrule at warn instead of failing the build |
+| `lx unwaive SRC --lang L --ids A,B` | put a waived segment's errors back |
 | `lx translate SRC --lang L` | translate with a configured model (`--mode draft\|polish\|repair`, `--limit N`) |
 | `lx check SRC --lang L` | validate; exit 1 on error (`--json` for the full report) |
 | `lx repair SRC --lang L` | re-translate only failing segments (`--limit N`) |
@@ -220,8 +224,10 @@ notes for the segments it emitted.
 | `punct` / `spacing` | warn | width and CJK/Latin boundary problems that could not be auto-fixed |
 | `length` | warn | a segment much shorter or longer than expected |
 | `held` | warn | a segment a reviewer is finishing themselves; no queue selects it |
+| `waived` | warn | a segment a reviewer read and stood by, so its errors report here |
 
-Turn any of them off per project with `"checks_disabled": ["length"]`.
+Turn any of them off per project with `"checks_disabled": ["length"]`, or stand
+by one segment with `lx waive`.
 
 Every rule here is decidable by a program; anything needing human judgement lives
 in the language brief or in review. `docs/decisions.md` records the entry test
@@ -393,6 +399,13 @@ too: a hold says the segment is yours to finish, and `lx commit` takes a whole
 document. Both are named by id when it happens, and an `lx unhold` or a fix
 followed by another `lx commit` is all either one needs.
 
+A **waived** segment *is* banked — you read the finding and stood by the wording,
+so the memory should hold it — and its line carries `"waived": true`. The waiver
+itself does not travel: the next document to take that wording gets it unwaived,
+`lx check` reports it there, and `lx extract` names the segment, because your
+judgement about one paragraph is not a judgement about a document you have not
+read.
+
 `.lx/state.db` is working state — one SQLite database for the project. It is
 regenerable only for wording you have already banked with `lx commit`, so commit
 before you delete it. `.lx/reports/` is always regenerable.
@@ -560,7 +573,7 @@ that lost.
 ## Development
 
 ```bash
-python -m pytest -q                # 1886 tests, no network
+python -m pytest -q                # 1906 tests, no network
 python -m ruff check src tests
 ```
 

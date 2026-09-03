@@ -3,6 +3,255 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-09-03 · A reviewer may answer one segment's report, and every place that answer may not reach
+
+Closing HANDOFF-043. `lx waive` / `lx unwaive` and `POST /api/waive` land, a
+`waived` boolean joins the segment body, and **`contract_version` stays at 3 on
+the workbench contract and 1 on the status contract** — a new endpoint, a new
+response key, a new rule name and a new counter are all additive by both
+documents' own rules.
+
+The 2026-09-02 entry declined this and named this package. It was right to
+decline *then* and wrong to keep declining, and the measurement is what turned
+it: the case that opened the question really was a wrong rule, and the case that
+remains is not.
+
+### The population, measured rather than argued
+
+Seven hand-built literary segments through the real `checks.check_segment`, zh-TW,
+with a cast masked as do-not-translate terms:
+
+| shape | verdict | `tags` |
+|---|---|---|
+| a repeated name Chinese renders once | correct | **error** |
+| a place name folded into a pronoun | correct | **error** |
+| emphasis carried lexically, the pair dropped | correct | **error** |
+| three mentions, one kept | correct | **error** |
+| emphasis kept, span widened | correct | clean |
+| a name gone with nothing standing for it | broken | error |
+| one half of a pair gone | broken | error |
+
+Four of six `tags` errors are correct Traditional Chinese a reviewer would sign
+off, and **no mechanical rule separates them from the two that are not**: at the
+level the rule can see, both are a lost placeholder. That is invariant 4's line
+falling inside a single rule rather than between two of them, which is the shape
+no severity can fix.
+
+Measured end to end on a real project, the cost of having no answer: `lx check`
+exits 1, `lx hold` does not help (the hold reports at warn and every other rule
+still fires), `lx commit` refuses either way, `lx run` will not render — while
+`lx render` writes the correct Chinese. The only escape was
+`checks_disabled: ["tags"]`, which removes invariant 2b's own check from every
+segment in the project.
+
+### The routing finding, which is real and does not settle it
+
+A design lane found that the premise was itself a misconfiguration, and it is
+worth recording because the next reader will meet it: **a character name belongs
+in `config/glossary.csv`, not in `config/dnt.txt`.** `lx terms` writes to the
+glossary and its own docstring uses a cast member as the example; the shipped
+`config/dnt.txt` holds `API`, `SDK`, `CI/CD`, `OAuth`, `GitHub Actions` — things
+a translation *reproduces*, never things it renders. Re-measured with the cast in
+the glossary, the first, second and fourth rows above go clean and the broken one
+is still caught, at `glossary` — the discrimination this entry says no rule can
+make, performed by asking a different question: `tags` asks whether the
+placeholder counts match, which is the wrong question for a name, and `glossary`
+asks whether the agreed rendering appears at all, which is the right one.
+
+It does not close the population, and three measurements say so.
+
+- **A sole mention rendered as a pronoun** — the commonest thing in Chinese
+  narrative prose — fires `glossary` at error. The remedy is that row's own
+  severity column, which is per *term* and not per segment, so using it downgrades
+  that name everywhere in the book and the genuinely-broken case passes with it.
+- **A cast name that is an ordinary English word** — Will, Grace, Hope, Rose,
+  Mark, Ash, May, June, Dawn, all common in novels — manufactures a new population
+  of errors, because the glossary match lowercases both sides and the auxiliary
+  verb `will` triggers the row.
+- **Migrating an already-translated book regresses it and poisons the memory.**
+  Measured: a document at `errors: 0` goes to `errors: 4` on every segment
+  mentioning the cast, and the tracked `.lx/tm.<lang>.jsonl` still holds lines
+  carrying `⟦1⟧` with `slots: ["Ana"]`, so a new chapter takes a hit that renders
+  the Latin name with `origin: tm` — in a chapter nobody has touched — and
+  `lx commit` will not bank the correct wording over it, because the correct
+  wording is what now fails.
+
+So the routing belongs in `README.md` and in a reader's head, and it clears the
+repeat-fold subclass only. It is not a mechanism and it is not a substitute for
+one.
+
+### It downgrades, and never silences
+
+A waived segment's error-severity findings are re-emitted at `warn`, keeping
+their rule name and their message, and a `waived` warning names the segment
+beside them. Nothing leaves `issues`, nothing leaves `by_rule`, and the counts
+both frozen contracts document keep meaning exactly what their tables say — which
+is why neither version moved.
+
+*Lost:* **removing the issue**, which is what "suppression" would ordinarily mean.
+It changes what `errors`, `warnings`, `by_rule` and `issues` mean on two frozen
+surfaces at once, so it bumps both — and the bump is a scheduled package, which
+would have put this behind HANDOFF-036 for a behaviour nobody asked for. It also
+makes the waiver unauditable at the one place a reviewer looks.
+
+*Lost:* **a `blocking` count beside `errors`**, so the exit code could move while
+`errors` did not. It is the honest shape if the finding must stay at error, and it
+costs the same double bump for the same reason.
+
+### What may be waived is decided where the finding is made
+
+`check_segment`'s `add` closure takes a **required** fourth argument, `waivable`,
+with no default. There is no list of waivable rule names anywhere in the code, and
+that is the whole defence: this repository has now recorded five times what happens
+when a correctly stated rule has its *enumeration* read as its definition, and a
+list is a second place for the answer to live. Omitting the argument is a
+`TypeError`, so a rule added later cannot inherit an answer by silence, and a test
+asserts the property with `ast` — the answers are judgement, the property is what
+keeps them reviewable.
+
+The property, stated so it survives restatement: **an issue is waivable when a
+reviewer's judgement can overrule it — when what it reports is that the wording
+may be wrong. It is not waivable when what it reports is that the substituted
+bytes are malformed**, because judgement is not what decides whether a tag closes.
+That is invariant 2b's half and no reader of a translation is a second opinion on
+it.
+
+It has to be per **instance** rather than per rule, and `tags` is what forces it.
+One rule name covers a wording that dropped a slot — whose unmasking is ordinary
+prose — and one that dropped half a pair, whose unmasking is an `<em>` that never
+closes. `checks.pair_problems` *explicitly declines* the second case ("a half that
+never arrived is already a mismatch") and delegates it to the multiset comparison,
+so a naive `waivable = not extra` marks it waivable. Two independent adversarial
+lanes found that hole in the first design, and both reproduced it: against
+`This is ⟦1⟧very⟦2⟧ important, ⟦3⟧.` a wording dropping only `⟦2⟧` gets
+`pair_problems() == []` and renders `這是<em>非常重要的，Ana。`, and `lx check`
+would have exited 0 over it. `checks.dangling_pair_halves` is the repair, and the
+predicate is now `not extra and not dangling`.
+
+*Lost:* **narrowing by rule name** — waiving `numbers` on one segment but not
+`tags`. It is the shape HANDOFF-043 listed and it is the enumeration this design
+exists to avoid; it is also *not fine enough at the exact place it matters*, since
+`tags` is one name over two kinds of finding. *Lost:* **a fingerprint recomputed
+at read time**, which two lanes proposed. It answers the staleness question a
+second time when the writers already answer it structurally, and it cannot see the
+inputs that are not the target — a `config/dnt.txt` edit changes what the
+placeholders mean without changing the wording, and a fingerprint over the wording
+says nothing about it.
+
+### Its own body key, and that is a measurement
+
+`review` holds one string. A waiver stored there takes a held segment from `held`
+to `waived`, `checks.is_held` goes false, and `checks.workable` hands the segment
+back to the very queues the hold took it out of — reproduced 2026-09-03. A second
+`review` value had already lost three times on other grounds: `docs/decisions.md`
+2026-08-17 and 2026-09-02, and `docs/contracts/workbench-http.md` divergence (24),
+all three making the same argument that it spends a vocabulary the contract
+advertises as closed on a state the check already reports. This is the fourth
+refusal and the first by measurement. The two states compose now, and a segment
+may be both.
+
+*Cost, accepted:* `store.Carryover`'s entry becomes a five-element tuple, the
+second positional field added to it in a month. The next one converts it to a
+record; this package did not, because doing it here would put a shape change
+inside a behaviour change.
+
+### Pinned to the wording, structurally rather than by a check
+
+`store.save_targets` drops the flag on every write — every caller feeds it
+`translate.accept`'s output, so the text is never the one that was waived — and
+`store.save_segments` drops it only when the stored target actually moved, which
+is the conditional `target_slots` already carries there and for the measured
+reason it carries it: an agent round-tripping a whole document resends every
+segment byte for byte, and an unconditional pop would lift every waiver in the
+book on a save that changed nothing.
+
+A carryover **keeps** it, because `lx run` re-extracts on every invocation and a
+waiver that did not survive that would be gone before the check it was placed for.
+The diff-fallback branch **drops** it, the rule a hold already follows: that branch
+is the one that could not establish a position, and carrying a waiver into it
+would answer the report on a paragraph nobody has read.
+
+### One expression arms the downgrade and its marker
+
+`waived = is_waived(seg) and WAIVED not in disabled`. A project that puts `waived`
+in `checks_disabled` turns the feature off rather than keeping the cap and losing
+the one line that says a reviewer overrode something. The first version armed them
+separately and was measured producing `errors: 0` **and** `waived: 0` on a
+document with three capped errors — the exact pair invariant 10 cannot afford.
+
+### A waived wording is banked, and its line says so
+
+Decided by the maintainer against the alternative this package recommended.
+`lx commit`'s gate *is* `check_segment` at error severity, so a waiver takes the
+segment through the gate that already exists — one rule, one home, and no fourth
+refusal list beside `refused`, `held` and `stranded`. The memory line carries
+`"waived": true`, written only when true, so a memory with no waivers is
+byte-for-byte the file it was.
+
+**The waiver does not travel.** A segment that takes such a line comes back
+unwaived, `lx check` reports it where it landed, and `lx extract` names it —
+`waived_source` on `POST /api/extract`, a printed line on the CLI. One reviewer's
+judgement about one position is not a judgement about a document they have never
+seen, and the alternative — inheriting the waiver — would answer a report on
+behalf of a reader who never opened the file.
+
+Measured while building it, and it bounds the whole path: **a waived wording that
+dropped a placeholder never reaches a second document at all**, because
+`translate.accept` refuses it on the multiset and knows nothing about waivers.
+What travels is a waiver over a rule that judges the *text* — `lexicon`,
+`glossary`, `numbers`, and the advisory ones.
+
+*Lost:* **refusing to bank it**, which is what the `stranded` precedent argues by
+analogy and what this package recommended: a waiver is local to a position and the
+memory is read by every document, and `store.load_tm` keeps the last record per
+key, so a banked waived wording shadows a correct one. The maintainer took the
+other branch, and the mark plus the naming is what pays for it. *Lost:* **banking
+it with no mark**, which is the same harm with nothing to see it by. *Lost:*
+**preferring a non-waived record under a key at lookup time**, which would remove
+the shadowing entirely — it loses because it breaks `load_tm`'s documented rule
+that a later record supersedes an earlier one, and a *correction* that itself
+needs a waiver would then be shadowed by the wording it was written to replace.
+
+### `waived` on `lx status --json`, counted live
+
+Beside `held` in `cli._counts`, off the live segments, and deliberately not read
+from the persisted report the way `errors` and `warnings` are. A waiver is state,
+not a finding: it is true the moment `lx waive` returns, where a report is only as
+current as the last `lx check` — and reading it from the report would inherit
+`_check`'s staleness hole, since placing a waiver moves neither of the two
+integers `stale` compares, so a consumer would be told `waived: 0` on a document
+that had just waived four.
+
+It exists because the status contract's consumer may not read inside `.lx/` and
+may not call the Python API. `errors: 0` with `waived: 0` means no rule fired;
+`errors: 0` with `waived: 3` means three segments carry findings a person decided
+to stand by. Without the second number the two are indistinguishable on the one
+surface that was frozen so they would not have to be.
+
+### What this leaves
+
+**HANDOFF-036 is corrected in place, not deferred.** Its distilled gate is the
+full placeholder multiset, which is true of every segment a waiver exists for, so
+it would render the untranslated marker — or, under `--force`, the English source
+— over the reviewer's own words, silently. That package now carries the exemption
+and the test that bounds it: a target carrying an id the segment has no slot for
+is still missing *even when the segment is waived*, which is safe by construction
+because such a finding is unwaivable.
+
+**The workbench has an endpoint and no control.** `POST /api/waive` ships and
+`GET /api/doc` carries `waived`; the page does not draw it, because the frontend
+is HANDOFF-204's and `index.html` tests `seg.review === 'held'` by exact equality
+today. The CLI is the product (invariant 8) and this is the ordinary order.
+
+**Nothing stops a reviewer waiving every segment in a book.** The defences are
+friction — explicit ids, no glob — and visibility: three surfaces count it and the
+report still carries every finding. That is a deliberate limit rather than an
+oversight; a mechanism that could tell a considered waiver from a careless one
+would be exactly the judgement invariant 4 keeps out of `checks.py`.
+
+The routing finding above is a `README` item and a habit, and it is written down
+here because it is the first thing to try before waiving anything.
+
 ## 2026-09-02 · One paragraph, named; and a source file that changed underneath
 
 Closing HANDOFF-039. Two acts the CLI has had all along and `POST /api/translate`

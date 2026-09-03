@@ -446,6 +446,11 @@ def test_every_endpoint_returns_exactly_the_keys_the_contract_documents(base, pr
     # order here is the order a reviewer works in, not an arrangement.
     record("POST", "/api/hold", {"ids": [seg]})
     record("POST", "/api/hold", {"ids": [seg], "held": False})
+    # Same order and for the same reason: waiving refuses a segment with no
+    # target too. Both directions, so the reply shape of a lift is exercised as
+    # well as that of a grant.
+    record("POST", "/api/waive", {"ids": [seg]})
+    record("POST", "/api/waive", {"ids": [seg], "waived": False})
     record("POST", "/api/check")
     record("GET", "/api/preview")
     record("POST", "/api/render")
