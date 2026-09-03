@@ -120,6 +120,7 @@ CI 上有一組語料庫在把關，裡面收了 55 份刻意刁難的輸入（M
 |---|---|
 | `lx init` | 建立設定與狀態骨架 |
 | `lx extract SRC --lang L` | 解析成 segment、遮罩標記、重用翻譯記憶（小說加 `--tone literary`） |
+| `lx extract SRC --lang L --from OLD` | 把另一份已追蹤文件的譯文帶過來，連 hold 和 waiver 一起——拆書或改名時要用的 |
 | `lx todo SRC --lang L` | 以 JSON 吐出待譯 segment，供 agent 翻譯 |
 | `lx terms SRC --lang L` | 從原文挑出候選術語、開成詞彙表的列（加 `--append` 直接寫進去） |
 | `lx apply SRC --lang L --file F` | 收回譯文，自動正規化 |
@@ -361,6 +362,52 @@ argv 在行程列表裡看得到，也會直接進 shell 記錄，那時候再�
 `.lx/state.db` 是工作狀態，整個專案共用一個 SQLite 檔。只有已經用 `lx commit`
 存進記憶的譯法才重新產生得出來，所以刪掉它之前記得先 commit。`.lx/reports/`
 則隨時都可以再生。
+
+
+## 拆書，或是把某一章改名
+
+小說常常是一整個大檔進來的，你想把它拆成一章一章。用編輯器拆——這個工具不寫原
+文檔——拆完之後告訴每個新檔案，它的譯文在哪裡：
+
+```bash
+lx extract ch1.md --lang zh-TW --from novel.md
+lx extract ch2.md --lang zh-TW --from novel.md
+```
+
+兩邊都會回 `reused N | pending 0`。沒有任何一句被重譯，也沒有任何一次模型呼叫。
+之所以成立，是因為一個 segment 的身分是它的**內容**，不是它的位置，也不是它在哪
+個檔案裡；換了檔案的那一段，還是同一段。
+
+`--from` 讀的是另一份文件存起來的狀態。它是複製，不是搬移：`novel.md` 原本有的
+東西一樣都不會少，十章都指向它也沒問題。hold、waiver、`origin`，還有每段譯文當初
+是照哪一份 placeholder 對照表寫的，全部跟著過去，因為這些本來就跟 segment 存在
+一起。
+
+**用 `--from`，不要先 commit。** 先 `lx commit` 再普通 `lx extract` 多數時候看起
+來也對，但它會安靜地少掉兩樣東西。翻譯記憶是用原文當鍵的，所以一本書裡同一句話出
+現兩次、你給了兩種譯法，兩行都存得進去，讀回來卻只剩一行——兩章於是拿到同一個譯
+法。另外 `lx commit` 刻意不存 **held** 的段落，所以你正在斟酌、還沒定案的那一句根
+本沒進記憶，重新 extract 之後它是空的。`--from` 兩樣都不會掉。
+
+改名也是同一招：對新路徑 extract，`--from` 舊的那個。
+
+**沒有任何機制會檢查你切在哪裡。** 章節標題留在上一個檔案的結尾、或者某一章根本
+沒有標題，每一段照樣完美重用、`lx check` 照樣過。切點是你的責任，而 `lx render`
+是你唯一看得到它的地方。
+
+如果你去 extract 一個已經不在的檔案，指令會直接說清楚，並且告訴你什麼還能用：
+
+```
+$ lx extract novel.md --lang zh-TW
+lx: novel.md is not there, and `lx extract` is the only command that reads the
+    source file — this document's translations are still in .lx/state.db, so
+    `lx render novel.md --lang zh-TW` and `lx check novel.md --lang zh-TW` both
+    still work. If you renamed or split it, extract the new file and carry them
+    across: `lx extract <new-file> --lang zh-TW --from novel.md`.
+```
+
+拆完之後，舊文件那一列還留在 `.lx/state.db` 裡，所以 `lx stats` 和
+`lx status --json` 會繼續把它算進去，直到你把它移掉為止。目前還沒有這個指令。
 
 ## 審校工作台
 

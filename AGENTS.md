@@ -442,13 +442,14 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 1932 tests; no network (one is POSIX-only,
+python -m pytest -q                 # 1946 tests; no network (one is POSIX-only,
                                     #   one runs only where the filesystem folds case)
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
 
 lx run docs/guide.md --lang zh-TW   # extract -> translate -> check -> repair -> render
 lx run book/ch1.md --lang zh-TW --limit 50    # at most 50 segments per pass; run it again to continue
+lx extract book/ch1.md --lang zh-TW --from book/whole.md   # carry a split or renamed file's translations across
 lx waive book/ch1.md --lang zh-TW --ids s0042   # stand by this wording: its errors report at warn
 lx models --provider llamacpp       # ask a backend which models it serves
 lx blocks docs/guide.md --lang zh-TW --json   # the rendered document, block by block
@@ -756,6 +757,30 @@ own.
   what it replaced. Divergence (27), closed 2026-09-01; before it, a `human`
   segment came back as `tm` and stopped being covered by origin precedence, with
   no collision and no race.
+
+  **A carryover can be read out of another document, and that is what a split or
+  a rename needs.** `lx extract NEW --lang L --from OLD` points
+  `store.prior_targets` at `OLD`'s state instead of `NEW`'s; everything below
+  that line is unchanged, so the wording still goes through `translate.accept`
+  and the alignment is still `Carryover.align`'s diff. It exists because the
+  route this project used to recommend — `lx commit`, then split, then extract —
+  is **lossy in two independent ways**, measured 2026-09-04. The memory key
+  carries no position and no `doc_id` and `store.load_tm` keeps the *last* record
+  per key, so a book holding one paragraph twice with two different translations
+  banks two lines, reads back one, and both halves come back with the same
+  wording. And `lx commit` refuses a held segment by design, so a wording a
+  reviewer was still working on is not banked at all and returns as `pending`
+  with `lx check` at exit 1. The carryover loses neither: it is a diff over a
+  position sequence, and `review`, `waived`, `origin` and `target_slots` all ride
+  in the segment `body`. Four refusals guard it, all decidable before anything is
+  read — it is not `--reset`'s companion, it may not name the document being
+  extracted, the named document must have state in this language, and the two
+  registers must agree, because `prior_targets` freezes the stored register into
+  its keys and a mismatch carries nothing while printing `reused 0`. The register
+  is therefore resolved from the source document when neither `--tone` nor the
+  target's own state answers, which is what makes the ordinary case — a
+  `literary` novel in a project still configured `technical` — work at all.
+  `docs/decisions.md`, 2026-09-04.
 
   Two simpler spellings were built and both were wrong — by segment id, which a
   single insertion defeats and a deletion turns into laundering, and by ordinal
