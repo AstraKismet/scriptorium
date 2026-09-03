@@ -528,6 +528,7 @@ client must remember something.
 | `kept` | array of string | Segment ids whose stored target the acceptance path refused and this endpoint **kept anyway**, with its `origin` and its `review`. They come back `status: "translated"` holding wording that fails validation, and `POST /api/doc` carries the error on the segment itself — so this array is a convenience, not the only way to find them. *Known divergences* (24), closed. |
 | `ambiguous` | array of string | Segment ids the position diff could not place, which took the last stored wording under their key instead: a new occurrence of a sentence the document already had, a paragraph that moved, or a member of a run of identical paragraphs that changed size. **Which stored wording belongs to which position is not established for these** — check their `origin`. Nothing else on this surface reports it. **Not capped:** past the alignment work budget the diff is skipped for the whole document and every carried segment lands here, which on a novel that is one sentence repeated is every segment in it. *Known divergences* (26), open. |
 | `replaced` | array of string | Segment ids where a translation-memory hit was accepted **over wording this document was already holding** — the stored target no longer fit the re-parsed segment and a banked one did. Since 2026-09-01 the wording that gives way is always a machine's (`llm:*`, `tm`, `tm:legacy`); what a person or an agent wrote is kept instead and named in `kept`. So the sentence is not gone — the memory still holds it — but the segment's `origin` is now `tm`, which is worth a reviewer's eye. Nothing else on this surface reports it, and unlike `kept` there is no error to find it by: the segment is `translated` and passes every validator. *Known divergences* (27), **closed**. The array narrowed and the key did not move, exactly as `rejected` did not on 2026-08-17: it means what the run did. |
+| `waived_source` | array of string | Segment ids that took a banked wording whose memory line carries `"waived": true` — a reviewer waived it where it was committed. **The waiver did not travel**: the segment arrives unwaived, so `lx check` reports the issue here and this reader decides for themselves. Named because nothing else on this surface would say so — the segment comes back `translated` and, like `replaced`, there is no error to find it by until the check runs. Present and empty when it did not happen. |
 
 **Carrying over is position-aware, and a refusal does not delete.** Two rules
 landed on 2026-08-17 and neither moves a key:
@@ -703,6 +704,111 @@ other rule.
 
 Side effects: updates the `review` field of the named segment rows in
 `.lx/state.db`, and nothing else — not `target`, not `status`.
+
+---
+
+### POST /api/waive
+
+Stand by a segment's wording: report the rules a reviewer can overrule at `warn`
+on it, instead of failing the build. Or take that back.
+
+Backed by: `cli.do_waive`. Equivalent to `lx waive` / `lx unwaive`.
+
+**Request**
+
+| Key | Required | Type | Default | Notes |
+|---|---|---|---|---|
+| `src` | yes | string | — | confined |
+| `lang` | yes | string | — | whitelisted |
+| `ids` | no | array of string | `[]` | An id naming no segment is ignored, not refused. An empty list is a no-op. |
+| `waived` | no | boolean | `true` | `false` lifts the waiver. A non-boolean is a `400`; a `null` would read as `false` and *lift* one. |
+
+**Response**
+
+| Key | Type | Meaning |
+|---|---|---|
+| `applied` | integer | Segments whose waiver this request actually changed. A no-op is not counted, so lifting a waiver nobody placed answers `0`. |
+| `unknown` | array of string | Ids with no matching segment. |
+| `stale` | array of string | Ids left alone because the stored target moved between this request being prepared and the write — a translation batch or another client landing in between. A waiver is about the words the reviewer read, so it is refused rather than applied to whatever is there now: measured 2026-09-03, without this the flag landed on a wording nobody had seen and `lx check` went green over it. **Present and empty** when it did not happen. |
+
+**A waiver is its own segment field, not a `review` value.** `review` holds one
+string, so a waiver stored there would overwrite a hold: measured 2026-09-03,
+`review` went `held` → `waived`, `checks.is_held` went false, and the segment
+returned to the queues the hold had taken it out of. The two states are
+independent and a segment may carry both.
+
+**It downgrades and never silences.** Every issue stays in `issues`, stays in
+`by_rule`, and keeps its message; what moves is severity, from `error` to `warn`,
+and only for issues a reviewer's judgement can settle. A `waived` warning names
+the segment on the same reply, so a client can always tell a waived segment from
+an ordinary one. The exit code of `lx check` follows the severities, so this is
+what lets a document with a genuinely-unfixable segment finish.
+
+⚠️ **What a waiver cannot reach.** Whether an issue may be waived is decided
+where it is raised, beside its severity, and it is `false` for every rule that
+reports the substituted *bytes* are malformed rather than that the wording may be
+wrong — invariant 2b's own half. Today that is `containment`, `escaping`, `eol`,
+`missing`, the placeholder **pair** messages of `tags`, and a `tags` multiset
+mismatch the rendered bytes cannot survive: an id the segment has no slot for,
+an id repeated whose original is an HTML tag, or a lost tag half whose partner is
+still standing. That last one is asked of the **tag text**, not of `pair_id`:
+markup is paired within a segment, so a `<div>` opened in one paragraph and
+closed in the next leaves both halves unpaired, and a predicate keying on
+`pair_id` called that waivable — measured 2026-09-03, `lx check` exited 0 over a
+file that rendered an unclosed `<span>`. A whole pair lost together stays
+waivable; nothing is left standing. A void element written bare — `<br>` — reads
+as an open whose close never arrives and is therefore called unbalanced when the
+bytes would in fact be fine, which is the safe direction and is deliberate.
+Those stay `error` on a waived segment and still fail the build.
+
+This list is a **symptom of the rule and never its definition.** There is no list
+of waivable rule names anywhere in the code: the answer is a required argument at
+each call site, so a rule added later cannot inherit one by omission, and a test
+asserts that by `ast`.
+
+⚠️ **Waiving requires a non-empty target**, whole-request and before anything is
+written, with a `400` naming `lx translate --ids` — the rule `/api/hold` follows.
+A waiver on an untranslated segment would answer a report nobody has read about
+wording nobody has written. Lifting carries no such condition.
+
+⚠️ **And a segment `lx check` reports an error on.** A waiver answers a finding;
+it is not a mark of approval, and one placed on a passing segment would put a
+line in the tracked translation memory saying a reviewer overruled a rule that
+never fired. Also a `400`, also whole-request, and evaluated with the flag forced
+off so that re-affirming a waiver already in force is not refused by the state it
+put there. `POST /api/hold` is the control for "this segment is mine to finish".
+
+**A waiver is pinned to the wording, and the pin does not depend on a writer.**
+The stored value is the token of the target it was granted over, and a waiver
+whose token no longer matches is simply not in force — so the flag cannot outlive
+the sentence a reviewer read even under a build that does not know the field,
+where a stale hold merely over-restricts and a stale waiver would move the exit
+code. Any write that changes the target also drops it outright:
+`store.save_targets` unconditionally, `store.save_segments` when the stored
+target actually moved. So a re-translation, a reviewer's edit and a memory hit
+each lift it, while `lx run` — which re-extracts every time — keeps it, because a
+carryover is the same wording at the same position. A carryover that could not
+establish a position drops it, the rule a hold already follows.
+
+**A waived wording is banked.** `lx commit` gates on `checks.check_segment` at
+error severity, which a waiver has moved, so a waived segment passes that gate
+like any other — and its memory line carries `"waived": true`. **The mark belongs
+to the wording and does not come off it**: a later commit of the same target
+keeps it even from a document with no waiver of its own, which is what stops the
+field being erased one hop downstream and what stops a toggled flag appending a
+duplicate line to a tracked source of truth. Re-wording the segment produces an
+unmarked record, as it should.
+
+The waiver itself does **not** travel: a segment that takes such a line comes
+back unwaived, is reported by `lx check` where it landed, and is named in
+`waived_source` on `POST /api/extract`. One reviewer's judgement about one
+position is not a judgement about a document they have never seen — and note the
+limit of that promise: `lx check` on the receiving document reports the finding
+only where the waived rule fires there too, so `waived_source` is the one place
+the handover appears.
+
+Side effects: updates the `waived` key inside the named segment rows in
+`.lx/state.db`, and nothing else — not `target`, not `status`, not `review`.
 
 ---
 
@@ -1099,6 +1205,7 @@ against a second read surface no longer has one.
 | `source` | string | **The masked text** — placeholders as `⟦n⟧`, not the raw source. Note the name: `lx todo --json` calls the same thing `text`. |
 | `target` | string | `""` when absent, never `null`. |
 | `review` | string \| null | The review state, from a **closed** vocabulary: `held`, or `null`. Always present rather than omitted when absent, so a client does not have to tell "not held" from "an older server". `held` means no queue that selects work will take this segment — see `POST /api/hold`, which is the only thing that sets or clears it. |
+| `waived` | boolean | Whether a reviewer has waived this segment's wording, so that the rules judgement can overrule are reported at `warn` on it instead of failing the build. Always present rather than omitted, the rule `review` follows. **Its own field and not a `review` value**, so a segment can be both held and waived — `review` holds one string, and a waiver written there would delete a hold. Set and cleared only by `POST /api/waive`, and dropped by any write that changes the target. |
 | `token` | string | What `POST /api/save`'s `base` takes for this segment: `sha1(target)[:12]`, where an absent target hashes as `""`. Opaque — a client stores it and hands it back, and must not compute or compare it beyond equality. |
 | `issues` | array of *issue* | Only this segment's. |
 
@@ -1107,7 +1214,7 @@ against a second read surface no longer has one.
 | Key | Type | Notes |
 |---|---|---|
 | `seg` | string | Segment id. |
-| `rule` | string | One of `bare_term`, `containment`, `dnt`, `eol`, `escaping`, `glossary`, `held`, `length`, `lexicon`, `missing`, `numbering`, `numbers`, `punct`, `spacing`, `tags`, `untranslated`. |
+| `rule` | string | One of `bare_term`, `containment`, `dnt`, `eol`, `escaping`, `glossary`, `held`, `length`, `lexicon`, `missing`, `numbering`, `numbers`, `punct`, `spacing`, `tags`, `untranslated`, `waived`. |
 | `severity` | string | `error` or `warn` for every rule the code decides. The `glossary` rule passes column four of `config/glossary.csv` through unvalidated, and `lexicon_extra` does the same, so a hand-edited configuration can put any string here. Anything that is not exactly `error` is counted as a warning. |
 | `message` | string | Human-readable. Not stable; do not parse it. |
 

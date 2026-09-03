@@ -348,6 +348,25 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
     heading in every novel, at error severity, since before the 2026-07-28 audit.
     Repaired the same day; `docs/decisions.md`, 2026-09-02.
 
+    **Since 2026-09-03 the exit code carries one qualifier, and it is the whole
+    of what changed:** a green `lx check` claims that every mechanical rule
+    passed on every segment *except those a reviewer has waived*, where the rules
+    judgement can overrule are reported at `warn` instead. It is not a hole in
+    the sentence above and it is deliberately not a silencer. Nothing is removed
+    from the report — the finding keeps its rule name and its message, moves to
+    `warn`, and a `waived` warning names the segment — so `errors: 0` with
+    `waived: 0` still means what it always meant, and the pair is available on
+    every surface: `lx check --json`, `POST /api/check`, and `lx status --json`,
+    whose consumer may not read inside `.lx/` and would otherwise have no way to
+    tell the two apart. **What a waiver cannot reach is the half a reviewer
+    cannot be right about**: whether an issue is waivable is decided beside its
+    severity where the finding is made, and it is false for every rule that
+    reports the substituted *bytes* are malformed rather than that the wording
+    may be wrong — invariant 2b's own half. There is no list of waivable rule
+    names: the argument is required at each `add()` call site, so a rule added
+    later cannot inherit an answer by omission, and a test asserts that by `ast`.
+    `docs/decisions.md`, 2026-09-03.
+
 11. **An untrusted path is confined before it is opened.** Any path the user did
     not type at a terminal — one that arrived in an HTTP request, was read out of
     a configuration file, or is an entry name inside a container — goes through
@@ -416,13 +435,14 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 1886 tests; no network (one is POSIX-only,
+python -m pytest -q                 # 1921 tests; no network (one is POSIX-only,
                                     #   one runs only where the filesystem folds case)
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
 
 lx run docs/guide.md --lang zh-TW   # extract -> translate -> check -> repair -> render
 lx run book/ch1.md --lang zh-TW --limit 50    # at most 50 segments per pass; run it again to continue
+lx waive book/ch1.md --lang zh-TW --ids s0042   # stand by this wording: its errors report at warn
 lx models --provider llamacpp       # ask a backend which models it serves
 lx blocks docs/guide.md --lang zh-TW --json   # the rendered document, block by block
 lx sentences docs/guide.md --lang zh-TW       # where its sentences begin and end
@@ -827,6 +847,80 @@ own.
   the very next commit — and the skipped ids are named on both surfaces. The one
   measured cost is that a held-and-never-committed wording really is gone after
   `lx extract --reset`, which is what that command's message already says.
+- **A waiver is a `waived` boolean on the segment body, not a second `review`
+  value**, with `lx waive` / `lx unwaive` and `POST /api/waive`. That is a
+  measurement and not a preference: `review` holds one string, so a waiver stored
+  there takes it from `held` to `waived`, `checks.is_held` goes false, and
+  `checks.workable` hands the segment back to the queues the hold took it out of.
+  Reproduced 2026-09-03. A second `review` value had already lost three times on
+  other grounds — `docs/decisions.md` 2026-08-17 and 2026-09-02, and
+  `docs/contracts/workbench-http.md` divergence (24) — and this is the fourth,
+  arriving by measurement. Like `review` it costs no `SCHEMA_VERSION` and no
+  `STATE_VERSION`, and the two states compose: a segment may be both.
+
+  **It downgrades and never silences.** The finding keeps its rule name and its
+  message and moves to `warn`; a `waived` warning names the segment beside it.
+  One expression in `check_segment` arms both, so a project that puts `waived` in
+  `checks_disabled` turns the feature off rather than keeping the downgrade and
+  losing the line that reports it — measured 2026-09-03, that pair produced
+  `errors: 0` and `waived: 0` on a document with three capped errors.
+
+  **What may be waived is decided where the finding is made**, as a *required*
+  fourth argument to `check_segment`'s `add` — omitting it is a `TypeError`, so
+  there is no list of rule names anywhere and a rule added later cannot inherit
+  an answer by omission. The property: an issue is waivable when a reviewer's
+  judgement can overrule it, and not when it reports the substituted *bytes* are
+  malformed, which is invariant 2b's half and not a matter of opinion. It is
+  therefore per **instance** and not per rule — `tags` is the case that forces
+  it, since one rule name covers a wording that dropped a slot, whose bytes are
+  well formed, and one that dropped half a pair, whose bytes are an unclosed tag
+  that `pair_problems` explicitly declines to report.
+
+  **The question is asked of the tag text, never of `pair_id`**, and that is the
+  correction the adversarial pass forced. `mask` pairs markup within a segment,
+  so a `<div>` opened in one paragraph and closed in the next leaves both halves
+  `standalone` with no `pair_id` — and the first predicate called that waivable.
+  Measured 2026-09-03 on an ordinary Markdown file: `lx check` exited 0 over a
+  document that rendered an unclosed `<span>`. `checks.unbalanced_markup` reads
+  `mask.tag_shape`, made public for it so the two answers cannot differ. The same
+  pass found the mirror: refusing every `extra` id made `lx run` permanently
+  decline a *correct* document whose Chinese repeats a code span, which renders
+  legally — so what is refused is an id with no slot, an id whose original is a
+  tag, and a lost tag half, and nothing else.
+
+  It is pinned to the wording twice over. The stored value is the **token of the
+  target** it was granted on, compared at `store._segment` on the way out, so a
+  waiver cannot outlive the sentence a reviewer read even under a build that does
+  not know the field — a stale hold over-restricts and a stale waiver would move
+  the exit code, which is why this one could not be left to a writer. Beside it
+  the writers still drop the key outright: `store.save_targets` on every write,
+  `store.save_segments` when the target actually moved. A carryover keeps it,
+  because `lx run` re-extracts on every invocation; the diff-fallback branch
+  drops it, the rule a hold already follows. And the write is a
+  **compare-and-swap** on the target the reviewer read: a batch landing in
+  between used to leave the flag on wording nobody had seen.
+
+  **A waiver answers a finding and is not a mark of approval.** `do_waive`
+  refuses a segment `lx check` reports no error on, whole-request, evaluated with
+  the flag forced off so re-affirming one is not refused by the state it put
+  there. Left open it put a line in the tracked memory claiming a reviewer had
+  overruled a rule that never fired.
+
+  **A waived wording is banked, and its memory line says so.** `lx commit`'s gate
+  *is* `check_segment` at error severity, so a waiver takes the segment through
+  the gate that already exists — one rule, one home, and no fourth refusal list.
+  The line carries `"waived": true`, and **the mark belongs to the wording**:
+  `tm_records` keeps it on a later commit of the same target even from a document
+  with no waiver of its own, which is what stops it being erased one hop
+  downstream and what stops a toggled flag appending duplicate lines to a source
+  of truth. The waiver itself does **not** travel: the receiving segment comes
+  back unwaived, `lx check` reports it there *where the waived rule fires there
+  too*, and `lx extract` names it in `waived_source` on both surfaces. One
+  reviewer's judgement about one position is not a judgement about a document
+  they have never seen. Measured while building it: a waived wording that dropped
+  a placeholder never reaches a second document at all, because `translate.accept`
+  refuses it on the multiset — so this path carries `lexicon`, `glossary`,
+  `numbers` and the advisory rules, and nothing structural.
 - The project style sheet (`config/style.txt`) says how *this book* sounds, where
   the register brief says how the target language's prose is written. Its two
   halves are injected differently and that is the design, not an accident: the

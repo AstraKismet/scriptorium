@@ -233,6 +233,7 @@ divergences* (5).
 | `translated` | integer | How many have a **non-empty target after stripping**. That is the same rule `store._segment` derives a segment's `status` from — and it is **not** the rule `lx check`'s report or the workbench's `docs[].done` use, both of which count any target at all. On a document holding a whitespace-only target the numbers differ; see *Known divergences* (3). |
 | `pending` | integer | `segments - translated`. |
 | `held` | integer | How many carry `review == "held"` — no queue that selects work will take them. **A held segment is also counted in `translated`** — the two are not disjoint, while `translated + pending` is still `segments`. That containment comes from the **hold control**, which refuses a segment with no target, and not from anything on this surface: the two counts are computed independently here, so a writer that ever produced a held row with an empty target would break it silently. Do not compute "translated and not held" as `translated - held` without allowing for that. |
+| `waived` | integer | How many carry a **waiver**: a reviewer read what `lx check` reports on that wording and stood by it, so the rules judgement can overrule are reported at `warn` on it instead of failing the build. Counted from the live segments, like `held` and unlike `errors` — a waiver is state, not a finding, so this number is current whether or not `lx check` has run since. **Not disjoint from anything**: a waived segment is also counted in `translated`, may also be `held`, and its own issues still appear in the `check` counts, under `warnings`. ⚠️ **Read it beside `errors`, and mind that the two are counted differently.** `errors: 0` with `waived: 0` means no rule fired *at the time of the last check*; `errors: 0` with `waived: 3` means three segments carry issues a person stood by. But this number is live and `errors` is a projection of the last `lx check`, so between placing a waiver and re-checking they describe different moments — and `stale` cannot say so, because placing a waiver moves neither integer it compares. In that window `waived: 1` sits beside an `errors` that still counts the finding. It clears on the next check. Nothing here was ever a pass claim; this pair is a better question to ask, not an answer. |
 | `check` | *check* \| null | The last `lx check`'s counts, or `null` when nobody has checked this document. |
 
 ### check
@@ -285,6 +286,7 @@ first; `totals` does not carry it at all.
 | `translated` | integer | Sum. |
 | `pending` | integer | Sum. |
 | `held` | integer | Sum. |
+| `waived` | integer | Sum. |
 | `errors` | integer | Summed over the `checked` documents only. |
 | `warnings` | integer | Summed over the `checked` documents only. |
 
@@ -293,6 +295,14 @@ direction that matters: a document nobody has checked contributes zero and reads
 exactly like a clean one, so "0 errors" across a project nobody has checked is
 indistinguishable from a project that passes. *"3 errors across 5 of 7 checked"*
 is the smallest honest statement of quality this surface can make.
+
+`waived` is there for the same reason and against the other door. A project can
+reach `errors: 0` because every rule passed, or because a person read the ones
+that did not and stood by the wording; those are different claims and the exit
+code alone stopped being able to tell them apart on 2026-09-03. Summing it makes
+the second visible without asking a consumer to look inside `.lx/`, which this
+contract forbids it. *"0 errors, 4 waived, across 7 of 7 checked"* is what an
+honest library card says about a finished book.
 
 ## Deliberately not in the contract
 

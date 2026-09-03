@@ -43,6 +43,7 @@ from ..cli import (
     do_sentences,
     do_translate,
     do_untracked,
+    do_waive,
     language_tag,
     writable_key,
 )
@@ -606,6 +607,13 @@ class _Handler(BaseHTTPRequestHandler):
                     # client does not have to tell "not held" from "an older
                     # server" — the rule `collisions` follows on `/api/state`.
                     "review": s.get("review"),
+                    # Always present and always a boolean, `false` when nobody
+                    # has waived this segment — the rule `review` follows one
+                    # line up, so a client never has to tell "not waived" from
+                    # "an older server". Its own key rather than a `review`
+                    # value: `review` holds one string, and a waiver written
+                    # there would delete a hold.
+                    "waived": bool(s.get("waived")),
                     "target": s.get("target") or "",
                     # What a client hands back to `POST /api/save` to prove its
                     # edit was based on this text. Derived, so it costs no column
@@ -666,7 +674,12 @@ class _Handler(BaseHTTPRequestHandler):
                                                body.get("reset", False))
             return {"segments": len(doc["segments"]), "reused": reused, "rejected": rejected,
                     "kept": notes["kept"], "ambiguous": notes["ambiguous"],
-                    "replaced": notes["replaced"]}
+                    "replaced": notes["replaced"],
+                    # Unconditional like the three beside it, so a client does
+                    # not have to tell "none" from "an older server" and the
+                    # contract test's exact-key comparison holds on a first
+                    # extract.
+                    "waived_source": notes["waived_source"]}
         if path == "/api/save":
             # `base` is optional and per id, so a client that has not opted in
             # writes exactly as it did. An empty target raises `UnusableTarget`,
@@ -689,6 +702,14 @@ class _Handler(BaseHTTPRequestHandler):
             applied, unknown = do_hold(src, lang, cfg, body.get("ids"),
                                        held=body.get("held", True))
             return {"applied": applied, "unknown": unknown}
+        if path == "/api/waive":
+            # Shapes are checked in `do_waive`, for the reason `/api/hold` gives:
+            # a `bool()` here would turn `waived: null` into a *lift* and
+            # `waived: "false"` into a waiver, which is the silent coercion this
+            # surface refuses everywhere else.
+            applied, unknown, stale = do_waive(src, lang, cfg, body.get("ids"),
+                                               waived=body.get("waived", True))
+            return {"applied": applied, "unknown": unknown, "stale": stale}
         if path == "/api/check":
             report, _ = do_check(src, lang, cfg)
             return report

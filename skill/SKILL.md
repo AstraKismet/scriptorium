@@ -27,6 +27,8 @@ $LX commit  docs/guide.md --lang zh-TW      # bank approved segments in the TM
 
 Run `check` until it exits 0 before rendering. `check` writes `.lx/reports/<doc>.<lang>.json`; that file is the localization report — never write one by hand, and never claim a document passed without a green exit code.
 
+A green exit code carries one qualifier: it covers every segment except any a **person** has waived with `lx waive`, where the rules judgement can overrule are reported at `warn` instead. **Never run `lx waive` yourself.** It is a reviewer saying they read a finding and stand by the wording, and you are not in a position to say that on their behalf — report the finding and let them decide. The rules that report the substituted *bytes* are malformed cannot be waived by anyone, so a `containment`, `escaping`, `eol`, placeholder-pair or extra-placeholder error is yours to fix whatever the report says.
+
 ## Translating
 
 `todo` returns segments that look like this:
@@ -69,6 +71,7 @@ If `check` reports `tags` errors repeatedly on the same segment, the placeholder
 | `numbers` | error | a figure in the source missing from the target |
 | `missing` | error | segment never translated |
 | `held` | warn | a reviewer is finishing this one; no queue selects it |
+| `waived` | warn | a reviewer read this one and stood by it, so its errors are reported here |
 | `lexicon` | error/warn | a term the target locale writes differently |
 | `dnt` | warn | protected brand or product name altered |
 | `untranslated` | warn | source copied through verbatim |

@@ -409,6 +409,18 @@ _SEG_COLUMNS = (("seg_id", "id"), ("content_hash", "hash"), ("context", "context
 
 def _seg_row(pos, seg):
     body = {k: v for k, v in seg.items() if k not in {f for _, f in _SEG_COLUMNS}}
+    # The waiver is a boolean everywhere outside this module and a token inside
+    # it, and this is the one place the two meet on the way in — :func:`_segment`
+    # is the one place they meet on the way out. A caller hands back the segment
+    # it was given, so it hands back `waived: True`; stored as-is that would be a
+    # flag with nothing tying it to the wording, which is the whole guarantee.
+    # Encoded here rather than asked of every writer: `cli.do_extract` carries a
+    # waiver across a re-parse and `cli.do_apply` carries it across a save, and
+    # neither should have to know how it is spelled on disk.
+    if "waived" in body:
+        body["waived"] = target_token(seg.get("target")) if body["waived"] else None
+        if body["waived"] is None:
+            del body["waived"]
     return (seg["id"], pos, seg.get("hash"), seg.get("context"), seg.get("variant"),
             seg.get("status"), seg.get("target"), json.dumps(body, ensure_ascii=False))
 
@@ -431,6 +443,22 @@ def _segment(row):
     # write-side guard, which had made the neighbouring `source` fix self-healing
     # on read and this one not.
     seg["status"] = "translated" if (seg.get("target") or "").strip() else "pending"
+    # **A waiver is only in force over the wording it was granted on**, and that
+    # is decided here rather than trusted from the row. The two writers drop the
+    # key when the target moves, which is enough while every write goes through
+    # this build — and is not enough across builds: a build without the field
+    # writes a new target and leaves the flag, and a stale waiver is *fail-open*
+    # where a stale hold is fail-safe. It downgrades error-severity findings and
+    # moves the exit code invariant 10 rests on, so it cannot be left to a writer
+    # that may not exist. Stored as the token of the target it was granted over,
+    # compared here, and simply not surfaced when the two disagree.
+    #
+    # Recomputed on read, exactly as `status` is one line up and for the same
+    # reason: a guard that binds only future writes does nothing for a row
+    # already on disk. `True` rather than the token, because no reader outside
+    # this module has any use for the token and one of them ships it on the wire.
+    if seg.pop("waived", None) == target_token(seg.get("target")):
+        seg["waived"] = True
     return seg
 
 
@@ -619,13 +647,14 @@ class Carryover:
     def __init__(self, keys, entries, by_key):
         #: Every prior segment's key, in document order.
         self.keys = keys
-        #: Parallel to :attr:`keys`: ``(target, origin, review)``, or ``None``
-        #: where that segment held no translation.
+        #: Parallel to :attr:`keys`: an entry, or ``None`` where that segment
+        #: held no translation.
         self.entries = entries
         #: ``{key: [entry, ...]}`` — the *translated* entries under a key, in
         #: document order. The fallback, and the old rule's whole world. An entry
-        #: is ``(target, origin, review, slots)``, where ``slots`` is the map the
-        #: target's placeholders were written against.
+        #: is ``(target, origin, review, waived, slots)``, where ``slots`` is the
+        #: map the target's placeholders were written against and ``waived`` is
+        #: whether a reviewer had answered that wording's report.
         self.by_key = by_key
 
     def __len__(self):
@@ -635,7 +664,7 @@ class Carryover:
     def align(self, segments, tone):
         """``{seg_id: (entry, ambiguous)}`` — what each freshly parsed segment inherits.
 
-        ``entry`` is ``(target, origin, review)`` or ``None``.
+        ``entry`` is ``(target, origin, review, waived, slots)`` or ``None``.
 
         **The two key sequences are diffed, and the matching blocks are the
         answer.** Nothing else establishes which of two identical paragraphs is
@@ -699,11 +728,16 @@ class Carryover:
                 out[sid] = (placed[sid], False)
                 continue
             rows = self.by_key.get(key)
-            # `review` does not survive the fallback: a hold is one reviewer's
-            # statement about a position, and this is the branch that could not
-            # establish one. The provenance map travels with the wording, because
-            # it describes the wording rather than the position.
-            entry = (rows[-1][0], rows[-1][1], None, rows[-1][3]) if rows else None
+            # Neither `review` nor the waiver survives the fallback, and for
+            # one reason: both are a reviewer's statement about a *position*, and
+            # this is the branch that could not establish one. Carrying a hold in
+            # took a paragraph nobody had looked at out of every queue; carrying a
+            # waiver in would go one worse and answer the report on a paragraph
+            # nobody had read, which is the one thing a waiver must never do by
+            # itself. The provenance map does travel, because it describes the
+            # wording rather than the position.
+            entry = ((rows[-1][0], rows[-1][1], None, False, rows[-1][4])
+                     if rows else None)
             out[sid] = (entry, entry is not None)
         return out
 
@@ -807,14 +841,23 @@ def prior_targets(src, lang):
             entry = None
             if key is not None and target:
                 held = json.loads(body)
-                # The fourth field is the map this *target* was written against,
+                # The last field is the map this *target* was written against,
                 # which is not the segment's own `slots` whenever a re-parse has
                 # moved under it: `save_doc` rewrites `slots` from the fresh
                 # parse on every extract, and the divergence (24) keep path puts
                 # an old target on a fresh segment. `target_slots` is written
                 # only when the two differ, so its absence means "the segment's
                 # own map", which is true of every row an earlier build wrote.
+                #
+                # The waiver rides here beside `review` for the same reason that
+                # one does: it is a statement about *this wording*, and `lx run`
+                # re-extracts on every invocation, so a waiver that did not
+                # survive an ordinary carryover would be gone before the check
+                # that was supposed to see it. What must not survive is a *new*
+                # wording, and nothing here can produce one — every path that
+                # writes a target drops the flag first.
                 entry = (target, held.get("origin") or "carryover", held.get("review"),
+                         held.get("waived") == target_token(target),
                          _slot_map(held.get("target_slots")) or _slot_map(held.get("slots")))
                 by_key.setdefault(key, []).append(entry)
             keys.append(key)
@@ -1060,8 +1103,19 @@ def save_segments(src, lang, segments, expect=None, over_human=False):
                     continue
                 # A copy rather than a mutation: the caller's dict is
                 # `cli.do_apply`'s own and it builds the reply from it.
-                if seg.get("target_slots") and seg.get("target") != was.get(seg_id):
-                    seg = {k: v for k, v in seg.items() if k != "target_slots"}
+                # `target_slots` and the waiver are dropped together and under
+                # the same condition, because they answer the same question about
+                # the same thing: both describe *this wording*, and both stop
+                # describing it the moment the wording moves. Conditional, not
+                # unconditional — an agent round-tripping a whole document
+                # resends every segment byte for byte, and an unconditional pop
+                # there would lift every waiver in the book on a save that
+                # changed nothing. That is the measured reason the `target_slots`
+                # pop is conditional (2026-09-01), and it is this one's too.
+                if seg.get("target") != was.get(seg_id):
+                    drop = {k for k in ("target_slots", "waived") if seg.get(k)}
+                    if drop:
+                        seg = {k: v for k, v in seg.items() if k not in drop}
                 row = (*_seg_row(0, seg)[2:], doc_id(src), lang, seg_id)
                 if seg_id in expect:
                     n = conn.execute(
@@ -1138,6 +1192,14 @@ def save_targets(src, lang, targets, origin, over_human=False):
                 # re-seat a wording that never needed it. See `target_slots` in
                 # `cli.do_extract`.
                 body.pop("target_slots", None)
+                # And the waiver, for the same reason one line up: it was granted
+                # on the wording this statement is replacing. Unconditional here
+                # where `save_segments` has to compare, because every caller of
+                # this function feeds it `translate.accept`'s output — a proposal
+                # that passed the gate — so the text is never the one that was
+                # waived. Structural rather than checked: no writer has to
+                # remember, and no read has to recompute a fingerprint.
+                body.pop("waived", None)
                 written += conn.execute(
                     "UPDATE segments SET status=?, target=?, body=? "
                     "WHERE doc_id=? AND lang=? AND seg_id=?",
@@ -1259,6 +1321,73 @@ def save_review(src, lang, review):
         conn.close()
 
 
+def save_waived(src, lang, waived, expect=None):
+    """Set or clear the waiver on these ids, touching nothing else.
+
+    ``(written, stale)``.
+
+    :func:`save_review`'s twin, and deliberately not a widening of it: ``review``
+    holds one string, so a waiver stored there would overwrite a hold — measured
+    2026-09-03, ``review`` went ``held`` → ``waived``, :func:`checks.is_held`
+    went false, and :func:`checks.workable` handed the segment back to the queues
+    the hold had taken it out of. Two keys, two writers, and the two states
+    compose the way a reviewer expects: a segment can be both.
+
+    ``waived[seg_id]`` is ``True`` to waive and ``False`` (or ``None``) to lift.
+    The key is *removed* rather than stored false, so a segment that was never
+    waived and one whose waiver was lifted are one row and not two — the rule
+    :func:`save_review` follows.
+
+    **The value stored is the token of the target it was granted over**, not a
+    bare ``true``. :func:`_segment` compares it on the way out and does not
+    surface a waiver whose wording has moved, so the flag cannot outlive the
+    sentence a reviewer read even if some writer forgets to drop it.
+
+    ``expect`` is ``{seg_id: target_at_read}`` and makes this a
+    **compare-and-swap**, the way :func:`save_segments` is one. Without it the
+    write lands on whatever the row holds *now*: measured 2026-09-03, a
+    translation batch committing between :func:`cli.do_waive`'s read and this
+    write left the waiver on a wording the reviewer had never seen, with
+    ``lx check`` green over it. A named id whose target has moved is skipped and
+    comes back in ``stale``.
+
+    The read and the write share the transaction. ``written`` counts the rows
+    whose value actually changed, so ``lx unwaive`` on a segment nobody waived
+    reports nothing rather than reporting a release.
+    """
+    expect = expect or {}
+    conn = _connect()
+    try:
+        with conn:
+            _begin_write(conn)
+            written, stale = 0, []
+            for seg_id, value in waived.items():
+                row = conn.execute(
+                    "SELECT target, body FROM segments "
+                    "WHERE doc_id=? AND lang=? AND seg_id=?",
+                    (doc_id(src), lang, seg_id)).fetchone()
+                if row is None:
+                    continue
+                target, body = row[0], json.loads(row[1])
+                if seg_id in expect and (target or "") != (expect[seg_id] or ""):
+                    stale.append(seg_id)
+                    continue
+                want = target_token(target) if value else None
+                if body.get("waived") == want:
+                    continue
+                if want is None:
+                    body.pop("waived", None)
+                else:
+                    body["waived"] = want
+                written += conn.execute(
+                    "UPDATE segments SET body=? WHERE doc_id=? AND lang=? AND seg_id=?",
+                    (json.dumps(body, ensure_ascii=False),
+                     doc_id(src), lang, seg_id)).rowcount
+        return written, stale
+    finally:
+        conn.close()
+
+
 def tracked(lang=None):
     # Version-independent, like `prior_doc` and for the same reason: `stats` and
     # the workbench's document list read counts and a source path, so a document
@@ -1319,7 +1448,14 @@ def load_tm(lang):
 
 
 def tm_lookup(tm, seg, tone=None):
-    """``(target, origin)`` for a segment, or ``(None, None)``.
+    """``(target, origin, slots, waived)`` for a segment, or all-empty.
+
+    ``waived`` is whether the *record* was banked from a segment a reviewer had
+    waived. It travels so that the caller can say so, and for nothing else: the
+    receiving segment does not inherit the waiver, because one reviewer's
+    judgement about one position is not a judgement about a document they have
+    never seen. `cli.do_extract` names the segments it happened to, the way it
+    names a `kept` or a `replaced` one.
 
     The exact key first. A record carrying neither a context nor a segmentation
     version predates both, and is then tried on content alone — that is every
@@ -1347,12 +1483,14 @@ def tm_lookup(tm, seg, tone=None):
     """
     exact = tm.get(segment_key(seg, tone))
     if exact is not None:
-        return exact["target"], "tm", slot_map(exact.get("slots"))
+        return (exact["target"], "tm", slot_map(exact.get("slots")),
+                bool(exact.get("waived")))
     if seg.get("variant") is None and key_tone(tone) is None:
         legacy = tm.get(tm_key(seg["hash"], None, 0, None, None))
         if legacy is not None:
-            return legacy["target"], "tm:legacy", slot_map(legacy.get("slots"))
-    return None, None, None
+            return (legacy["target"], "tm:legacy", slot_map(legacy.get("slots")),
+                    bool(legacy.get("waived")))
+    return None, None, None, False
 
 
 def tm_record(seg, tone=None):
@@ -1386,6 +1524,19 @@ def tm_record(seg, tone=None):
                                    or _slot_map(seg.get("slots")))
         if originals:
             rec["slots"] = originals
+    # **A banked wording says whether a reviewer had to waive it.** `lx commit`
+    # gates on `checks.check_segment` at error severity, and a waiver moves
+    # exactly those issues to warn — so without this field the gate would let a
+    # waived wording through wearing no mark at all, and the next document would
+    # receive it as an ordinary hit. The memory is read by every document in the
+    # project, and one reviewer's judgement about one position does not travel:
+    # the receiving segment is *not* waived, `lx check` reports it there, and
+    # `lx extract` names it so the reader is told rather than left to notice.
+    #
+    # Written only when true, the rule every optional field here follows, so a
+    # memory file with no waivers is byte-for-byte the file it was before.
+    if seg.get("waived"):
+        rec["waived"] = True
     return rec
 
 
@@ -1417,7 +1568,27 @@ def tm_records(doc, tm):
         # re-banks the segments that need it, once, visibly, in a file whose
         # contract is that it only grows.
         record = tm_record(seg, tone)
-        if tm.get(segment_key(seg, tone)) == record:
+        # **A wording banked as waived stays marked while it is that wording.**
+        # The mark says a reviewer had to stand by these words somewhere, and
+        # `tm_record` can only read the segment in front of it — which is a
+        # *different* segment on every document after the first, and one this
+        # build deliberately leaves unwaived. Without this the mark comes off the
+        # tracked file the first time anybody commits the same wording without a
+        # waiver of their own: measured 2026-09-03, waive → commit → unwaive →
+        # commit erased it in one project, and the whole payment for banking a
+        # waived wording at all is that the file says so.
+        #
+        # It also stops a reviewer's flag churning a source of truth: toggling a
+        # waiver used to append a full duplicate line per commit, six for one
+        # wording in the measured run, because the record differed by that field
+        # alone. Now it does not differ, so the comparison below skips it.
+        #
+        # Keyed on the wording, so re-wording the segment produces an unmarked
+        # record as it should — a new sentence has been through no reviewer.
+        held = tm.get(segment_key(seg, tone))
+        if held and held.get("waived") and held.get("target") == record.get("target"):
+            record["waived"] = True
+        if held == record:
             continue
         out.append(record)
     return out

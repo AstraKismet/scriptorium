@@ -446,6 +446,14 @@ def test_every_endpoint_returns_exactly_the_keys_the_contract_documents(base, pr
     # order here is the order a reviewer works in, not an arrangement.
     record("POST", "/api/hold", {"ids": [seg]})
     record("POST", "/api/hold", {"ids": [seg], "held": False})
+    # Same order and for the same reason, plus one of its own: waiving refuses a
+    # segment `lx check` reports nothing on, so this saves wording that trips the
+    # zh-TW lexicon first. Both directions, so the reply shape of a lift is
+    # exercised as well as that of a grant.
+    record("POST", "/api/save", {"targets": {seg: "看一下網絡"}})
+    record("POST", "/api/waive", {"ids": [seg]})
+    record("POST", "/api/waive", {"ids": [seg], "waived": False})
+    record("POST", "/api/save", {"targets": {seg: "標題"}})
     record("POST", "/api/check")
     record("GET", "/api/preview")
     record("POST", "/api/render")

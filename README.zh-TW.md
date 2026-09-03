@@ -110,8 +110,9 @@ CI 上有一組語料庫在把關，裡面收了 55 份刻意刁難的輸入（M
 就算每個 segment 的正確率有 99.5%，一份 500 個 segment 的文件也只有 8% 的機率
 毫髮無傷；而少一根表格分隔線、壞掉一個連結，正好就是撐得過審校的那種損傷。
 
-`lx check` 通過只代表兩件事：結構沒被破壞，機械規則也都過了。它不保證譯文品質好，
-那是審校的工作。
+`lx check` 通過只代表兩件事：結構沒被破壞，機械規則在你沒有**豁免**的段落上都過了。
+豁免請看下面的 `lx waive`：它把那些判定降成警告，而不是把它們拿掉。通過不保證譯文
+品質好，那是審校的工作。
 
 ## 指令
 
@@ -124,6 +125,8 @@ CI 上有一組語料庫在把關，裡面收了 55 份刻意刁難的輸入（M
 | `lx apply SRC --lang L --file F` | 收回譯文，自動正規化 |
 | `lx hold SRC --lang L --ids A,B` | 把 segment 排除在所有挑工作的佇列之外 |
 | `lx unhold SRC --lang L --ids A,B` | 讓被保留的 segment 回到佇列 |
+| `lx waive SRC --lang L --ids A,B` | 為這段譯文背書：憑判斷可以推翻的規則改以 warn 回報，不再擋住 build。`lx check` 沒有報 error 的段落會被拒絕 |
+| `lx unwaive SRC --lang L --ids A,B` | 把豁免收回，錯誤照舊 |
 | `lx translate SRC --lang L` | 用設定好的模型翻譯（`--mode draft\|polish\|repair`、`--limit N`） |
 | `lx check SRC --lang L` | 驗證；有 error 時以 1 結束（`--json` 可拿到完整報告） |
 | `lx repair SRC --lang L` | 只重譯失敗的 segment（`--limit N`） |
@@ -195,8 +198,10 @@ lx terms novel.md --lang zh-TW --append     # 沒收錄過的直接補進詞彙�
 | `punct` / `spacing` | warn | 無法自動修好的標點寬度與中英文交界問題 |
 | `length` | warn | 長度比預期短得多或長得多 |
 | `held` | warn | 審校者正在自己收尾的段落；任何佇列都不會選到它 |
+| `waived` | warn | 審校者看過並為它背書的段落，它的錯誤改在這裡回報 |
 
-每個專案都可以自行關掉任何一條，寫成 `"checks_disabled": ["length"]` 即可。
+每個專案都可以自行關掉任何一條，寫成 `"checks_disabled": ["length"]` 即可；只想為
+單一段落背書就用 `lx waive`。
 
 這裡的每一條規則，程式都能自己決定，不需要人的判斷；凡是要靠人判斷的，
 都寫在語言 brief 或交給審校。`docs/decisions.md` 記著這張表的入場條件，
@@ -348,6 +353,11 @@ argv 在行程列表裡看得到，也會直接進 shell 記錄，那時候再�
 的意思是這段由你收尾，而 `lx commit` 一次處理整份文件。兩種情況都會列出段落 id；
 `lx unhold` 之後、或把譯法修好之後再 commit 一次就好。
 
+被 **waive** 的段落**會**入庫 —— 你看過那條判定並且為譯法背書，記憶庫本來就該留著
+它 —— 而且那一行會帶 `"waived": true`。豁免本身不會跟著跑：下一份文件拿到這個譯法
+時是沒有豁免的，`lx check` 會在那裡照樣回報，`lx extract` 也會把段落點名出來。你對
+某一段的判斷，不是對一份你沒讀過的文件的判斷。
+
 `.lx/state.db` 是工作狀態，整個專案共用一個 SQLite 檔。只有已經用 `lx commit`
 存進記憶的譯法才重新產生得出來，所以刪掉它之前記得先 commit。`.lx/reports/`
 則隨時都可以再生。
@@ -481,7 +491,7 @@ Markdown 與純文字目前都可以端到端跑完：抽取、翻譯、驗證�
 ## 開發
 
 ```bash
-python -m pytest -q                # 1886 tests，不碰網路
+python -m pytest -q                # 1921 tests，不碰網路
 python -m ruff check src tests
 ```
 
