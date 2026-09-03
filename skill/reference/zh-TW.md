@@ -141,7 +141,8 @@ the opposite is idiomatic — 第一章, 三天, 一九八四年 are how a book 
 Chinese says those things, and 第 1 章 reads as a translation.
 
 The `numbers` rule fails the build when a figure goes missing, which is the most
-common silent defect in a translated table. Since 2026-09-02 it reads Chinese
+common silent defect in a translated table — unless a reviewer has waived that
+segment, which is theirs to do and never yours. Since 2026-09-02 it reads Chinese
 numerals as well as Arabic ones, so a figure correctly spelled out satisfies it.
 What it cannot see is a figure rendered in the *wrong* system for its register:
 `HTTP 500` written 五百 passes. The paragraph above is therefore a rule for the

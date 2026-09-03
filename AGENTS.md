@@ -435,7 +435,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 1912 tests; no network (one is POSIX-only,
+python -m pytest -q                 # 1921 tests; no network (one is POSIX-only,
                                     #   one runs only where the filesystem folds case)
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
@@ -876,23 +876,49 @@ own.
   well formed, and one that dropped half a pair, whose bytes are an unclosed tag
   that `pair_problems` explicitly declines to report.
 
-  It is pinned to the wording **structurally**: `store.save_targets` drops it on
-  every write and `store.save_segments` drops it when the target actually moved
-  — the two lines `target_slots` already uses, and the reason no read has to
-  recompute a fingerprint. A carryover keeps it, because `lx run` re-extracts on
-  every invocation and a waiver that did not survive that would be gone before
-  the check it was placed for; the diff-fallback branch drops it, the rule a hold
-  already follows.
+  **The question is asked of the tag text, never of `pair_id`**, and that is the
+  correction the adversarial pass forced. `mask` pairs markup within a segment,
+  so a `<div>` opened in one paragraph and closed in the next leaves both halves
+  `standalone` with no `pair_id` — and the first predicate called that waivable.
+  Measured 2026-09-03 on an ordinary Markdown file: `lx check` exited 0 over a
+  document that rendered an unclosed `<span>`. `checks.unbalanced_markup` reads
+  `mask.tag_shape`, made public for it so the two answers cannot differ. The same
+  pass found the mirror: refusing every `extra` id made `lx run` permanently
+  decline a *correct* document whose Chinese repeats a code span, which renders
+  legally — so what is refused is an id with no slot, an id whose original is a
+  tag, and a lost tag half, and nothing else.
+
+  It is pinned to the wording twice over. The stored value is the **token of the
+  target** it was granted on, compared at `store._segment` on the way out, so a
+  waiver cannot outlive the sentence a reviewer read even under a build that does
+  not know the field — a stale hold over-restricts and a stale waiver would move
+  the exit code, which is why this one could not be left to a writer. Beside it
+  the writers still drop the key outright: `store.save_targets` on every write,
+  `store.save_segments` when the target actually moved. A carryover keeps it,
+  because `lx run` re-extracts on every invocation; the diff-fallback branch
+  drops it, the rule a hold already follows. And the write is a
+  **compare-and-swap** on the target the reviewer read: a batch landing in
+  between used to leave the flag on wording nobody had seen.
+
+  **A waiver answers a finding and is not a mark of approval.** `do_waive`
+  refuses a segment `lx check` reports no error on, whole-request, evaluated with
+  the flag forced off so re-affirming one is not refused by the state it put
+  there. Left open it put a line in the tracked memory claiming a reviewer had
+  overruled a rule that never fired.
 
   **A waived wording is banked, and its memory line says so.** `lx commit`'s gate
   *is* `check_segment` at error severity, so a waiver takes the segment through
   the gate that already exists — one rule, one home, and no fourth refusal list.
-  The line carries `"waived": true` and the waiver itself does **not** travel:
-  the receiving segment comes back unwaived, `lx check` reports it there, and
-  `lx extract` names it in `waived_source` on both surfaces. One reviewer's
-  judgement about one position is not a judgement about a document they have
-  never seen. Measured while building it: a waived wording that dropped a
-  placeholder never reaches a second document at all, because `translate.accept`
+  The line carries `"waived": true`, and **the mark belongs to the wording**:
+  `tm_records` keeps it on a later commit of the same target even from a document
+  with no waiver of its own, which is what stops it being erased one hop
+  downstream and what stops a toggled flag appending duplicate lines to a source
+  of truth. The waiver itself does **not** travel: the receiving segment comes
+  back unwaived, `lx check` reports it there *where the waived rule fires there
+  too*, and `lx extract` names it in `waived_source` on both surfaces. One
+  reviewer's judgement about one position is not a judgement about a document
+  they have never seen. Measured while building it: a waived wording that dropped
+  a placeholder never reaches a second document at all, because `translate.accept`
   refuses it on the multiset — so this path carries `lexicon`, `glossary`,
   `numbers` and the advisory rules, and nothing structural.
 - The project style sheet (`config/style.txt`) says how *this book* sounds, where

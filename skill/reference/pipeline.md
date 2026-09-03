@@ -37,9 +37,11 @@ the second, third, and seventh translation of a document nearly free.
 | `lx render SRC --lang L --fallback` | untranslated segments fall back to source |
 | `lx blocks SRC --lang L [--fallback] [--json]` | the rebuilt document block by block; writes nothing |
 | `lx sentences SRC --lang L [--ids A,B] [--source]` | where sentences begin and end, by the one rule in Python |
+| `lx waive SRC --lang L --ids A,B` | a **person** stands by this wording: the rules judgement can overrule are reported at warn instead of failing the build. Never run this yourself — report the finding and let the reviewer decide |
+| `lx unwaive SRC --lang L --ids A,B` | put a waived segment's errors back |
 | `lx commit SRC --lang L` | append approved segments to the TM |
 | `lx stats [--lang L]` | coverage across tracked documents |
-| `lx status [--json] [--lang L] [--scan ROOT] [--depth N]` | project status. `--json` is a frozen contract — `docs/contracts/status-json.md`. `--scan` reports every project under a root. Exits 0 even when it reports errors; read `totals.errors`, not the exit code. |
+| `lx status [--json] [--lang L] [--scan ROOT] [--depth N]` | project status. `--json` is a frozen contract — `docs/contracts/status-json.md`. `--scan` reports every project under a root. Exits 0 even when it reports errors; read `totals.errors`, not the exit code — **and read `totals.waived` beside it**, because a document whose findings a reviewer stood by reports `errors: 0` too. |
 | `lx untracked [--json] [--max N]` | files matching `sources` with no state yet, one row per target language; `--json` is never truncated |
 | `lx config get [KEY]` | the effective value; with no key, the whole merged configuration |
 | `lx config set KEY VALUE` | write one dotted key, validated before the write |

@@ -125,7 +125,7 @@ CI 上有一組語料庫在把關，裡面收了 55 份刻意刁難的輸入（M
 | `lx apply SRC --lang L --file F` | 收回譯文，自動正規化 |
 | `lx hold SRC --lang L --ids A,B` | 把 segment 排除在所有挑工作的佇列之外 |
 | `lx unhold SRC --lang L --ids A,B` | 讓被保留的 segment 回到佇列 |
-| `lx waive SRC --lang L --ids A,B` | 為這段譯文背書：憑判斷可以推翻的規則改以 warn 回報，不再擋住 build |
+| `lx waive SRC --lang L --ids A,B` | 為這段譯文背書：憑判斷可以推翻的規則改以 warn 回報，不再擋住 build。`lx check` 沒有報 error 的段落會被拒絕 |
 | `lx unwaive SRC --lang L --ids A,B` | 把豁免收回，錯誤照舊 |
 | `lx translate SRC --lang L` | 用設定好的模型翻譯（`--mode draft\|polish\|repair`、`--limit N`） |
 | `lx check SRC --lang L` | 驗證；有 error 時以 1 結束（`--json` 可拿到完整報告） |
@@ -491,7 +491,7 @@ Markdown 與純文字目前都可以端到端跑完：抽取、翻譯、驗證�
 ## 開發
 
 ```bash
-python -m pytest -q                # 1912 tests，不碰網路
+python -m pytest -q                # 1921 tests，不碰網路
 python -m ruff check src tests
 ```
 

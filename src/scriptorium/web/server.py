@@ -707,9 +707,9 @@ class _Handler(BaseHTTPRequestHandler):
             # a `bool()` here would turn `waived: null` into a *lift* and
             # `waived: "false"` into a waiver, which is the silent coercion this
             # surface refuses everywhere else.
-            applied, unknown = do_waive(src, lang, cfg, body.get("ids"),
-                                        waived=body.get("waived", True))
-            return {"applied": applied, "unknown": unknown}
+            applied, unknown, stale = do_waive(src, lang, cfg, body.get("ids"),
+                                               waived=body.get("waived", True))
+            return {"applied": applied, "unknown": unknown, "stale": stale}
         if path == "/api/check":
             report, _ = do_check(src, lang, cfg)
             return report

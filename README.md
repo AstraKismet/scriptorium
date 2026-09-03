@@ -139,7 +139,7 @@ mean the translation is good; that is what review is for.
 | `lx apply SRC --lang L --file F` | ingest translations, auto-normalize |
 | `lx hold SRC --lang L --ids A,B` | keep segments out of every queue that selects work |
 | `lx unhold SRC --lang L --ids A,B` | return held segments to the queues |
-| `lx waive SRC --lang L --ids A,B` | stand by this wording: report the rules judgement can overrule at warn instead of failing the build |
+| `lx waive SRC --lang L --ids A,B` | stand by this wording: report the rules judgement can overrule at warn instead of failing the build. Refused on a segment `lx check` reports nothing on |
 | `lx unwaive SRC --lang L --ids A,B` | put a waived segment's errors back |
 | `lx translate SRC --lang L` | translate with a configured model (`--mode draft\|polish\|repair`, `--limit N`) |
 | `lx check SRC --lang L` | validate; exit 1 on error (`--json` for the full report) |
@@ -573,7 +573,7 @@ that lost.
 ## Development
 
 ```bash
-python -m pytest -q                # 1912 tests, no network
+python -m pytest -q                # 1921 tests, no network
 python -m ruff check src tests
 ```
 

@@ -758,8 +758,10 @@ def report_extract(src, lang, notes):
         _out(f"  {len(notes['waived_source'])} segment(s) took a banked wording that was "
              f"waived where it was committed: {', '.join(notes['waived_source'])}. The "
              f"waiver did not travel with it — one reviewer's judgement about one position "
-             f"is not one about this document — so `lx check` will report it here. Read it "
-             f"and `lx waive` it yourself, or re-word it.")
+             f"is not one about this document. Read the wording. `lx check` reports it here "
+             f"whenever the rule that was waived fires on this document too, and says "
+             f"nothing when it does not, which is why this line is the only place the "
+             f"handover appears.")
     if notes["ambiguous"]:
         # The half no alignment can fix: a run of identical paragraphs that
         # gained or lost a member has no evidence left about which wording
@@ -1576,15 +1578,41 @@ def do_waive(src, lang, cfg, ids, waived=True):
                 f"read what `lx check` reports on this wording and stand by it, and these "
                 f"segments have no wording yet. Translate them first: "
                 f"`lx translate {src} --lang {lang} --ids {','.join(blank)}`.")
-    return save_waived(src, lang, {sid: waived for sid in wanted}), unknown
+        # **And nothing to stand by if nothing fails.** Evaluated with the flag
+        # forced off, so re-affirming a waiver already in force is not refused by
+        # the very state it put there. Whole-request, like the blank refusal.
+        #
+        # It is not tidiness. A waiver on a passing segment reaches
+        # `store.tm_record`, so the tracked memory grows a line claiming a
+        # reviewer overrode a finding that never fired — and toggling one used to
+        # append a full duplicate line per commit, six for one wording in the
+        # measured run. Both found 2026-09-03 by the adversarial pass.
+        glossary, dnt = load_glossary(cfg), load_dnt(cfg)
+        clean = sorted(sid for sid in wanted if not any(
+            i["severity"] == "error" for i in
+            check_segment(dict(by_id[sid], waived=False), lang, cfg, glossary, dnt)))
+        if clean:
+            raise UnusableTarget(
+                f"{', '.join(clean)}: `lx check` reports no error on these, so there is "
+                f"nothing to stand by. A waiver answers a finding; it is not a mark of "
+                f"approval, and one placed here would put a line in "
+                f"`.lx/tm.{lang}.jsonl` saying a reviewer overruled a rule that never "
+                f"fired. Use `lx hold` to say a segment is yours to finish.")
+    applied, stale = save_waived(src, lang, {sid: waived for sid in wanted},
+                                 expect={sid: by_id[sid].get("target") for sid in wanted})
+    return applied, unknown, stale
 
 
 def cmd_waive(args, cfg):
     ids = [s for s in args.ids.split(",") if s]
-    applied, unknown = do_waive(args.src, args.lang, cfg, ids, waived=not args.lift)
+    applied, unknown, stale = do_waive(args.src, args.lang, cfg, ids, waived=not args.lift)
     verb = "un-waived" if args.lift else "waived"
     _out(f"{verb} {applied} segment(s)"
          + (f"; unknown ids ignored: {unknown}" if unknown else ""))
+    if stale:
+        _out(f"  {len(stale)} segment(s) were left alone because their wording changed "
+             f"while this ran: {', '.join(stale)}. A waiver is about the words you read, "
+             f"so read them again and repeat the command.")
     if not args.lift and applied:
         # Said on the way out rather than left to be discovered, because the one
         # thing a waiver does not buy is the thing a reviewer is most likely to
@@ -2153,7 +2181,7 @@ def _text(value):
 
 
 def _counts(segments):
-    """`{segments, translated, pending, held}` for one document.
+    """`{segments, translated, pending, held, waived}` for one document.
 
     Counted from the **target text**, which is the same rule `store._segment`
     derives `status` from. Read off the text rather than off `status` so that the
@@ -2481,6 +2509,14 @@ def _print_project(project, indent=""):
             line += "  unchecked"
         if row["held"]:
             line += f", {row['held']} held"
+        # Printed beside the counts and not behind a flag, because the pair is
+        # the reading: `0 error(s)` on a document with a waiver is a person's
+        # judgement rather than a clean sweep, and this is the surface a
+        # maintainer actually looks at before saying the book is done. The JSON
+        # gained the counter and the terminal did not, which was the same half-fix
+        # the status contract's own `checked` counter exists to stop.
+        if row["waived"]:
+            line += f", {row['waived']} waived"
         _out(line)
 
 
@@ -2505,7 +2541,8 @@ def cmd_status(args, cfg):
                  else "  not a project — no .lx/ and no lx.config.json")
             continue
         _out(f"  {totals['segments']} segments, {totals['translated']} translated, "
-             f"{totals['pending']} pending, {totals['held']} held — "
+             f"{totals['pending']} pending, {totals['held']} held, "
+             f"{totals['waived']} waived — "
              f"{totals['errors']} error(s), {totals['warnings']} warning(s) "
              f"across {totals['checked']} of {totals['documents']} checked")
     if status["scanned"] is not None and not status["projects"]:

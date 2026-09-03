@@ -31,7 +31,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from scriptorium import checks  # noqa: E402
+from scriptorium import checks, cli  # noqa: E402
 from scriptorium.checks import check_segment, is_held, is_waived  # noqa: E402
 from scriptorium.cli import (  # noqa: E402
     UnusableTarget,
@@ -44,7 +44,12 @@ from scriptorium.cli import (  # noqa: E402
     do_waive,
 )
 from scriptorium.config import DEFAULT_CONFIG  # noqa: E402
-from scriptorium.store import load_doc, save_targets, tm_path  # noqa: E402
+from scriptorium.store import (  # noqa: E402
+    load_doc,
+    save_targets,
+    target_token,
+    tm_path,
+)
 
 CFG = dict(DEFAULT_CONFIG)
 
@@ -117,7 +122,7 @@ def test_a_waived_segment_does_not_fail_the_build(book):
     before, _ = do_check("d.md", "zh-TW", CFG)
     assert before["errors"] == 1 and before["by_rule"]["tags"] == 1
 
-    assert do_waive("d.md", "zh-TW", CFG, [book[0]]) == (1, [])
+    assert do_waive("d.md", "zh-TW", CFG, [book[0]]) == (1, [], [])
 
     after, _ = do_check("d.md", "zh-TW", CFG)
     assert after["errors"] == 0
@@ -304,7 +309,12 @@ def test_lifting_a_waiver_removes_the_key_rather_than_storing_false(book):
     ids = [s["id"] for s in load_doc("d.md", "zh-TW")["segments"]]
     assert "waived" not in body(ids[0])
     save_waived("d.md", "zh-TW", {ids[0]: True})
-    assert body(ids[0])["waived"] is True
+    # The stored value is the token of the wording it was granted over, never a
+    # bare `true`: `store._segment` compares it on the way out, so a waiver
+    # cannot outlive the sentence a reviewer read even under a build that does
+    # not know the field. What a reader outside `store` sees is still a boolean.
+    assert body(ids[0])["waived"] == target_token(FOLDED)
+    assert is_waived(load_doc("d.md", "zh-TW")["segments"][0]) is True
     save_waived("d.md", "zh-TW", {ids[0]: False})
     assert "waived" not in body(ids[0])
 
@@ -330,6 +340,236 @@ def test_a_waiver_survives_a_carryover_the_acceptance_path_takes(book, tmp_path)
     assert is_waived(load_doc("h.md", "zh-TW")["segments"][0])
     report, _ = do_check("h.md", "zh-TW", CFG)
     assert report["errors"] == 0
+
+
+def test_a_tag_half_whose_partner_is_in_another_segment_is_not_waivable(tmp_path,
+                                                                       monkeypatch):
+    """The hole the first version of this feature shipped with.
+
+    `mask._pair_tags` pairs only *within* a segment — its own docstring names
+    "a `<div>` whose partner is in another block" as ordinary input — so a
+    `<span>` opened in one paragraph and closed in the next leaves both halves
+    `role: "standalone", pair_id: None`. The first predicate keyed on `pair_id`
+    and called that waivable. Measured 2026-09-03 on this exact file: waive the
+    closing segment, `lx check` exits **0**, and `lx render` writes an unclosed
+    `<span class="note">` into the book. A `<div>` around several paragraphs is
+    the commonest shape in technical source and in EPUB, so it is not a corner.
+    """
+    root = tmp_path / "span"
+    (root / "config").mkdir(parents=True)
+    (root / "config" / "dnt.txt").write_text("", encoding="utf-8")
+    (root / "s.md").write_bytes(
+        b'Intro.\n\n<span class="note">First warning.\n\nSecond warning.</span>\n')
+    monkeypatch.chdir(root)
+    do_extract("s.md", "zh-TW", CFG)
+    segs = load_doc("s.md", "zh-TW")["segments"]
+    # The premise, asserted rather than assumed: both halves are standalone.
+    holders = [s for s in segs if s.get("slots")]
+    assert len(holders) == 2
+    assert all(rec["pair_id"] is None for s in holders for rec in s["slots"].values())
+
+    ids = [s["id"] for s in segs]
+    do_apply("s.md", "zh-TW", CFG,
+             {ids[0]: "引言。", ids[1]: "⟦1⟧第一段警語。",
+              ids[2]: "第二段警語。"}, origin="human")
+    assert _rules("s.md") == [("error", "tags")]
+    do_waive("s.md", "zh-TW", CFG, [ids[2]])
+    report, _ = do_check("s.md", "zh-TW", CFG)
+    assert report["errors"] == 1, "a lost tag half is not a reviewer's to overrule"
+
+
+def test_a_repeated_placeholder_is_waivable_when_repeating_it_is_legal():
+    """The mirror direction, which the first predicate got wrong the other way.
+
+    English says a code span once and Chinese may want it twice. `mask.unmask`
+    substitutes both, the bytes are ordinary Markdown, and the reviewer is
+    exactly the right authority — but `waivable = not extra` refused it, so
+    `lx run` permanently declined a correct document and the waiver could not
+    reach it. Repeating a *tag* is a different thing and stays unwaivable:
+    `⟦1⟧x⟦1⟧` over an `<b>` renders `<b>x<b>`.
+    """
+    code = {"original": "`make`", "role": "standalone", "pair_id": None,
+            "can_reorder": True}
+    legal = _seg("s", "Run ⟦1⟧ first.", "請先執行 ⟦1⟧；⟦1⟧ 就是它。", {"1": code})
+    assert any(i["severity"] == "error"
+               for i in check_segment(legal, "zh-TW", CFG, [], []))
+    assert not any(i["severity"] == "error" for i in
+                   check_segment(dict(legal, waived=True), "zh-TW", CFG, [], []))
+
+    broken = _seg("s", "⟦1⟧bold⟦2⟧", "⟦1⟧粗⟦1⟧體⟦2⟧", {"1": _OPEN, "2": _CLOSE})
+    assert any(i["severity"] == "error" for i in
+               check_segment(dict(broken, waived=True), "zh-TW", CFG, [], []))
+
+
+def test_a_waiver_stored_against_other_wording_is_not_in_force(book):
+    """The guarantee that does not depend on a writer remembering.
+
+    The two writers drop the flag when the target moves, which is enough while
+    every write goes through this build. It is not enough across builds: one
+    without the field writes a new target and leaves the flag standing, and a
+    stale waiver is *fail-open* where a stale hold is fail-safe — it moves the
+    exit code invariant 10 rests on. So the stored value is the token of the
+    wording it was granted over and `store._segment` compares it on the way out.
+    Simulated here by writing the row the way an older build would leave it.
+    """
+    import sqlite3
+
+    from scriptorium.store import db_path, doc_id
+
+    do_waive("d.md", "zh-TW", CFG, [book[0]])
+    assert is_waived(load_doc("d.md", "zh-TW")["segments"][0])
+
+    conn = sqlite3.connect(db_path())
+    try:
+        with conn:
+            conn.execute("UPDATE segments SET target=? WHERE doc_id=? AND seg_id=?",
+                         ("⟦1⟧在門邊等了很久。", doc_id("d.md"), book[0]))
+    finally:
+        conn.close()
+    assert not is_waived(load_doc("d.md", "zh-TW")["segments"][0])
+    report, _ = do_check("d.md", "zh-TW", CFG)
+    assert report["errors"] == 1
+
+
+def test_a_wording_that_moved_under_the_reviewer_is_refused_rather_than_waived(book):
+    """The compare-and-swap, which `POST /api/save` has and this needed too.
+
+    `do_waive` reads the document, a reviewer reads the wording, and the write
+    lands later. A translation batch committing in between used to leave the
+    waiver on a sentence nobody had seen, with `lx check` green over it —
+    measured 2026-09-03 with two threads. The named ids come back in `stale`
+    rather than being applied to whatever the row holds now.
+    """
+    from scriptorium.store import save_waived
+
+    applied, stale = save_waived("d.md", "zh-TW", {book[0]: True},
+                                 expect={book[0]: "wording nobody stored"})
+    assert (applied, stale) == (0, [book[0]])
+    assert not is_waived(load_doc("d.md", "zh-TW")["segments"][0])
+
+    applied, stale = save_waived("d.md", "zh-TW", {book[0]: True},
+                                 expect={book[0]: FOLDED})
+    assert (applied, stale) == (1, [])
+
+
+def test_waiving_a_segment_with_nothing_to_answer_is_refused(book):
+    """A waiver answers a finding; it is not a mark of approval.
+
+    Left open, it reached `store.tm_record` and put a line in the tracked memory
+    claiming a reviewer had overruled a rule that never fired — and toggling one
+    appended a full duplicate line per commit, six for one wording in the
+    measured run. Both found 2026-09-03 by the adversarial pass.
+    """
+    with pytest.raises(UnusableTarget) as caught:
+        do_waive("d.md", "zh-TW", CFG, [book[1]])
+    assert "nothing to stand by" in str(caught.value)
+    assert "lx hold" in str(caught.value), "say what the reviewer wanted instead"
+
+    # Whole-request: the failing segment beside it is not waived either.
+    with pytest.raises(UnusableTarget):
+        do_waive("d.md", "zh-TW", CFG, [book[0], book[1]])
+    assert not is_waived(load_doc("d.md", "zh-TW")["segments"][0])
+
+    # And re-affirming a waiver already in force is not refused by the state it
+    # put there: the check is run with the flag forced off.
+    do_waive("d.md", "zh-TW", CFG, [book[0]])
+    assert do_waive("d.md", "zh-TW", CFG, [book[0]]) == (0, [], [])
+
+
+def test_the_memory_mark_does_not_come_off_the_wording_it_belongs_to(book):
+    """The mark is the whole payment for banking a waived wording, and it leaked.
+
+    `tm_record` can only read the segment in front of it, and every document
+    after the first is a *different* segment that this build deliberately leaves
+    unwaived. So the first commit without a waiver erased the field from the
+    tracked file. Measured 2026-09-03 in one project: waive → commit → unwaive →
+    commit, and the mark was gone.
+
+    Fixing it also stops a reviewer's flag churning a source of truth: the record
+    no longer differs by that field alone, so the toggle appends nothing.
+    """
+    do_waive("d.md", "zh-TW", CFG, [book[0]])
+    assert do_commit("d.md", "zh-TW", CFG)[0] == 2
+
+    def lines():
+        return [json.loads(ln) for ln in
+                open(tm_path("zh-TW"), encoding="utf-8").read().splitlines() if ln]
+
+    assert sum(rec.get("waived") is True for rec in lines()) == 1
+    before = len(lines())
+
+    do_waive("d.md", "zh-TW", CFG, [book[0]], waived=False)
+    do_commit("d.md", "zh-TW", CFG)
+    assert sum(rec.get("waived") is True for rec in lines()) == 1
+    assert len(lines()) == before, "a toggled flag is not a new wording"
+
+
+def test_do_waive_gives_the_writer_the_wording_it_read(book, monkeypatch):
+    """The compare-and-swap is only a guard if the caller hands it the snapshot.
+
+    Its own test calls `store.save_waived` directly, so a mutation round could
+    replace `do_waive`'s `expect=` with `None` and nothing failed — the guard was
+    there and unwired. Reproduced here without threads by making the read stale
+    the way a translation batch makes it stale: `do_waive` sees the wording the
+    reviewer read while the row already holds the next one. The observable state
+    is identical and the test is deterministic.
+    """
+    stale_doc = load_doc("d.md", "zh-TW")
+    save_targets("d.md", "zh-TW", {book[0]: "⟦1⟧在門邊等了很久。"}, origin="agent")
+    monkeypatch.setattr(cli, "load_doc", lambda *a, **k: stale_doc)
+
+    applied, unknown, stale = do_waive("d.md", "zh-TW", CFG, [book[0]])
+    assert (applied, unknown, stale) == (0, [], [book[0]])
+    # Not `monkeypatch.undo()`: the fixture's `chdir` rode in on the same
+    # instance, and undoing it here moves the working directory out of the
+    # project. The module-level `load_doc` is `store`'s and was never patched.
+    assert not is_waived(load_doc("d.md", "zh-TW")["segments"][0])
+
+
+def test_the_memory_mark_survives_a_commit_from_a_document_without_a_waiver(book):
+    """The laundering path that remains once a clean segment cannot be waived.
+
+    A waiver answers a finding, so while the finding stands every commit of that
+    wording is a waived one. The mark comes off when the finding stops standing —
+    a project adds a `lexicon_extra` row downgrading the term, say — and the same
+    wording is then banked by a document with no waiver of its own. That is the
+    ordinary shape of the measured defect: the mark is the whole payment for
+    banking a waived wording, and it survived exactly one such commit.
+    """
+    (open("m.md", "wb")).write(b"Check the network.\n")
+    do_extract("m.md", "zh-TW", CFG)
+    mid = load_doc("m.md", "zh-TW")["segments"][0]["id"]
+    do_apply("m.md", "zh-TW", CFG, {mid: "看一下網絡。"}, origin="human")
+    do_waive("m.md", "zh-TW", CFG, [mid])
+    assert do_commit("m.md", "zh-TW", CFG)[0] == 1
+
+    def lines():
+        return [json.loads(ln) for ln in
+                open(tm_path("zh-TW"), encoding="utf-8").read().splitlines() if ln]
+
+    assert [rec.get("waived") for rec in lines()] == [True]
+
+    # The project decides that term is theirs to keep, so the finding stops
+    # standing and the waiver comes off.
+    relaxed = {**CFG, "lexicon_extra": {"網絡": ["網路", "warn"]}}
+    do_waive("m.md", "zh-TW", relaxed, [mid], waived=False)
+    assert do_commit("m.md", "zh-TW", relaxed)[0] == 0, "the record did not change"
+    assert [rec.get("waived") for rec in lines()] == [True]
+
+
+def test_the_terminal_status_names_a_waiver_beside_the_counts(book, capsys):
+    """The half the first version shipped only to the machine-readable surface.
+
+    `errors: 0` on a document carrying a waiver is a person's judgement rather
+    than a clean sweep, and this is the surface a maintainer looks at before
+    saying the book is done.
+    """
+    do_waive("d.md", "zh-TW", CFG, [book[0]])
+    do_check("d.md", "zh-TW", CFG)
+    capsys.readouterr()
+    cli.main(["status"])
+    out = capsys.readouterr().out
+    assert "1 waived" in out, out
 
 
 def test_every_finding_declares_whether_it_may_be_waived():
@@ -385,9 +625,9 @@ def test_missing_is_not_waivable_and_is_refused_at_the_door_besides(book):
     assert not is_waived(load_doc("d.md", "zh-TW")["segments"][0])
     # An id that names no segment is ignored rather than refused, which is what
     # `unknown` means everywhere else on this surface.
-    assert do_waive("d.md", "zh-TW", CFG, ["nope"]) == (0, ["nope"])
+    assert do_waive("d.md", "zh-TW", CFG, ["nope"]) == (0, ["nope"], [])
     # And lifting carries no such condition: undoing must never be harder.
-    assert do_waive("d.md", "zh-TW", CFG, [_untranslated()], waived=False) == (0, [])
+    assert do_waive("d.md", "zh-TW", CFG, [_untranslated()], waived=False) == (0, [], [])
 
 
 # ── what a waiver may not outlive ───────────────────────────────────────────

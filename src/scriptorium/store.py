@@ -409,6 +409,18 @@ _SEG_COLUMNS = (("seg_id", "id"), ("content_hash", "hash"), ("context", "context
 
 def _seg_row(pos, seg):
     body = {k: v for k, v in seg.items() if k not in {f for _, f in _SEG_COLUMNS}}
+    # The waiver is a boolean everywhere outside this module and a token inside
+    # it, and this is the one place the two meet on the way in — :func:`_segment`
+    # is the one place they meet on the way out. A caller hands back the segment
+    # it was given, so it hands back `waived: True`; stored as-is that would be a
+    # flag with nothing tying it to the wording, which is the whole guarantee.
+    # Encoded here rather than asked of every writer: `cli.do_extract` carries a
+    # waiver across a re-parse and `cli.do_apply` carries it across a save, and
+    # neither should have to know how it is spelled on disk.
+    if "waived" in body:
+        body["waived"] = target_token(seg.get("target")) if body["waived"] else None
+        if body["waived"] is None:
+            del body["waived"]
     return (seg["id"], pos, seg.get("hash"), seg.get("context"), seg.get("variant"),
             seg.get("status"), seg.get("target"), json.dumps(body, ensure_ascii=False))
 
@@ -431,6 +443,22 @@ def _segment(row):
     # write-side guard, which had made the neighbouring `source` fix self-healing
     # on read and this one not.
     seg["status"] = "translated" if (seg.get("target") or "").strip() else "pending"
+    # **A waiver is only in force over the wording it was granted on**, and that
+    # is decided here rather than trusted from the row. The two writers drop the
+    # key when the target moves, which is enough while every write goes through
+    # this build — and is not enough across builds: a build without the field
+    # writes a new target and leaves the flag, and a stale waiver is *fail-open*
+    # where a stale hold is fail-safe. It downgrades error-severity findings and
+    # moves the exit code invariant 10 rests on, so it cannot be left to a writer
+    # that may not exist. Stored as the token of the target it was granted over,
+    # compared here, and simply not surfaced when the two disagree.
+    #
+    # Recomputed on read, exactly as `status` is one line up and for the same
+    # reason: a guard that binds only future writes does nothing for a row
+    # already on disk. `True` rather than the token, because no reader outside
+    # this module has any use for the token and one of them ships it on the wire.
+    if seg.pop("waived", None) == target_token(seg.get("target")):
+        seg["waived"] = True
     return seg
 
 
@@ -829,7 +857,7 @@ def prior_targets(src, lang):
                 # wording, and nothing here can produce one — every path that
                 # writes a target drops the flag first.
                 entry = (target, held.get("origin") or "carryover", held.get("review"),
-                         bool(held.get("waived")),
+                         held.get("waived") == target_token(target),
                          _slot_map(held.get("target_slots")) or _slot_map(held.get("slots")))
                 by_key.setdefault(key, []).append(entry)
             keys.append(key)
@@ -1293,8 +1321,10 @@ def save_review(src, lang, review):
         conn.close()
 
 
-def save_waived(src, lang, waived):
-    """Set or clear the waiver on these ids, touching nothing else. ``written``.
+def save_waived(src, lang, waived, expect=None):
+    """Set or clear the waiver on these ids, touching nothing else.
+
+    ``(written, stale)``.
 
     :func:`save_review`'s twin, and deliberately not a widening of it: ``review``
     holds one string, so a waiver stored there would overwrite a hold — measured
@@ -1306,37 +1336,54 @@ def save_waived(src, lang, waived):
     ``waived[seg_id]`` is ``True`` to waive and ``False`` (or ``None``) to lift.
     The key is *removed* rather than stored false, so a segment that was never
     waived and one whose waiver was lifted are one row and not two — the rule
-    :func:`save_review` follows, and what makes ``bool(body.get("waived"))`` the
-    whole of :func:`checks.is_waived`.
+    :func:`save_review` follows.
+
+    **The value stored is the token of the target it was granted over**, not a
+    bare ``true``. :func:`_segment` compares it on the way out and does not
+    surface a waiver whose wording has moved, so the flag cannot outlive the
+    sentence a reviewer read even if some writer forgets to drop it.
+
+    ``expect`` is ``{seg_id: target_at_read}`` and makes this a
+    **compare-and-swap**, the way :func:`save_segments` is one. Without it the
+    write lands on whatever the row holds *now*: measured 2026-09-03, a
+    translation batch committing between :func:`cli.do_waive`'s read and this
+    write left the waiver on a wording the reviewer had never seen, with
+    ``lx check`` green over it. A named id whose target has moved is skipped and
+    comes back in ``stale``.
 
     The read and the write share the transaction. ``written`` counts the rows
     whose value actually changed, so ``lx unwaive`` on a segment nobody waived
     reports nothing rather than reporting a release.
     """
+    expect = expect or {}
     conn = _connect()
     try:
         with conn:
             _begin_write(conn)
-            written = 0
+            written, stale = 0, []
             for seg_id, value in waived.items():
                 row = conn.execute(
-                    "SELECT body FROM segments WHERE doc_id=? AND lang=? AND seg_id=?",
+                    "SELECT target, body FROM segments "
+                    "WHERE doc_id=? AND lang=? AND seg_id=?",
                     (doc_id(src), lang, seg_id)).fetchone()
                 if row is None:
                     continue
-                body = json.loads(row[0])
-                want = bool(value)
-                if bool(body.get("waived")) == want:
+                target, body = row[0], json.loads(row[1])
+                if seg_id in expect and (target or "") != (expect[seg_id] or ""):
+                    stale.append(seg_id)
                     continue
-                if want:
-                    body["waived"] = True
-                else:
+                want = target_token(target) if value else None
+                if body.get("waived") == want:
+                    continue
+                if want is None:
                     body.pop("waived", None)
+                else:
+                    body["waived"] = want
                 written += conn.execute(
                     "UPDATE segments SET body=? WHERE doc_id=? AND lang=? AND seg_id=?",
                     (json.dumps(body, ensure_ascii=False),
                      doc_id(src), lang, seg_id)).rowcount
-        return written
+        return written, stale
     finally:
         conn.close()
 
@@ -1521,7 +1568,27 @@ def tm_records(doc, tm):
         # re-banks the segments that need it, once, visibly, in a file whose
         # contract is that it only grows.
         record = tm_record(seg, tone)
-        if tm.get(segment_key(seg, tone)) == record:
+        # **A wording banked as waived stays marked while it is that wording.**
+        # The mark says a reviewer had to stand by these words somewhere, and
+        # `tm_record` can only read the segment in front of it — which is a
+        # *different* segment on every document after the first, and one this
+        # build deliberately leaves unwaived. Without this the mark comes off the
+        # tracked file the first time anybody commits the same wording without a
+        # waiver of their own: measured 2026-09-03, waive → commit → unwaive →
+        # commit erased it in one project, and the whole payment for banking a
+        # waived wording at all is that the file says so.
+        #
+        # It also stops a reviewer's flag churning a source of truth: toggling a
+        # waiver used to append a full duplicate line per commit, six for one
+        # wording in the measured run, because the record differed by that field
+        # alone. Now it does not differ, so the comparison below skips it.
+        #
+        # Keyed on the wording, so re-wording the segment produces an unmarked
+        # record as it should — a new sentence has been through no reviewer.
+        held = tm.get(segment_key(seg, tone))
+        if held and held.get("waived") and held.get("target") == record.get("target"):
+            record["waived"] = True
+        if held == record:
             continue
         out.append(record)
     return out

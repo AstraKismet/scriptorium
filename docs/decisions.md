@@ -125,18 +125,16 @@ so a naive `waivable = not extra` marks it waivable. Two independent adversarial
 lanes found that hole in the first design, and both reproduced it: against
 `This is ⟦1⟧very⟦2⟧ important, ⟦3⟧.` a wording dropping only `⟦2⟧` gets
 `pair_problems() == []` and renders `這是<em>非常重要的，Ana。`, and `lx check`
-would have exited 0 over it. `checks.dangling_pair_halves` is the repair, and the
-predicate is now `not extra and not dangling`.
+would have exited 0 over it.
+
+**The first repair asked `pair_id` and was still wrong**; `checks.unbalanced_markup`
+asks the tag text through `mask.tag_shape` instead, and the section below on the
+adversarial pass records what forced the second version and what it costs.
 
 *Lost:* **narrowing by rule name** — waiving `numbers` on one segment but not
 `tags`. It is the shape HANDOFF-043 listed and it is the enumeration this design
 exists to avoid; it is also *not fine enough at the exact place it matters*, since
-`tags` is one name over two kinds of finding. *Lost:* **a fingerprint recomputed
-at read time**, which two lanes proposed. It answers the staleness question a
-second time when the writers already answer it structurally, and it cannot see the
-inputs that are not the target — a `config/dnt.txt` edit changes what the
-placeholders mean without changing the wording, and a fingerprint over the wording
-says nothing about it.
+`tags` is one name over two kinds of finding.
 
 ### Its own body key, and that is a measurement
 
@@ -155,7 +153,17 @@ second positional field added to it in a month. The next one converts it to a
 record; this package did not, because doing it here would put a shape change
 inside a behaviour change.
 
-### Pinned to the wording, structurally rather than by a check
+### Pinned to the wording, and the pin does not depend on a writer
+
+The stored value is the **token of the target** it was granted over, compared at
+`store._segment` on the way out, so a waiver that no longer describes the stored
+wording is simply not in force. That is the guarantee; the drops below are how the
+row stays tidy, not what makes it safe. Both were needed and the entry originally
+carried only the drops: see the adversarial section, which measured a waiver
+surviving a wording change made by a build that does not know the field, and one
+landing on a sentence nobody had read because the write was not a compare-and-swap.
+The boolean/token boundary is `store._seg_row` in and `store._segment` out, so no
+caller outside that module learns the encoding.
 
 `store.save_targets` drops the flag on every write — every caller feeds it
 `translate.accept`'s output, so the text is never the one that was waived — and
@@ -228,29 +236,113 @@ may not call the Python API. `errors: 0` with `waived: 0` means no rule fired;
 to stand by. Without the second number the two are indistinguishable on the one
 surface that was frozen so they would not have to be.
 
-### What this leaves
+### What the adversarial pass found, and the seven repairs it forced
 
-**HANDOFF-036 is corrected in place, not deferred.** Its distilled gate is the
-full placeholder multiset, which is true of every segment a waiver exists for, so
-it would render the untranslated marker — or, under `--force`, the English source
-— over the reviewer's own words, silently. That package now carries the exemption
-and the test that bounds it: a target carrying an id the segment has no slot for
-is still missing *even when the segment is waived*, which is safe by construction
-because such a finding is unwaivable.
+Five read-only lenses over the landed code, each finding reproduced by an
+independent second agent before it was believed. **Every finding was confirmed.**
+A 22-mutant round had already killed 22 of 22 — it is recorded above as spent,
+because removing a guard cannot find the guard that was never written, and six of
+these seven are exactly that.
 
-**The workbench has an endpoint and no control.** `POST /api/waive` ships and
-`GET /api/doc` carries `waived`; the page does not draw it, because the frontend
-is HANDOFF-204's and `index.html` tests `seg.review === 'held'` by exact equality
-today. The CLI is the product (invariant 8) and this is the ordinary order.
+**The predicate was wrong in both directions, and the fatal half shipped.** It
+asked `pair_id` whether a lost id was half of a pair. `mask` pairs markup
+*within a segment* — its own docstring names "a `<div>` whose partner is in
+another block" as ordinary input — so a `<span>` opened in one paragraph and
+closed in the next leaves both halves `standalone` with `pair_id: None`.
+Reproduced on an ordinary four-paragraph Markdown file: waive the closing
+segment, `lx check` goes from exit 1 to **exit 0**, and `lx render` writes an
+unclosed `<span class="note">`. That is verbatim the thing this entry promises
+cannot happen, and it was reachable with three supported commands.
 
-**Nothing stops a reviewer waiving every segment in a book.** The defences are
-friction — explicit ids, no glob — and visibility: three surfaces count it and the
-report still carries every finding. That is a deliberate limit rather than an
-oversight; a mechanism that could tell a considered waiver from a careless one
-would be exactly the judgement invariant 4 keeps out of `checks.py`.
+The mirror direction was a `major` on the same line: refusing every `extra` id
+refused a wording that repeats a code span, which is what Chinese does with
+`Run \`make\` first` and which `mask.unmask` renders as perfectly legal Markdown.
+So `lx run` permanently declined a *correct* document and the waiver — whose
+entire purpose is "I have read this, stop blocking me" — could not reach it.
 
-The routing finding above is a `README` item and a habit, and it is written down
-here because it is the first thing to try before waiving anything.
+`checks.unbalanced_markup` replaces `dangling_pair_halves` and asks the **tag
+text** instead, through `mask.tag_shape`, made public so the two readings cannot
+differ. Unwaivable is now: an id with no slot record, an id repeated whose
+original is a tag, and a lost tag half whose partner is still standing. *Cost,
+taken deliberately:* a bare void element — `<br>` — reads as an open whose close
+never arrives, so losing one is called unbalanced when the bytes would be fine.
+`mask.tag_shape` already refuses to keep a void list because it "would be a
+second place to be wrong about HTML", and the asymmetry is right: the false
+positive costs a reviewer one re-wording, the false negative costs a broken file
+under a green check.
+
+**A waiver could outlive the wording it was granted on, two ways.** The write was
+not a compare-and-swap, so a translation batch committing between `do_waive`'s
+read and its write left the flag on a sentence the reviewer had never seen —
+reproduced with two threads, the way `store.save_segments`' own guard was. And
+the structural drops hold only while every writer is this build: one without the
+field writes a target and leaves the flag standing, and a stale waiver is
+**fail-open** where a stale hold is fail-safe, because it moves the exit code
+invariant 10 rests on. Both closed by storing the **token of the target** rather
+than a bare `true`, compared at `store._segment` on the way out — the place
+`status` is already recomputed on read, and for the same stated reason: a guard
+that binds only future writes does nothing for a row already on disk. The
+boolean/token boundary is `_seg_row` on the way in and `_segment` on the way out,
+so no caller outside `store` learns the encoding. *Lost:* bumping
+`STATE_VERSION`, which would strand every existing document behind
+`lx extract --reset` for a field an older build merely ignores.
+
+**A waiver on a passing segment was accepted**, and it put a line in the tracked
+memory claiming a reviewer had overruled a rule that never fired. Worse, toggling
+one appended a full duplicate line per commit — six lines for one wording in the
+measured run — because the record differed by that field alone, and
+`.lx/tm.*.jsonl` is a source of truth under invariant 9 whose growth had become a
+function of a reviewer's UI state. `do_waive` refuses it now, whole-request, with
+the check evaluated **flag forced off** so re-affirming a waiver is not refused by
+the state it put there, and the message names `lx hold` as the control the
+reviewer probably wanted.
+
+**The mark laundered itself off the memory one hop downstream.** `tm_record` can
+only read the segment in front of it, and every document after the first is a
+different segment that this build deliberately leaves unwaived — so the first
+commit of that wording without a waiver erased the field. The entire payment for
+banking a waived wording at all is that the file says so, and it survived exactly
+one hop. `tm_records` keeps the mark when the stored record carries it and the
+target is unchanged: it belongs to the *wording*, so re-wording produces an
+unmarked record and toggling produces no record at all.
+
+**Two surfaces got only half the fix.** `lx status --json` gained the counter and
+the terminal `lx status` did not, so the surface a maintainer actually reads
+before saying a book is done still showed `0 error(s)` with nothing beside it.
+And `skill/reference/pipeline.md` still told an agent to read `totals.errors`
+alone, while `skill/reference/zh-TW.md` still said `numbers` "fails the build"
+without qualification. All three corrected. The lesson is the one this file keeps
+recording: a fix lands on the surface being edited, and the neighbouring surface
+that makes the same claim is invisible from inside the edit.
+
+**One sentence written for this change was false when written.** The status
+contract said the `errors`/`waived` pair "is the only honest reading". `errors`
+is a projection of the last `lx check` and `waived` is live, so between placing a
+waiver and re-checking they describe different moments — and `stale` cannot say
+so, because placing a waiver moves neither integer it compares. The cell says
+that now.
+
+### What this leaves open, and where it lives
+
+**A waived wording whose ids the segment cannot satisfy banks a record nothing
+can ever use, and evicts one that can.** `store.load_tm` keeps the last record
+per key; `translate.accept` refuses such a wording at every receiving document;
+so the line is pure eviction. It is the 2026-09-01 measurement arriving through
+the door this change opened, and it is the honest residue of banking a waived
+wording at all. It is **not** closed here: every repair on the table is either a
+second home for half of `checks.py`'s `tags` rule — refused on 2026-09-01 — or a
+change to what `load_tm` returns, which is a decision about a source of truth and
+deserves its own entry. **HANDOFF-044** owns it.
+
+The workbench draws no waive control. `POST /api/waive` ships, `GET /api/doc`
+carries `waived`, and `index.html` tests `seg.review === "held"` by exact
+equality — the frontend is HANDOFF-204's and this is the ordinary order.
+
+Nothing caps how many segments a reviewer may waive. The defences are friction —
+explicit ids, no glob, one refusal for a segment with nothing to answer — and
+visibility: three surfaces count it and every finding stays in the report. A
+mechanism that could tell a considered waiver from a careless one would be the
+judgement invariant 4 keeps out of `checks.py`.
 
 ## 2026-09-02 · One paragraph, named; and a source file that changed underneath
 

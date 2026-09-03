@@ -18,6 +18,7 @@ from .mask import (
     CJK_RE,
     PH_RE,
     strip_placeholders,
+    tag_shape,
     target_map,
     term_pattern,
     unmask,
@@ -752,38 +753,80 @@ def is_waived(seg):
     return bool(seg.get(WAIVED))
 
 
-def dangling_pair_halves(lost, target, slots):
-    """Of the placeholder ids missing from a target, those that break its bytes.
+def unbalanced_markup(lost, extra, target, maps):
+    """Placeholder ids whose loss or repetition leaves the rendered bytes wrong.
 
-    A lost id whose slot stands alone — a term, a URL, a code span — takes its
-    original out of the rendered text and leaves well-formed bytes behind. A lost
-    id that is *half of a pair* leaves the other half standing: an ``<em>`` that
-    never closes, or a ``</em>`` that never opened.
+    This is the whole of what a reviewer may not overrule, expressed as a
+    property of the bytes rather than as a list of rule names. Three ways a
+    `tags` mismatch stops being a claim about the wording and becomes one about
+    the document:
 
-    The distinction has to be drawn here because :func:`pair_problems` explicitly
-    declines it — "a half that never arrived is already a mismatch" — and
-    delegates the case to the multiset comparison in :func:`check_segment`. That
-    makes the one `tags` message two different findings: one a reviewer can be
-    right about, one nobody can. Measured 2026-09-03: against
-    ``This is ⟦1⟧very⟦2⟧ important, ⟦3⟧.`` a wording dropping only ``⟦2⟧`` gets
-    ``pair_problems() == []`` and renders ``這是<em>非常重要的，Ana。``.
+    1. **An id the segment has no slot for.** `mask.unmask` leaves the literal
+       ``⟦99⟧`` in the file — divergence (31), which HANDOFF-036 closes at the
+       render.
+    2. **A repeated id whose original is a tag.** ``⟦1⟧x⟦1⟧`` over an ``<b>``
+       renders ``<b>x<b>``. A repeated *term* or code span renders twice and is
+       perfectly legal, which is why this asks what the original is rather than
+       refusing every repetition — refusing every repetition was the first
+       spelling and it made `lx run` permanently refuse a correct document.
+    3. **A lost tag half whose partner is still standing.** ``<em>`` that never
+       closes, or ``</em>`` that never opened.
 
-    Returned rather than answered as a boolean so the message can name the ids.
+    Case 3 is why this reads the tag text through :func:`mask.tag_shape`
+    instead of trusting ``pair_id``. `mask._pair_tags` pairs only *within* a
+    segment, so a ``<span>`` opened in one paragraph and closed in the next
+    leaves both halves ``role: "standalone", pair_id: None`` — and the first
+    version of this predicate, which keyed on ``pair_id``, called that waivable.
+    Measured 2026-09-03 on an ordinary Markdown file: waive the closing segment,
+    `lx check` exits **0**, and `lx render` writes an unclosed
+    ``<span class="note">``. A whole pair lost together is still fine, and stays
+    waivable, because nothing is left standing.
+
+    *Cost, deliberate:* a void element written bare — ``<br>``, ``<img …>`` —
+    reads as an open whose close never arrives, so losing one is called
+    unbalanced when the bytes would in fact be fine. Erring that way is the
+    point: :func:`mask.tag_shape` says a void list here "would be a second place
+    to be wrong about HTML", and the cost of the false negative is a reviewer
+    re-wording one segment where the cost of the false positive is a broken file
+    under a green check.
+
+    ``maps`` is every slot map that could explain an id in play — the map the
+    wording's ids mean **and** the segment's own, because a lost id is a
+    source-side id and an extra one is a target-side id, and on a stranded
+    segment those are different maps. An id is a tag if either says so.
     """
-    present = set(PH_RE.findall(target))
+    present = Counter(PH_RE.findall(target))
+    merged = {}
+    for m in maps:
+        for sid, rec in (m or {}).items():
+            if isinstance(rec, dict):
+                merged.setdefault(sid, []).append(rec)
+
+    def is_tag(sid):
+        return any(tag_shape(rec.get("original") or "")[0] in ("open", "close")
+                   for rec in merged.get(sid, ()))
+
     partners = {}
-    for sid, rec in (slots or {}).items():
-        if rec.get("pair_id"):
-            partners.setdefault(rec["pair_id"], []).append(sid)
-    out = []
+    for sid, recs in merged.items():
+        for rec in recs:
+            if rec.get("pair_id"):
+                partners.setdefault(rec["pair_id"], set()).add(sid)
+
+    bad = set()
+    for sid in extra:
+        if sid not in merged or is_tag(sid):
+            bad.add(sid)
     for sid in lost:
-        pair_id = ((slots or {}).get(sid) or {}).get("pair_id")
-        if not pair_id:
+        if not is_tag(sid):
             continue
-        if any(other != sid and other in present
-               for other in partners.get(pair_id, ())):
-            out.append(sid)
-    return out
+        pair = set()
+        for rec in merged.get(sid, ()):
+            pair |= partners.get(rec.get("pair_id"), set())
+        # The whole pair went together, so nothing is left standing.
+        if pair and not any(present.get(other) for other in pair):
+            continue
+        bad.add(sid)
+    return sorted(bad)
 
 
 def workable(segments):
@@ -884,17 +927,18 @@ def check_segment(seg, lang, cfg, glossary, dnt):
         lost = sorted((a - b).elements())
         extra = sorted((b - a).elements())
         # **Waivable only where the render is well formed whatever the reviewer
-        # decided.** Two ways it is not, and both are decided from the bytes
-        # rather than from a rule name. An `extra` id is one the segment has no
-        # slot for, so `mask.unmask` leaves the literal `⟦99⟧` in the file —
-        # divergence (31), which HANDOFF-036 is scheduled to close at the render.
-        # A `lost` id whose pair partner survived leaves a tag that never closes.
-        # Everything else that reaches here — a term, a URL, a code span, a whole
-        # pair dropped together — renders as ordinary prose that may be missing
-        # something, which is the judgement call a reviewer is for.
-        dangling = dangling_pair_halves(lost, tgt, seg.get("slots") or {})
+        # decided**, and that question is asked of the bytes rather than of a
+        # rule name: see `unbalanced_markup`, which is the whole of the line.
+        # Everything it does not name — a term, a URL, a code span, a whole pair
+        # dropped together, a legal repetition — renders as ordinary prose that
+        # may be missing something, which is the judgement call a reviewer is
+        # for. Both maps are handed over because a lost id is a source-side id
+        # and an extra one is a target-side id, and on a segment a re-parse
+        # stranded those are two different maps.
+        unbalanced = unbalanced_markup(lost, extra, tgt,
+                                       (target_map(seg), seg.get("slots")))
         add("tags", "error", f"placeholder mismatch lost={lost} extra={extra}",
-            waivable=not extra and not dangling)
+            waivable=not unbalanced)
     for msg in pair_problems(tgt, seg.get("slots") or {}):
         add("tags", "error", msg, waivable=False)
 

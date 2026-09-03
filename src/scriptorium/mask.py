@@ -66,8 +66,13 @@ PAIRABLE = "htmltag"
 _TAG_SHAPE_RE = re.compile(r"<(/?)([A-Za-z][A-Za-z0-9-]*)")
 
 
-def _tag_shape(tag):
+def tag_shape(tag):
     """``(role, name)`` for a masked HTML tag, read as written.
+
+    Public since 2026-09-03 because `checks.unbalanced_markup` needs the same
+    reading: whether losing a slot leaves the document unbalanced is a question
+    about the tag text, and asking it twice in two spellings is how the two
+    answers come to differ.
 
     A self-closing tag is standalone whatever its name says. A void element
     written bare — ``<br>``, ``<img …>`` — needs no table here: it is an open
@@ -102,7 +107,7 @@ def _pair_tags(slots, tags):
     """
     stack = []
     for sid, tag in tags:
-        role, name = _tag_shape(tag)
+        role, name = tag_shape(tag)
         if role == "open":
             stack.append((name, sid))
         elif role == "close":
