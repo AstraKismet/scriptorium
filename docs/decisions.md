@@ -237,6 +237,28 @@ failed here died because `/v1/embeddings` on port 8088 answers 501 and the
 attempt was abandoned rather than checked against this file, which already names
 8089 for that model. **A failed instrument is not an absent signal.**
 
+**The cheapest remedy is a routing change, and it is not in this package.** The
+whole investigation held the model fixed, and an adversarial lane asked why. The
+same payload, the same window, the same oracle, three trials each:
+
+| model | misattributed of 25 | the gate said |
+|---|---|---|
+| `translategemma-12b-it` | 11, 15, 14 | refused, refused, refused |
+| `gemma-4-12b-heretic-abliterated:REASONINGOFF` | **1, 0, 0** | accepted, accepted, accepted |
+
+A translation-specialised model is not built to hold a structured id-keyed output
+contract; a general instruct model of the same size does. The maintainer already
+has that second model configured — it is their `polish` and `repair` route — so
+pointing `draft` at it as well costs a line of config. The `:REASONINGOFF` suffix
+is load-bearing: the plain variant answered three requests with empty
+completions.
+
+That table is also the detector's fairest test, because it is the only place both
+sides were measured at once: three refusals on the model that shifts and three
+clean acceptances on the model that does not. It is three trials on one window
+and one machine, so it is a strong recommendation rather than a finding — but it
+is the recommendation to try first, before any of the code above matters.
+
 Two things for the maintainer before any repair, neither a defect:
 
 - **Every one of their four real documents is frozen at `tone: technical`**, and
