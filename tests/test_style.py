@@ -82,7 +82,14 @@ THOMAS_NOTE = "Working-class, warm, elliptical."
 ABSENT_NOTE = "not on the page anywhere"
 COMMENT = "If this reaches the model, comments are broken."
 
-DONE = "已翻譯。"
+#: A stand-in translation, and its **length is load-bearing**. Since
+#: 2026-09-04 `translate.misattributed` throws a whole reply away when an
+#: answer cannot plausibly be a translation of the source it was asked
+#: about, and the four characters this used to be were 8% of a fifty-character
+#: sentence -- refused, correctly, and the refusal turned every test in this
+#: file into an assertion about the retry path instead of about its own
+#: subject. Sized at roughly the 0.45 zh-TW renders English at.
+DONE = "這一段已經翻譯完成，內容僅供測試使用。"
 
 
 class _Recorder:
@@ -104,7 +111,7 @@ class _Recorder:
         items = json.loads(user[user.index("[\n"):])
         if self._answer is not None:
             return self._answer(items)
-        return json.dumps({i["id"]: DONE for i in items}, ensure_ascii=False)
+        return json.dumps({i["id"]: DONE + i["id"] for i in items}, ensure_ascii=False)
 
 
 #: Serial, because every test here asserts which request carried what.
@@ -266,7 +273,7 @@ def test_a_retried_segment_carries_only_its_own_names(tmp_path, monkeypatch):
         # Fail the whole batch once so every segment is retried alone.
         if len(items) > 1:
             return "not json at all"
-        return json.dumps({i["id"]: DONE for i in items}, ensure_ascii=False)
+        return json.dumps({i["id"]: DONE + i["id"] for i in items}, ensure_ascii=False)
 
     stub = _Recorder(answer)
     _run(src, segs, stub, monkeypatch)

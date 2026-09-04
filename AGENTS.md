@@ -424,7 +424,8 @@ src/scriptorium/
   config.py      layered config, glossary, do-not-translate list, style sheet;
                  dotted-key addressing, the atomic config writer, and
                  `resolve_route` — the one answer to "which backend, which model"
-  translate.py   batching, concurrency, JSON tolerance, per-segment retry
+  translate.py   batching, concurrency, JSON tolerance, per-segment retry, and
+                 `misattributed` — whether a reply answers the request it was sent
   providers/     openai_compat (primary), anthropic; base holds transport + retry
   web/           local review workbench, a shell over cli.py
 skill/           Claude Skill packaging (SKILL.md + reference/)
@@ -442,7 +443,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 1946 tests; no network (one is POSIX-only,
+python -m pytest -q                 # 1952 tests; no network (one is POSIX-only,
                                     #   one runs only where the filesystem folds case)
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
@@ -662,6 +663,39 @@ own.
   names the wrong cause is worse than the general one it replaces. `lx run`'s
   refusal now **asks the draft queue** whether anything is left rather than
   assuming from the flag. See `docs/decisions.md`, 2026-09-02.
+- **A reply that does not answer the request is thrown away whole, and the object
+  judged is the reply.** `translate.misattributed` since 2026-09-04, because a
+  model can return every id that was asked for, none extra, and put each answer
+  under the *neighbour's* id — measured at 13.3% of segments and 47% of batches
+  against the backend this project's maintainer runs. Nothing downstream could
+  see it: `accept` refuses a placeholder mismatch and 273 of 273 segments of a
+  novel carry no placeholders, so invariant 2b's gate is inert on exactly the
+  material the project exists for.
+
+  **Whole reply, never part of one.** A cascade is contiguous but where it starts
+  is not decidable from what a reply carries — an extra id names a segment nobody
+  asked about, a missing one is at the tail, and a length outlier falls where two
+  neighbouring sources differ most, which is systematically late. A partial
+  refusal keeps the cascade's head, banks it through `on_batch`, and pays for the
+  retries after it anyway. The refusal is spelled `mapping = {}`, which is the
+  discard an unparsable reply already took, so every segment falls to the
+  per-segment `retry_one` that has always existed and the loop, the return tuple
+  and both `contract_version`s are untouched.
+
+  **A neighbour outside the request now gets no field at all**, which reverses
+  the operative half of 2026-08-02's D5. An inlined neighbour had no id of its
+  own; measured, the model translates it and the answer takes the *first real
+  id*. `retry_one` inlined **both** sides, so the branch that exists to rescue a
+  segment was the likeliest place in the system to corrupt one — 9 of 25
+  single-segment rescues came back carrying a neighbour's translation. Interior
+  references by id stay.
+
+  The length arm is `checks.length_ratio`'s band asked at a different moment, and
+  it is that function rather than a copy of its arithmetic — a policy with two
+  homes is what invariant 8 exists to stop, and the forty-character floor is part
+  of the policy. Three arms and no fourth: a `missing_ids` arm and a
+  batch-calibrated length arm were both built, scored and removed for adding
+  nothing. See `docs/decisions.md`, 2026-09-04.
 - **Where a sentence ends is `sentences.py`, and nowhere else.** Not `checks.py`
   (invariant 4 — it is not decidable without judgement), not the frontend, and
   not the translation-memory key or `store.SEGMENTATION_VERSION`, which a test

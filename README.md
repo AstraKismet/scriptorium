@@ -627,7 +627,7 @@ that lost.
 ## Development
 
 ```bash
-python -m pytest -q                # 1932 tests, no network
+python -m pytest -q                # 1952 tests, no network
 python -m ruff check src tests
 ```
 

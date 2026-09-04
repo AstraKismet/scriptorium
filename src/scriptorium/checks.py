@@ -724,6 +724,43 @@ def workable(segments):
     return [s for s in segments if not is_held(s)]
 
 
+def length_band(lang, cfg):
+    """``(lo, hi)`` — how far a target's length may sit from its source's.
+
+    Split out from :func:`length_ratio` because `translate.misattributed` needs
+    the band without a pair to measure: it reads the band's *width* and applies
+    it around a batch's own centre. Two readers, one declaration.
+    """
+    return tuple(cfg.get("length_ratio", {}).get(lang, [0.2, 2.5]))
+
+
+def length_ratio(src, tgt, lang, cfg):
+    """``(ratio, lo, hi)`` for one pair, or ``(None, lo, hi)`` where it says nothing.
+
+    Rule 9's arithmetic, lifted out so that it has **one home**. Since 2026-09-04
+    `translate.run_batch` asks the same question of a whole reply before storing
+    it, and a length band with two implementations is the shape `AGENTS.md` names
+    for `lx commit`: "a policy with two homes is what this invariant exists to
+    stop". The two callers differ in what they *do* with the answer — here it is
+    a warning a reviewer may waive, there it is a reason to re-ask the model —
+    and that difference is the point. What may not differ is the arithmetic.
+
+    ``None`` below forty source characters is the rule's own floor and not a
+    convenience: a heading, a menu label or a one-word cell has no plausible
+    ratio, and the floor is why `The Lighthouse` -> `燈塔` is silent. Naming it
+    here rather than at each call site is what stops the next caller reinventing
+    it slightly differently — the scorer that chose this rule's threshold did
+    exactly that, dropped the floor, and rated the rule fourteen points better
+    than the shipped code can actually be.
+    """
+    lo, hi = length_band(lang, cfg)
+    slen = len(strip_placeholders(src).strip())
+    tlen = len(strip_placeholders(tgt).strip())
+    if slen < 40:
+        return None, lo, hi
+    return tlen / slen, lo, hi
+
+
 def check_segment(seg, lang, cfg, glossary, dnt):
     issues = []
     src, tgt = seg["masked"], seg.get("target") or ""
@@ -1008,10 +1045,8 @@ def check_segment(seg, lang, cfg, glossary, dnt):
             add("dnt", "warn", f"protected term {term!r} missing in target", waivable=True)
 
     # 9. length plausibility
-    lo, hi = cfg.get("length_ratio", {}).get(lang, [0.2, 2.5])
-    slen, tlen = len(strip_placeholders(src).strip()), len(strip_placeholders(tgt).strip())
-    if slen >= 40:
-        ratio = tlen / slen
+    ratio, lo, hi = length_ratio(src, tgt, lang, cfg)
+    if ratio is not None:
         if ratio < lo:
             add("length", "warn", f"target unusually short (ratio {ratio:.2f} < {lo})",
                 waivable=True)

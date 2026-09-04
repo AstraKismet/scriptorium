@@ -325,7 +325,8 @@ class TranslatingHandler(BaseHTTPRequestHandler):
         items = json.loads(user[user.index("["):])
         TRANSLATED["bodies"].append(body_in)
         TRANSLATED["requests"].append(items)
-        answer = json.dumps({i["id"]: "已翻譯。" for i in items}, ensure_ascii=False)
+        answer = json.dumps({i["id"]: "已翻譯。" + i["id"] for i in items},
+                            ensure_ascii=False)
         body = json.dumps({"choices": [{"message": {"content": answer}}]}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -368,8 +369,12 @@ def test_neighbour_context_survives_an_actual_request(translating):
     assert [i["id"] for i in first] == ["s0001", "s0002"]
     assert set(first[0]) == {"id", "kind", "text", "after_id"}     # first of the document
     assert first[0]["after_id"] == "s0002"                         # inside the batch
-    assert first[1]["after_text"] == "Sentence number 3."          # across the boundary
-    assert second[0]["before_text"] == "Sentence number 2."
+    # And the batch edges reference nothing across the boundary, which since
+    # 2026-09-04 is the whole of what a neighbour outside the request gets: the
+    # inlined form put an id-less paragraph in the item and the model answered
+    # it under a real segment's id. `translate._attach` carries the measurement.
+    assert set(first[1]) == {"id", "kind", "before_id", "text"}
+    assert set(second[0]) == {"id", "kind", "text", "after_id"}
     assert set(second[1]) == {"id", "kind", "before_id", "text"}   # last of the document
 
 

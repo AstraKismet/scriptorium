@@ -87,7 +87,10 @@ class _Interrupting:
         if len(self.seen) >= self.answer_batches:
             raise KeyboardInterrupt("^C")
         self.seen.append(ids)
-        return json.dumps({sid: "已翻譯。" for sid in ids}, ensure_ascii=False)
+        # The id keeps the answers distinct: one string for two sources is what
+        # `translate.misattributed` refuses, and a stub that did it would be
+        # asserting about the retry path rather than about resuming.
+        return json.dumps({sid: "已翻譯。" + sid for sid in ids}, ensure_ascii=False)
 
 
 def _run(src, segments):

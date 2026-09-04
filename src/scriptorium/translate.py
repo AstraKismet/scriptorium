@@ -12,6 +12,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from .checks import check_segment, workable
+from .checks import length_ratio as check_length_ratio
 from .config import (
     DEFAULT_TONE,
     canonical_tone,
@@ -143,14 +144,10 @@ not have, and do not flatten an image into a statement.""",
 #: unconditional documentation-register sentence beat `Tone:` for months; the
 #: brief keeps that position and this takes the one below `_BASE_RULES`.
 _CONTEXT_RULES = """\
-Some items carry `before_id`, `before_text`, `after_id` or `after_text`: the
-segments that surround this one in the document, in document order, so that a
-pronoun, a speaker, a tense, or a level of formality has something to resolve
-against. They are context and nothing else.
-
-`before_id` and `after_id` name another item of this same request — read its
-`text` there. `before_text` and `after_text` carry a neighbour's source inline,
-because that neighbour is not in this request.
+Some items carry `before_id` or `after_id`: the id of the item beside this one in
+the document, so that a pronoun, a speaker, a tense, or a level of formality has
+something to resolve against. Read that item's `text` where it appears in this
+same request. They are context and nothing else.
 
 Never translate a neighbour, never fold one into the segment you are
 translating, and never reply under an id that is not the `id` of an item."""
@@ -264,6 +261,95 @@ def parse_reply(text):
     return {str(k): v for k, v in data.items() if isinstance(v, str)}
 
 
+def misattributed(asked, mapping, sources, lang, cfg):
+    """Why this whole reply should not be believed, or ``None``.
+
+    **The object judged is the reply, so the unit refused is the reply.** A
+    partial refusal was measured and rejected: a cascade is contiguous, but where
+    it *starts* is not decidable from what a reply carries. The two id-shaped
+    signals carry no position at all — an extra key names a segment nobody asked
+    about, and a missing one is at the tail — and the length signal is
+    systematically *late*, because a residual is largest where two neighbouring
+    sources differ most in length, which is nowhere near the split that began the
+    run. So any partial refusal keeps the cascade's head, banks it through
+    `on_batch`, and pays for the retries after it anyway. Both ends lost.
+
+    Three arms, most certain first, so the reason reported is the strongest one
+    rather than the cheapest:
+
+    * an id nobody asked for — the model was not tracking ids at all, and
+      the keys observed include `s0005_after_text` and `s0010_2`, which are the
+      field it read and the last id it had with a number stuck on;
+    * one answer returned for two different sources, which is one of the two
+      shapes the maintainer reported;
+    * a segment outside the project's own declared length band, which is
+      `checks.py` rule 9 asked at a different moment.
+
+    Scored on 180 real replies from that model, trained on one chapter of the
+    book and held out on another: **72% of batches carrying a misattribution are
+    caught and 2% of clean ones are refused** on the held-out half, and at the
+    default `batch.size` of 25 — the only size `lx translate` uses unless told
+    otherwise — 13 of 13 were caught, for 5 clean batches of 17 refused.
+
+    *Built, measured and removed:* a fourth arm that estimated the
+    source-to-target ratio from the batch's own median and flagged a segment far
+    off it, tolerance taken from the band's width so no language constant was
+    written down. It is a good idea and it does nothing: sharing
+    `checks.length_ratio`'s forty-character floor, a segment that is an outlier
+    against its batch is almost always outside the absolute band as well, so the
+    arm above reaches it first. Measured over the same 180 batches it changed
+    recall not at all (49 of 66 either way) and added two false alarms. Do not
+    rebuild it without a corpus where the two disagree. **A missing id is deliberately not an arm.** It added nothing — every
+    batch it caught was already caught — and it would have turned a reply that
+    merely stops a few ids early into twenty-five requests instead of the three
+    the existing per-segment path already handles.
+
+    `docs/decisions.md`, 2026-09-04.
+    """
+    extra = sorted(k for k in mapping if k not in set(asked))
+    if extra:
+        return (f"the reply answered {len(extra)} id(s) nobody asked for "
+                f"({', '.join(extra[:3])}{', …' if len(extra) > 3 else ''}), so it "
+                f"was not tracking which segment it was translating")
+    # One answer for two different sources. At most one of them can be right,
+    # and the sources are compared because a document really can hold the same
+    # sentence twice — the memory key exists because it does.
+    #
+    # **It fired on none of the 180 batches this was scored against**, and it is
+    # here anyway, which needs saying rather than hiding: it is one of the two
+    # shapes the maintainer reported, its false-alarm rate is likewise zero, and
+    # what the corpus actually held was *near*-duplicates — the model
+    # re-translating the neighbour's source rather than copying its target, so
+    # two wordings of one paragraph. A similarity threshold would catch those and
+    # is not here, because "how alike is too alike" is the judgement invariant 4
+    # keeps out of a mechanical rule. This arm is the literal case, decided by
+    # equality, and it costs one pass over the batch.
+    seen = {}
+    for sid in asked:
+        answer = (mapping.get(sid) or "").strip()
+        if not answer:
+            continue
+        twin = seen.setdefault(answer, sid)
+        if twin != sid and sources.get(twin, "").strip() != sources.get(sid, "").strip():
+            return (f"{twin} and {sid} came back with the same translation over "
+                    f"different sources, so at most one of them is right")
+    for sid in asked:
+        answer = mapping.get(sid) or ""
+        # **An id with no answer is not this function's business**, and the
+        # `or ""` above is why it has to be said: an absent answer measures zero
+        # characters, which is outside every band, and letting that count would
+        # put the `missing_ids` arm back through the door it was measured out
+        # of. A reply that simply stops early already costs only the segments it
+        # dropped, because the loop below hands each of them to `retry_one`.
+        if not answer.strip():
+            continue
+        ratio, lo, hi = check_length_ratio(sources.get(sid, ""), answer, lang, cfg)
+        if ratio is not None and not lo <= ratio <= hi:
+            return (f"{sid} came back at {ratio:.2f} of its source's length, outside "
+                    f"[{lo}, {hi}]")
+    return None
+
+
 # ── batch payloads ─────────────────────────────────────────────────────────
 
 #: The letters a name can be made of, for deciding where one ends. ASCII plus
@@ -342,7 +428,7 @@ def _style_block_text(blocks):
 
 
 def _neighbour_context(doc, segments, window):
-    """``({id: (before_ids, after_ids)}, {id: source})`` in document order.
+    """``{id: (before_ids, after_ids)}`` in document order.
 
     Adjacency comes from **the document**, never from the ``segments`` argument.
     `lx repair` passes only the failing segments and `lx translate --ids` passes
@@ -352,8 +438,11 @@ def _neighbour_context(doc, segments, window):
     reason this consults ``doc["segments"]`` — the authority `tone` and `eol`
     already have for facts about the document rather than about one request.
 
-    The source text is the *masked* form, so invariant 3 holds for a neighbour
-    exactly as it does for the segment being translated.
+    **Only references, since 2026-09-04.** A neighbour outside the request used
+    to arrive as its own source text inlined in the item; `_attach` records what
+    that cost and why the branch is gone. Nothing here needs the source map any
+    more, and building one nobody reads is the dead-data half of the inert-branch
+    rule this docstring already states below.
 
     A window of ``0`` needs no early return and does not get one: it slices
     ``ids[i:i]`` on both sides, so every entry comes out empty, no item gains a
@@ -365,7 +454,6 @@ def _neighbour_context(doc, segments, window):
     order = [s for s in (doc.get("segments") or segments) if s.get("id")]
     ids = [s["id"] for s in order]
     at = {sid: i for i, sid in enumerate(ids)}
-    source = {s["id"]: s.get("masked") or "" for s in order}
     adjacency = {}
     for seg in segments:
         i = at.get(seg.get("id"))
@@ -378,49 +466,69 @@ def _neighbour_context(doc, segments, window):
         # that slices `ids[-1:1]`, which is empty, so the second segment of a
         # document would silently lose the first.
         adjacency[seg["id"]] = (ids[max(0, i - window):i], ids[i + 1 : i + 1 + window])
-    return adjacency, source
+    return adjacency
 
 
-def _attach(item, side, nids, present, source):
-    """Give one side of ``item`` its neighbours: a reference, an inline source, or both.
+def _attach(item, side, nids, present):
+    """Point one side of ``item`` at its neighbours **inside this request**, or say nothing.
 
-    Referencing is what keeps the cost bounded: inside a batch the neighbours of
-    an interior segment are other items of the same request, so sending their
-    text again would treble the payload for nothing. Only the two edges of a
-    batch — and, on the retry path, both sides — have nothing to point at.
+    A neighbour that is not an item of this request gets no field at all. Until
+    2026-09-04 it was inlined as its own source text under `before_text` /
+    `after_text`, and the argument for withholding an id from it was written
+    here: "an id the model can see is an id it can answer under ... `run_batch`
+    and `retry_one` both read only the ids they requested, so such an answer is
+    already discarded."
 
-    **Two scalar fields, not one list of objects, and the reason is measured.**
-    `_user_message` serializes with ``indent=1``, so ``[{"id": "s0004"}]`` costs
-    about 48 characters where the id inside it costs 8 — the container, not the
-    reference. On a document of short blocks the nested form made the request
-    1.95x its no-context size against these fields' 1.50x, and on prose, which
-    is what this feature is for, 1.25x against 1.16x. `docs/decisions.md`,
-    2026-08-02.
+    **That reasoning is exactly backwards, and it was measured.** With nowhere of
+    its own to put the answer, the model puts it under the *first real id* and
+    every answer after that moves one place. `_user_message` puts `before_text`
+    ahead of `text` in the item, so the id-less paragraph is the first prose the
+    model reads — and the asymmetry follows: before bleeds, after mostly does
+    not. Four independent measurements against `translategemma-12b`, the model
+    this project's maintainer runs:
 
-    A widened window joins rather than lists, for that same reason: its
-    neighbours on one side are consecutive segments of one document, so a blank
-    line between them is what the document itself says there.
+    * every item given both neighbours inline: 25, 22 and 22 of 25 misattributed
+      across three trials; the same window with the field removed: 0, 0, 0;
+    * the production shape — one `before_text` on a batch's first item: 24, 25
+      and 25 of 25, against 0, 0 and 1 without it;
+    * `retry_one`, which sends one segment and so inlined *both* sides: 9 of 25
+      single-segment rescues came back carrying a neighbour's translation;
+    * batch size 5 with context on, where two items in five are edges: 45% of
+      segments shifted, against 1.9% with context off.
 
-    An inlined neighbour has nowhere to carry an id, which is deliberate rather
-    than incidental. An id the model can see is an id it can answer under, and
-    an answer for a segment nobody asked about is exactly what must not come
-    back. `run_batch` and `retry_one` both read only the ids they requested, so
-    such an answer is already discarded; this removes the temptation one layer
-    earlier rather than relying on that alone.
+    The discard the old docstring relied on never happened, because the answer
+    did not arrive under a stranger's id — it arrived under a real one.
+
+    *Lost:* keeping the after-side, which is far safer (0 of 25 against 22 of 25)
+    and half the change. It was refused because the model still translates the
+    inlined paragraph and still needs somewhere to put it: three production
+    trials in three came back carrying an invented id, which `misattributed`
+    would then read as grounds to throw the whole reply away. A field that makes
+    the detector fire on every clean batch is worse than no field.
+
+    *Lost:* moving the two inlined neighbours out of the array into a labelled
+    prose block above it. One trial in three ran away — 119 invented ids and
+    three times the wall clock — so the model reads a paragraph as work to do
+    wherever it is put, not only inside an item.
+
+    What stays is the reference form, and the reason it is two scalar fields
+    rather than one list of objects is still measured: `_user_message`
+    serializes with ``indent=1``, so ``[{"id": "s0004"}]`` costs about 48
+    characters where the id inside it costs 8. A widened window joins rather
+    than lists, because its neighbours on one side are consecutive segments of
+    one document. `docs/decisions.md`, 2026-08-02 and 2026-09-04.
+
     """
     refs = [n for n in nids if n in present]
-    texts = [source[n] for n in nids if n not in present and source.get(n)]
     if refs:
         item[f"{side}_id"] = " ".join(refs)
-    if texts:
-        item[f"{side}_text"] = "\n\n".join(texts)
 
 
 def _user_message(segments, glossary, mode, context=None, style_blocks=None):
     terms = []
     for seg in segments:
         terms.extend(_glossary_hints(seg["masked"], glossary))
-    adjacency, source = context or ({}, {})
+    adjacency = context or {}
     present = {seg["id"] for seg in segments}
     payload = []
     for seg in segments:
@@ -429,9 +537,9 @@ def _user_message(segments, glossary, mode, context=None, style_blocks=None):
         # what follows it. The payload reaches the model as text, and flow is
         # the one thing these fields exist to carry.
         item = {"id": seg["id"], "kind": seg["kind"]}
-        _attach(item, "before", before, present, source)
+        _attach(item, "before", before, present)
         item["text"] = seg["masked"]
-        _attach(item, "after", after, present, source)
+        _attach(item, "after", after, present)
         if mode == "polish":
             item["draft"] = seg.get("target") or ""
         if seg.get("issues"):
@@ -635,20 +743,57 @@ def translate_segments(segments, doc, cfg, provider_name=None, mode="draft",
     # `cli.main` for exit 2.
     style_preamble, style_blocks = load_style(cfg)
     # Built once, from the document, and closed over by both request paths — so
-    # `retry_one` gets its neighbours for free rather than needing the segment
-    # list threaded into it. A payload of one has nothing to point at, so both
-    # sides arrive inlined, which is precisely what the retry path needs: it is
-    # where a hard sentence ends up and where the context was worst.
+    # `retry_one` needs no segment list threaded into it. A payload of one has
+    # nothing inside the request to point at and therefore carries no context at
+    # all, which since 2026-09-04 is the point rather than the gap: see `_attach`.
     context = _neighbour_context(doc, segments, batch_cfg.get("context", 1))
-    briefed = any(b or a for b, a in context[0].values())
+    batches = list(_chunks(segments, size))
+    # **Whether a reference will actually appear, not whether the document has
+    # neighbours.** Adjacency is a fact about the document and is non-empty for
+    # almost every segment of it; a *field* appears only where the neighbour is
+    # an item of the same request. Asking the weaker question briefed the model
+    # about `before_id` and `after_id` on runs where no item could carry one —
+    # `batch.size` 1, `lx translate --ids` on a scattered set — which is the cost
+    # `_CONTEXT_RULES` says in its own comment that it exists to avoid. Harmless
+    # before 2026-09-04, because an inlined neighbour meant nearly every request
+    # carried something; the same expression became wrong the moment the inline
+    # branch went.
+    briefed = any(n in {s["id"] for s in batch}
+                  for batch in batches
+                  for seg in batch
+                  for side in context.get(seg["id"], ((), ()))
+                  for n in side)
     system = _system_prompt(source_lang, lang, tone, mode, briefed, style_preamble)
 
     results, failures = {}, []
+    #: How many replies were thrown away whole. Counted rather than returned:
+    #: the per-batch line says it as it happens and scrolls away, and a run that
+    #: quietly refused a third of its replies is a run whose backend is wrong for
+    #: this work — which the person needs told once, at the end, beside what it
+    #: cost. A structured field on the job record would be a `contract_version`
+    #: move, and the contract forbids parsing `log` precisely so that a sentence
+    #: like this can be added to it without one.
+    discarded = 0
     lock = threading.Lock()
-    batches = list(_chunks(segments, size))
     progress(f"{provider.describe()} · {len(segments)} segment(s) in {len(batches)} batch(es)")
 
     def retry_one(seg):
+        """One segment, alone — and since 2026-09-04 that means no neighbours.
+
+        Not by a branch here: a payload of one has nothing inside the request to
+        reference, and `_attach` no longer inlines anything, so the item comes
+        out as `id`, `kind`, `text` and nothing else. That is the shape this
+        package measured 125 times while building its oracle — complete and
+        correctly aligned every time — and it is the shape the old one was not:
+        of 25 retries built the way 2026-08-02 specified, with both neighbours
+        inlined, **nine came back carrying a neighbour's translation**. The
+        branch that exists to rescue a segment was the likeliest place in the
+        system to corrupt one. See `_attach`.
+
+        The system prompt is not rebuilt: it is assembled once per run so a local
+        runtime's prefix cache survives the book, and a sentence about fields
+        this request has none of costs nothing.
+        """
         note = ""
         if seg["masked"].count("\u27e6"):
             note = ("\nThis segment previously came back with the wrong placeholders. "
@@ -673,6 +818,24 @@ def translate_segments(segments, doc, cfg, provider_name=None, mode="draft",
         except Exception as e:  # noqa: BLE001
             progress(f"batch {idx + 1}/{len(batches)} failed ({e}); retrying segment by segment")
             mapping = {}
+        else:
+            # **The whole reply, or none of it.** `mapping = {}` is deliberately
+            # the same discard the unparsable-reply branch above already takes,
+            # so a refused batch walks the per-segment path that has existed
+            # since this function was written rather than a second one written
+            # for it: every id below finds no answer, goes to `retry_one`, and
+            # is asked again alone. Nothing new is stored, no id is treated
+            # differently from its neighbours, and the loop, the return tuple
+            # and the shape of `failures` are untouched.
+            why = misattributed([s["id"] for s in batch], mapping,
+                                {s["id"]: s["masked"] for s in batch}, lang, cfg)
+            if why:
+                nonlocal discarded
+                with lock:
+                    discarded += 1
+                progress(f"batch {idx + 1}/{len(batches)} discarded — {why}; "
+                         f"re-asking its {len(batch)} segment(s) one at a time")
+                mapping = {}
 
         local_ok, local_bad = {}, []
         for seg in batch:
@@ -720,6 +883,13 @@ def translate_segments(segments, doc, cfg, provider_name=None, mode="draft",
         line = usage_line(spent)
         if line:
             progress(line)
+        if discarded:
+            progress(
+                f"{discarded} of {len(batches)} repl{'y' if discarded == 1 else 'ies'} "
+                f"looked misattributed and {'was' if discarded == 1 else 'were'} thrown "
+                f"away whole; those segments were re-asked one at a time. A backend that "
+                f"does this often is the wrong one for this work — `lx models` lists what "
+                f"else is served.")
 
     return results, failures
 
