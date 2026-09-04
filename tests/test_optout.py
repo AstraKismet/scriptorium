@@ -55,7 +55,10 @@ class _Echo:
         items = json.loads(user[user.index("["):])
         self.seen.extend(i["id"] for i in items)
         return json.dumps(
-            {i["id"]: "模型的字。" + "".join(re.findall(r"⟦\d+⟧", i["text"]))
+            # Sized so `translate.misattributed` does not refuse the reply; see
+            # the same note in `tests/test_select.py`.
+            {i["id"]: "這是模型寫下的字，長度合乎一段譯文。" + i["id"]
+                      + "".join(re.findall(r"⟦\d+⟧", i["text"]))
              for i in items}, ensure_ascii=False)
 
 

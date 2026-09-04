@@ -3,6 +3,252 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-09-04 · A model answers by position, not by id, and a novel is the shape that makes it happen
+
+HANDOFF-046. The maintainer reported two things seen in the review workbench: the
+tail of one segment's translation appearing inside the next one's target, and a
+segment's target duplicating its predecessor's with a run of consecutive segments
+shifted by one after it. They are one defect seen twice, and the package's first
+question was whether the stored data was wrong or the workbench was displaying it
+wrong. **The stored data is wrong.** Read straight out of `.lx/state.db` with no
+pipeline in the way, `docs_chapter_2.md` s0021's target opens with a complete
+translation of s0020's source before its own, and `docs_chapter_1.md` s0006's
+target is a translation of s0005's source and nothing else. The workbench is not
+implicated and nothing here touches it.
+
+**The pipeline remaps nothing.** The payload is a JSON array of objects each
+carrying its own `id`; `parse_reply` builds a dict keyed by id; `run_batch` reads
+`mapping.get(seg["id"])`; every write is a keyed `UPDATE ... WHERE seg_id = ?`.
+An answer returned under the wrong id is stored faithfully under that wrong id.
+Two code-side mechanisms were proposed and both are refuted by measurement rather
+than argument: `store.Carryover.align` places the real 90→88 edit this document
+had with 0 misplacements, and the two chapters hold 88 of 88 and 131 of 131
+*distinct* keys, so the repeated-run branch that could shift a block was
+unreachable on them. (That branch has a defect of its own, found on the way and
+scheduled as HANDOFF-051: its guard counts document-wide key totals rather than
+the run's size, so two runs changing size in opposite directions are both
+trusted, which is not what its own docstring or divergence (26) claims.)
+
+### Why nothing caught it
+
+`translate.accept` refuses three things: a failed `mask.reseat`, a placeholder-id
+multiset mismatch, and an empty string. **273 of the 273 segments in this novel
+carry zero placeholders.** Invariant 2b's gate is an accidental alignment check
+for marked-up text — a translation carrying the previous segment's placeholders
+fails the multiset test — and prose is exactly the material where it gives no
+cover. That is the sense in which this is a *novel* defect rather than a
+documentation one: the 2026-07-29 re-founding's "code's half smaller and the
+model's half harder", arriving as a concrete hole.
+
+The one rule that ever fired was `length`, at warn, and the clearest single
+illustration is a segment the maintainer has already reviewed without noticing.
+`docs_chapter_1.md` s0010 is 352 characters of narration ending in a line of
+dialogue — `... laced his fingers. "What am I looking at there, Ms. Tomlinsin?"`
+— and its stored target is 93 characters ending at 十指交叉。. The quoted line is
+gone; it is not in s0011 either, which correctly holds its own. The ratio is
+**0.2642**, inside `[0.25, 1.20]`, the band this project ships for zh-TW. `lx
+check` is green over a delivered book with a line of the author's dialogue
+missing from it.
+
+### Two triggers
+
+Reproduced live against the model the maintainer runs (`translategemma-12b-it`,
+OpenAI-compatible, local), driving the real request builders so what went on the
+wire is what `lx translate` sends.
+
+**T1 — an inlined neighbour takes a real id.** `_attach` gave a batch-edge item's
+out-of-batch neighbour a `before_text` / `after_text` field with no id of its
+own, and `_user_message` places `before_text` *ahead of* `text`, so it was the
+first prose in the item. The model translates it, has nowhere to put the answer,
+takes the next real id, and every answer after it moves one place. Proven
+directly by replies carrying the keys `s0005_after_text`, `s0010_text`,
+`s0010_after_text`, `s0010_1`, `s0010_2` and `s0010_3` — the model naming the
+field it read, or decorating the last id it had.
+
+The controlled form: every item given both neighbours inline scored 25, 22 and 22
+of 25 misattributed over three trials, and 0, 0, 0 with the field removed. The
+production shape — one `before_text` on a batch's first item — scored 24, 25 and
+25, against 0, 0 and 1 without it. `retry_one`, which sends one segment and so
+inlined **both** sides, returned a neighbour's translation for **9 of 25**
+single-segment rescues, eight of them the paragraph before. The branch that
+exists to rescue a segment was the likeliest place in the system to corrupt one,
+and the 2026-08-02 entry called that inlining "the point".
+
+`_attach`'s docstring argued that withholding the id was deliberate, because "an
+answer for a segment nobody asked about is exactly what must not come back" and
+"`run_batch` and `retry_one` both read only the ids they requested, so such an
+answer is already discarded". **The reasoning is exactly backwards.** Having
+nowhere of its own to go is what makes the model take a real id, and the discard
+it relied on never happens, because the answer does not arrive under a stranger's
+id — it arrives under a real one.
+
+**T2 — the model splits one item into two answers.** Nothing is inlined. The
+trigger is a narrative paragraph whose last sentence is a line of quoted
+dialogue: the model renders the narration, emits the quoted line as the *next*
+id, and counts on from there. s0010 above is the case, and s0011 through s0023 —
+thirteen consecutive segments — cascade from it. The shape is 17% of chapter 1's
+segments and 27% of chapter 2's, and 0% of `docs_characters.md`, which is a
+reference list rather than prose and which the alignment audit found entirely
+clean. T2 is unaffected by anything in the payload and reproduces at
+`batch.context: 0`.
+
+### The rate, and the arm that was mislabelled
+
+Five windows of 25 segments from the maintainer's own book, four request shapes,
+three trials each — sixty trials, 1500 segment observations. The oracle is a
+reference translation of each segment taken alone at context window 0: a batch of
+one has a single id and no neighbour, so it cannot be misattributed by
+construction. The payload was **dumped to confirm** it carries only `id`, `kind`
+and `text` rather than reasoned about, because `retry_one`'s batch of one is not
+that shape and would have been a contaminated control. Across every clean
+condition the oracle flagged 0 of 250 segments, which is its own control.
+
+| request shape | batches carrying a shift | segments shifted |
+|---|---|---|
+| size 25, references only | 47% | 13.3% |
+| size 25, no context at all | 40% | 8.3% |
+| size 5, two of five items inlined | 100% | 45.3% |
+| size 5, no context at all | 40% | 1.9% |
+
+**The first row is not what production sent, and finding that out is the single
+most useful thing an adversarial lane did here.** The harness set
+`doc["segments"]` to the 25-segment window, so at batch size 25 the batch *was*
+the whole document, every neighbour was inside the request, and nothing was
+inlined. That row is T2 alone. A real 88-segment document inlines `after_text` on
+batch 1's last item and both `before_text` and `after_text` on every interior
+batch — the field separately measured at 24 to 25 of 25. So the table's top row
+is a floor and the production rate is worse. A label is not a measurement.
+
+**Turning `batch.context` off was nearly shipped as the fix, and it is not one.**
+The first two windows swept were both from chapter 2, whose opening is short
+dialogue; context off scored zero on both. Chapter 1, whose paragraphs are long
+and narrative, still scored 12/25 and 13/25 with context off. Five windows rather
+than two is what caught it — `docs/conventions/delegated-work.md` §6.7, a sweep
+is blind to the axis it does not vary.
+
+**The visible corpus understates the rate, measurably.** `docs_chapter_1.md`
+s0012–s0026 is a run of fifteen consecutive `origin: human` segments bracketing
+the reproduced cascade s0011–s0023 with one to three segments of margin each
+side: the maintainer found that cascade and retranslated it by hand. The trigger
+segment s0010 is still `llm:polish` and still missing its dialogue line. Counting
+what survives in the database measures the maintainer's diligence, not the
+defect. And `--mode polish` preserves a shifted draft rather than repairing it —
+`_POLISH_RULES` never asks the model to check the draft against the source — so a
+polished cascade reads *better* and is harder for a reviewer to catch.
+
+Two further facts, because they change what the numbers mean. About 10% of
+replies are not valid JSON at all, which is a *loud* failure: `parse_reply`
+raises, `run_batch` sets `mapping = {}`, every segment goes to `retry_one`. The
+perverse consequence is that the product's JSON intolerance accidentally rescues
+some corrupt replies, so the rate reaching the database (7.7%) is lower than the
+rate the model produces (13.3%). Repairing the parser therefore removes a safety
+net and must not land first: HANDOFF-050 says so in its own text.
+
+### What ships
+
+**The whole reply, or none of it.** `translate.misattributed` judges the reply
+before anything is stored, and a reply it refuses is discarded by `mapping = {}`
+— the same discard an unparsable reply already took — so every segment falls to
+the per-segment `retry_one` that has always existed. The loop, the return tuple,
+the shape of `failures` and both `contract_version`s are untouched, and the two
+sentences it adds go to `progress`, which the contract declares free text.
+
+A partial refusal was designed and rejected. A cascade is contiguous, but where
+it *starts* is not decidable from what a reply carries: an extra id names a
+segment nobody asked about, a missing one is at the tail, and a length outlier
+falls where two neighbouring sources differ most in length, which is
+systematically late. Any partial refusal keeps the cascade's head, banks it
+through `on_batch` into the source of truth, and pays for the retries after it
+anyway. Splitting a dirty batch in half was rejected on a second ground worth
+recording: `_attach`'s `present` set comes from the call's own segments, so
+halving a batch turns two referenced neighbours into two new batch edges — it
+manufactures T1's trigger.
+
+Three arms, most certain first, so the reason reported is the strongest rather
+than the cheapest: an id nobody asked for; one answer returned for two different
+sources; a segment outside the project's own declared length band. The third is
+`checks.length_ratio` itself and not a copy of its arithmetic — a policy with two
+homes is what invariant 8 exists to stop — which also means the forty-character
+floor comes along, and that floor is load-bearing rather than incidental.
+
+Scored on 180 real replies, trained on one chapter and held out on the other:
+**72% of batches carrying a misattribution are refused, 2% of clean ones are.**
+At the default `batch.size` of 25 — the only size `lx translate` uses unless told
+otherwise — it caught 13 of 13, refusing 5 clean batches of 17. A false alarm
+costs the batch a per-segment retry, measured at 1.40x the wall clock of the
+request it replaces on a local backend and **6.8x its input characters**, 85% of
+which is the re-sent system prompt. That second number is the one that matters
+for a hosted API and the first is the one that matters locally; both are here
+because a proposal that cites only the flattering one is not measured.
+
+*Built, scored and removed:* a `missing_ids` arm, which caught nothing another
+arm did not and would have turned a reply that stops a few ids early into
+twenty-five requests where the existing path asks only for what is missing. And a
+batch-calibrated length arm — estimate the source-to-target ratio from the
+batch's own median, take the tolerance from the band's width, so no language
+constant is written down. It is a good idea and it does nothing: sharing the
+forty-character floor, a segment that is an outlier against its batch is almost
+always outside the absolute band as well. Over the same 180 batches it changed
+recall not at all — 49 of 66 either way — and added two false alarms. Do not
+rebuild either without a corpus where they disagree.
+
+**And the inlined neighbour is gone.** `_attach` keeps only its reference branch;
+`_neighbour_context` no longer builds a source map nobody reads; `_CONTEXT_RULES`
+describes `before_id` and `after_id` only. A batch edge and a retried segment now
+carry no neighbour at all. This reverses the operative half of D5 (2026-08-02) and
+the reversal is measured, not preferred — the four numbers in the T1 paragraph
+above. *Lost:* inlining only the after-side, which is far safer (0 of 25 against
+22 of 25) and half the change; refused because the model still translates the
+inlined paragraph and still needs somewhere to put it, and three production
+trials in three came back carrying an invented id, which `misattributed` would
+then read as grounds to throw a clean reply away. A field that makes the detector
+fire on every batch is worse than no field. *Lost:* moving the neighbours into a
+labelled prose block above the array — one trial in three ran away, 119 invented
+ids and three times the wall clock, so the model reads a paragraph as work to do
+wherever it is put.
+
+`briefed` moved with it. It asked whether the *document* had neighbours, which is
+true of nearly every segment; it now asks whether a reference will actually
+appear in some batch of this run. The weaker question was harmless while a
+neighbour was always inlined and became wrong the moment the inline branch went —
+it would brief the model about fields no item of a `batch.size` 1 run can carry.
+
+### What is not fixed, and what the maintainer should do
+
+Recall is 72%, not 100%. A reply that shifts within the band, with every id
+present and none duplicated, still passes — and the residue is stored, and
+`lx commit` will bank it, because that gate is `check_segment` at error severity
+and a fluent Chinese paragraph translating the wrong English breaks no mechanical
+rule. **This narrows the defect; it does not close it.**
+
+Nothing here reaches the damage already done, and there is more of it than the
+first look suggested. The reply-side detector finds **zero** of chapter 1's 83
+usable stored segments — structurally, because it reads a *reply*, where the run
+is what makes a shift visible, and stored state has been through a reviewer. The
+conclusion first drawn from that, "the signal does not exist", was wrong and
+wrong by generalizing from one instrument: a cross-lingual embedding flags **18
+of the 208 records in the tracked `.lx/tm.zh-TW.jsonl`** with no false positives
+at a 0.10 margin, names the record each target actually belongs to, and separates
+the populations cleanly — a median diagonal of 0.829 against flagged rows at 0.35
+to 0.74. The poisoned lines run contiguously, 16 holding 15's translation and 17
+holding 16's: the translate-time cascade, banked into a source of truth that
+`store.load_tm` reads last-wins. That auditor is HANDOFF-053. The attempt that
+failed here died because `/v1/embeddings` on port 8088 answers 501 and the
+attempt was abandoned rather than checked against this file, which already names
+8089 for that model. **A failed instrument is not an absent signal.**
+
+Two things for the maintainer before any repair, neither a defect:
+
+- **Every one of their four real documents is frozen at `tone: technical`**, and
+  the project config says the same; only `docs_sample.md` is `literary`. A novel
+  has been translated, and banked, in documentation register throughout. Changing
+  it discards the translations under the old register — `cmd_extract` says so in
+  as many words, and it was reproduced on a throwaway project — so the register
+  has to be settled *before* remediation, or the work is done twice.
+- `lx web` is the only surface that shows source, target and `origin` side by
+  side. A terminal cannot. That gap is HANDOFF-052, and it was found by being
+  unable to write the first line of a remediation procedure.
+
 ## 2026-09-04 · A split carries across from the document it came from, and the memory route that was going to do it is lossy
 
 Closing HANDOFF-041. The package asked whether this project should split a source

@@ -284,7 +284,13 @@ class _Echo:
         items = json.loads(user[user.index("["):])
         self.seen.extend(i["id"] for i in items)
         return json.dumps(
-            {i["id"]: "已翻譯。" + "".join(re.findall(r"⟦\d+⟧", i["text"]))
+            # Long enough to be a plausible translation: since 2026-09-04
+            # `translate.misattributed` throws away a reply whose answers are
+            # far off their sources' length, and a four-character answer to a
+            # fifty-character sentence is refused — which turned these tests
+            # into assertions about the retry path rather than about selection.
+            {i["id"]: "這一段已經翻譯完成，內容僅供測試。" + i["id"]
+                      + "".join(re.findall(r"⟦\d+⟧", i["text"]))
              for i in items}, ensure_ascii=False)
 
 

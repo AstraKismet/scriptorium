@@ -6,17 +6,26 @@ path, which is where a hard sentence actually ends up, sent one segment by
 itself. For a reference paragraph that costs almost nothing. For prose it
 removes exactly what prose depends on.
 
-Four properties keep the fix honest, and each has a test here:
+**Half of that was undone on 2026-09-04, and this file says which half.** A
+neighbour outside the request used to arrive as its own source text, inlined
+under `before_text` / `after_text` with no id of its own; measured against a real
+model, the id-less paragraph is translated like any other content and the answer
+takes the *first real id*, moving every answer after it one place. So a batch
+edge now carries nothing, and a retried segment — which is a batch of one, and
+so had both sides inlined — carries nothing either. `translate._attach` holds the
+numbers and `docs/decisions.md`, 2026-09-04, holds the argument.
+
+What is left, and what each test here pins:
 
 * a neighbour already in the payload is *referenced by id*, never repeated, so
-  the default window costs the two edges of a batch rather than trebling every
-  request;
-* the two edges, and a retried segment on both sides, carry the source inline;
+  the default window costs an id per item rather than trebling every request;
+* a neighbour that is **not** an item of this request gets no field at all, and
+  no payload anywhere carries a `_text` field;
 * adjacency is **the document's**, never the order of the caller's list, which
   `lx repair` and `lx translate --ids` both hand over non-contiguous;
-* a neighbour is context the model may read and must not answer for.
+* the prompt paragraph appears only when a reference actually will.
 
-`docs/decisions.md`, 2026-07-29, D5.
+`docs/decisions.md`, 2026-07-29 D5, and 2026-09-04.
 """
 
 import json
@@ -50,7 +59,26 @@ BOOK = "\n\n".join([
     "She went in anyway, and the gate swung shut behind her.",
 ]) + "\n"
 
-DONE = "已翻譯。"
+#: A stand-in translation, and its **length is load-bearing**. Since
+#: 2026-09-04 `translate.misattributed` throws a whole reply away when an
+#: answer cannot plausibly be a translation of the source it was asked
+#: about, and the four characters this used to be were 8% of a fifty-character
+#: sentence -- refused, correctly, and the refusal turned every test in this
+#: file into an assertion about the retry path instead of about its own
+#: subject. Sized at roughly the 0.45 zh-TW renders English at.
+DONE = "這一段已經翻譯完成，內容僅供測試使用。"
+
+
+def done(seg):
+    """The stand-in translation for one segment, **distinct per id**.
+
+    One string returned for two different sources is a shape
+    `translate.misattributed` refuses, so a stub that answers every item with
+    the same constant is not a plausible reply — it makes every test in this
+    file an assertion about the retry path instead of about its own subject.
+    Takes a payload item or a stored segment; both carry `id`.
+    """
+    return DONE + seg["id"]
 
 
 class _Recorder:
@@ -77,7 +105,7 @@ class _Recorder:
         self.systems.append(system)
         if self._answer is not None:
             return self._answer(items)
-        return json.dumps({i["id"]: DONE for i in items}, ensure_ascii=False)
+        return json.dumps({i["id"]: done(i) for i in items}, ensure_ascii=False)
 
 
 #: Serial on purpose: two workers make the order of `stub.payloads` a race, and
@@ -127,12 +155,20 @@ def test_neighbour_by_id_keeps_an_interior_segment_from_being_sent_three_times(
         assert request.count(seg["masked"]) == 1, f"{seg['id']} was repeated"
 
 
-def test_neighbour_batch_edges_carry_the_source_across_the_boundary(tmp_path, monkeypatch):
-    """The two edges are the only places a batch has nothing to point at.
+def test_a_batch_edge_carries_no_neighbour_at_all(tmp_path, monkeypatch):
+    """The two edges point at nothing, and that is the 2026-09-04 reversal.
 
-    `_chunks` slices consecutive segments, so adjacency inside a batch is real —
-    but it stops at the boundary, and before this the first and last segment of
-    every batch were as contextless as a segment sent alone.
+    They used to carry the neighbour's source inlined under `before_text` /
+    `after_text`, which is what made a batch boundary as informed as its middle.
+    The field was measured: an id-less paragraph placed first in an item is
+    translated like any other content, and with nowhere of its own to go the
+    answer takes the *first real id* — 24, 25 and 25 of 25 segments
+    misattributed across three trials against the production shape, against 0, 0
+    and 1 with the field removed. `translate._attach` carries the numbers.
+
+    So a batch keeps its interior references and its edges keep nothing. What
+    this test pins is the absence: no item, anywhere, under any window, carries
+    a text field.
     """
     src, doc = _book(tmp_path, monkeypatch)
     segs = doc["segments"]
@@ -141,10 +177,11 @@ def test_neighbour_batch_edges_carry_the_source_across_the_boundary(tmp_path, mo
     _run(src, CFG, segs, stub, monkeypatch, batch=2)
 
     middle = next(p for p in stub.payloads if p[0]["id"] == ids[2])
-    assert middle[0]["before_text"] == segs[1]["masked"]   # across the boundary
-    assert middle[0]["after_id"] == ids[3]                 # inside the batch
+    assert set(middle[0]) == {"id", "kind", "text", "after_id"}   # nothing across
+    assert middle[0]["after_id"] == ids[3]                        # inside the batch
+    assert set(middle[1]) == {"id", "kind", "before_id", "text"}
     assert middle[1]["before_id"] == ids[2]
-    assert middle[1]["after_text"] == segs[4]["masked"]
+    assert not any(k.endswith("_text") for p in stub.payloads for i in p for k in i)
 
     # Every id the model can see is one it may answer for: an inlined neighbour
     # has nowhere to carry an id, and a named one is an item of this request.
@@ -158,12 +195,24 @@ def test_neighbour_batch_edges_carry_the_source_across_the_boundary(tmp_path, mo
     assert named, "nothing was referenced by id at all"
 
 
-def test_neighbour_on_retry_arrives_in_full_on_both_sides(tmp_path, monkeypatch):
-    """The path that needs context most, and the one that had none at all.
+def test_a_retry_carries_no_neighbour_at_all(tmp_path, monkeypatch):
+    """The rescue path sends the segment and nothing else, and that is a reversal.
 
-    `retry_one` sends a single segment, so there is no batch to borrow from and
-    both sides are inlined. That token cost is one segment's worth of request,
-    accepted deliberately: this is where a hard sentence ends up.
+    Until 2026-09-04 this file asserted the opposite, and the reasoning was
+    written down: "`retry_one` sends a single segment, so there is no batch to
+    borrow from and both sides are inlined ... this is where a hard sentence ends
+    up." The cost that sentence weighed was tokens. The cost it could not have
+    known about was measured on 2026-09-04 against a real model: of 25
+    single-segment retries built exactly that way, **nine came back carrying a
+    neighbour's translation**, eight of them the paragraph before. A batch of one
+    has a single id, so a model that translates the inlined neighbour has only
+    that id to put it under, and `accept` cannot tell — the placeholder gate is
+    the only structural check there is and prose carries no placeholders.
+
+    So the branch every other failure falls into was the likeliest place in the
+    system to corrupt a segment. It now carries no `before_text`, no
+    `after_text`, and — since a payload of one has nothing to point at — no
+    `before_id` or `after_id` either. See `docs/decisions.md`, 2026-09-04.
     """
     src, doc = _book(tmp_path, monkeypatch)
     segs = doc["segments"]
@@ -173,7 +222,7 @@ def test_neighbour_on_retry_arrives_in_full_on_both_sides(tmp_path, monkeypatch)
         # Skip the third id in the batch reply and answer it when it comes back
         # alone — which is exactly how `run_batch` falls through to `retry_one`.
         skip = items[2]["id"] if len(items) > 2 else None
-        return json.dumps({i["id"]: DONE for i in items if i["id"] != skip},
+        return json.dumps({i["id"]: done(i) for i in items if i["id"] != skip},
                           ensure_ascii=False)
 
     stub = _Recorder(answer)
@@ -181,10 +230,12 @@ def test_neighbour_on_retry_arrives_in_full_on_both_sides(tmp_path, monkeypatch)
 
     retry = stub.payloads[-1]
     assert [i["id"] for i in retry] == [ids[2]], "the retry should carry one segment"
-    assert retry[0]["before_text"] == segs[1]["masked"]
-    assert retry[0]["after_text"] == segs[3]["masked"]
-    assert "before_id" not in retry[0] and "after_id" not in retry[0]
+    assert set(retry[0]) == {"id", "kind", "text"}, "a retry carries no neighbour"
+    assert retry[0]["text"] == segs[2]["masked"]
     assert all(s.get("target") for s in load_doc(src, "zh-TW")["segments"])
+    # And the batch that preceded it still referenced by id, so this changed the
+    # retry path and nothing else.
+    assert any("before_id" in i for i in stub.payloads[0])
 
 
 def test_neighbour_document_edges_carry_the_side_that_exists_and_no_field_for_the_other(
@@ -225,7 +276,7 @@ def test_neighbour_echo_ignored_when_the_model_answers_for_one(tmp_path, monkeyp
     echo = "鄰居的字。"
 
     def answer(items):
-        out = {i["id"]: DONE for i in items}
+        out = {i["id"]: done(i) for i in items}
         out[ids[1]] = echo          # inlined before the requested pair
         out[ids[4]] = echo          # inlined after it
         return json.dumps(out, ensure_ascii=False)
@@ -236,7 +287,7 @@ def test_neighbour_echo_ignored_when_the_model_answers_for_one(tmp_path, monkeyp
 
     assert (applied, failures, refused) == (2, [], [])
     after = {s["id"]: s.get("target") for s in load_doc(src, "zh-TW")["segments"]}
-    assert after[ids[2]] == after[ids[3]] == DONE
+    assert after[ids[2]] == done(segs[2]) and after[ids[3]] == done(segs[3])
     assert after[ids[1]] is None and after[ids[4]] is None, "a neighbour was written"
 
 
@@ -248,6 +299,12 @@ def test_neighbour_context_follows_the_document_and_not_the_callers_list(
     segment 5 are consecutive prose. A confident lie about flow is worse than no
     context, so adjacency is read off `doc["segments"]` — the same authority
     `tone` and `eol` already have for facts about the document.
+
+    Since 2026-09-04 the payload can only *reference*, so the lie this rules out
+    has a sharper shape than it did: two segments the caller happened to put
+    side by side are not neighbours, so neither may name the other. Read off the
+    list, `s0002` would carry `after_id: s0005`; read off the document, it
+    carries nothing, because its real neighbour is not in this request.
     """
     src, doc = _book(tmp_path, monkeypatch)
     segs = doc["segments"]
@@ -255,9 +312,16 @@ def test_neighbour_context_follows_the_document_and_not_the_callers_list(
     _run(src, CFG, [segs[1], segs[4]], stub, monkeypatch, batch=6)
 
     payload = stub.payloads[0]
-    assert payload[0]["after_text"] == segs[2]["masked"], "the caller's next, not the document's"
-    assert payload[1]["before_text"] == segs[3]["masked"], "the caller's previous, not the document's"
-    assert "after_id" not in payload[0] and "before_id" not in payload[1]
+    assert [i["id"] for i in payload] == [segs[1]["id"], segs[4]["id"]]
+    assert set(payload[0]) == {"id", "kind", "text"}, "the caller's next is not a neighbour"
+    assert set(payload[1]) == {"id", "kind", "text"}, "nor is the caller's previous"
+
+    # And the same two segments, asked for together with what really sits
+    # between them, do reference each other — so the absence above is the
+    # document speaking and not the feature being off.
+    both = _Recorder()
+    _run(src, CFG, segs[1:5], both, monkeypatch, batch=6)
+    assert both.payloads[0][0]["after_id"] == segs[2]["id"]
 
 
 def test_neighbour_window_config_widens_the_window_and_zero_turns_it_off(
@@ -272,23 +336,17 @@ def test_neighbour_window_config_widens_the_window_and_zero_turns_it_off(
     assert all(set(i) == {"id", "kind", "text"} for p in silent.payloads for i in p)
     assert all(_CONTEXT_RULES not in s for s in silent.systems)
 
-    # Widened, and every neighbour inlined, which is what pins the ordering:
-    # a side reads in document order and a joined pair is what the document says
-    # there — so `before_text` ends with the immediately preceding segment.
+    # A batch of one can reference nothing, so a widened window is invisible in
+    # the payload — and the prompt paragraph goes with it. Before 2026-09-04 an
+    # id-less neighbour would have been inlined here instead, and `briefed` was
+    # computed from the document's adjacency rather than from what a request can
+    # actually carry; asking the weaker question would brief the model about
+    # fields no item of this run has.
     wide = dict(CFG, batch=dict(CFG["batch"], context=2))
-    stub = _Recorder()
-    _run(src, wide, segs, stub, monkeypatch, batch=1)
-    item = next(p[0] for p in stub.payloads if p[0]["id"] == segs[3]["id"])
-    assert item["before_text"] == f"{segs[1]['masked']}\n\n{segs[2]['masked']}"
-    assert item["after_text"] == f"{segs[4]['masked']}\n\n{segs[5]['masked']}"
-    assert _CONTEXT_RULES in stub.systems[0]
-
-    # A window wider than the room left on one side truncates, and does not
-    # wrap: the second segment of the document has one segment before it, not
-    # two and not none. `ids[i - window:i]` without the clamp slices `ids[-1:1]`
-    # here, which is empty.
-    second = next(p[0] for p in stub.payloads if p[0]["id"] == segs[1]["id"])
-    assert second["before_text"] == segs[0]["masked"]
+    alone = _Recorder()
+    _run(src, wide, segs, alone, monkeypatch, batch=1)
+    assert all(set(i) == {"id", "kind", "text"} for p in alone.payloads for i in p)
+    assert all(_CONTEXT_RULES not in s for s in alone.systems)
 
     # The same window with room to reference: two ids a side, space separated,
     # in document order. This is the only place more than one id lands in a
@@ -298,6 +356,13 @@ def test_neighbour_window_config_widens_the_window_and_zero_turns_it_off(
     item = stub.payloads[0][3]
     assert item["before_id"] == f"{segs[1]['id']} {segs[2]['id']}"
     assert item["after_id"] == f"{segs[4]['id']} {segs[5]['id']}"
+    assert _CONTEXT_RULES in stub.systems[0]
+
+    # A window wider than the room left on one side truncates, and does not
+    # wrap: the second segment of the document has one segment before it, not
+    # two and not none. `ids[i - window:i]` without the clamp slices `ids[-1:1]`
+    # here, which is empty — and the clamp is why this is one id and not zero.
+    assert stub.payloads[0][1]["before_id"] == segs[0]["id"]
 
     # And a config written before the knob existed gets the feature, not silence.
     # `lx init` scaffolds `DEFAULT_CONFIG`, but a project scaffolded last month
@@ -320,23 +385,34 @@ def test_neighbour_context_skips_a_segment_the_document_does_not_hold(tmp_path, 
     src, doc = _book(tmp_path, monkeypatch)
     stranger = {"id": "s9999", "kind": "para", "masked": "From another document."}
     context = _neighbour_context(doc, [doc["segments"][0], stranger], 1)
-    assert set(context[0]) == {doc["segments"][0]["id"]}
+    assert set(context) == {doc["segments"][0]["id"]}
     item = json.loads(_user_message([stranger], [], "draft", context))[0]
     assert set(item) == {"id", "kind", "text"}
 
 
-def test_neighbour_context_drops_a_neighbour_with_no_source_rather_than_sending_an_empty_one():
-    """An empty `before_text` is noise with a shape that invites the model to fill it in."""
-    doc = {"segments": [
-        {"id": "s0001", "kind": "para", "masked": ""},
-        {"id": "s0002", "kind": "para", "masked": "The gate stood open."},
-        {"id": "s0003", "kind": "para", "masked": "She stopped in the road."},
-    ]}
-    target = doc["segments"][1]
-    context = _neighbour_context(doc, [target], 1)
-    item = json.loads(_user_message([target], [], "draft", context))[0]
-    assert set(item) == {"id", "kind", "text", "after_text"}
-    assert item["after_text"] == "She stopped in the road."
+def test_no_payload_ever_carries_a_neighbours_source(tmp_path, monkeypatch):
+    """The invariant the 2026-09-04 measurement bought, stated as an absence.
+
+    This replaces a test that pinned the opposite — that an inlined neighbour
+    with no source was dropped rather than sent empty — because the branch it
+    guarded is gone. The property worth a test now is that nothing brings it
+    back: whatever the window, whatever the batch size, whatever the caller's
+    list looks like, an item is `id`, `kind`, `text` and at most an id on each
+    side. A field carrying a paragraph the model was not asked to translate is
+    what put a neighbour's words under a real segment's id.
+    """
+    src, doc = _book(tmp_path, monkeypatch)
+    segs = doc["segments"]
+    allowed = {"id", "kind", "text", "before_id", "after_id", "draft", "problems"}
+    for window in (0, 1, 2, 5):
+        cfg = dict(CFG, batch=dict(CFG["batch"], context=window))
+        for size in (1, 2, len(segs)):
+            stub = _Recorder()
+            _run(src, cfg, segs, stub, monkeypatch, batch=size)
+            for payload in stub.payloads:
+                for item in payload:
+                    assert set(item) <= allowed, (
+                        f"window {window}, batch {size}: unexpected {set(item) - allowed}")
 
 
 def test_neighbour_context_reaches_the_polish_mode_payload_as_well(tmp_path, monkeypatch):
@@ -355,9 +431,8 @@ def test_neighbour_context_reaches_the_polish_mode_payload_as_well(tmp_path, mon
     _run(src, CFG, drafted, stub, monkeypatch, batch=2, mode="polish")
 
     middle = next(p for p in stub.payloads if p[0]["id"] == segs[2]["id"])
-    assert middle[0]["draft"] == DONE
-    # Source, not target: the drafts are all `DONE` and these are English.
-    assert middle[0]["before_text"] == segs[1]["masked"]
+    assert middle[0]["draft"] == done(middle[0])
     assert middle[0]["after_id"] == segs[3]["id"]
-    assert all(DONE not in i.get(k, "")
-               for i in middle for k in ("before_text", "after_text"))
+    # The batch edge references nothing, and that is the same rule as the draft
+    # path's: `_attach` has one branch and both modes go through it.
+    assert set(middle[0]) == {"id", "kind", "text", "after_id", "draft"}
