@@ -142,6 +142,7 @@ CI 上有一組語料庫在把關，裡面收了 55 份刻意刁難的輸入（M
 | `lx untracked` | `sources` 掃得到卻還沒建立狀態的檔案；每個目標語言各一列 |
 | `lx status [--json] [--scan ROOT]` | 專案進度；`--json` 是凍結後的契約，見 `docs/contracts/status-json.md` |
 | `lx models [--provider P]` | 問後端它供應哪些模型 |
+| `lx audit [SRC] --lang L` | 找出離別人的原文比離自己更近的譯文——翻譯記憶，或單一文件。只回報，不修改，也不影響任何結束碼；需要一個 embedding 後端 |
 | `lx providers` / `lx stats` | 後端 / 覆蓋率 |
 
 `translate`、`repair`、`run` 都吃 `--dry-run`，只回報會做哪些工作，不會真的呼叫模型；
@@ -538,7 +539,7 @@ Markdown 與純文字目前都可以端到端跑完：抽取、翻譯、驗證�
 ## 開發
 
 ```bash
-python -m pytest -q                # 1952 tests，不碰網路
+python -m pytest -q                # 2005 tests，不碰網路
 python -m ruff check src tests
 ```
 

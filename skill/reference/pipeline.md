@@ -40,6 +40,7 @@ the second, third, and seventh translation of a document nearly free.
 | `lx waive SRC --lang L --ids A,B` | a **person** stands by this wording: the rules judgement can overrule are reported at warn instead of failing the build. Never run this yourself — report the finding and let the reviewer decide |
 | `lx unwaive SRC --lang L --ids A,B` | put a waived segment's errors back |
 | `lx commit SRC --lang L` | append approved segments to the TM |
+| `lx audit [SRC] --lang L [--json]` | stored translations that sit closer to another source than to their own — the translation memory, or one document's segments. Needs an embedding backend named by `embedding.provider`; **exits 0 whenever it ran and 2 whenever it could not**, so read `flagged`, never the exit code. It reports and never repairs, and it certifies nothing about what it did not flag — read `note`, `skipped` and `superseded` beside the findings |
 | `lx stats [--lang L]` | coverage across tracked documents |
 | `lx status [--json] [--lang L] [--scan ROOT] [--depth N]` | project status. `--json` is a frozen contract — `docs/contracts/status-json.md`. `--scan` reports every project under a root. Exits 0 even when it reports errors; read `totals.errors`, not the exit code — **and read `totals.waived` beside it**, because a document whose findings a reviewer stood by reports `errors: 0` too. |
 | `lx untracked [--json] [--max N]` | files matching `sources` with no state yet, one row per target language; `--json` is never truncated |

@@ -156,6 +156,7 @@ mean the translation is good; that is what review is for.
 | `lx untracked` | files matching `sources` with no state yet, one row per target language |
 | `lx status [--json] [--scan ROOT]` | project status; `--json` is the frozen contract in `docs/contracts/status-json.md` |
 | `lx models [--provider P]` | ask a backend which models it serves |
+| `lx audit [SRC] --lang L` | stored translations that sit closer to another source than to their own — the memory, or one document. Reports; never repairs, and never moves any exit code. Needs an embedding backend |
 | `lx providers` / `lx stats` | backends / coverage |
 
 `--overwrite-human` on `translate`, `repair`, `run` and `apply` lets a model
@@ -627,7 +628,7 @@ that lost.
 ## Development
 
 ```bash
-python -m pytest -q                # 1952 tests, no network
+python -m pytest -q                # 2005 tests, no network
 python -m ruff check src tests
 ```
 

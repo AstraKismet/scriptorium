@@ -73,9 +73,11 @@ _LIST_RETRIES = 1
 #: An embedding batch's own budget, bounded below the completion one the way a
 #: listing is and for the opposite half of the same reason: a listing answers
 #: from a table and gets 30 s, while an embedding request runs a model and may
-#: load it first — the measured cold load of a router model on this machine was
-#: 104.9 s, so 120 covers it and is still far below the 600 the shipped
-#: `llamacpp` entry sets for a translation.
+#: load it first. 120 s is chosen against the router figures in
+#: `config.DEFAULT_CONFIG` — a first-ever request whose weights are not on disk
+#: was measured at 104.9 s there, and that is a *download*, which is the number
+#: this is meant to survive rather than the number it is derived from. It stays
+#: far below the 600 the shipped `llamacpp` entry sets for a translation.
 #:
 #: **`_EMBED_RETRIES` is 1 for a measured reason, not for symmetry.** The
 #: per-input size ceiling of a `llama-server` answers **500**, and 500 is in
@@ -86,11 +88,12 @@ _EMBED_TIMEOUT = 120.0
 _EMBED_RETRIES = 1
 
 #: How many bytes an embeddings reply may be read from. Measured on this machine
-#: 2026-09-06: one 1024-dimension vector serializes to 22,032 bytes and a batch
-#: of sixteen to 348,910, so a row is about 22 KB. Sixteen mebibytes is a batch
-#: of sixteen at four thousand dimensions with room over — and `_MAX_LIST_BYTES`
-#: is deliberately not reused, because its own comment scopes it to a listing
-#: and 4 MiB would refuse a legitimate wide-model reply.
+#: 2026-09-06 against the bge-m3 server: 21,861 bytes for one 1024-dimension
+#: vector, 348,740 for a batch of sixteen and 1,394,722 for a batch of
+#: sixty-four — about 21.8 KB a row, and linear. Sixteen mebibytes is a batch of
+#: sixteen at four thousand dimensions with room over. `_MAX_LIST_BYTES` is
+#: deliberately not reused: its own comment scopes it to a listing, and 4 MiB
+#: would refuse a legitimate wide-model reply.
 _MAX_EMBED_BYTES = 16 * 1024 * 1024
 
 #: The widest embedding this project will believe. Real models run 384 to 4096;

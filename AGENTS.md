@@ -200,6 +200,23 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    through. Measured 2026-08-20 by the adversarial pass over the change that
    introduced this.
 
+   **`Provider.embed` is the third endpoint and takes the same shape**, added
+   2026-09-06 for `lx audit`: `POST {base_url}/embeddings` with a body of
+   exactly `{model, input}`, advisory, gating nothing, and pinned by a test of
+   its own. `encoding_format` is the field this rule most has to refuse — a
+   `base64` reply is a different shape, so every check on the way in reads
+   something that is not there. It goes through its own door into the transport
+   rather than through `_post`: an embeddings reply carries `prompt_tokens` and
+   **no** `completion_tokens`, so counting it would make `_UsageTotals` report a
+   run's replies climbing while the reported count stayed at zero. The reply is
+   untrusted like every other, and refused *whole* rather than row by row —
+   `_listing` drops a bad row because a model nobody could select costs nothing,
+   while a dropped vector removes a record from a comparison and a record that
+   was not compared reads exactly like one that came back clean. That is also
+   where 2026-08-20's flip condition landed: `POST /embeddings` on a
+   `llama-server` answers **200** with a bare array, and a strict reader is what
+   makes it loud. `docs/decisions.md`, 2026-09-06.
+
    **Reading the reply is free; asking for more of it is not.** Since 2026-09-02
    a completion's `usage` object is read off the response and reported as what
    the run cost. That adds no field to the body, and the two tests pinning it are
@@ -419,6 +436,9 @@ src/scriptorium/
   normalize.py   deterministic repair: punctuation width, CJK/Latin spacing
   checks.py      validators; error severity fails the build. Invariant 2b lives
                  here: block-start containment, host escaping, placeholder pairs
+  audit.py       whether a stored translation belongs to the source it is filed
+                 under — the one question `checks.py` cannot ask, because
+                 answering it needs a network service and a threshold
   store.py       .lx/state.db (document state, SQLite), the translation-memory
                  key, the memory itself (.lx/tm.*.jsonl, still JSONL and tracked)
   config.py      layered config, glossary, do-not-translate list, style sheet;
@@ -443,7 +463,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 1952 tests; no network (one is POSIX-only,
+python -m pytest -q                 # 2005 tests; no network (one is POSIX-only,
                                     #   one runs only where the filesystem folds case)
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
@@ -453,6 +473,8 @@ lx run book/ch1.md --lang zh-TW --limit 50    # at most 50 segments per pass; ru
 lx extract book/ch1.md --lang zh-TW --from book/whole.md   # carry a split or renamed file's translations across
 lx waive book/ch1.md --lang zh-TW --ids s0042   # stand by this wording: its errors report at warn
 lx models --provider llamacpp       # ask a backend which models it serves
+lx audit --lang zh-TW               # stored wordings that look filed under another source
+lx audit book/ch1.md --lang zh-TW   # the same question of one document's segments
 lx blocks docs/guide.md --lang zh-TW --json   # the rendered document, block by block
 lx sentences docs/guide.md --lang zh-TW       # where its sentences begin and end
 lx web                              # review workbench on 127.0.0.1:8787
@@ -710,6 +732,33 @@ own.
   apart by what follows the run, mechanically, and Chinese dialogue attribution
   is not, because telling an attribution verb from an ordinary one needs a verb
   table. See `docs/decisions.md`, 2026-08-21.
+- **Whether a stored translation belongs to the source it is filed under is
+  `audit.py`, and it may never become a gate.** It is the mirror of the sentence
+  rule above: `sentences.py` exists because a rule with no command in front of it
+  cannot be seen, and this exists because a rule that needs a network service and
+  a threshold cannot be in `checks.py` at all — invariant 10 says `lx check`'s
+  exit code is the evidence, and an exit code that depends on a machine being up
+  is not evidence of anything. `translate.misattributed` refused a similarity
+  test of its own for the same reason and said so in its docstring; what buys
+  this one its threshold is that it only ever *reports*. So `lx audit` exits 0
+  whenever it ran and 2 whenever it could not, findings never move the exit code,
+  and there is no `--strict`.
+
+  **It examines the wordings anything reads, not the lines of the file.**
+  `store.load_tm` keeps the last record per key and a repair here is an *append*,
+  so a superseded line is dead and cannot be made to go away — an audit over the
+  lines would name records nobody reads and go on naming them after the reviewer
+  had fixed everything. Measured on the maintainer's own file: 17 lines carry a
+  misattributed wording and **2** are what a command would read.
+
+  **A report never says clean, and says what it did not look at.** Two blind
+  spots are structural — a target that translates none of the sources in the
+  store, and one whose true source is byte-identical to the one it is filed under
+  — and the count of records it could not compare is printed beside the count it
+  flagged. A record that was not compared is not a record that came back clean,
+  and the same asymmetry decides how a malformed reply is treated:
+  `Provider._vectors` refuses one whole where `_listing` drops a row. See
+  `docs/decisions.md`, 2026-09-06.
 - A document's line terminator is a document-level fact, held in `doc["eol"]` and
   re-imposed once at render — never carried inside a segment, where the model and
   the reviewer would both have to reproduce a control character neither can be

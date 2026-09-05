@@ -3,6 +3,290 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-09-06 · The damage already banked is two records, not eighteen, and finding it needs an instrument this project did not have
+
+HANDOFF-053. HANDOFF-046 stopped a model's misattributed answers reaching working
+state and said so plainly: "Nothing here reaches the damage already done, and
+there is more of it than the first look suggested." This is the auditor it
+named. Everything below was measured on 2026-09-06 against the maintainer's own
+tracked `.lx/tm.zh-TW.jsonl` and `.lx/state.db`, with every flagged pair read by
+hand.
+
+### The instrument, and what it costs to be sure of it
+
+Ask, for each stored pair, whether the target sits closer to its own source than
+to every other source in the same store, and report the ones that do not. The
+model is `bge-m3` over `POST {base_url}/embeddings`; the margin is the only knob.
+
+| margin | flagged of 208 lines | false positives |
+|---|---|---|
+| 0.02 | 20 | 3 |
+| 0.05 | 18 | 1 |
+| **0.10** | **17** | **0** |
+| 0.15 | 16 | 0, and one true positive lost |
+
+**The work package's own table was wrong and the correction matters.** It said
+"18 with no false positives at 0.10". 18 is the count at 0.05, and the pair that
+0.05 adds is a *correct* translation — line 30, delta 0.070, whose rival is a
+near-duplicate of its own source with a different wording. The 0.02 numbers
+reproduced exactly, as did the diagonal (median 0.828, min 0.351, max 1.000), so
+the instrument is the same one; the threshold was mis-transcribed. 0.10 is the
+corner: the largest margin that keeps all seventeen and the smallest that admits
+none of the near-duplicates.
+
+**The margin is a module constant with a `--margin` flag over it and is not a
+config key.** A per-project threshold lets two runs of one command over one file
+disagree with nothing in either report saying why — which is what
+`checks.length_ratio`'s per-project band cost on 2026-09-02. As a flag it is per
+invocation and is echoed into the report, so a finding always travels with the
+number that produced it.
+
+**The noise floor is 1.3e-4 and it is not zero.** The same string embedded twice
+at the same batch shape is bit-identical; embedded at two *positions* of one
+batch it comes back at cosine 0.99987. So the margin is about 770 times the
+instrument's own reproducibility — a finding cannot be manufactured by which
+batch a record landed in — and the batching is a fixed function of the store so
+that two runs print the same numbers.
+
+### Three findings the package did not contain, each of which changed the design
+
+**(1) Fifteen of the seventeen are already dead.** `store.load_tm` keeps the last
+record per key, and the file holds the same book twice: a poisoned early pass at
+lines 9–29, 54–55 and 81–82, and a corrected later pass at 94–107 and 162–171.
+208 lines carry 157 wordings, and **2** of the seventeen are the record anything
+actually reads — lines 29 and 158. So the audit examines the effective records
+rather than the lines, and reports how many lines a later line supersedes.
+
+The argument is not tidiness. A repair here is an **append**: `lx commit` writes
+a corrected record and the later one wins, so a superseded line stays in the file
+for ever. An audit over the lines would send a reviewer to repair fifteen records
+no command reads, and would go on naming them afterwards — the reviewer could
+never see their own repair land, which is the one thing a report like this has to
+make possible. *Lost:* a `--all-lines` flag. It answers a forensic question with
+no action attached to it, in a file that only grows, and red line 1 forbids the
+only thing anybody could do with the answer.
+
+**(2) The document store holds one, and it is the one nothing can reach.**
+`s0006` of `docs/chapter_1.md`, delta 0.223, holding `s0005`'s translation — and
+its `origin` is `human`. `store.save_targets` refuses an `llm:*` write over a
+stored `human` and `cli.do_select` drops it from every queue, so no rerun, repair
+round or polish pass will ever touch it. It is the only defect in the whole
+dataset that the pipeline cannot repair by itself, which makes it the highest
+value the command produces. The chain is legible: `retry_one` inlined a
+neighbour, the model translated the neighbour and filed it under the real id, a
+reviewer accepted the fluent Chinese in front of them, and `lx commit` banked it
+as memory line 158. **The stores are not parallel.** Repairing the memory alone
+re-poisons it at the next commit, so the report names `origin` on every document
+finding and the note says which command reaches it.
+
+**(3) A duplicated source does not hide a record — and the first version of this
+design believed it did.** The brief handed to the design round asserted, as a
+property rather than a measurement, that a record whose source is byte-identical
+to another's cannot flag. 89 of the 208 records have a source that is not unique
+and **16 of the 17 true positives are among them**. The true statement is much
+narrower: a byte-identical rival contributes exactly the diagonal, so it can
+never be the argmax — which means only a record whose *true owner* shares its own
+source text is invisible. Written the other way round, a filter would have
+deleted almost every finding. A test now plants two records that share a source,
+kept apart by `context` the way the real file keeps its duplicates apart.
+
+### Where the call lives
+
+**`Provider.embed` is the third endpoint, and it is `list_models`-shaped.**
+Advisory, gating nothing, adding no field to the chat-completion body invariant 7
+pins — the body is `{model, input}` and a test says so. `AnthropicProvider`
+inherits a refusal, as it does for a listing. *Lost:* a new `kind`. `kind` names
+a wire dialect and the dialect here is OpenAI's; a second class serving one
+dialect is the two-answers-to-one-question shape this project rejects for
+`resolve_route`. *Lost:* a module outside `providers/` with its own `urlopen`,
+which would re-implement `_backoff`, `Retry-After`, the scheme guard, the
+`printable_url` masking on three branches and the `InvalidURL` catch — five
+things `base.py` got wrong once each and repaired.
+
+**It enters `_request` through a third door, `_embed_post`, and not through
+`_post`.** The measured reply carries `prompt_tokens` and **no**
+`completion_tokens`, so `_UsageTotals.record` takes its one-of-two-present branch
+and counts every reply as *unreported*: a run would report replies climbing while
+reported stayed at zero, for a command that bought no completions at all. `_post`
+records usage precisely because "its two callers are exactly the two `complete()`
+implementations", and a third caller would falsify that rather than merely be
+inaccurate. `_get` set the precedent — a second door, and a listing has no cost
+to report. *Lost:* overriding `USAGE_FIELDS` to `("prompt_tokens",
+"total_tokens")`, which is a fact about a completion's wire format on a class
+that serves both endpoints. What the audit reports instead is what it counted
+itself.
+
+The budget is bounded downward only, `_get`'s rule: `_EMBED_TIMEOUT` 120 because
+an embedding request runs a model where a listing answers from a table, and
+`_EMBED_RETRIES` **1** for a measured reason — the per-input size ceiling answers
+**500**, 500 is in `_RETRYABLE`, and the refusal is deterministic, so the shipped
+`retries: 3` spends four attempts re-asking a question already answered.
+
+### The reply is refused whole, and that is the opposite of the listing's rule
+
+`Provider._vectors` refuses a malformed reply entirely; `_listing` drops a bad
+row and carries on. The asymmetry is the point. A dropped listing row costs a
+model nobody could have selected anyway. A dropped vector silently removes a
+record from the comparison — and **a record that was not compared is
+indistinguishable, in the answer, from one that came back clean**, which is the
+single output this command must never produce. The one exception is a zero
+vector, which becomes a named `skipped` entry, because one degenerate input does
+not condemn a run.
+
+Refused: a top level that is not an object; a row count that differs from the
+input count (`translate.misattributed`'s rule one layer down — there is no id in
+this payload to realign by); an `index` that is not a permutation of the request;
+a non-numeric, boolean or non-finite coordinate; and a width that disagrees
+within a reply **or with an earlier reply of this run**, which is the check a
+single reply cannot make and which a router swapping its resident model would
+otherwise walk straight through.
+
+`NaN` earns its own sentence: `json.loads` takes the bare token as an extension,
+and a NaN does not raise anywhere downstream — it makes every comparison false,
+so a poisoned reply would report a clean store.
+
+### The version-segment note fired, and the answer is not the one it named
+
+`docs/decisions.md` of 2026-08-20 refused to reject a `base_url` with no version
+segment, and flagged the fact that would flip it: "If this project ever adds a
+text-completion or an embeddings call … a missing version segment there is not a
+404 but a **200 carrying a different schema** … the cost stops being one failed
+run and starts being a batch of plausible bad data." Both halves are now measured
+true on this very server: `POST /embeddings` answers 200 with a bare array whose
+`embedding` is a list of lists.
+
+**The premise it rested on was that such a reply is silent. It is not silent to a
+reader that demands an object.** `_vectors` refuses it before any comparison is
+scored, so the cost is one failed request and zero conclusions — the same cost a
+404 has, which is exactly the property the 2026-08-20 recommendation rested on.
+The flip condition should therefore be restated: it fires the day a path can
+answer 200 in a way a **strict reader cannot distinguish from the correct
+shape**, not merely the day two handlers differ. These two shapes are disjoint —
+`dict` against `list` at the top, flat against nested inside a row — and that is
+a measurement, not an assumption.
+
+So what ships is the strict shape check and one conditional sentence: the refusal
+carries `_url_hint`, which fires only where `has_version_segment` is false, so a
+`/v1` endpoint answering the wrong shape is not told it forgot a version segment.
+That widens `_url_hint`'s own docstring, which said it never fires where the
+route was found — here the route *was* found, at the wrong handler, and the path
+is still exactly what is wrong. *Lost:* a refusal in `_field_base_url`. It is
+order-dependent (the rule would have to read `kind`, which a block written field
+by field does not have yet), it refuses the maintainer's own measured-working
+`http://127.0.0.1:8088`, and it does not close the hole anyway, because a
+hand-edited file is the other writer.
+
+### The command
+
+`lx audit [SRC] --lang L`. The absence of `SRC` is what selects the memory, the
+axis `lx status --scan` already uses. One command rather than two, because the
+question is identical and only the way a record is named differs.
+
+**Exit 0 whenever the audit ran, exit 2 whenever it could not; findings never
+move the exit code.** Both of the package's red lines point the same way. A
+nonzero exit on findings is a CI hook waiting to be written, and this
+instrument's findings are statistical where `lx check`'s are mechanically
+decidable — invariant 4's line, and the reason `translate.misattributed` refused
+a similarity test of its own. And the moment exit 1 means "found something", exit
+0 means "found nothing", which is one shell script away from "clean" — the claim
+this instrument cannot make. Anyone who wants a gate reads `flagged` out of
+`--json` and writes one, which is a decision somebody has to take on purpose.
+*Lost:* exit 1 on findings, symmetrical with `lx check`. *Lost:* an `--exit-code`
+flag, which is the gate arriving by another door.
+
+**The note is printed whether or not anything was found, and the word "clean"
+appears nowhere in the command's output.** It names the two blind spots by
+number, says how many records were not compared and why, and names the commands
+that compose — because the obvious one does not: `lx waive` refuses a segment
+`lx check` reports nothing on, and `lx check` reports nothing on any of these. A
+fluent sentence that translates the wrong source breaks no mechanical rule.
+
+### Which backend, and the fallback that had to be avoided
+
+`embedding.provider` names an ordinary `providers.*` block. Ordinary on purpose:
+that is what makes `_field_base_url`'s userinfo refusal, `_field_api_key_env`'s
+credential rules and `providers.available`'s masking bind to it by position
+rather than by anybody remembering to. It is validated at write time by
+`_field_embedding_provider` and is absent from `HTTP_WRITABLE_KEYS`, which is a
+literal tuple for exactly this reason — the key deciding which host a project's
+entire memory is POSTed to is the last one that should be settable over the wire.
+
+**It is deliberately not a `routing` stage.** `ROUTING_STAGES` is read verbatim
+as `lx translate --mode`'s choices, is projected per stage into `GET /api/state`,
+and is asserted equal to `DEFAULT_CONFIG["routing"]` by a test — so an `embed`
+entry would create `lx translate --mode embed`, move a documented response shape
+and fail that test. The decisive reason is worse than any of those:
+`config.route_entry` falls back to the `draft` entry for any stage it does not
+recognise, so a project that never configured embeddings would POST every source
+and every translation it holds to the **translation** backend. A data-egress
+default nobody chose. *Lost:* a required `--provider` with no config key at all,
+which survives as the override and loses as the only mechanism — it forfeits the
+write-time check and leaves no record of which instrument produced a number.
+
+### What it does not do, measured rather than asserted
+
+**No window.** A positional window was built and scored: at ±10 it lost 2 of the
+17 and at ±50 it still lost 1, whose true owner sat 150 records away in a file
+holding the same book twice. The saving was not needed either — the comparison
+runs at about 39,000 pairs a second in pure Python, so a 3000-record store is
+four minutes. A bound that silently reduces recall is the failure this command
+exists to report, committed by the command itself.
+
+**No second threshold.** A conjunction of the margin with a ceiling on the
+diagonal was proposed and measured: all 17 true positives have a diagonal at or
+below 0.645 while every clean record with any rival advantage sits at or above
+0.699, so at margin 0.05 it gives 17 with zero false positives. It was refused
+because the property claimed for it does not hold. The false positives it removes
+are *high*-diagonal records — correct translations with a close rival — and the
+mode that will dominate as a store grows is the opposite one: a short heading or
+a one-word entry whose own diagonal is already 0.51 to 0.65, which a ceiling
+admits. It buys no independence from N, and at margin 0.10 it changes nothing on
+the only labelled corpus there is. A second knob calibrated on the same 208
+records is not a second axis.
+
+**No truncation.** Over-long inputs are skipped and named. Truncating changes
+which record a target is nearest to — the distinguishing sentence of a long
+paragraph is as likely to be in the tail as the head — so the report would be
+making a claim about text it never embedded. `estimated_tokens` weights
+characters by Unicode category `Lo`, from two measured ratios (0.85 tokens per
+character for Traditional Chinese, 0.24 for English, the second rounded up to
+0.30), and the asymmetry is chosen: over-skipping English prose is reported,
+under-skipping CJK costs a request that fails. **Not `mask.CJK_RE`**, whose range
+is pinned to where `mdparse` puts segment boundaries and whose own comment names
+the exclusion of kana and Hangul as a limitation — borrowing it would inherit a
+fact about block structure to answer a question about token density.
+
+**No compiled dependency, and that shapes the arithmetic.** Vectors are held as
+`array("f")`: measured, a list of Python floats costs about 32 KB per
+1024-dimension vector against 4 KB, so a ten-thousand-record memory is 640 MB one
+way and 80 MB the other, and the 22% the array costs in speed is what makes a
+long book possible at all. The inner product is `sum(map(mul, a, b))`, measured
+2.1 times faster than a generator over `zip`.
+
+### The honest comparison with what was already free
+
+`checks.length_ratio` with the real `zh-TW` band finds **6 of the 17**, with 6
+false positives, and its forty-character floor silences six of the true positives
+outright. Those six are already reported by `lx check` today, so the embedding's
+*marginal* yield over what a maintainer can see for nothing is **11 records** —
+that is the number the network dependency has to be worth, and it is stated here
+rather than left as "the embedding works".
+
+### What is still not known
+
+The margin was chosen on 208 records and the score is a maximum over every other
+record, so it can only grow with the store. Subsampling the measured file, the
+worst delta over records known clean runs +0.0002 at 25 records and +0.0700 at
+208, against a lowest true positive of +0.1166 — so at the size it was calibrated
+on, the worst false positive has already consumed 60% of the gap. Recall moves
+the same way and for a different reason: the instrument needs the true owner to
+be *in the audited set*, and at 25 records it finds only 44.8% of the seventeen.
+**Neither number is validated for a novel's memory of thousands.** `own` and
+`delta` ride on every finding, and the note says what was not examined, so a
+reader at that size can see how near the edge each call sat; but the honest
+statement is that this is measured on one book, one language pair, one model and
+one run.
+
 ## 2026-09-04 · A model answers by position, not by id, and a novel is the shape that makes it happen
 
 HANDOFF-046. The maintainer reported two things seen in the review workbench: the
