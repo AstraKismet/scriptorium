@@ -736,12 +736,14 @@ def test_a_listing_is_bounded_below_the_completion_budget(models_server):
     p = build("local", _cfg(models_server, timeout=600, retries=3))
     real = p._request
 
-    def spy(url, headers, payload=None, method="POST", timeout=None, retries=None,
-            max_bytes=None):
-        seen[method] = (timeout, retries)
-        seen["max_bytes"] = max_bytes
-        return real(url, headers, payload=payload, method=method,
-                    timeout=timeout, retries=retries, max_bytes=max_bytes)
+    # `**kw` rather than the parameter list spelled out: a spy that names each
+    # argument is a second declaration of `_request`'s signature, and it breaks
+    # the day one is added — which it did, when `what` arrived so that a bounded
+    # read could say which kind of read it was.
+    def spy(url, headers, **kw):
+        seen[kw.get("method", "POST")] = (kw.get("timeout"), kw.get("retries"))
+        seen["max_bytes"] = kw.get("max_bytes")
+        return real(url, headers, **kw)
 
     p._request = spy
     MODELS["payload"] = {"data": [{"id": "m"}]}
@@ -1509,3 +1511,325 @@ def test_a_partial_count_is_a_floor_and_says_the_word():
     assert usage_line({"prompt": 0, "completion": 0, "total": 0,
                        "replies": 0, "reported": 0}) is None
     assert usage_line(None) is None
+
+
+# ── embeddings: the third endpoint, and the reply nobody wrote for us ───────
+#
+# `Provider.embed` is `lx audit`'s instrument. The handler below answers the
+# OpenAI embeddings shape and lets a test dictate both halves of what makes this
+# hard: which vector a given input comes back as, so a geometry can be planted
+# and read, and how the reply is deformed on the way out, so every refusal in
+# `Provider._vectors` has a live server behind it rather than a hand-built dict.
+
+#: The channel from a test to the handler thread.
+#:
+#: `vectors` maps an input string to the first coordinates of its vector, padded
+#: with zeros; anything absent gets a **one-hot vector of its own**, assigned on
+#: first sight. That fallback is chosen so an unlisted string is exactly
+#: orthogonal to every other unlisted string and to every planted one: filler
+#: text can never manufacture a finding, so a test's assertions are about the
+#: geometry it wrote down and nothing else.
+#:
+#: `mangle` is called with the well-formed body and returns what is actually
+#: sent — an object, a list, or a `str` for the shapes `json.dumps` will not
+#: produce, such as a bare `NaN`.
+EMBED = {"vectors": {}, "mangle": None, "seen": [], "slots": {}, "dims": 64}
+
+#: How many low coordinates a planted vector may use. Everything above is the
+#: one-hot space the fallback assigns from, so the two cannot collide.
+_EMBED_PLANTED_DIMS = 8
+
+
+def _embed_reset(**kw):
+    EMBED.update({"vectors": {}, "mangle": None, "seen": [], "slots": {},
+                  "dims": 64})
+    EMBED.update(kw)
+
+
+def _embed_vector(text):
+    dims = EMBED["dims"]
+    planted = EMBED["vectors"].get(text)
+    if planted is not None:
+        return list(planted) + [0.0] * (dims - len(planted))
+    slots = EMBED["slots"]
+    if text not in slots:
+        slots[text] = len(slots)
+    at = _EMBED_PLANTED_DIMS + slots[text]
+    assert at < dims, "the mock ran out of one-hot slots; plant the text or raise dims"
+    return [1.0 if i == at else 0.0 for i in range(dims)]
+
+
+class EmbeddingsHandler(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        payload = json.loads(self.rfile.read(n))
+        EMBED["seen"].append({"payload": payload, "path": self.path,
+                              "auth": self.headers.get("Authorization")})
+        texts = payload.get("input") or []
+        body = {"model": payload.get("model"), "object": "list",
+                # No `completion_tokens`, exactly as the measured server answers.
+                "usage": {"prompt_tokens": 3 * len(texts),
+                          "total_tokens": 3 * len(texts)},
+                "data": [{"object": "embedding", "index": i,
+                          "embedding": _embed_vector(t)} for i, t in enumerate(texts)]}
+        mangle = EMBED["mangle"]
+        out = mangle(body) if mangle else body
+        raw = out.encode() if isinstance(out, str) else json.dumps(out).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+
+@pytest.fixture(scope="module")
+def embeddings_server():
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), EmbeddingsHandler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{httpd.server_address[1]}/v1"
+    httpd.shutdown()
+
+
+def test_the_embeddings_request_carries_only_a_model_and_an_input(embeddings_server):
+    """Invariant 7's rule, applied to the second body this project sends.
+
+    The chat completion's five keys are pinned by two tests; this is the third
+    endpoint and it gets the same treatment. `encoding_format` is the field that
+    would hurt most — `base64` changes the reply's own shape, and every check in
+    `_vectors` reads the array form — so a "harmless" addition here is not.
+    """
+    _embed_reset()
+    build("local", _cfg(embeddings_server)).embed(["one", "two"])
+    sent = EMBED["seen"][-1]
+    assert set(sent["payload"]) == {"model", "input"}
+    assert sent["payload"]["input"] == ["one", "two"]
+    assert sent["path"].endswith("/v1/embeddings")
+    assert sent["auth"] is None, "a local server is offered no credential"
+
+
+def test_an_embedding_is_never_counted_as_a_completion(embeddings_server):
+    """`_embed_post`, not `_post`, and this is what says so.
+
+    The measured reply carries `prompt_tokens` and no `completion_tokens`, so
+    routing it through `_post` would take `_UsageTotals.record`'s
+    one-of-two-present branch: `replies` climbing while `reported` stayed at
+    zero, on a command that bought no completions at all. This fails the moment
+    anyone simplifies the second door away.
+    """
+    _embed_reset()
+    p = build("local", _cfg(embeddings_server))
+    p.embed(["one", "two", "three"])
+    assert p.usage.snapshot() == {"prompt": 0, "completion": 0, "total": 0,
+                                  "replies": 0, "reported": 0}
+
+
+def test_an_embedding_batch_is_bounded_below_the_completion_budget(embeddings_server):
+    """A read's budget on a POST. Bounded downward only, `_get`'s own rule."""
+    from scriptorium.providers.base import _EMBED_RETRIES, _EMBED_TIMEOUT
+
+    _embed_reset()
+    seen = {}
+    p = build("local", _cfg(embeddings_server, timeout=600, retries=3))
+    real = p._request
+
+    def spy(url, headers, **kw):
+        seen["budget"] = (kw.get("timeout"), kw.get("retries"))
+        seen["max_bytes"] = kw.get("max_bytes")
+        seen["what"] = kw.get("what")
+        return real(url, headers, **kw)
+
+    p._request = spy
+    p.embed(["one"])
+    assert seen["budget"] == (_EMBED_TIMEOUT, _EMBED_RETRIES)
+    assert _EMBED_TIMEOUT < 600 and _EMBED_RETRIES < 3
+    assert seen["max_bytes"] and seen["what"] == "a batch of embeddings"
+
+
+def test_a_shorter_embedding_budget_than_the_cap_is_kept(embeddings_server):
+    """Bounded downward *only* — the rule `_get` states and the reason it gives:
+    a project that deliberately chose a shorter timeout keeps it."""
+    _embed_reset()
+    seen = {}
+    p = build("local", _cfg(embeddings_server, timeout=5, retries=0))
+    p._request = lambda *a, **k: seen.update(
+        {"short": (k.get("timeout"), k.get("retries"))}) or {"data": []}
+    with pytest.raises(ProviderError):
+        p.embed(["one"])          # the stub answers no rows; the budget is the subject
+    assert seen["short"] == (5, 0)
+
+
+def test_vectors_are_placed_by_index_and_not_by_arrival(embeddings_server):
+    """The specification says `index` is the answer's address, so it is read.
+
+    This endpoint was measured answering in order on one build, and a
+    measurement on one build is not a licence to ignore the field — an
+    instrument built to find misattribution must not be able to misattribute.
+    """
+    _embed_reset(vectors={"a": [1, 0, 0], "b": [0, 1, 0], "c": [0, 0, 1]})
+    EMBED["mangle"] = lambda body: {**body, "data": list(reversed(body["data"]))}
+    rows = build("local", _cfg(embeddings_server)).embed(["a", "b", "c"])
+    assert [list(r[:3]) for r in rows] == [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+
+
+def test_a_bare_array_reply_is_refused_and_names_the_missing_version_segment(
+        embeddings_server):
+    """The measured shape of the version-segment mistake.
+
+    `POST /embeddings` and `POST /v1/embeddings` are different handlers on
+    `llama-server`, and the first answers **200** with a bare array whose
+    `embedding` is a list of lists. `docs/decisions.md` of 2026-08-20 named an
+    embeddings call as the fact that would flip its `base_url` decision, on the
+    premise that such a reply would be silent. It is not silent to a reader that
+    demands an object — and the hint fires only where the path could be the
+    cause, which is the pair `_url_hint`'s own tests already assert for a 404.
+    """
+    _embed_reset()
+    EMBED["mangle"] = lambda body: [{"index": r["index"],
+                                     "embedding": [r["embedding"]]}
+                                    for r in body["data"]]
+    bare = embeddings_server.rsplit("/v1", 1)[0]
+    with pytest.raises(ProviderError) as e:
+        build("local", _cfg(bare)).embed(["a"])
+    assert "did not answer an embeddings list" in str(e.value)
+    assert "version segment" in str(e.value)
+
+    with pytest.raises(ProviderError) as versioned:
+        build("local", _cfg(embeddings_server)).embed(["a"])
+    assert "version segment" not in str(versioned.value), (
+        "a path that already carries one must not be told it forgot one")
+
+
+def test_a_row_count_that_differs_from_the_request_is_refused(embeddings_server):
+    """`translate.misattributed`'s rule one layer down: a reply that answers a
+    different number of questions does not answer this request, and there is no
+    id in this payload to realign by."""
+    _embed_reset()
+    EMBED["mangle"] = lambda body: {**body, "data": body["data"][:1]}
+    with pytest.raises(ProviderError, match="asked .* for 2 embedding"):
+        build("local", _cfg(embeddings_server)).embed(["a", "b"])
+
+
+@pytest.mark.parametrize("index", [0, 5, -1, True, "0", None])
+def test_an_index_that_is_not_a_position_in_the_request_is_refused(
+        embeddings_server, index):
+    """Duplicated, out of range, boolean, textual or missing — every one of them
+    means at least one input has no vector, and a missing vector is what would
+    silently shrink the comparison."""
+    _embed_reset()
+
+    def mangle(body):
+        rows = body["data"]
+        rows[1]["index"] = index
+        return {**body, "data": rows}
+
+    EMBED["mangle"] = mangle
+    with pytest.raises(ProviderError, match="index"):
+        build("local", _cfg(embeddings_server)).embed(["a", "b"])
+
+
+def test_a_vector_holding_a_nan_is_refused_rather_than_compared(embeddings_server):
+    """`json.loads` takes the bare token and nothing downstream raises on it.
+
+    A NaN makes every comparison false, so a poisoned reply would report a clean
+    store — the one output this instrument must never produce.
+    """
+    _embed_reset()
+    EMBED["mangle"] = lambda body: json.dumps(body).replace("1.0", "NaN", 1)
+    with pytest.raises(ProviderError, match="finite"):
+        build("local", _cfg(embeddings_server)).embed(["a"])
+
+
+@pytest.mark.parametrize("bad", [[["nested"]], "text", 4, [], [True, 1.0], ["x", 2]])
+def test_a_row_whose_embedding_is_not_a_vector_of_numbers_is_refused(
+        embeddings_server, bad):
+    """Including the nested form, which is what the wrong handler returns."""
+    _embed_reset()
+    EMBED["mangle"] = lambda body: {**body,
+                                    "data": [{**body["data"][0], "embedding": bad}]}
+    with pytest.raises(ProviderError):
+        build("local", _cfg(embeddings_server)).embed(["a"])
+
+
+def test_vectors_of_different_widths_in_one_reply_are_refused(embeddings_server):
+    _embed_reset()
+
+    def mangle(body):
+        rows = body["data"]
+        rows[1]["embedding"] = rows[1]["embedding"][:4]
+        return {**body, "data": rows}
+
+    EMBED["mangle"] = mangle
+    with pytest.raises(ProviderError, match="different"):
+        build("local", _cfg(embeddings_server)).embed(["a", "b"])
+
+
+def test_a_width_change_between_requests_is_refused(embeddings_server):
+    """The check a single reply cannot make.
+
+    The development backend is a router serving sixteen models with one
+    resident. One that swapped the resident model between batches would hand
+    back two incomparable geometries with nothing in either reply saying so, and
+    the run would compare them without noticing.
+    """
+    _embed_reset()
+    p = build("local", _cfg(embeddings_server))
+    p.embed(["a"])
+    EMBED["mangle"] = lambda body: {**body,
+                                    "data": [{**r, "embedding": r["embedding"][:8]}
+                                             for r in body["data"]]}
+    with pytest.raises(ProviderError, match="earlier request of this run"):
+        p.embed(["b"])
+
+
+def test_a_zero_vector_comes_back_rather_than_ending_the_run(embeddings_server):
+    """The one reply defect the provider does not refuse.
+
+    Whether a degenerate input ends a run or skips one record is the caller's
+    policy, and a normalizer here would have to answer it before the caller
+    could. `audit.unit` is where it is answered.
+    """
+    from scriptorium.audit import unit
+
+    _embed_reset(vectors={"a": [0, 0, 0]})
+    rows = build("local", _cfg(embeddings_server)).embed(["a"])
+    assert not any(rows[0])
+    assert unit(rows[0]) is None
+
+
+def test_an_oversized_embeddings_reply_is_refused_before_it_is_parsed(
+        embeddings_server):
+    """The listing's byte cap, for the second bounded read — and the sentence
+    that comes with it now names which read it was."""
+    from scriptorium.providers.base import _MAX_EMBED_BYTES
+
+    _embed_reset()
+    EMBED["mangle"] = lambda body: {**body, "pad": "x" * (_MAX_EMBED_BYTES + 1)}
+    with pytest.raises(ProviderError) as e:
+        build("local", _cfg(embeddings_server)).embed(["a"])
+    assert "a batch of embeddings" in str(e.value)
+    assert "Nothing was parsed" in str(e.value)
+    assert "model list" not in str(e.value), (
+        "the bounded-read message was written for the listing and must not "
+        "describe the caller wrongly")
+
+
+def test_a_backend_that_serves_no_embeddings_says_so_rather_than_failing_late():
+    """`AnthropicProvider` inherits the base refusal, as it does for a listing.
+
+    The sentence names the key to set, which is the only remedy there is.
+    """
+    cfg = {"providers": {"c": {"kind": "anthropic", "model": "m", "api_key_env": ""}}}
+    with pytest.raises(ProviderError, match="does not serve embeddings"):
+        build("c", cfg).embed(["a"])
+
+
+def test_nothing_to_embed_is_refused_without_a_round_trip(embeddings_server):
+    """An empty `input` answers 400, which is not retryable, so sending it buys
+    one certain failure and a worse sentence."""
+    _embed_reset()
+    with pytest.raises(ProviderError, match="nothing to embed"):
+        build("local", _cfg(embeddings_server)).embed([])
+    assert EMBED["seen"] == []

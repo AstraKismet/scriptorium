@@ -1415,13 +1415,68 @@ def tracked(lang=None):
         conn.close()
 
 
-def load_tm(lang):
-    """``{key: record}``. Last write wins, so a correction supersedes its original.
+def tm_lines(lang):
+    """``[(lineno, record)]`` for every readable line, in file order.
 
     A line that is not an object with a hash and a target is skipped rather than
     raised on. The file is append-only and hand-editable by design, and one bad
     line taking down every command that reads the memory is a poor trade for a
     diagnostic nobody asked for.
+
+    Split out of :func:`load_tm` for `lx audit`, which needs to name the line a
+    record came from and cannot get one from a dict keyed by identity: a
+    corrected re-bank and the wording it supersedes are *one* entry there and
+    two lines here. Nothing else reads it — the parse rule for what counts as a
+    record lives here now so that the reader with line numbers and the reader
+    without cannot come to disagree about which lines exist.
+    """
+    out = []
+    p = tm_path(lang)
+    if not os.path.exists(p):
+        return out
+    with open(p, encoding="utf-8") as f:
+        for lineno, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(rec, dict) or not rec.get("hash") or not rec.get("target"):
+                continue
+            out.append((lineno, rec))
+    return out
+
+
+def tm_effective(lang):
+    """``([(lineno, record)], superseded)`` — the memory as anything actually reads it.
+
+    Last write wins, so a correction supersedes its original; ``superseded`` is
+    how many readable lines a later line displaced. The records come back in the
+    order their key first appears, which is what :func:`load_tm` has always
+    handed back and is a pure function of the file.
+
+    It exists because "how many wordings does this memory hold" and "how many
+    lines does this file have" are different numbers, and only the first one is
+    a fact about the project: measured 2026-09-06 on the maintainer's tracked
+    `.lx/tm.zh-TW.jsonl`, 208 lines carry 157 wordings, and 15 of the 17
+    misattributed lines in it are already displaced by a later, correct re-bank.
+    An audit over the lines would send a reviewer to repair fifteen records no
+    command reads, and — because a repair here is an *append* and a displaced
+    line stays displaced — nothing they did would change what the audit said
+    the next time. See `docs/decisions.md`, 2026-09-06.
+    """
+    rows = {}
+    total = 0
+    for lineno, rec in tm_lines(lang):
+        total += 1
+        rows[record_key(rec)] = (lineno, rec)
+    return list(rows.values()), total - len(rows)
+
+
+def load_tm(lang):
+    """``{key: record}``. Last write wins, so a correction supersedes its original.
 
     **The whole record, not the target.** It flattened to ``rec["target"]`` until
     2026-08-17, which is a smaller thing to hold and made a line's own account of
@@ -1429,22 +1484,13 @@ def load_tm(lang):
     sets, and a wholesale renumbering satisfies that. :func:`tm_lookup` returns
     the map beside the target now, and `lx todo`'s fuzzy panel will want the
     `source` off the same line.
+
+    Built on :func:`tm_effective` rather than reading the file itself, so that
+    "which line wins" is stated once. Two loops each ending in
+    ``rows[record_key(rec)] = rec`` is not a duplication anybody notices until
+    one of them grows a condition.
     """
-    tm = {}
-    p = tm_path(lang)
-    if os.path.exists(p):
-        with open(p, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    try:
-                        rec = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if not isinstance(rec, dict) or not rec.get("hash") or not rec.get("target"):
-                        continue
-                    tm[record_key(rec)] = rec
-    return tm
+    return {record_key(rec): rec for _, rec in tm_effective(lang)[0]}
 
 
 def tm_lookup(tm, seg, tone=None):
