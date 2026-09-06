@@ -2209,11 +2209,19 @@ def do_audit(cfg, lang, src=None, provider=None, model=None, margin=None,
     embedding = cfg.get("embedding")
     name = provider or (embedding.get("provider") if isinstance(embedding, dict) else "") or ""
     if not isinstance(name, str) or not name.strip():
+        # The second sentence exists because the first one's remedy can be
+        # refused: `lx config set embedding local` writes a scalar, and then
+        # `embedding.provider` addresses nothing inside it — a dead end a reader
+        # would otherwise have to work out from two messages that do not mention
+        # each other.
         raise ConfigError(
             "no embedding backend. `lx audit` needs one, and nothing else does — "
             "`lx config set embedding.provider <name>` names a configured backend for "
             "this project, or `--provider <name>` names one for this run. "
-            "`lx providers` lists what is configured.")
+            "`lx providers` lists what is configured."
+            + ("" if embedding is None or isinstance(embedding, dict) else
+               " `embedding` currently holds a single value rather than a block, so "
+               "run `lx config unset embedding` first."))
     doc = load_doc(src, lang) if src else None
     return audit.run(build(name.strip(), cfg, model), lang, doc=doc,
                      margin=audit.MARGIN if margin is None else margin,
@@ -2253,20 +2261,34 @@ def cmd_audit(args, cfg):
          + (f" · {report['dimensions']} dims" if report["dimensions"] else "")
          + f" · {report['comparisons']} comparison(s)"
          + (f" · {report['superseded']} line(s) superseded" if report["superseded"] else ""))
-    for finding in report["flagged"][: args.max]:
+    # Floored, `cmd_untracked`'s line and for its measured reason: a negative
+    # slice counts from the tail while the arithmetic below counts from the head,
+    # so `--max -1` showed one finding fewer and then claimed two more than
+    # exist. On the one command in this project whose whole output is a count of
+    # suspicious records, a report that contradicts its own header and names
+    # records that are not there is the worst shape available. `cmd_check`, which
+    # this block was written from, still carries the defect and is still a
+    # different command's line to change.
+    shown = max(0, args.max)
+    for finding in report["flagged"][:shown]:
         rival = finding["belongs_to"]
         _out(f"\n  {_ref(finding['ref'])}  own {finding['own']:.2f}  → belongs to "
              f"{_ref(rival['ref'])}  {rival['score']:.2f}  (+{finding['delta']:.2f})"
-             + (f"  origin {finding['origin']}" if finding.get("origin") else ""))
+             # `origin` and `review` because they decide the remedy and neither
+             # can be re-derived from the rest of the line: a `human` origin is
+             # refused to every model write, and a hold is the reviewer's own
+             # mark that the segment is theirs to finish.
+             + (f"  origin {finding['origin']}" if finding.get("origin") else "")
+             + (f"  review {finding['review']}" if finding.get("review") else ""))
         _out(f"      its source     : {_one_line(finding['source'])[:88]}")
         _out(f"      its target     : {_one_line(finding['target'])[:88]}")
         _out(f"      {_ref(rival['ref'])} source : {_one_line(rival['source'])[:88]}")
-    if len(report["flagged"]) > args.max:
-        _out(f"\n  ... {len(report['flagged']) - args.max} more (use --max or --json)")
-    for entry in report["skipped"][: args.max]:
+    if len(report["flagged"]) > shown:
+        _out(f"\n  ... {len(report['flagged']) - shown} more (use --max or --json)")
+    for entry in report["skipped"][: shown]:
         _out(f"\n  {_ref(entry['ref'])}  not compared: {entry['reason']}")
-    if len(report["skipped"]) > args.max:
-        _out(f"\n  ... {len(report['skipped']) - args.max} more not compared "
+    if len(report["skipped"]) > shown:
+        _out(f"\n  ... {len(report['skipped']) - shown} more not compared "
              f"(use --max or --json)")
     _out(f"\n{report['note']}")
 

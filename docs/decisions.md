@@ -82,13 +82,24 @@ finding and the note says which command reaches it.
 **(3) A duplicated source does not hide a record — and the first version of this
 design believed it did.** The brief handed to the design round asserted, as a
 property rather than a measurement, that a record whose source is byte-identical
-to another's cannot flag. 89 of the 208 records have a source that is not unique
+to another's cannot flag. 89 of the 208 *lines* have a source that is not unique
 and **16 of the 17 true positives are among them**. The true statement is much
 narrower: a byte-identical rival contributes exactly the diagonal, so it can
 never be the argmax — which means only a record whose *true owner* shares its own
 source text is invisible. Written the other way round, a filter would have
-deleted almost every finding. A test now plants two records that share a source,
-kept apart by `context` the way the real file keeps its duplicates apart.
+deleted almost every finding.
+
+*Corrected after the adversarial pass, because the repair repeated the mistake it
+was fixing.* Those two figures are over the **lines**, and the command audits the
+**157 effective records**, of which **none** has a duplicated source — the file's
+duplicates are exactly its superseded half. Two records can share a source and
+both be examined only where something else in the memory key separates them:
+`context`, `variant` or the register. So the test plants that situation rather
+than sampling it, and a document's segments — where the same sentence twice is
+two positions — are the case where it arises by itself. The lines-versus-records
+distinction is the one `store.tm_effective` exists to make, and stating it in one
+paragraph while conflating it in the next is how a correction becomes a second
+error.
 
 ### Where the call lives
 
@@ -272,20 +283,123 @@ outright. Those six are already reported by `lx check` today, so the embedding's
 that is the number the network dependency has to be worth, and it is stated here
 rather than left as "the embedding works".
 
+### What the adversarial pass found, and it returned NOT CLEARED
+
+Four read-only lenses over the finished commit — a security-tier re-derivation of
+the trust boundary, an arithmetic lens, a lens checking every claim in the new
+prose against the code, and one asking what else the change moved. Thirty-two
+mutants over the guards, before and after, all thirty-two caught. What the lenses
+found that the mutants could not:
+
+**The guard the code claimed and did not have.** `_vector` refused a NaN and
+believed it had refused everything else, on the strength of `except
+OverflowError` around `array("f", …)`. Measured: `array("f", [1e300])[0]` is
+`inf` and **does not raise**. So a reply carrying a perfectly finite double that
+single precision cannot hold passed `math.isfinite`, became an infinity, made
+`audit.unit` return a vector of NaN, and every comparison against it false — the
+command would have reported **a clean store over a poisoned one**, which is the
+one output it exists not to produce, and `--json` would have carried a bare `NaN`
+that `JSON.parse` refuses. Its twin: `math.isfinite(10 ** 400)` *raises*
+`OverflowError`, which is not a `ProviderError`, is not in `cli.main`'s exit-2
+tuple and skips the per-input fallback — a traceback and exit 1, from a
+401-digit integer well inside `json.loads`' own limit. Building the array and
+asking `math.isfinite` of what came out answers both, because every way a number
+can fail to be storable ends as `inf` or `nan` there, and the one that does not
+is the one `array` itself refuses.
+
+**The note steered the reviewer into the one command that must not be used.** It
+said `lx check` reports none of this and `lx waive` would therefore refuse.
+`checks.numbers` fires at **error** whenever the source carries a digit the
+target does not — a chapter heading, a count, a date — and a misattributed target
+is a translation of some other sentence, so `lx check` exits 1 on exactly these
+segments and the waiver *succeeds*. A waiver banks `"waived": true` into the
+tracked memory, recording that a reviewer stood by the wording. The note now says
+so and says not to.
+
+**The estimate under-counted the one shape this project's targets have.** `⟦` and
+`⟧` are punctuation outside ASCII and the first weighting charged them at the
+cheapest rate it had: a 592-character Traditional Chinese target with four
+placeholders estimated 301 tokens against a real **547**, was offered, and was
+refused — the opposite of the asymmetry its own comment claimed. Re-measured
+across twenty-six samples, six scripts and the longest real records in the
+maintainer's file: a placeholder costs a flat 2.25 whatever its id, whitespace is
+nearly free, ASCII punctuation costs three times an ASCII letter, and Cyrillic
+costs a third of what CJK costs. The weights are now six classes and the range is
+0.91 to 1.46 of real. **And the asymmetry was stated backwards to begin with**:
+once a failure no longer ends the run, under-estimating is recoverable — the
+input is offered, refused, isolated and named with the server's own words — while
+over-estimating loses a record permanently *and* takes its source out of the
+rival pool. The estimate is therefore tuned to be accurate rather than
+conservative, and both errors are reported.
+
+**A tail batch of one made the give-up rule certain to fire.** "Every input of
+this batch failed" is the whole batch when the batch holds one input, which is
+what a store of `16n + 1` records produces — every vector already computed thrown
+away, exit 2, no report. The rule is now "nothing has succeeded yet", which still
+stops a wrong-shape backend after one batch and never punishes a store for its
+length.
+
+Smaller, and each with a test: `--max -1` sliced the display from the tail while
+the arithmetic counted from the head, so the report contradicted its own header
+and named records that do not exist — `cmd_untracked` had already fixed this and
+`cmd_check`, which this block was written from, still has it. `comparisons`
+counted compared pairs where the pool is every source that embedded, understating
+exactly the number the module tells a reader to judge false-positive risk by. A
+hand-edited memory line with a non-string `source` ended the command with an
+`AttributeError`. The nested-array sentence sat on the branch that never sees a
+nested array, so a base64 reply on a `/v1` endpoint was told to check its path.
+And `embedding.provider` was correctly absent from `HTTP_WRITABLE_KEYS` with
+nothing holding it there — a one-line change would have let a cross-site-reachable
+endpoint repoint the host the whole memory is POSTed to, and the suite would have
+gone green with one more test passing.
+
+**Three claims in the prose were false and are corrected rather than removed**:
+that an empty `input` answers 400 (it answers 500, which *is* retryable — the
+code was right and its reason was not); that 4 MiB would refuse a legitimate
+wide-model reply (a batch of sixteen at four thousand dimensions is 1.33 MiB; the
+real reason `_MAX_LIST_BYTES` is not reused is scope, not size); and that
+importing `providers.errors` avoids the provider stack (Python executes the
+package `__init__` first, so it does not — `errors.py`'s own docstring rests on
+the same false premise, which is HANDOFF-054).
+
 ### What is still not known
 
 The margin was chosen on 208 records and the score is a maximum over every other
-record, so it can only grow with the store. Subsampling the measured file, the
-worst delta over records known clean runs +0.0002 at 25 records and +0.0700 at
-208, against a lowest true positive of +0.1166 — so at the size it was calibrated
-on, the worst false positive has already consumed 60% of the gap. Recall moves
-the same way and for a different reason: the instrument needs the true owner to
-be *in the audited set*, and at 25 records it finds only 44.8% of the seventeen.
-**Neither number is validated for a novel's memory of thousands.** `own` and
-`delta` ride on every finding, and the note says what was not examined, so a
-reader at that size can see how near the edge each call sat; but the honest
-statement is that this is measured on one book, one language pair, one model and
-one run.
+record, so it can only grow with the store. Subsampling the measured file — 300
+draws per size, seeded, the statistic being the largest delta over records known
+clean within the draw:
+
+| audited N | median worst clean delta | max over 300 draws | draws with any clean record over 0.10 |
+|---|---|---|---|
+| 25 | 0.0000 | 0.0700 | 0% |
+| 50 | 0.0011 | 0.0700 | 0% |
+| 100 | 0.0217 | 0.0700 | 0% |
+| 150 | 0.0700 | 0.0700 | 0% |
+| 208 | 0.0700 | 0.0700 | 0% |
+
+against a lowest true positive of **+0.1166**.
+
+**Read the two columns separately, because the first draft of this entry read
+only one and said something stronger than the data.** The *median* grows with N
+and that is the mechanism to worry about — a maximum over more rivals. The *max*
+does not grow at all: it is one specific pair, line 30, and drawing more records
+only makes it likelier to be present. And at no size does any clean record cross
+0.10, so the margin has margin on this file at every size measured. A review lane
+could not reproduce the median figure precisely because it was reading the max;
+the procedure is written out above so the next reader need not guess which.
+
+Recall moves the other way, and no threshold reaches it: the instrument is
+comparative, so it needs the record a target really belongs to to be *in the
+audited set*. Over the same draws, asking of every labelled true positive that
+lands in one whether it still flags — 42.7% at N=25, 63.1% at 50, 82.6% at 100,
+93.1% at 150, 100% at 208. A small store's silence means less than a large one's,
+and the two axes move in opposite directions.
+
+**None of this is validated for a novel's memory of thousands** — the
+mechanism is real and the extrapolation is not measured. `own` and `delta` ride
+on every finding and the note says what was not examined, so a reader at that
+size can see how near the edge each call sat; but the honest statement is that
+this is one book, one language pair, one model and one run. HANDOFF-209.
 
 ## 2026-09-04 · A model answers by position, not by id, and a novel is the shape that makes it happen
 

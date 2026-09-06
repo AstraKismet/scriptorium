@@ -1140,6 +1140,7 @@ def test_a_routing_object_is_rebuilt_rather_than_stored():
     "providers.x.headers", "providers.x.headers.Authorization",
     "providers", "providers.openai", "routing", "routing.draft.model",
     "batch", "batch.size.x", "targets", "tone", "formats.map", "lexicon_extra",
+    "embedding", "embedding.provider", "embedding.provider.x",
 ])
 def test_a_key_off_the_http_allowlist_is_refused_before_its_value_is_looked_at(key):
     """One case per key, not one per class, because the classes differ.
@@ -1149,6 +1150,13 @@ def test_a_key_off_the_http_allowlist_is_refused_before_its_value_is_looked_at(k
     on what somebody typed would miss; `batch.size.x` is one of the two bypasses
     measured on 2026-08-12. They are refused by the same mechanism for different
     reasons, and a list is what keeps a future widening from dropping one.
+
+    `embedding.provider` is the newest and the reason the list is a list rather
+    than a property. It is a key the field table decides by itself, so the
+    structural test above it is satisfied by admitting it; it holds no path, so
+    the `PATH_VALUED_KEYS` test does not reach it. Nothing but this line stops
+    the one-line change that would let a cross-site-reachable endpoint repoint
+    the host every source and every translation in the project is POSTed to.
     """
     with pytest.raises(cli.UnwritableKey):
         cli.writable_key(key)

@@ -81,9 +81,12 @@ class OpenAICompatProvider(Provider):
         `config.DEFAULT_CONFIG`'s `local-model` placeholder rests on.
         """
         base = self.spec.get("base_url", "http://localhost:11434/v1").rstrip("/")
-        # Refused here rather than at the endpoint: an empty `input` answers 400
-        # (measured), which is not retryable, so sending it buys one certain
-        # failure and a worse sentence than this one.
+        # Refused here rather than at the endpoint, and the measurement is the
+        # reason rather than the guess it replaced: `llama-server` answers an
+        # empty `input` with **500** `"prompt" must not be empty`, and 500 is in
+        # `providers.base._RETRYABLE` — so sending it buys a full retry ladder
+        # over a question already answered, and then a sentence about the server
+        # where the truth is that the caller asked for nothing.
         if not texts:
             raise ProviderError(f"{self.name}: nothing to embed.")
         url = f"{base}/embeddings"

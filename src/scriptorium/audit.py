@@ -27,9 +27,18 @@ rather than left to be discovered:
 * **A target whose true source is byte-identical to the one it is filed under.**
   Identical text embeds identically, so that rival scores exactly what the
   diagonal scores and can never win. Note what this does *not* say: a record
-  whose source merely appears twice flags freely — 89 of 208 records in the
-  measured file have a duplicated source and 16 of the 17 true positives are
-  among them. Only the rival that would expose it is silenced.
+  whose source merely appears twice flags freely, on some other rival — only the
+  rival that would expose it is silenced. Written the other way round, a filter
+  that skipped duplicated sources would have deleted 16 of the 17 findings in
+  the measured file, and the brief this module was designed from asserted
+  exactly that. Two records can share a source and both be examined only when
+  something else in the memory key separates them — `context`, `variant` or the
+  register — because otherwise the later one supersedes the earlier and
+  `memory_pairs` sees one. In the measured file nothing does: 89 of its 208
+  *lines* carry a duplicated source and **none of its 157 effective records
+  does**, so that file's own duplicates are the superseded half. A document's
+  segments are the other case, where the same sentence twice is two positions
+  and both are compared.
 * **Its own false-positive rate at a size it has not been measured at.** The
   score is a maximum over every other record, so it can only grow with the
   store: subsampling the measured file, the worst delta over records known clean
@@ -42,15 +51,22 @@ See `docs/decisions.md`, 2026-09-06, for the measurements and for the two rules
 that were built, scored and removed.
 """
 
+import string
 import unicodedata
 from array import array
 from operator import mul
 
-# `providers.errors`, not `providers`. That module exists so that naming this
-# class costs nothing: importing `providers` pulls `urllib.request` and with it
-# `ssl`, `http.client`, `socket` and fifteen `email` submodules, measured at
-# roughly doubling the cost of importing `scriptorium.cli`. This module is
-# imported by `cli` for one command and must not put that on `lx --help`.
+from .mask import PH_RE
+
+# `providers.errors` is the narrowest import that names this class, and today it
+# saves nothing: Python executes `providers/__init__.py` before it can bind a
+# submodule, and that file imports `base`, which imports `urllib.request` and
+# with it `ssl`. `errors.py`'s own docstring and `cli.py`'s import comment both
+# claim otherwise and both are wrong — measured 2026-09-06, `import
+# scriptorium.providers.errors` alone loads `ssl` and fifteen `email` submodules.
+# No regression: `cli.py` already paid it. It stays spelled this way because it
+# is the import that would become cheap the day that premise is made true, which
+# is HANDOFF-054.
 from .providers.errors import ProviderError
 from .store import tm_effective, tm_path
 
@@ -96,39 +112,96 @@ BATCH = 16
 #: the development `llama-server` refuses any single input above its physical
 #: batch size with `HTTP 500 input (530 tokens) is too large to process ...
 #: current batch size: 512` — and 500 is in `providers.base._RETRYABLE`, so
-#: without this the refusal is retried before it is believed. 460 leaves a tenth
-#: of that in hand.
-#:
-#: There is no tokenizer here and there will not be one: invariant 1 forbids a
-#: compiled dependency, and a pure-Python SentencePiece is a model file, not a
-#: rule. So the estimate is on characters, from two measured ratios — 0.85
-#: tokens per character for Traditional Chinese, 0.24 for English — with the
-#: second rounded **up** to 0.30. The asymmetry is chosen: it over-skips English
-#: prose by about a quarter rather than under-skipping CJK, because an
-#: over-skipped record is reported as skipped and an under-skipped one costs a
-#: request that fails.
-TOKEN_CEILING = 460
+#: without this the refusal is retried before it is believed. The number is that
+#: measured limit, and a backend with a different one is handled by
+#: :func:`embed_texts`' per-input pass either way.
+TOKEN_CEILING = 512
 
-_DENSE_PER_CHAR = 0.85
-_OTHER_PER_CHAR = 0.30
+#: What a character of each kind costs, measured 2026-09-06 against `bge-m3`
+#: over twenty-six samples: six scripts, the ASCII shapes that are cheap and
+#: expensive for opposite reasons, and the longest real records in the
+#: maintainer's own memory file.
+#:
+#: ============================  ===============  =========
+#: kind                          measured         used here
+#: ============================  ===============  =========
+#: one ``⟦n⟧`` placeholder       2.25, flat       3.0
+#: whitespace                    ~0.007           0.10
+#: ASCII letter or digit         0.27 – 0.37      0.42
+#: ASCII punctuation             0.48 – 0.97      1.00
+#: CJK, kana, Hangul             0.61 – 0.91      0.95
+#: other non-ASCII               0.30 – 0.35      0.45
+#: ============================  ===============  =========
+#:
+#: A placeholder is counted rather than averaged in, and that is the correction
+#: that mattered: `⟦` and `⟧` are punctuation outside ASCII, the first version of
+#: this counted them at the cheapest rate available, and a 592-character
+#: Traditional Chinese target carrying four of them estimated 301 tokens against
+#: a real 547 — the backend refused it. Placeholders are this project's own
+#: construct, `mask.PH_RE` finds them, and the cost is flat: `⟦1⟧`, `⟦12⟧` and
+#: `⟦123⟧` were each measured at 2.25.
+_PH_TOKENS = 3.0
+_PER_SPACE = 0.10
+_PER_ALNUM = 0.42
+_PER_PUNCT = 1.00
+_PER_DENSE = 0.95
+_PER_WIDE = 0.45
+
+_SPACE_CHARS = frozenset(" \t\n\r\f\v")
+_ALNUM_CHARS = frozenset(string.ascii_letters + string.digits)
+
+#: The scripts that cost about a token a character. Category ``Lo`` — a letter
+#: with no case — is CJK, kana, Hangul, Thai and the abugidas, and the two
+#: ranges beside it are CJK punctuation and the fullwidth forms, which are
+#: `Po`/`Ps`/`Pe` and just as expensive. Cyrillic, Greek and accented Latin are
+#: cased letters and cost a third of that, which is why they are not in here:
+#: folding them in over-estimated a Russian paragraph by 2.35 and would have
+#: skipped records that fit comfortably.
+_CJK_PUNCT = range(0x3000, 0x3040)
+_FULLWIDTH = range(0xFF00, 0xFFF0)
 
 
 def estimated_tokens(text):
-    """A deliberately high guess at how many tokens ``text`` will cost.
+    """About how many tokens ``text`` will cost, from the table above.
 
-    "Dense" is Unicode category ``Lo`` — a letter with no case — which is CJK,
-    kana, Hangul, Thai and the abugidas. **Not `mask.CJK_RE`**, which is the
-    right answer to a different question: that range is pinned to where
-    `mdparse` puts segment boundaries and its own comment names the exclusion of
-    kana and Hangul as a real limitation. Borrowing it here would inherit a
-    limitation about block structure to answer a question about token density.
+    **It errs in both directions and neither one loses a record**, which is what
+    lets it be an estimate at all. Over twenty-six measured samples it runs 0.91
+    to 1.46 of the real count. Where it reads high, the record is skipped and
+    named in the report. Where it reads low, the input is offered, the backend
+    refuses it, and :func:`embed_texts` isolates and names it with the server's
+    own words. The first version of this claimed the opposite asymmetry —
+    "over-skips English rather than under-skipping CJK" — and then under-counted
+    the one shape this project's targets actually have.
+
+    "Dense" is decided by Unicode category and range, **not by `mask.CJK_RE`**.
+    That constant is pinned to where `mdparse` puts segment boundaries, and
+    `mask.py` records the exclusion of kana and Hangul as a limitation of the
+    range it belongs to; borrowing it here would inherit a fact about block
+    structure to answer a question about token density.
     """
-    dense = sum(1 for ch in text if unicodedata.category(ch) == "Lo")
-    return _DENSE_PER_CHAR * dense + _OTHER_PER_CHAR * (len(text) - dense)
+    ph = len(PH_RE.findall(text))
+    rest = PH_RE.sub("", text)
+    space = alnum = punct = dense = wide = 0
+    for ch in rest:
+        code = ord(ch)
+        if code > 127:
+            if (unicodedata.category(ch) == "Lo" or code in _CJK_PUNCT
+                    or code in _FULLWIDTH):
+                dense += 1
+            else:
+                wide += 1
+        elif ch in _SPACE_CHARS:
+            space += 1
+        elif ch in _ALNUM_CHARS:
+            alnum += 1
+        else:
+            punct += 1
+    return (_PH_TOKENS * ph + _PER_SPACE * space + _PER_ALNUM * alnum
+            + _PER_PUNCT * punct + _PER_DENSE * dense + _PER_WIDE * wide)
 
 
 def oversize(text):
-    """Whether this input is too long for a backend to be offered it."""
+    """Whether this input is long enough that offering it is not worth a request."""
     return estimated_tokens(text) > TOKEN_CEILING
 
 
@@ -220,31 +293,39 @@ def embed_texts(provider, texts, on_progress=None):
     server's physical batch size, and anything it lets through that the backend
     still refuses is caught here and named.
 
-    **A failure that reaches every input of a batch ends the run** by re-raising.
-    A backend answering the wrong shape, or refusing the credential, or not
-    listening at all fails on every input alike, and grinding through the whole
-    store one request at a time to report two hundred copies of one sentence
-    would be slow, rude to the server, and a worse answer than the sentence
-    itself. A size refusal never has that shape, because the inputs that are too
-    long are the long ones.
+    **A failure ends the run only while nothing has succeeded yet.** A backend
+    answering the wrong shape, or refusing the credential, or not listening at
+    all fails on every input alike, and grinding through a whole store one
+    request at a time to report two hundred copies of one sentence would be slow,
+    rude to the server and a worse answer than the sentence. But once *anything*
+    has come back, the backend is answering, and a later failure is about that
+    input — so it is recorded and the run continues.
+
+    The condition is deliberately not "every input of this batch failed", which
+    is what it was first written as. Two shapes falsify that: a store whose
+    length leaves **one** input in the last batch, where a single refusal is the
+    whole batch and would have thrown away every vector already computed; and a
+    batch that happens to hold sixteen paragraphs all longer than the backend
+    takes, which is not rare in a novel. Both were reproduced.
     """
     vectors = [None] * len(texts)
     reasons = [None] * len(texts)
+    answered = False
     done = 0
     for start in range(0, len(texts), BATCH):
         chunk = texts[start:start + BATCH]
         try:
             for k, vec in enumerate(provider.embed(chunk)):
                 vectors[start + k] = vec
+            answered = True
         except ProviderError as batch_error:
-            got = 0
             for k, one in enumerate(chunk):
                 try:
                     vectors[start + k] = provider.embed([one])[0]
-                    got += 1
+                    answered = True
                 except ProviderError as one_error:
                     reasons[start + k] = str(one_error)
-            if not got:
+            if not answered:
                 raise batch_error
         done += len(chunk)
         if on_progress is not None:
@@ -260,6 +341,14 @@ def compare(pairs, sources, targets, margin):
     is present stays in the rival pool even when its own pair could not be
     compared, because a target may well belong to a record whose own target the
     backend refused.
+
+    **The converse is the blind spot and it is reported rather than fixed**: a
+    record dropped before this — an empty source, or one long enough that
+    `oversize` declined to offer it — never reaches the pool at all, so a
+    misattributed target that belongs to *it* has no rival that can expose it
+    and comes back looking clean. `_note` says so with the count beside it,
+    because there is nothing to do about it here: the alternative is embedding
+    text the backend will refuse.
 
     **The pool is every other source, and no window narrows it.** A positional
     window was built and measured: at ±10 it lost 2 of the 17 true positives and
@@ -306,11 +395,16 @@ def _note(store, records, compared, skipped, superseded, margin):
     what it could not look at are in the same paragraph as the count of what it
     found, and the word *clean* appears nowhere in this command's output.
 
-    It also names the commands that compose, because the obvious one does not:
-    `lx waive` refuses a segment `lx check` reports nothing on, and `lx check`
-    reports nothing on any of these — a fluent sentence that translates the
-    wrong source breaks no mechanical rule. A reviewer whose first move is to
-    waive gets a refusal and no explanation of it.
+    **It warns against `lx waive`, and the reason is the opposite of the one
+    first written here.** The first version said `lx check` reports none of this
+    and `lx waive` would therefore refuse. Measured 2026-09-06: `checks.numbers`
+    fires at **error** severity whenever the source carries a digit the target
+    does not, and a misattributed target is a translation of some other
+    sentence, so a chapter heading, a count or a date makes `lx check` exit 1 on
+    exactly these segments. `lx waive` then *succeeds* — and a waiver banks
+    `"waived": true` into the tracked memory, recording that a reviewer stood by
+    the wording. The reviewer the old sentence steered away from waiving was the
+    one for whom it would have worked, on the one wording it must not be used on.
     """
     what = "wording(s) in this memory" if store == "memory" else "translated segment(s)"
     lines = [
@@ -322,8 +416,10 @@ def _note(store, records, compared, skipped, superseded, margin):
     ]
     if skipped:
         lines.append(f"{skipped} pair(s) were not compared and are listed with the "
-                     f"reason; a pair that was not compared is not a pair that came "
-                     f"back clean.")
+                     f"reason. A pair that was not compared is not a pair that came "
+                     f"back clean — and its source was not offered as a rival either, "
+                     f"so a wording that belongs to one of them cannot be reported "
+                     f"against anything.")
     if superseded:
         lines.append(f"{superseded} line(s) of the file carry a wording a later line "
                      f"supersedes. They are not examined, because nothing reads them "
@@ -336,9 +432,14 @@ def _note(store, records, compared, skipped, superseded, margin):
     else:
         lines.append("A segment whose origin is `human` is refused to every model write "
                      "and dropped from every queue, so no rerun reaches it: repair it "
-                     "with `lx apply` or `lx translate --ids`. `lx check` reports none "
-                     "of this and `lx waive` will refuse a segment it reports nothing "
-                     "on.")
+                     "with `lx apply`, or with `lx translate --ids <id> "
+                     "--overwrite-human` — naming the id alone reaches the segment and "
+                     "is then refused at the write.")
+    lines.append("Do not `lx waive` one of these. `lx check` cannot see a "
+                 "misattribution as such, but where the source carries a number it "
+                 "reports `numbers` at error on exactly these segments — so the waiver "
+                 "goes through, and it banks into the tracked memory the claim that a "
+                 "reviewer stood by this wording.")
     return " ".join(lines)
 
 
@@ -358,7 +459,15 @@ def run(provider, lang, doc=None, margin=MARGIN, on_progress=None):
     skipped = []
     live = []
     for pair in pairs:
-        if not pair["source"].strip():
+        # `isinstance` before `.strip()`, because the memory file is
+        # hand-editable by design and `store.tm_lines` keeps any line whose
+        # `hash` and `target` are merely truthy. A line carrying `"source": 5`
+        # used to end the command with an `AttributeError` and exit 1; a
+        # `"target": ["…"]` was handed to the backend as a nested array.
+        if not isinstance(pair["source"], str) or not isinstance(pair["target"], str):
+            skipped.append({"ref": pair["ref"],
+                            "reason": "the record's source or target is not text"})
+        elif not pair["source"].strip():
             skipped.append({"ref": pair["ref"], "reason": "the record carries no source text"})
         elif oversize(pair["source"]) or oversize(pair["target"]):
             skipped.append({"ref": pair["ref"],
@@ -396,6 +505,12 @@ def run(provider, lang, doc=None, margin=MARGIN, on_progress=None):
     flagged = compare(live, sources, targets, margin) if live else []
     compared = sum(1 for i in range(len(live))
                    if sources[i] is not None and targets[i] is not None)
+    # The pool is every source that embedded, which is not the same as the count
+    # of pairs that could be compared: a record whose target the backend refused
+    # is still somebody else's rival. Reporting `compared * (compared - 1)`
+    # under-stated it, and this is the number the module docstring tells a reader
+    # to judge the false-positive risk by.
+    pool = sum(1 for v in sources if v is not None)
     return {
         "store": store,
         "lang": lang,
@@ -409,7 +524,7 @@ def run(provider, lang, doc=None, margin=MARGIN, on_progress=None):
         "records": len(pairs),
         "compared": compared,
         "superseded": superseded,
-        "comparisons": compared * max(compared - 1, 0),
+        "comparisons": compared * max(pool - 1, 0),
         "skipped": skipped,
         "flagged": flagged,
         "note": _note(store, len(pairs), compared, len(skipped), superseded, margin),

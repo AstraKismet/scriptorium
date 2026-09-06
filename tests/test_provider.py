@@ -9,6 +9,7 @@ import os
 import sys
 import threading
 import time
+from array import array
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -1626,9 +1627,18 @@ def test_an_embedding_is_never_counted_as_a_completion(embeddings_server):
                                   "replies": 0, "reported": 0}
 
 
-def test_an_embedding_batch_is_bounded_below_the_completion_budget(embeddings_server):
-    """A read's budget on a POST. Bounded downward only, `_get`'s own rule."""
-    from scriptorium.providers.base import _EMBED_RETRIES, _EMBED_TIMEOUT
+def test_an_embedding_clamps_the_retries_and_leaves_the_timeout_alone(
+        embeddings_server):
+    """The half of `_get`'s rule that transfers, and the half that does not.
+
+    Retries are clamped because the per-input size ceiling answers **500**, which
+    is retryable and deterministic — a ladder over it is spent re-asking a
+    question already answered. The timeout is *not*, because a listing answers
+    from a table and an embedding request runs a model and may load it first:
+    a ceiling here would be one no configuration could raise, and the sentence
+    the caller then reads would tell them a loading server "is not answering".
+    """
+    from scriptorium.providers.base import _EMBED_RETRIES
 
     _embed_reset()
     seen = {}
@@ -1636,29 +1646,18 @@ def test_an_embedding_batch_is_bounded_below_the_completion_budget(embeddings_se
     real = p._request
 
     def spy(url, headers, **kw):
-        seen["budget"] = (kw.get("timeout"), kw.get("retries"))
-        seen["max_bytes"] = kw.get("max_bytes")
-        seen["what"] = kw.get("what")
+        seen.update(kw)
         return real(url, headers, **kw)
 
     p._request = spy
     p.embed(["one"])
-    assert seen["budget"] == (_EMBED_TIMEOUT, _EMBED_RETRIES)
-    assert _EMBED_TIMEOUT < 600 and _EMBED_RETRIES < 3
+    assert seen.get("timeout") is None, "the caller's own timeout, unclamped"
+    assert p.timeout == 600
+    assert seen["retries"] == _EMBED_RETRIES < 3
     assert seen["max_bytes"] and seen["what"] == "a batch of embeddings"
-
-
-def test_a_shorter_embedding_budget_than_the_cap_is_kept(embeddings_server):
-    """Bounded downward *only* — the rule `_get` states and the reason it gives:
-    a project that deliberately chose a shorter timeout keeps it."""
-    _embed_reset()
-    seen = {}
-    p = build("local", _cfg(embeddings_server, timeout=5, retries=0))
-    p._request = lambda *a, **k: seen.update(
-        {"short": (k.get("timeout"), k.get("retries"))}) or {"data": []}
-    with pytest.raises(ProviderError):
-        p.embed(["one"])          # the stub answers no rows; the budget is the subject
-    assert seen["short"] == (5, 0)
+    assert "loading the model" in seen["advice"], (
+        "each caller states its own remedy; the listing's `it is not answering` "
+        "is false of a backend that is loading")
 
 
 def test_vectors_are_placed_by_index_and_not_by_arrival(embeddings_server):
@@ -1833,3 +1832,78 @@ def test_nothing_to_embed_is_refused_without_a_round_trip(embeddings_server):
     with pytest.raises(ProviderError, match="nothing to embed"):
         build("local", _cfg(embeddings_server)).embed([])
     assert EMBED["seen"] == []
+
+
+@pytest.mark.parametrize("value,why", [
+    (1e300, "a finite double single precision cannot hold"),
+    (-1e300, "the same, negative"),
+    (10 ** 400, "a whole number `math.isfinite` itself refuses to look at"),
+])
+def test_a_number_this_project_cannot_store_is_refused(embeddings_server, value, why):
+    """The guard the first version claimed and did not have.
+
+    `array("f", [1e300])[0]` is `inf` — it does **not** raise — so a reply
+    holding a perfectly finite double passed `math.isfinite`, became an infinity,
+    made `audit.unit` return a vector of NaN, and every comparison against it
+    false. The command would have reported a clean store over a poisoned one.
+    And `math.isfinite(10 ** 400)` raises `OverflowError`, which is not a
+    `ProviderError`, is not in `cli.main`'s exit-2 tuple, and skips the
+    per-input fallback: a traceback and exit 1. Building the array and asking
+    `math.isfinite` of what came out answers both.
+    """
+    _embed_reset()
+    EMBED["mangle"] = lambda body: {
+        **body, "data": [{**body["data"][0], "embedding": [value, 1.0, 0.0]}]}
+    with pytest.raises(ProviderError) as e:
+        build("local", _cfg(embeddings_server)).embed(["a"])
+    assert "Traceback" not in str(e.value), why
+
+
+def test_a_finite_but_unstorable_reply_never_reaches_the_arithmetic(
+        embeddings_server):
+    """The end-to-end shape of the same defect, so the guard is pinned where it
+    matters rather than only where it is written: an infinity that got through
+    would make `audit.unit` return NaN and every finding disappear."""
+    from scriptorium.audit import unit
+
+    _embed_reset()
+    EMBED["mangle"] = lambda body: {
+        **body, "data": [{**body["data"][0], "embedding": [1e300, 1.0]}]}
+    with pytest.raises(ProviderError, match="finite number"):
+        build("local", _cfg(embeddings_server)).embed(["a"])
+    # And the arithmetic downstream would indeed have been silent about it: the
+    # norm is an infinity, so `unit` returns `[nan, 0.0]`, and every comparison
+    # against a NaN is false — the store would come back with nothing flagged.
+    from scriptorium.audit import cosine
+
+    poisoned = unit(array("f", [float("inf"), 1.0]))
+    assert any(x != x for x in poisoned)
+    score = cosine(poisoned, array("f", [1.0, 0.0]))
+    assert score != score and not (score > 0.10)
+
+
+def test_a_nested_embedding_is_named_for_what_it_is(embeddings_server):
+    """The wrong-handler shape gets the version-segment sentence and the other
+    wrong shapes do not.
+
+    `[[0.1]]` is a non-empty list, so it used to fall into the generic
+    "not numbers" branch while the generic branch carried the nested-array
+    sentence unconditionally — a base64 reply on a `/v1` endpoint was told to
+    check its path.
+    """
+    _embed_reset()
+    EMBED["mangle"] = lambda body: {
+        **body, "data": [{**body["data"][0], "embedding": [[0.1], [0.2]]}]}
+    bare = embeddings_server.rsplit("/v1", 1)[0]
+    with pytest.raises(ProviderError) as nested:
+        build("local", _cfg(bare)).embed(["a"])
+    assert "array of arrays" in str(nested.value)
+    assert "version segment" in str(nested.value)
+
+    EMBED["mangle"] = lambda body: {
+        **body, "data": [{**body["data"][0], "embedding": "QUFBQQ=="}]}
+    with pytest.raises(ProviderError) as base64ish:
+        build("local", _cfg(embeddings_server)).embed(["a"])
+    assert "not a non-empty array" in str(base64ish.value)
+    assert "version segment" not in str(base64ish.value)
+    assert "llama.cpp" not in str(base64ish.value)

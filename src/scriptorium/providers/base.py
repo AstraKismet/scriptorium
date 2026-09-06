@@ -70,30 +70,40 @@ _UNSAFE_CATEGORIES = ("Cc", "Cf", "Zl", "Zp")
 _LIST_TIMEOUT = 30.0
 _LIST_RETRIES = 1
 
-#: An embedding batch's own budget, bounded below the completion one the way a
-#: listing is and for the opposite half of the same reason: a listing answers
-#: from a table and gets 30 s, while an embedding request runs a model and may
-#: load it first. 120 s is chosen against the router figures in
-#: `config.DEFAULT_CONFIG` — a first-ever request whose weights are not on disk
-#: was measured at 104.9 s there, and that is a *download*, which is the number
-#: this is meant to survive rather than the number it is derived from. It stays
-#: far below the 600 the shipped `llamacpp` entry sets for a translation.
+#: How many attempts an embedding batch gets, and **the timeout is deliberately
+#: not clamped beside it.**
 #:
-#: **`_EMBED_RETRIES` is 1 for a measured reason, not for symmetry.** The
+#: A listing is bounded on both because it answers from a table, and its
+#: docstring says so. That premise does not transfer: an embedding request runs
+#: a model and the first one may load it — `config.DEFAULT_CONFIG` records a
+#: 2.5 GB fetch at 104.9 s and puts a 15 GB one at roughly ten minutes, with the
+#: router blocking the caller for the whole of it rather than answering
+#: something retryable. A ceiling here would be one no configuration could
+#: raise, and the sentence the caller then reads — "if the server is simply slow
+#: to answer, it is not answering" — would be false of exactly that case. So the
+#: `timeout` a project set for this backend is the timeout this uses.
+#:
+#: `_EMBED_RETRIES` is 1 for a measured reason rather than for symmetry: the
 #: per-input size ceiling of a `llama-server` answers **500**, and 500 is in
 #: `_RETRYABLE` above — measured 2026-09-06, `input (530 tokens) is too large to
 #: process`. That refusal is deterministic, so the shipped `retries: 3` spends
 #: four attempts and three backoffs re-asking a question already answered.
-_EMBED_TIMEOUT = 120.0
 _EMBED_RETRIES = 1
 
 #: How many bytes an embeddings reply may be read from. Measured on this machine
 #: 2026-09-06 against the bge-m3 server: 21,861 bytes for one 1024-dimension
 #: vector, 348,740 for a batch of sixteen and 1,394,722 for a batch of
-#: sixty-four — about 21.8 KB a row, and linear. Sixteen mebibytes is a batch of
-#: sixteen at four thousand dimensions with room over. `_MAX_LIST_BYTES` is
-#: deliberately not reused: its own comment scopes it to a listing, and 4 MiB
-#: would refuse a legitimate wide-model reply.
+#: sixty-four — about 21.8 KB a row, and linear.
+#:
+#: **`_MAX_LIST_BYTES` is not reused, and the reason is scope rather than
+#: arithmetic.** Its own comment binds it to a listing, and a constant that
+#: means "a listing is never this big" cannot also mean "an embedding batch is
+#: never this big" without one of the two sentences becoming untrue the next
+#: time either changes. On the numbers alone 4 MiB would in fact have been
+#: enough — a batch of sixteen at four thousand dimensions is 1.33 MiB, and it
+#: would take about twelve thousand dimensions to reach 4 MiB — and an earlier
+#: version of this comment claimed the opposite. Sixteen mebibytes is chosen for
+#: the room, not because four is short.
 _MAX_EMBED_BYTES = 16 * 1024 * 1024
 
 #: The widest embedding this project will believe. Real models run 384 to 4096;
@@ -429,11 +439,16 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
           that swaps the resident model between batches would hand back two
           incomparable geometries with nothing in either reply saying so.
 
-        No string from the reply is ever formatted into a message here, and that
-        absence is the property rather than an oversight: `_sane` and `_tame`
-        exist because a listing row and an error body *are* printed, and a rule
-        with no string to escape needs no escaper. `str(data)[:300]` in the two
-        shape refusals goes through `repr` on the way, as the listing's twin does.
+        **One refusal below prints part of the reply and every other one prints
+        only a type name**, which is the opposite of what an earlier version of
+        this paragraph claimed. The exception is the first: a reader whose
+        backend answered the wrong shape needs to see some of it, so
+        `str(data)[:300]` goes through `_tame` — and `_tame` is what makes that
+        safe, not `repr`. A reply whose top level is a JSON *string* reaches the
+        message unquoted, because `str` of a string is the string; the control
+        characters and the bidirectional overrides are gone either way, which is
+        the property that matters. Everything after it names a type and nothing
+        else, so there is no second place for a backend's own text to arrive.
         """
         rows = data.get("data") if isinstance(data, dict) else None
         if not isinstance(rows, list):
@@ -483,17 +498,51 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
         style one: a list of Python floats costs about 32 KB per 1024-dimension
         vector against 4 KB here, measured, so a ten-thousand-record memory is
         640 MB one way and 80 MB the other. The arithmetic that reads it is
-        `sum(map(mul, a, b))`, measured 22% slower on arrays than on lists — a
-        price worth paying once, since the alternative is a command that cannot
-        finish a book at all. Single precision costs about 1e-7 of a cosine,
-        three orders below this instrument's own measured reproducibility.
+        `sum(map(mul, a, b))`, measured about 1.9 times faster than a generator
+        over `zip` and about 22% slower on arrays than on lists — a price worth
+        paying once, since the alternative is a command that cannot finish a book
+        at all. Single precision costs well under 1e-7 of a cosine, three orders
+        below this instrument's own measured reproducibility.
+
+        **Finiteness is checked on the array and not on the reply**, and the
+        first version of this had it the other way round with a comment claiming
+        a guard it did not have. Two measurements, 2026-09-06:
+
+        * `array("f", [1e300])[0]` is `inf`. It does **not** raise — so a reply
+          holding a perfectly finite double that single precision cannot store
+          passed `math.isfinite`, became an infinity here, made `audit.unit`
+          return a vector of `NaN`, and every comparison against it false. The
+          command would have reported a **clean store over a poisoned one**,
+          which is the one output it exists not to produce, and `--json` would
+          have carried a bare `NaN` that `JSON.parse` refuses.
+        * `math.isfinite(10 ** 400)` **raises** `OverflowError`. A 401-digit
+          integer is far inside `json.loads`' own 4300-digit limit, so a reply
+          could reach that call and leave as an exception that is not a
+          `ProviderError`, is not in `cli.main`'s exit-2 tuple, and skips
+          `audit.embed_texts`' per-input fallback entirely: a traceback and
+          exit 1.
+
+        Building the array first and asking `math.isfinite` of what came out
+        answers both, because every way a number can fail to be storable ends as
+        `inf` or `nan` there — and the one that does not, the huge integer, is
+        the one `array` itself refuses.
         """
         if not isinstance(value, list) or not value:
             raise ProviderError(
                 f"{self.name}: {printable_url(url)} answered a row whose `embedding` is "
-                f"not a non-empty array ({type(value).__name__}). A nested array is what "
-                f"llama.cpp's own `/embeddings` handler returns — see whether `base_url` "
-                f"is missing its version segment.{self._url_hint(None, url)}")
+                f"not a non-empty array ({type(value).__name__}).")
+        if isinstance(value[0], list):
+            # The nested form, and it gets its own sentence because it is the one
+            # wrong shape with a known cause: `llama-server` serves `/embeddings`
+            # and `/v1/embeddings` from different handlers and the first answers
+            # a list of lists. `_vectors` refuses that reply at the top level
+            # before this is reached, so what arrives here is the nested body
+            # behind a gateway that wrapped it — still the same diagnosis, and
+            # `_url_hint` keeps it silent where the path is not the cause.
+            raise ProviderError(
+                f"{self.name}: {printable_url(url)} answered a row whose `embedding` is "
+                f"an array of arrays, which is what llama.cpp's own `/embeddings` "
+                f"handler returns.{self._url_hint(None, url)}")
         if len(value) > _MAX_EMBED_DIMS:
             raise ProviderError(
                 f"{self.name}: {printable_url(url)} answered a {len(value)}-dimension "
@@ -503,20 +552,21 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
                 raise ProviderError(
                     f"{self.name}: {printable_url(url)} answered a vector holding "
                     f"{type(x).__name__}, not numbers.")
-            if not math.isfinite(x):
-                raise ProviderError(
-                    f"{self.name}: {printable_url(url)} answered a vector holding a "
-                    f"value that is not a finite number. `json.loads` takes the bare "
-                    f"tokens NaN and Infinity, and neither raises anywhere downstream — "
-                    f"they make every comparison false, so a poisoned reply would report "
-                    f"a clean store.")
         try:
-            return array("f", value)
+            vec = array("f", value)
         except OverflowError:
-            # `math.isfinite` passes a double that single precision cannot hold.
+            raise ProviderError(
+                f"{self.name}: {printable_url(url)} answered a vector holding a whole "
+                f"number too large to be a coordinate.") from None
+        if not all(map(math.isfinite, vec)):
             raise ProviderError(
                 f"{self.name}: {printable_url(url)} answered a vector holding a value "
-                f"outside the range this project stores.") from None
+                f"that is not a finite number this project can store. `json.loads` takes "
+                f"the bare tokens NaN and Infinity, and a value merely too large for "
+                f"single precision becomes one — none of them raise anywhere "
+                f"downstream, they make every comparison false, so a poisoned reply "
+                f"would report a clean store.")
+        return vec
 
     # -- transport ---------------------------------------------------------
     def _backoff(self, attempt, retry_after=None):
@@ -576,10 +626,13 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
         if has_version_segment(url):
             return ""
         # It deliberately does **not** end by recommending `lx models`. That was
-        # the first draft, and `lx models` is itself one of the two callers — so
-        # the failure of that very command ended by advising the reader to run
-        # it. Naming a remedy is `cmd_config_set`'s job, where the command being
-        # named is not the one that just failed.
+        # the first draft, and `lx models` is itself one of the callers — so the
+        # failure of that very command ended by advising the reader to run it.
+        # Naming a remedy is `cmd_config_set`'s job, where the command being
+        # named is not the one that just failed. ("One of the two" is what this
+        # said until 2026-09-06; `_vectors` and `_vector` are the third and
+        # fourth, and an enumeration in a comment is the thing this project has
+        # watched go stale six times.)
         return (" That path carries no API version segment — many endpoints serve "
                 "this API under one, as /v1.")
 
@@ -668,7 +721,10 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
         return self._request(url, headers, payload=None, method="GET",
                              timeout=min(self.timeout, _LIST_TIMEOUT),
                              retries=min(self.retries, _LIST_RETRIES),
-                             max_bytes=_MAX_LIST_BYTES, what="a model listing")
+                             max_bytes=_MAX_LIST_BYTES, what="a model listing",
+                             advice=" A model listing is bounded well below the "
+                                    "completion timeout on purpose; if the server is "
+                                    "simply slow to answer, it is not answering.")
 
     def _embed_post(self, url, payload, headers):
         """A batch of embeddings: a POST with a read's budget.
@@ -694,17 +750,22 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
         instead is what it counted itself, and the reply's `usage` is read by
         nothing.
 
-        The budget is bounded **downward only**, `_get`'s rule verbatim: a
-        project that deliberately set a shorter timeout keeps it.
+        **Retries are clamped and the timeout is not**, which is where this
+        parts company with `_get` — see `_EMBED_RETRIES`. The reply is bounded
+        in bytes because it is a read a person can start by typing one command,
+        and a hostile one is otherwise parsed in full.
         """
         return self._request(url, headers, payload=payload, method="POST",
-                             timeout=min(self.timeout, _EMBED_TIMEOUT),
                              retries=min(self.retries, _EMBED_RETRIES),
                              max_bytes=_MAX_EMBED_BYTES,
-                             what="a batch of embeddings")
+                             what="a batch of embeddings",
+                             advice=" The first request to a backend may be loading the "
+                                    "model — raise `providers.<name>.timeout`, or load "
+                                    "the model before auditing.")
 
     def _request(self, url, headers, payload=None, method="POST",
-                 timeout=None, retries=None, max_bytes=None, what=None):
+                 timeout=None, retries=None, max_bytes=None, what=None,
+                 advice=None):
         # **Only http(s) leaves this function.** `urllib`'s stock opener also
         # speaks `file:`, `ftp:` and `data:`, so a hand-edited `base_url` of
         # `file:///…` made the one endpoint a browser gesture can reach into a
@@ -867,18 +928,20 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
                     f"the environment variable named by `api_key_env`, never in the URL."
                 ) from None
             except (TimeoutError, socket.timeout):
-                # Branched on `what`, not on `method`. It branched on
-                # `method == "GET"`, which meant "is this the listing" only for
-                # as long as the listing was the one non-completion call — and
-                # the first POST that is not a completion inherited advice to
-                # lower `batch.size`, a knob that has nothing to do with it.
+                # The caller's own sentence, not one derived from `method`. It
+                # branched on `method == "GET"`, which meant "is this the
+                # listing" only for as long as the listing was the one
+                # non-completion call — the first POST that was not a completion
+                # inherited advice to lower `batch.size`, a knob with nothing to
+                # do with it. Deriving it from `what` instead was the first
+                # repair and was still wrong: it gave an embedding batch the
+                # listing's "it is not answering", which is false of a backend
+                # loading a model. Each caller states its own remedy because each
+                # caller has a different one.
                 last = ProviderError(
                     f"{self.name}: timed out after {timeout}s."
-                    + (f" {what[0].upper()}{what[1:]} is bounded below the completion "
-                       "timeout on purpose; if the server is simply slow to answer, it "
-                       "is not answering." if what else
-                       " Local models on CPU are slow — raise `timeout` or "
-                       "lower `batch.size`."))
+                    + (advice or " Local models on CPU are slow — raise `timeout` or "
+                                 "lower `batch.size`."))
                 if not final:
                     time.sleep(self._backoff(attempt))
         raise last or ProviderError(f"{self.name}: request failed")

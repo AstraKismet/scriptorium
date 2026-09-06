@@ -191,8 +191,12 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    gates nothing**: a single-model `llama-server` ignores the `model` field
    entirely and still answers, so a listing that became a check would refuse a
    working configuration on the strength of an endpoint this world treats as
-   optional. It is also the one place where text from a remote server reaches a
-   terminal, so an id carrying a control character — or a line separator, or
+   optional. It was, until 2026-09-06, the one place where text from a remote
+   server reached a terminal; `Provider._vectors` is a second, and
+   `openai_compat`'s two shape refusals were a third and fourth all along. What
+   survives of the sentence is the rule rather than the count: any of them can
+   put a backend's own bytes in front of a reader,
+   so an id carrying a control character — or a line separator, or
    an over-long field — is dropped at the boundary rather than escaped at the
    print, and the drop is what protects **both** the listing and `--json`.
    `json.dumps(ensure_ascii=False)` was assumed to cover the second and does
@@ -463,7 +467,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 2005 tests; no network (one is POSIX-only,
+python -m pytest -q                 # 2029 tests; no network (one is POSIX-only,
                                     #   one runs only where the filesystem folds case)
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`

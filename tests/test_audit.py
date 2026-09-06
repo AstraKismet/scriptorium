@@ -68,8 +68,8 @@ def _tm(*pairs, context=None):
 
     ``context`` is gettext's ``msgctxt`` and part of the key, so it is how two
     records come to hold the same source text and both survive the last-wins
-    collapse — which is how 89 of the 208 records in the measured file have a
-    source that is not unique.
+    collapse. Nothing else can: two records with one source and one context are
+    one key, and `store.tm_effective` keeps the later.
     """
     return [{"hash": seg_hash(src), "segmentation_version": SEGMENTATION_VERSION,
              **({"context": context} if context else {}),
@@ -170,7 +170,11 @@ def test_the_report_says_what_it_did_not_look_at_even_when_it_found_nothing(
     assert report["flagged"] == []
     assert "certifies nothing about the rest" in report["note"]
     assert "byte-identical" in report["note"]
-    assert "clean" not in report["note"].lower()
+    # The word appears only where it is denied — "not a pair that came back
+    # clean" — and never as something the command asserts of the store.
+    for claim in ("is clean", "are clean", "no misattribution", "nothing wrong",
+                  "passed", "OK"):
+        assert claim not in report["note"], claim
 
 
 def test_a_record_whose_source_is_not_unique_still_flags(
@@ -179,14 +183,16 @@ def test_a_record_whose_source_is_not_unique_still_flags(
 
     A byte-identical *rival* contributes exactly the diagonal and so can never
     be the argmax — but the record still flags, on some other rival. The brief
-    that produced this module asserted the opposite as a property, and on the
-    measured corpus 16 of the 17 true positives have a duplicated source: a
-    filter that skipped them would have deleted almost every finding.
+    that produced this module asserted the opposite as a property, and over the
+    measured file's 208 lines 16 of the 17 true positives have a duplicated
+    source: a filter that skipped them would have deleted almost every finding.
 
-    The two records here hold **the same source text**, kept apart by `context`
-    the way the measured file keeps its duplicates apart, and both are poisoned.
-    Each is therefore in the other's rival pool at exactly its own score, and
-    both must still be reported.
+    The two records here hold **the same source text**, kept apart by `context`,
+    and both are poisoned. Each is therefore in the other's rival pool at exactly
+    its own score, and both must still be reported. Note that this situation is
+    the one the measured file does *not* contain — its duplicates are all
+    superseded lines, so over its 157 effective records the count is zero — which
+    is why it is constructed here rather than sampled.
     """
     monkeypatch.chdir(tmp_path)
     _embed_reset(vectors=GEOMETRY)
@@ -253,7 +259,8 @@ def test_a_pair_too_long_to_offer_a_backend_is_named_rather_than_skipped_silentl
     """
     monkeypatch.chdir(tmp_path)
     _embed_reset(vectors=GEOMETRY)
-    long_source = "x" * (int(audit.TOKEN_CEILING / audit._OTHER_PER_CHAR) + 10)
+    long_source = "x" * (int(audit.TOKEN_CEILING / audit._PER_ALNUM) + 10)
+    assert audit.oversize(long_source)
     append_tm("zh-TW", _tm((A, TA), (long_source, "何か")))
 
     report = do_audit(_cfg(server), "zh-TW")
@@ -264,26 +271,77 @@ def test_a_pair_too_long_to_offer_a_backend_is_named_rather_than_skipped_silentl
     assert "not a pair that came back clean" in report["note"]
 
 
-def test_the_token_estimate_matches_what_the_measured_server_accepted():
-    """Calibration, pinned against the four points that were measured live.
+#: What `bge-m3` actually charged for each of these strings, measured against
+#: the live backend on 2026-09-06. Pinned as data because the suite has no
+#: network and a calibration nobody can re-check is a number that drifts: these
+#: are what `estimated_tokens` was fitted to, so a change to its weights has to
+#: face them.
+MEASURED_TOKENS = [
+    ("english prose",
+     "The lamplighter went down the row of iron posts, and behind him the street "
+     "came awake one flame at a time. " * 7, 205),
+    ("zh-TW prose", "點燈人沿著那排鐵柱走下去，在他身後，街道一盞一盞地醒來。" * 11, 278),
+    ("zh-TW with placeholders",
+     "點燈人沿著⟦1⟧那排鐵柱走下去，⟦22⟧在他身後，街道一盞一盞地⟦3⟧醒來。⟦4⟧" * 7, 262),
+    ("nothing but placeholders", "⟦1⟧⟦2⟧⟦3⟧⟦4⟧" * 18, 148),
+    ("japanese", "ランプ点灯人は鉄の柱の列を下っていき、彼の後ろで街は目を覚ました。" * 8, 195),
+    ("russian", "Фонарщик шёл вдоль ряда железных столбов, и улица просыпалась. " * 7, 156),
+    ("markdown", "- **bold** `code` [link](http://x/y) and a | table | row |\n" * 10, 282),
+    ("table rows", "| cell one | cell two | 42 | `code` |\n" * 14, 254),
+    ("digits", "1234567890 " * 50, 202),
+]
 
-    English 1464 characters cost 354 real tokens and were accepted; 2196 cost
-    530 and were refused. Traditional Chinese 540 cost 459 and were accepted;
-    720 cost 611 and were refused. The estimate must accept both accepted cases
-    and refuse both refused ones — it is allowed to be conservative in between,
-    and on English it deliberately is.
+
+@pytest.mark.parametrize("name,text,real", MEASURED_TOKENS,
+                         ids=[m[0] for m in MEASURED_TOKENS])
+def test_the_token_estimate_stays_in_the_band_it_was_measured_at(name, text, real):
+    """Calibration, against what the backend charged rather than against a guess.
+
+    The band is wide on purpose and `estimated_tokens` says why: the estimate
+    errs in both directions and neither direction loses a record — where it
+    reads high the record is skipped and named, where it reads low the backend
+    refuses the input and `embed_texts` isolates and names it. What it may not
+    do is drift outside the range it was measured in with nobody noticing.
+
+    The first version of these weights sat at **0.55** of the real cost on the
+    third row below, which is the ordinary shape of a translated segment here.
     """
-    en = ("The lamplighter went down the row of iron posts, and behind him the "
-          "street came awake one flame at a time, so that a man walking north "
-          "would have thought the light was following him. ")
-    zh = "點燈人沿著那排鐵柱走下去，在他身後，街道一盞一盞地醒來，因此往北走的人會以為那光正跟著他。"
+    ratio = audit.estimated_tokens(text) / real
+    assert 0.85 <= ratio <= 1.6, f"{name}: {ratio:.2f} of the measured {real}"
 
-    assert not audit.oversize(en * 8), "1464 characters answered 200"
-    assert audit.oversize(en * 12), "2196 characters answered 500"
-    assert not audit.oversize(zh * 12), "540 characters answered 200"
-    assert audit.oversize(zh * 16), "720 characters answered 500"
-    # The ratio the CJK arm rests on, stated so a change to it is deliberate.
-    assert 0.8 < audit.estimated_tokens(zh) / len(zh) < 0.9
+
+def test_a_placeholder_is_counted_and_not_averaged_away():
+    """The specific defect the first weights had, pinned as its own case.
+
+    `⟦` and `⟧` are punctuation outside ASCII, and the first estimate charged
+    them at the cheapest rate it had: a 592-character Traditional Chinese target
+    carrying four placeholders estimated 301 tokens against a real 547 and was
+    offered to a backend that refused it. Measured, a placeholder costs a flat
+    2.25 whatever its id — `⟦1⟧`, `⟦12⟧` and `⟦123⟧` alike — which is why it is
+    counted rather than averaged into a per-character rate.
+    """
+    carrier = "點燈人沿著那排鐵柱走下去，在他身後，街道一盞一盞地醒來。" * 4
+    four = carrier + "⟦1⟧⟦22⟧⟦333⟧⟦4⟧"
+
+    per_placeholder = (audit.estimated_tokens(four)
+                       - audit.estimated_tokens(carrier)) / 4
+    assert per_placeholder >= 2.25
+    assert (audit.estimated_tokens(carrier + "⟦1⟧⟦2⟧⟦3⟧⟦4⟧")
+            == audit.estimated_tokens(four)), "the id is not what is charged for"
+
+
+def test_a_cased_script_is_not_charged_at_the_cjk_rate():
+    """Cyrillic, Greek and accented Latin cost about a third of what CJK costs.
+
+    Folding every non-ASCII character into one rate over-estimated a Russian
+    paragraph by 2.35 and would have skipped records that fit comfortably. The
+    split is by Unicode category, so it needs no list of scripts.
+    """
+    ru = "Фонарщик шёл вдоль ряда железных столбов. " * 12
+    zh = "點燈人沿著那排鐵柱走下去，在他身後，街道醒來。" * 12
+    assert audit.estimated_tokens(ru) / len(ru) < 0.6
+    assert audit.estimated_tokens(zh) / len(zh) > 0.9
+
 
 
 def test_a_zero_vector_skips_its_record_rather_than_the_run(
@@ -535,3 +593,166 @@ def test_the_checks_module_still_performs_no_io():
     called = {n.func.id for n in ast.walk(tree)
               if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
     assert "open" not in called and "urlopen" not in called
+
+
+def test_a_last_batch_of_one_that_fails_does_not_throw_away_the_run(
+        tmp_path, monkeypatch, server):
+    """The shape that made the first give-up rule certain to fire.
+
+    The rule was "every input of this batch failed", and a store whose length
+    leaves one input in the last batch makes a single refusal into a whole
+    failed batch — every vector already computed thrown away, `lx audit` exit 2,
+    no report at all. The rule is now "nothing has succeeded yet", so a backend
+    that is answering keeps answering.
+    """
+    monkeypatch.chdir(tmp_path)
+    _embed_reset(vectors=GEOMETRY)
+    tail = "the last record, alone in its batch"
+    filler = [(f"source {i}", f"target {i}") for i in range(audit.BATCH)]
+    append_tm("zh-TW", _tm(*filler, (tail, "尾")))
+    assert (len(filler) + 1) % audit.BATCH == 1, "the last batch holds one input"
+
+    def mangle(body):
+        texts = EMBED["seen"][-1]["payload"]["input"]
+        return {**body, "data": body["data"][:-1]} if tail in texts else body
+
+    EMBED["mangle"] = mangle
+    report = do_audit(_cfg(server), "zh-TW")
+
+    assert report["records"] == audit.BATCH + 1
+    assert report["compared"] == audit.BATCH
+    assert [s["ref"] for s in report["skipped"]] == [{"line": audit.BATCH + 1}]
+
+
+def test_a_backend_that_never_answers_ends_the_run_on_the_first_batch(
+        tmp_path, monkeypatch, server):
+    """The other side of the same rule, and the reason it is not simply removed:
+    a wrong shape must not be reported two hundred times, one request each."""
+    monkeypatch.chdir(tmp_path)
+    _embed_reset(vectors=GEOMETRY)
+    append_tm("zh-TW", _tm(*[(f"s{i}", f"t{i}") for i in range(40)]))
+    EMBED["mangle"] = lambda body: [{"index": r["index"], "embedding": [r["embedding"]]}
+                                    for r in body["data"]]
+
+    with pytest.raises(ProviderError):
+        do_audit(_cfg(server), "zh-TW")
+
+    # One batch, then that batch isolated — and then it stops, rather than
+    # walking the remaining twenty-four records one request at a time.
+    assert len(EMBED["seen"]) == audit.BATCH + 1
+
+
+def test_the_comparison_count_is_the_pool_and_not_the_compared_pairs(
+        tmp_path, monkeypatch, server):
+    """A record whose target the backend refused is still somebody else's rival.
+
+    The module docstring tells a reader to judge the false-positive risk by how
+    many records the maximum ran over, so reporting the smaller number
+    understates exactly the thing it points at.
+    """
+    monkeypatch.chdir(tmp_path)
+    _embed_reset(vectors={**GEOMETRY, TA: [0, 0, 0]})   # A's target is degenerate
+    append_tm("zh-TW", _tm((A, TA), (B, TB), (C, TC)))
+
+    calls = []
+    real = audit.cosine
+    monkeypatch.setattr(audit, "cosine", lambda a, b: calls.append(1) or real(a, b))
+    report = do_audit(_cfg(server), "zh-TW")
+
+    assert report["compared"] == 2, "A has no target vector"
+    assert report["comparisons"] == 2 * 2, "but A's source is still a rival"
+    # Two own scores plus two rivals each: the arithmetic actually performed.
+    assert len(calls) == 2 + report["comparisons"]
+
+
+def test_a_hand_edited_record_whose_fields_are_not_text_is_named_not_fatal(
+        tmp_path, monkeypatch, server):
+    """`.lx/tm.*.jsonl` is hand-editable by design and `store.tm_lines` keeps any
+    line whose `hash` and `target` are merely truthy.
+
+    A `"source": 5` ended the command with an `AttributeError` and exit 1; a
+    `"target": ["…"]` was handed to the backend as a nested array.
+    """
+    monkeypatch.chdir(tmp_path)
+    _embed_reset(vectors=GEOMETRY)
+    append_tm("zh-TW", _tm((A, TA))
+              + [{"hash": "h2", "segmentation_version": SEGMENTATION_VERSION,
+                  "source": 5, "target": "五"},
+                 {"hash": "h3", "segmentation_version": SEGMENTATION_VERSION,
+                  "source": "three", "target": ["三"]}])
+
+    report = do_audit(_cfg(server), "zh-TW")
+
+    assert report["records"] == 3 and report["compared"] == 1
+    assert [s["ref"] for s in report["skipped"]] == [{"line": 2}, {"line": 3}]
+    assert all("not text" in s["reason"] for s in report["skipped"])
+    for sent in EMBED["seen"]:
+        assert all(isinstance(t, str) for t in sent["payload"]["input"])
+
+
+def test_a_negative_max_is_floored_rather_than_slicing_from_the_tail(
+        tmp_path, monkeypatch, server, capsys):
+    """`cmd_untracked`'s measured defect, which this command was written past.
+
+    A negative slice counts from the tail while the arithmetic counts from the
+    head, so `--max -1` showed one finding fewer and claimed two more than exist
+    — on the one command whose whole output is a count of suspicious records.
+    """
+    monkeypatch.chdir(tmp_path)
+    _embed_reset(vectors=GEOMETRY)
+    append_tm("zh-TW", _tm((A, TA), (B, TB), (C, TC)))
+    args = argparse.Namespace(src=None, lang="zh-TW", provider=None, model=None,
+                              margin=None, json=False, max=-1)
+
+    cmd_audit(args, _cfg(server))
+
+    out = capsys.readouterr().out
+    assert "1 flagged" in out
+    assert "... 1 more (use --max or --json)" in out
+    assert "2 more" not in out and "not compared" not in out
+
+
+def test_the_note_warns_against_the_command_a_reviewer_would_reach_for(
+        tmp_path, monkeypatch, server):
+    """`lx waive` is the trap, and the first version of this note recommended
+    against it for the wrong reason.
+
+    It said `lx check` reports none of this so the waiver would be refused.
+    Measured: `checks.numbers` fires at **error** whenever the source carries a
+    digit the target does not — every chapter heading, count and date — so the
+    waiver goes through, and a waiver banks into the tracked memory the claim
+    that a reviewer stood by the wording.
+    """
+    from scriptorium.checks import check_segment
+
+    monkeypatch.chdir(tmp_path)
+    _embed_reset(vectors=GEOMETRY)
+    append_tm("zh-TW", _tm((A, TA), (B, TB), (C, TC)))
+    report = do_audit(_cfg(server), "zh-TW")
+
+    assert "Do not `lx waive`" in report["note"]
+    assert "banks into the tracked memory" in report["note"]
+
+    # The measurement the sentence rests on, so the sentence cannot outlive it.
+    seg = {"id": "s1", "kind": "para", "slots": [],
+           "source": "He counted 3 lanterns on the far wall.",
+           "masked": "He counted 3 lanterns on the far wall.",
+           "target": "她把窗戶關上，外面的雨聲忽然變得很遠。"}
+    found = check_segment(seg, "zh-TW", json.loads(json.dumps(DEFAULT_CONFIG)), {}, [])
+    assert [i["rule"] for i in found if i["severity"] == "error"] == ["numbers"]
+
+
+def test_the_note_says_a_skipped_record_left_the_rival_pool(
+        tmp_path, monkeypatch, server):
+    """The blind spot the first note did not name: a record that was not
+    compared was also not offered as a rival, so a wording that belongs to it
+    cannot be reported against anything."""
+    monkeypatch.chdir(tmp_path)
+    _embed_reset(vectors=GEOMETRY)
+    long_source = "x" * (int(audit.TOKEN_CEILING / audit._PER_ALNUM) + 10)
+    append_tm("zh-TW", _tm((A, TA), (long_source, "何か")))
+
+    report = do_audit(_cfg(server), "zh-TW")
+
+    assert len(report["skipped"]) == 1
+    assert "not offered as a rival" in report["note"]
