@@ -397,8 +397,10 @@ def _note(store, records, compared, skipped, superseded, margin):
     The third red line of the package this came from: a listing must not imply
     completeness. An empty `flagged` list with no sentence under it reads as a
     clean bill of health, and this instrument cannot issue one — so the counts of
-    what it could not look at are in the same paragraph as the count of what it
-    found, and the word *clean* appears nowhere in this command's output.
+    what it could not look at sit in the same paragraph as the count of what it
+    found. The word *clean* appears in this command's output exactly once and
+    only where it is denied: "a pair that was not compared is not a pair that
+    came back clean". Nothing here ever asserts it.
 
     **It warns against `lx waive`, and the reason is the opposite of the one
     first written here.** The first version said `lx check` reports none of this
