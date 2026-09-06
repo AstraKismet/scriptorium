@@ -61,6 +61,42 @@ class OpenAICompatProvider(Provider):
                 f"model list (expected a `data` array): {_tame(str(data)[:300])}")
         return self._listing(rows)
 
+    def embed(self, texts):
+        """``POST {base_url}/embeddings`` — one vector per input, in input order.
+
+        The body is `{model, input}` and nothing else, and a test pins the key
+        set. `encoding_format`, `dimensions`, `truncate` and `user` are all real
+        fields of the hosted API and none is sent: invariant 7's letter is the
+        *chat completion* body, but its reason — self-hosted runtimes refuse an
+        unknown field rather than ignoring it — is about this wire and applies
+        here word for word. `encoding_format` would be the worst of them, since
+        `base64` changes the reply's own shape and every check in
+        `Provider._vectors` reads the array form.
+
+        **`model` is sent even though this endpoint may ignore it.** Measured
+        2026-09-06 against the development `llama-server`: a request naming a
+        model it does not serve, and a request naming none at all, both answered
+        200 and echoed the value back. Sending it costs nothing there and is
+        required by every hosted API, which is the same asymmetry
+        `config.DEFAULT_CONFIG`'s `local-model` placeholder rests on.
+        """
+        base = self.spec.get("base_url", "http://localhost:11434/v1").rstrip("/")
+        # Refused here rather than at the endpoint, and the measurement is the
+        # reason rather than the guess it replaced: `llama-server` answers an
+        # empty `input` with **500** `"prompt" must not be empty`, and 500 is in
+        # `providers.base._RETRYABLE` — so sending it buys a full retry ladder
+        # over a question already answered, and then a sentence about the server
+        # where the truth is that the caller asked for nothing.
+        if not texts:
+            raise ProviderError(f"{self.name}: nothing to embed.")
+        url = f"{base}/embeddings"
+        headers = {"Content-Type": "application/json"}
+        key = self.api_key
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        data = self._embed_post(url, {"model": self.model, "input": list(texts)}, headers)
+        return self._vectors(data, len(texts), url)
+
     def complete(self, system, user):
         base = self.spec.get("base_url", "http://localhost:11434/v1").rstrip("/")
         url = f"{base}/chat/completions"

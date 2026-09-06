@@ -11,7 +11,7 @@ import sys
 import urllib.parse
 from collections import Counter
 
-from . import __version__, formats, sentences
+from . import __version__, audit, formats, sentences
 from .checks import HELD, check_segment, is_held, is_waived, workable
 from .config import (
     DEFAULT_TONE,
@@ -1001,6 +1001,40 @@ def checked_limit(limit, what="limit"):
             f"it would take every segment except the last {abs(limit)}. Pass a "
             f"positive number, or 0 for the whole document.")
     return limit
+
+
+def checked_margin(margin):
+    """``margin`` as a cosine distance, or a refusal saying why it is not one.
+
+    `checked_limit`'s rule for the other bound this project takes from a caller,
+    and the two failures it closes are the same two, arriving as floats:
+
+    * **A non-finite margin flags nothing, silently.** `float("nan")` is what
+      argparse's `type=float` makes of `nan`, and every comparison against a NaN
+      is false — so `--margin nan` would report a clean store over a poisoned
+      one, which is the single worst output this command can produce.
+    * **A negative margin flags almost everything.** The delta it is compared
+      against is a difference of cosines, so a negative bound is satisfied by
+      any record whose nearest rival is merely close, and the report becomes a
+      copy of the store.
+
+    The upper bound is 2.0 because that is the width of the cosine range, so
+    anything past it is a margin nothing can ever cross — a way to spell "report
+    nothing" that reads like a strict setting.
+    """
+    if margin is None:
+        return None
+    if isinstance(margin, bool) or not isinstance(margin, (int, float)):
+        raise UnusableTarget(
+            f"`margin` is a number between 0 and 2, and this sent "
+            f"{type(margin).__name__}. It is how much closer to another source a "
+            f"translation has to sit before it is reported.")
+    if not math.isfinite(margin) or not 0.0 <= margin <= 2.0:
+        raise UnusableTarget(
+            "`margin` is a number between 0 and 2 — the width of the cosine range. "
+            "A negative one reports almost every record and a non-finite one reports "
+            "none of them, because every comparison against it is false.")
+    return float(margin)
 
 
 def bounded(segments, limit, what="limit"):
@@ -2144,6 +2178,126 @@ def cmd_commit(args, cfg):
              f"--lang {args.lang} --ids {','.join(held)}` and commit again.")
 
 
+def do_audit(cfg, lang, src=None, provider=None, model=None, margin=None,
+             on_progress=None):
+    """Which stored wordings look like they belong to a different source.
+
+    The seam behind `lx audit`, and the only place the two stores are chosen
+    between: ``src`` names a document, and its absence means the translation
+    memory for ``lang``.
+
+    **Which backend, and the one refusal that happens before any network call.**
+    ``embedding.provider`` names an ordinary `providers.*` entry — an ordinary
+    one on purpose, because that is what makes `_field_base_url`'s userinfo
+    refusal, `_field_api_key_env`'s credential rules, `providers.available`'s
+    masking and the whole of `HTTP_WRITABLE_KEYS`' reasoning bind to it by
+    position rather than by anybody remembering to. ``--provider`` overrides it
+    for one run. With neither, this refuses and names both, which is the honest
+    degradation a project with no embedding endpoint gets: one sentence, exit 2,
+    and no other command's behaviour changed.
+
+    It deliberately does **not** go through `config.resolve_route`. That function
+    falls back to the `draft` entry for any stage it does not recognise
+    (`config.py`, `route_entry`), so an unwritten key would silently POST every
+    source and every translation in the project to the *translation* backend —
+    a data-egress default nobody chose, and the one failure mode here that is
+    worse than not running at all.
+    """
+    from .providers import build
+
+    margin = checked_margin(margin)
+    embedding = cfg.get("embedding")
+    name = provider or (embedding.get("provider") if isinstance(embedding, dict) else "") or ""
+    if not isinstance(name, str) or not name.strip():
+        # The second sentence exists because the first one's remedy can be
+        # refused: `lx config set embedding local` writes a scalar, and then
+        # `embedding.provider` addresses nothing inside it — a dead end a reader
+        # would otherwise have to work out from two messages that do not mention
+        # each other.
+        raise ConfigError(
+            "no embedding backend. `lx audit` needs one, and nothing else does — "
+            "`lx config set embedding.provider <name>` names a configured backend for "
+            "this project, or `--provider <name>` names one for this run. "
+            "`lx providers` lists what is configured."
+            + ("" if embedding is None or isinstance(embedding, dict) else
+               " `embedding` currently holds a single value rather than a block, so "
+               "run `lx config unset embedding` first."))
+    doc = load_doc(src, lang) if src else None
+    return audit.run(build(name.strip(), cfg, model), lang, doc=doc,
+                     margin=audit.MARGIN if margin is None else margin,
+                     on_progress=on_progress)
+
+
+def cmd_audit(args, cfg):
+    """`lx audit`. Exit 0 whenever the audit ran; exit 2 whenever it could not.
+
+    **Findings do not move the exit code, and that is the decision rather than an
+    oversight.** Both red lines of the package this came from point the same way.
+    A nonzero exit on findings is a CI hook waiting to be written, and this
+    instrument's findings are statistical where `lx check`'s are mechanically
+    decidable — invariant 4's line, and the reason `translate.misattributed`
+    refused a similarity test of its own. And the moment exit 1 means "found
+    something", exit 0 means "found nothing", which is one shell script away from
+    "clean" — the claim this command cannot make and says so in its own note.
+    Anyone who wants a gate reads `flagged` out of `--json` and writes one, which
+    is a decision somebody has to make on purpose.
+    """
+    def progress(done, total):
+        if not args.json:
+            _out(f"  embedding {done}/{total}")
+
+    report = do_audit(cfg, args.lang, src=args.src, provider=args.provider,
+                      model=args.model, margin=args.margin,
+                      on_progress=progress if not args.json else None)
+    if args.json:
+        _out(json.dumps(report, ensure_ascii=False, indent=2))
+        return
+    where = report["path"] or report["source"]
+    _out(f"{where} [{report['lang']}]  {report['records']} record(s)  "
+         f"{report['compared']} compared  {len(report['skipped'])} skipped  "
+         f"{len(report['flagged'])} flagged")
+    _out(f"  margin {report['margin']:g} · {report['provider']}"
+         + (f" · {report['model']}" if report["model"] else "")
+         + (f" · {report['dimensions']} dims" if report["dimensions"] else "")
+         + f" · {report['comparisons']} comparison(s)"
+         + (f" · {report['superseded']} line(s) superseded" if report["superseded"] else ""))
+    # Floored, `cmd_untracked`'s line and for its measured reason: a negative
+    # slice counts from the tail while the arithmetic below counts from the head,
+    # so `--max -1` showed one finding fewer and then claimed two more than
+    # exist. On the one command in this project whose whole output is a count of
+    # suspicious records, a report that contradicts its own header and names
+    # records that are not there is the worst shape available. `cmd_check`, which
+    # this block was written from, still carries the defect and is still a
+    # different command's line to change.
+    shown = max(0, args.max)
+    for finding in report["flagged"][:shown]:
+        rival = finding["belongs_to"]
+        _out(f"\n  {_ref(finding['ref'])}  own {finding['own']:.2f}  → belongs to "
+             f"{_ref(rival['ref'])}  {rival['score']:.2f}  (+{finding['delta']:.2f})"
+             # `origin` and `review` because they decide the remedy and neither
+             # can be re-derived from the rest of the line: a `human` origin is
+             # refused to every model write, and a hold is the reviewer's own
+             # mark that the segment is theirs to finish.
+             + (f"  origin {finding['origin']}" if finding.get("origin") else "")
+             + (f"  review {finding['review']}" if finding.get("review") else ""))
+        _out(f"      its source     : {_one_line(finding['source'])[:88]}")
+        _out(f"      its target     : {_one_line(finding['target'])[:88]}")
+        _out(f"      {_ref(rival['ref'])} source : {_one_line(rival['source'])[:88]}")
+    if len(report["flagged"]) > shown:
+        _out(f"\n  ... {len(report['flagged']) - shown} more (use --max or --json)")
+    for entry in report["skipped"][: shown]:
+        _out(f"\n  {_ref(entry['ref'])}  not compared: {entry['reason']}")
+    if len(report["skipped"]) > shown:
+        _out(f"\n  ... {len(report['skipped']) - shown} more not compared "
+             f"(use --max or --json)")
+    _out(f"\n{report['note']}")
+
+
+def _ref(ref):
+    """How a record is named in the report: a memory line or a segment id."""
+    return f"line {ref['line']}" if "line" in ref else ref["seg"]
+
+
 def cmd_stats(args, cfg):
     """The progress bars, over `do_status`'s counts rather than a second set.
 
@@ -3227,11 +3381,46 @@ def _field_route(cfg, path, value):
     return {"provider": provider, "model": model} if model else provider
 
 
+def _field_embedding_provider(cfg, path, value):
+    """Which configured backend `lx audit` sends its comparisons to.
+
+    A provider *name* and nothing more — no `provider:model` spelling, unlike
+    `routing.*`. There is one embedding backend per project and a model override
+    belongs on the backend (`providers.<name>.model`) or on the run
+    (`lx audit --model`); a second spelling for the same thing is how two
+    surfaces come to disagree about which model produced a number.
+
+    It checks the name against the configured backends here rather than leaving
+    it to `providers.build` at run time, for `_field_route`'s reason and one
+    more of its own: this key decides which host every source and every
+    translation in the project is POSTed to, so a typo caught at write time is
+    caught before anything leaves the machine.
+
+    The rejected value **is** echoed, which is safe and deliberate — this key is
+    nowhere near `api_key_env` or `base_url`, the two boxes a mispasted
+    credential lands in, and naming the typo is the whole point of checking
+    early. `_field_kind` does the same for the same reason.
+    """
+    name = _as_text(path, value, "the name of a configured provider")
+    if not name.strip():
+        raise ConfigError(
+            f"{path} names no provider. `lx providers` lists what is configured.")
+    specs = cfg.get("providers") or {}
+    if name.strip() not in specs:
+        raise ConfigError(
+            f"unknown provider {name.strip()!r}. Configured: "
+            f"{', '.join(sorted(specs)) or 'none'} — `lx providers` lists them. An "
+            f"embedding backend is an ordinary provider block: give it the `base_url` "
+            f"of a server that serves `/embeddings`.")
+    return name.strip()
+
+
 #: A field this command decides for itself rather than inferring from what is
 #: already there. A pattern is a dotted key with `*` standing for exactly one
 #: segment; each rule takes the value as typed *or* as decoded out of a JSON
 #: block, and returns what will be written.
 _CONFIG_FIELDS = {
+    "embedding.provider": _field_embedding_provider,
     "providers.*.kind": _field_kind,
     "providers.*.base_url": _field_base_url,
     "providers.*.api_key_env": _field_api_key_env,
@@ -4593,6 +4782,31 @@ def build_parser():
                     help="split the masked source instead of the target")
     sn.add_argument("--json", action="store_true")
     sn.set_defaults(fn=cmd_sentences)
+
+    au = sub.add_parser(
+        "audit", help="report stored translations that look filed under the wrong source",
+        description="Ask an embedding backend whether each stored translation sits "
+                    "closer to its own source than to any other in the same store. "
+                    "Reports; never repairs, and never moves any other command's exit "
+                    "code. Needs a backend: `lx config set embedding.provider <name>`, "
+                    "where <name> is a configured OpenAI-compatible embedding server.")
+    # Optional, and it is the axis that chooses the store: a document when it is
+    # given, the translation memory when it is not. `lx status --scan` already
+    # reads presence-or-absence as which subject a command has.
+    au.add_argument("src", nargs="?",
+                    help="a document to audit; omit to audit the translation memory")
+    au.add_argument("--lang", required=True)
+    au.add_argument("--provider", help="override embedding.provider for this run")
+    au.add_argument("--model", help="override the backend's own model for this run")
+    # `type=float` and then `checked_margin`, because argparse takes `nan` and
+    # `-1` for a float quite happily and both are silent failures — see there.
+    au.add_argument("--margin", type=float, default=None,
+                    help=f"how much closer to another source a translation must sit "
+                         f"before it is reported (default {audit.MARGIN:g}; lower it to "
+                         f"see near misses, which are mostly near-duplicate sources)")
+    au.add_argument("--json", action="store_true")
+    au.add_argument("--max", type=int, default=25)
+    au.set_defaults(fn=cmd_audit)
 
     m = sub.add_parser("commit", help="bank approved segments in the translation memory")
     m.add_argument("src")

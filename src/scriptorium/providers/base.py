@@ -17,6 +17,7 @@ import time
 import unicodedata
 import urllib.error
 import urllib.request
+from array import array
 
 from ..config import has_version_segment, printable_url
 from .errors import ProviderError
@@ -68,6 +69,48 @@ _UNSAFE_CATEGORIES = ("Cc", "Cf", "Zl", "Zp")
 #: A model listing's own budget, bounded below the completion one. See `_get`.
 _LIST_TIMEOUT = 30.0
 _LIST_RETRIES = 1
+
+#: How many attempts an embedding batch gets, and **the timeout is deliberately
+#: not clamped beside it.**
+#:
+#: A listing is bounded on both because it answers from a table, and its
+#: docstring says so. That premise does not transfer: an embedding request runs
+#: a model and the first one may load it — `config.DEFAULT_CONFIG` records a
+#: 2.5 GB fetch at 104.9 s and puts a 15 GB one at roughly ten minutes, with the
+#: router blocking the caller for the whole of it rather than answering
+#: something retryable. A ceiling here would be one no configuration could
+#: raise, and the sentence the caller then reads — "if the server is simply slow
+#: to answer, it is not answering" — would be false of exactly that case. So the
+#: `timeout` a project set for this backend is the timeout this uses.
+#:
+#: `_EMBED_RETRIES` is 1 for a measured reason rather than for symmetry: the
+#: per-input size ceiling of a `llama-server` answers **500**, and 500 is in
+#: `_RETRYABLE` above — measured 2026-09-06, `input (530 tokens) is too large to
+#: process`. That refusal is deterministic, so the shipped `retries: 3` spends
+#: four attempts and three backoffs re-asking a question already answered.
+_EMBED_RETRIES = 1
+
+#: How many bytes an embeddings reply may be read from. Measured on this machine
+#: 2026-09-06 against the bge-m3 server: 21,861 bytes for one 1024-dimension
+#: vector, 348,740 for a batch of sixteen and 1,394,722 for a batch of
+#: sixty-four — about 21.8 KB a row, and linear.
+#:
+#: **`_MAX_LIST_BYTES` is not reused, and the reason is scope rather than
+#: arithmetic.** Its own comment binds it to a listing, and a constant that
+#: means "a listing is never this big" cannot also mean "an embedding batch is
+#: never this big" without one of the two sentences becoming untrue the next
+#: time either changes. On the numbers alone 4 MiB would in fact have been
+#: enough — a batch of sixteen at four thousand dimensions is 1.33 MiB, and it
+#: would take about twelve thousand dimensions to reach 4 MiB — and an earlier
+#: version of this comment claimed the opposite. Sixteen mebibytes is chosen for
+#: the room, not because four is short.
+_MAX_EMBED_BYTES = 16 * 1024 * 1024
+
+#: The widest embedding this project will believe. Real models run 384 to 4096;
+#: the cap is here because a dimension count decides how much arithmetic the
+#: caller then does per pair, so an absurd width is a way to make a read-only
+#: command spend the afternoon.
+_MAX_EMBED_DIMS = 16384
 
 #: The largest token count this project will believe from a backend. A real
 #: completion is bounded by a context window measured in hundreds of thousands,
@@ -207,6 +250,13 @@ class Provider:
         if not isinstance(headers, dict):
             raise TypeError("`headers` is a block of name to value")
         self.extra_headers = headers
+        # Pinned by the first embedding reply and compared against on every one
+        # after it. On this class rather than in the caller because a router
+        # swapping the resident model mid-run is a fact about the *backend*, and
+        # a rule private to one caller is a rule the next caller does not get —
+        # `anthropic.py` records the day that cost this project a whole class's
+        # protection. `None` until a first reply arrives; nothing else reads it.
+        self._embed_dims = None
 
     # -- credentials -------------------------------------------------------
     @property
@@ -253,6 +303,31 @@ class Provider:
         raise ProviderError(
             f"{self.name}: a {self.kind} backend does not publish a model list here. "
             f"Set the model by hand: `lx config set providers.{self.name}.model <id>`.")
+
+    def embed(self, texts):  # pragma: no cover - interface
+        """One vector per input, in the order given: ``[[float]]``.
+
+        The third endpoint, after the completion and the listing, and it is the
+        listing's shape rather than the completion's: **advisory, and it gates
+        nothing.** `lx audit` reports with it and no other command consults it,
+        so a project with no embedding backend loses one report and nothing
+        else. It adds no field to the chat-completion body invariant 7 pins —
+        the body here is `{model, input}` and a test says so.
+
+        One request, one reply. Batching, the retry of a single input after a
+        batch fails, and every threshold live above this layer, exactly as
+        `translate.py` lives above `complete()`: what a suspect pair *is* must
+        not be decided inside a transport.
+
+        Vectors come back validated — right count, right order, finite numbers,
+        one consistent width — and **not normalized**. Whether a zero vector
+        ends a run or skips one record is the caller's policy, and a normalizer
+        here would have to answer it before the caller could.
+        """
+        raise ProviderError(
+            f"{self.name}: a {self.kind} backend does not serve embeddings here. "
+            f"`lx audit` needs an OpenAI-compatible embedding backend — point "
+            f"`embedding.provider` at one.")
 
     # -- listing helpers, shared by every backend that publishes one -------
     @staticmethod
@@ -312,6 +387,187 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
         # sort is here at all.
         return sorted(out, key=lambda m: m["id"])[:_MAX_ROWS]
 
+    # -- embedding helpers, shared by every backend that serves them -------
+    def _vectors(self, data, count, url):
+        """``count`` validated vectors from an embeddings reply, in input order.
+
+        In this class and not in `openai_compat.py`, for the reason
+        `USAGE_FIELDS` states and `anthropic.py` paid for: a rule about an
+        untrusted reply written private to one backend is a rule the second
+        backend goes without, and a `kind` is a configurable string.
+
+        **A malformed reply is refused whole; it is never read row by row for
+        whatever survives.** That asymmetry is the opposite of `_listing`'s, and
+        deliberately so. A dropped listing row costs a model nobody could have
+        selected anyway; a dropped vector silently removes a record from the
+        comparison the caller is about to make, and a record that was not
+        compared is indistinguishable in the answer from a record that came back
+        clean. The one exception is left to the caller — see :meth:`embed` on why
+        a zero vector is not normalized here.
+
+        The refusals, and what each is for:
+
+        * **The top level is not an object.** This is the measured shape of the
+          version-segment mistake: on `llama-server`, `POST /embeddings` and
+          `POST /v1/embeddings` are different handlers, and the first answers
+          **200** with a bare array whose `embedding` is a list *of lists*
+          (measured 2026-09-06). `docs/decisions.md` of 2026-08-20 named an
+          embeddings call as the fact that would flip its `base_url` decision,
+          on the premise that such a reply would be *silent*. It is not silent
+          to a reader that demands an object, which is why this refusal is the
+          answer to that note rather than a refusal at write time — see
+          `docs/decisions.md`, 2026-09-06.
+        * **A row count that differs from the input count.** There is no id in
+          this payload to realign by, so a reply that answers a different number
+          of questions does not answer this request. It is
+          `translate.misattributed`'s rule one layer down, and the same
+          treatment: thrown away whole.
+        * **`index` that is not a permutation of `range(count)`.** Rows are
+          *placed* by `index`, never taken in arrival order. This endpoint was
+          measured answering in order on one build, and a measurement on one
+          build is not a licence to ignore the field the specification says is
+          the answer's address — an instrument built to find misattribution must
+          not be able to misattribute.
+        * **A non-numeric, boolean or non-finite element.** `json.loads` accepts
+          the bare tokens `NaN` and `Infinity` as an extension, and a NaN does
+          not raise anywhere downstream — it makes every comparison false, so a
+          poisoned reply would report a clean store. `bool` is refused for
+          `_token_count`'s reason: `isinstance(True, int)` is true.
+        * **A width that disagrees**, within the reply or with an earlier reply
+          of this run. The second half is what a single-batch check cannot see:
+          the development backend is a router serving sixteen models, and one
+          that swaps the resident model between batches would hand back two
+          incomparable geometries with nothing in either reply saying so.
+
+        **One refusal below prints part of the reply and every other one prints
+        only a type name**, which is the opposite of what an earlier version of
+        this paragraph claimed. The exception is the first: a reader whose
+        backend answered the wrong shape needs to see some of it, so
+        `str(data)[:300]` goes through `_tame` — and `_tame` is what makes that
+        safe, not `repr`. A reply whose top level is a JSON *string* reaches the
+        message unquoted, because `str` of a string is the string; the control
+        characters and the bidirectional overrides are gone either way, which is
+        the property that matters. Everything after it names a type and nothing
+        else, so there is no second place for a backend's own text to arrive.
+        """
+        rows = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(rows, list):
+            raise ProviderError(
+                f"{self.name}: {printable_url(url)} did not answer an embeddings list "
+                f"(expected a `data` array, got {type(data).__name__}): "
+                f"{_tame(str(data)[:300])}{self._url_hint(None, url)}")
+        if len(rows) != count:
+            raise ProviderError(
+                f"{self.name}: asked {printable_url(url)} for {count} embedding(s) and "
+                f"it answered {len(rows)}. Nothing in the reply says which input each "
+                f"row belongs to, so none of it is used.")
+        out = [None] * count
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ProviderError(
+                    f"{self.name}: {printable_url(url)} answered a row that is not an "
+                    f"object ({type(row).__name__}).")
+            idx = row.get("index")
+            if isinstance(idx, bool) or not isinstance(idx, int) or not 0 <= idx < count:
+                raise ProviderError(
+                    f"{self.name}: {printable_url(url)} answered a row whose `index` is "
+                    f"not a position in this request.")
+            if out[idx] is not None:
+                raise ProviderError(
+                    f"{self.name}: {printable_url(url)} answered `index` {idx} twice, so "
+                    f"at least one input has no vector and one has two.")
+            out[idx] = self._vector(row.get("embedding"), url)
+        width = len(out[0])
+        if any(len(v) != width for v in out):
+            raise ProviderError(
+                f"{self.name}: {printable_url(url)} answered vectors of different "
+                f"widths in one reply, which cannot be compared with each other.")
+        if self._embed_dims is None:
+            self._embed_dims = width
+        elif width != self._embed_dims:
+            raise ProviderError(
+                f"{self.name}: {printable_url(url)} answered {width}-dimension vectors "
+                f"where an earlier request of this run got {self._embed_dims}. The "
+                f"backend changed model mid-run and the two cannot be compared.")
+        return out
+
+    def _vector(self, value, url):
+        """One row's `embedding` as an ``array('f')``, or a `ProviderError`.
+
+        `array('f')` rather than a list, and it is a size decision rather than a
+        style one: a list of Python floats costs about 32 KB per 1024-dimension
+        vector against 4 KB here, measured, so a ten-thousand-record memory is
+        640 MB one way and 80 MB the other. The arithmetic that reads it is
+        `sum(map(mul, a, b))`, measured about 1.9 times faster than a generator
+        over `zip` and about 22% slower on arrays than on lists — a price worth
+        paying once, since the alternative is a command that cannot finish a book
+        at all. Single precision costs well under 1e-7 of a cosine, three orders
+        below this instrument's own measured reproducibility.
+
+        **Finiteness is checked on the array and not on the reply**, and the
+        first version of this had it the other way round with a comment claiming
+        a guard it did not have. Two measurements, 2026-09-06:
+
+        * `array("f", [1e300])[0]` is `inf`. It does **not** raise — so a reply
+          holding a perfectly finite double that single precision cannot store
+          passed `math.isfinite`, became an infinity here, made `audit.unit`
+          return a vector of `NaN`, and every comparison against it false. The
+          command would have reported a **clean store over a poisoned one**,
+          which is the one output it exists not to produce, and `--json` would
+          have carried a bare `NaN` that `JSON.parse` refuses.
+        * `math.isfinite(10 ** 400)` **raises** `OverflowError`. A 401-digit
+          integer is far inside `json.loads`' own 4300-digit limit, so a reply
+          could reach that call and leave as an exception that is not a
+          `ProviderError`, is not in `cli.main`'s exit-2 tuple, and skips
+          `audit.embed_texts`' per-input fallback entirely: a traceback and
+          exit 1.
+
+        Building the array first and asking `math.isfinite` of what came out
+        answers both, because every way a number can fail to be storable ends as
+        `inf` or `nan` there — and the one that does not, the huge integer, is
+        the one `array` itself refuses.
+        """
+        if not isinstance(value, list) or not value:
+            raise ProviderError(
+                f"{self.name}: {printable_url(url)} answered a row whose `embedding` is "
+                f"not a non-empty array ({type(value).__name__}).")
+        if isinstance(value[0], list):
+            # The nested form, and it gets its own sentence because it is the one
+            # wrong shape with a known cause: `llama-server` serves `/embeddings`
+            # and `/v1/embeddings` from different handlers and the first answers
+            # a list of lists. `_vectors` refuses that reply at the top level
+            # before this is reached, so what arrives here is the nested body
+            # behind a gateway that wrapped it — still the same diagnosis, and
+            # `_url_hint` keeps it silent where the path is not the cause.
+            raise ProviderError(
+                f"{self.name}: {printable_url(url)} answered a row whose `embedding` is "
+                f"an array of arrays, which is what llama.cpp's own `/embeddings` "
+                f"handler returns.{self._url_hint(None, url)}")
+        if len(value) > _MAX_EMBED_DIMS:
+            raise ProviderError(
+                f"{self.name}: {printable_url(url)} answered a {len(value)}-dimension "
+                f"vector, which no real embedding model serves.")
+        for x in value:
+            if isinstance(x, bool) or not isinstance(x, (int, float)):
+                raise ProviderError(
+                    f"{self.name}: {printable_url(url)} answered a vector holding "
+                    f"{type(x).__name__}, not numbers.")
+        try:
+            vec = array("f", value)
+        except OverflowError:
+            raise ProviderError(
+                f"{self.name}: {printable_url(url)} answered a vector holding a whole "
+                f"number too large to be a coordinate.") from None
+        if not all(map(math.isfinite, vec)):
+            raise ProviderError(
+                f"{self.name}: {printable_url(url)} answered a vector holding a value "
+                f"that is not a finite number this project can store. `json.loads` takes "
+                f"the bare tokens NaN and Infinity, and a value merely too large for "
+                f"single precision becomes one — none of them raise anywhere "
+                f"downstream, they make every comparison false, so a poisoned reply "
+                f"would report a clean store.")
+        return vec
+
     # -- transport ---------------------------------------------------------
     def _backoff(self, attempt, retry_after=None):
         """How long to wait before the next attempt.
@@ -355,16 +611,28 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
 
         It never fires on a 401, 400 or 5xx: those mean the route was found, and
         a hint about the path would be a lie with a plausible ring to it.
+
+        **A 200 of the wrong shape is the case that sentence did not cover**, and
+        it is why `_vectors` passes `None` here. `llama-server` serves
+        `/embeddings` and `/v1/embeddings` from different handlers and the first
+        answers 200 with a bare array (measured 2026-09-06) — the route was
+        found, and the path is still exactly what is wrong. The `code is None`
+        branch already says "we cannot tell you a status code, only that the URL
+        has no version segment", which is true of that reply as much as of a
+        connection that never opened.
         """
         if code is not None and code != 404:
             return ""
         if has_version_segment(url):
             return ""
         # It deliberately does **not** end by recommending `lx models`. That was
-        # the first draft, and `lx models` is itself one of the two callers — so
-        # the failure of that very command ended by advising the reader to run
-        # it. Naming a remedy is `cmd_config_set`'s job, where the command being
-        # named is not the one that just failed.
+        # the first draft, and `lx models` is itself one of the callers — so the
+        # failure of that very command ended by advising the reader to run it.
+        # Naming a remedy is `cmd_config_set`'s job, where the command being
+        # named is not the one that just failed. ("One of the two" is what this
+        # said until 2026-09-06; `_vectors` and `_vector` are the third and
+        # fourth, and an enumeration in a comment is the thing this project has
+        # watched go stale six times.)
         return (" That path carries no API version segment — many endpoints serve "
                 "this API under one, as /v1.")
 
@@ -453,10 +721,51 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
         return self._request(url, headers, payload=None, method="GET",
                              timeout=min(self.timeout, _LIST_TIMEOUT),
                              retries=min(self.retries, _LIST_RETRIES),
-                             max_bytes=_MAX_LIST_BYTES)
+                             max_bytes=_MAX_LIST_BYTES, what="a model listing",
+                             advice=" A model listing is bounded well below the "
+                                    "completion timeout on purpose; if the server is "
+                                    "simply slow to answer, it is not answering.")
+
+    def _embed_post(self, url, payload, headers):
+        """A batch of embeddings: a POST with a read's budget.
+
+        The third entry point into `_request`, written as `_get`'s sibling and
+        for its stated reason — everything that makes this loop careful, from
+        `Retry-After` to the `InvalidURL` mask invariant 6 gained on 2026-09-01,
+        is exactly as necessary here, and a second copy is a second place to
+        forget one of them.
+
+        **It is a POST and it is not `_post`.** `_post` records usage, and its
+        docstring says in terms that its two callers are exactly the two
+        `complete()` implementations — which is what makes that counter
+        trustworthy. Routing an embedding through it would not merely be
+        inaccurate, it would falsify a documented property: the measured reply
+        carries `prompt_tokens` and `total_tokens` and **no**
+        `completion_tokens`, so `_UsageTotals.record` takes its
+        one-of-two-present branch and counts every reply as *unreported* — a run
+        would report replies climbing while reported stayed at zero, on a
+        command that bought no completions at all. `_get` set the precedent for
+        the right move: a second door, and "a model listing is not a completion
+        and has no cost to report". Neither is this. What the audit reports
+        instead is what it counted itself, and the reply's `usage` is read by
+        nothing.
+
+        **Retries are clamped and the timeout is not**, which is where this
+        parts company with `_get` — see `_EMBED_RETRIES`. The reply is bounded
+        in bytes because it is a read a person can start by typing one command,
+        and a hostile one is otherwise parsed in full.
+        """
+        return self._request(url, headers, payload=payload, method="POST",
+                             retries=min(self.retries, _EMBED_RETRIES),
+                             max_bytes=_MAX_EMBED_BYTES,
+                             what="a batch of embeddings",
+                             advice=" The first request to a backend may be loading the "
+                                    "model — raise `providers.<name>.timeout`, or load "
+                                    "the model before auditing.")
 
     def _request(self, url, headers, payload=None, method="POST",
-                 timeout=None, retries=None, max_bytes=None):
+                 timeout=None, retries=None, max_bytes=None, what=None,
+                 advice=None):
         # **Only http(s) leaves this function.** `urllib`'s stock opener also
         # speaks `file:`, `ftp:` and `data:`, so a hand-edited `base_url` of
         # `file:///…` made the one endpoint a browser gesture can reach into a
@@ -507,10 +816,15 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
                     # it" are distinguishable without a second call.
                     raw = resp.read() if max_bytes is None else resp.read(max_bytes + 1)
                 if max_bytes is not None and len(raw) > max_bytes:
+                    # `what` rather than a hard-coded "a model list". The listing
+                    # was this branch's only caller for a year and the sentence
+                    # said so; the moment a second bounded read existed, that
+                    # sentence became a wrong one the new caller inherited
+                    # silently. Found by the security-tier pass over this change.
                     raise ProviderError(
                         f"{self.name}: {printable_url(url)} answered more than "
-                        f"{max_bytes} bytes for a model list, which no real backend "
-                        f"does. Nothing was parsed.")
+                        f"{max_bytes} bytes for {what or 'this request'}, which no real "
+                        f"backend does. Nothing was parsed.")
                 try:
                     return json.loads(raw.decode("utf-8"))
                 except (ValueError, UnicodeDecodeError) as e:
@@ -614,13 +928,20 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
                     f"the environment variable named by `api_key_env`, never in the URL."
                 ) from None
             except (TimeoutError, socket.timeout):
+                # The caller's own sentence, not one derived from `method`. It
+                # branched on `method == "GET"`, which meant "is this the
+                # listing" only for as long as the listing was the one
+                # non-completion call — the first POST that was not a completion
+                # inherited advice to lower `batch.size`, a knob with nothing to
+                # do with it. Deriving it from `what` instead was the first
+                # repair and was still wrong: it gave an embedding batch the
+                # listing's "it is not answering", which is false of a backend
+                # loading a model. Each caller states its own remedy because each
+                # caller has a different one.
                 last = ProviderError(
                     f"{self.name}: timed out after {timeout}s."
-                    + (" A model listing is bounded well below the completion "
-                       "timeout on purpose; if the server is simply slow to "
-                       "answer, it is not answering." if method == "GET" else
-                       " Local models on CPU are slow — raise `timeout` or "
-                       "lower `batch.size`."))
+                    + (advice or " Local models on CPU are slow — raise `timeout` or "
+                                 "lower `batch.size`."))
                 if not final:
                     time.sleep(self._backoff(attempt))
         raise last or ProviderError(f"{self.name}: request failed")
