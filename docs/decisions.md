@@ -272,7 +272,7 @@ fact about block structure to answer a question about token density.
 1024-dimension vector against 4 KB, so a ten-thousand-record memory is 640 MB one
 way and 80 MB the other, and the 22% the array costs in speed is what makes a
 long book possible at all. The inner product is `sum(map(mul, a, b))`, measured
-2.1 times faster than a generator over `zip`.
+about 1.9 times faster than a generator over `zip` on both operand types.
 
 ### The honest comparison with what was already free
 

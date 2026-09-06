@@ -40,12 +40,17 @@ rather than left to be discovered:
   segments are the other case, where the same sentence twice is two positions
   and both are compared.
 * **Its own false-positive rate at a size it has not been measured at.** The
-  score is a maximum over every other record, so it can only grow with the
-  store: subsampling the measured file, the worst delta over records known clean
-  runs +0.0002 at 25 records and +0.0700 at 208, against a lowest true positive
-  of +0.1166. The margin below was chosen on 208 records and is not validated
-  for thousands. `own` and `delta` ride on every finding so a reader can see how
-  near the edge each one sat.
+  score is a maximum over every other record, so what a clean record scores can
+  only grow with the store: subsampling the measured file, the *median* worst
+  delta over records known clean runs 0.0000 at 25 records, 0.0217 at 100 and
+  0.0700 at 208, against a lowest true positive of +0.1166 — while the *maximum*
+  over draws is 0.0700 at every size, because it is one particular pair rather
+  than a frontier. No clean record crosses 0.10 at any size measured, and the
+  margin below was chosen on 208 records and is not validated for thousands.
+  `own` and `delta` ride on every finding so a reader can see how near the edge
+  each one sat. Recall moves the other way for a reason no threshold reaches:
+  the record a target belongs to has to be *in the audited set*, and over the
+  same draws it is found 42.7% of the time at 25 records and 93.1% at 150.
 
 See `docs/decisions.md`, 2026-09-06, for the measurements and for the two rules
 that were built, scored and removed.
@@ -214,8 +219,8 @@ def unit(vec):
     backend can get wrong is `providers.base.Provider._vectors`' business and is
     refused there.
 
-    Vectors were measured arriving normalized to within 2e-8, and this is done
-    anyway — a measurement of one model is not a property of the endpoint.
+    Vectors were measured arriving normalized to within about 5e-8, and this is
+    done anyway — a measurement of one model is not a property of the endpoint.
     """
     norm = sum(map(mul, vec, vec)) ** 0.5
     if norm < 1e-12:
