@@ -472,7 +472,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 2080 collected, no network. Four are
+python -m pytest -q                 # 2133 collected, no network. Four are
                                     #   conditional on three different things, so
                                     #   which two skip is a property of the machine
                                     #   AND the account: one is POSIX-only, one
@@ -745,6 +745,59 @@ own.
   of the policy. Three arms and no fourth: a `missing_ids` arm and a
   batch-calibrated length arm were both built, scored and removed for adding
   nothing. See `docs/decisions.md`, 2026-09-04.
+- **A repair may change a reply's syntax; it may not take content out of it.**
+  `translate.parse_reply` returns `(mapping, how)` since 2026-09-07, `how` being
+  `clean` or `repaired`. It used to accept valid JSON and nothing else, so one
+  stray comma cost the whole batch a request per segment — twenty-five where one
+  would have done — and HANDOFF-050 measured about 10% of replies arriving that
+  way from the backend this project's maintainer runs. Invariant 5: two of the
+  three measured shapes are correctable deterministically, so they are
+  corrected.
+
+  **Two rungs, least-edited first, and both are lossless.** A trailing comma
+  removed, raw controls inside strings escaped; each is a string-aware character
+  scan, each hands its result to `json.loads`, and every answer the model wrote
+  survives into what the standard library agreed to read. A reply neither can
+  reach still raises, and `run_batch` re-asks its segments one at a time as it
+  always has — the refusal is reached by **two** paths, no brace-delimited object
+  and no repair that worked, and each needs its own test: replacing the second
+  with `return {}, "clean"` passed 823 of them.
+
+  **A scan and not a substitution, and that is not tidiness.**
+  `re.sub(r",(\s*[}\]])", r"\1", body)` is global, so a reply carrying a real
+  trailing comma *and* the sequence `, }` inside a translated value parses after
+  the edit and delivers the sentence with a character taken out of it — valid
+  JSON, matching placeholders, `lx check` green. `_FENCE` is the same rule and
+  was a live defect: as `re.M` it anchored `^` at every line start, including the
+  ones a raw newline inside a value creates, and deleted a translated code
+  block's fence lines out of the middle of a sentence. Harmless while the
+  mangled reply then failed to parse, and a silently shortened translation the
+  moment a repair could read it. It is anchored to the whole reply now.
+
+  **A third rung was built, measured and refused**, and it is the one
+  HANDOFF-050 asked for by name: reading the finished `"key": "value"` pairs out
+  with a regex, as `research/handoff-046/tolerant.py` does. It recovers shape 3 —
+  a reply cut off mid-value — and it is lossy by construction, which is where all
+  four of its measured defects came from. Two decide it. **What it drops from a
+  truncated reply is the trailing id, and that id is the only evidence
+  `misattributed` has for the drift shape**: whole, such a reply is refused and
+  every segment re-asked; truncated, the extra id is exactly what the regex
+  misses, all three arms pass, and four misfiled wordings are banked with
+  `lx check` at exit 0. And a value no JSON parser would read has to be guessed
+  at, which deleted three backslashes from `C:\Users\me\Documents` and wrote a
+  raw U+0008 into a delivered file — against source the pipeline really does hand
+  the model, since `mask.py` has no backslash pattern and 45 of the 3884 segments
+  this repository's own documentation parses into carry one. So shape 3 still
+  costs a request per segment; `handoff/90-later/HANDOFF-210` carries it, and any
+  future attempt must be lossless or hand what it dropped to `misattributed`.
+
+  The counts reach the reader the way `discarded` does — a line per reply and a
+  summary at the end, over `progress`, which the contract declares free text.
+  The denominator is replies rather than batches because `retry_one` sends one
+  too, and the count is taken **before** the parse with a second counter for the
+  replies no repair could reach: counting after put the most malformed reply
+  there is into neither half of the sentence, and silenced the sentence entirely
+  on the run that most needs it. `docs/decisions.md`, 2026-09-07.
 - **Where a sentence ends is `sentences.py`, and nowhere else.** Not `checks.py`
   (invariant 4 — it is not decidable without judgement), not the frontend, and
   not the translation-memory key or `store.SEGMENTATION_VERSION`, which a test

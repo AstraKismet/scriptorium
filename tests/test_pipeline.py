@@ -2784,12 +2784,127 @@ def test_every_corpus_segment_reseated_by_accept_still_renders_the_file():
     '[{"id": "s1", "text": "a"}]',
 ])
 def test_reply_parsing_tolerates_chatty_models(reply):
-    assert parse_reply(reply)["s1"] == "a"
+    """And reports none of them as a repair.
+
+    A fence and a paragraph of commentary are what `parse_reply` has always read
+    through, so calling either a repair would put a line in front of the reader
+    on the ordinary case — and a report that fires every run is a report nobody
+    is reading by the second book.
+    """
+    mapping, how = parse_reply(reply)
+    assert mapping["s1"] == "a"
+    assert how == "clean"
 
 
-def test_reply_parsing_rejects_garbage():
+@pytest.mark.parametrize("reply", [
+    "I cannot help with that.",
+    '"just a string"',
+    "42",
+    "null",
+    '["a", "b"]',
+    "",
+])
+def test_reply_parsing_rejects_garbage(reply):
+    """A reply carrying no answers still raises — the salvage pass did not eat this.
+
+    It is the half a tolerant parser removes by accident. A salvage that returned
+    `{}` instead of raising would make every unreadable reply look to `run_batch`
+    like a parsed one, and the per-segment path written for exactly this case
+    stops being reached. `["a", "b"]` is here because it used to raise
+    `TypeError` out of `d["id"]`, which is not what either caller catches by name.
+    """
     with pytest.raises(ValueError):
-        parse_reply("I cannot help with that.")
+        parse_reply(reply)
+
+
+def test_a_reply_no_repair_can_reach_still_raises_even_with_braces():
+    """The refusal *after* the repair ladder, which no other refusal test reaches.
+
+    `parse_reply` refuses in two places: once when the reply holds no
+    brace-delimited object at all, and once after every repair has been tried
+    and failed. Every other case in `test_reply_parsing_rejects_garbage` takes
+    the first — none of them has both braces — so a build that replaced the
+    second with `return {}, "clean"` passed 823 tests and turned every
+    unreadable reply into a batch of ids with no answer, which reads to
+    `run_batch` like a parsed reply. Measured 2026-09-07 by mutation. This reply
+    has both braces and is unreadable: the model wrote dialogue and did not
+    escape its quotes.
+    """
+    reply = '{"s0001": "He said "hello" and left.", "s0002": "\u597d\u3002"}'
+    assert "{" in reply and "}" in reply
+    with pytest.raises(ValueError):
+        parse_reply(reply)
+
+
+@pytest.mark.parametrize("reply, expected", [
+    # Shape 1 — a trailing comma before the closing brace, the one seen most.
+    ('{"s1": "甲。",\n "s2": "乙。",\n}', {"s1": "甲。", "s2": "乙。"}),
+    # Shape 2 — a raw control character inside a string, usually a newline the
+    #           model did not escape. A tab arrives the same way.
+    ('{"s1": "甲。\n乙。", "s2": "丙。"}', {"s1": "甲。\n乙。", "s2": "丙。"}),
+    ('{"s1": "甲\t乙"}', {"s1": "甲\t乙"}),
+    # Both at once, which is what a model that is bad at JSON actually sends.
+    ('{"s1": "甲\n乙",\n}', {"s1": "甲\n乙"}),
+])
+def test_a_repairable_reply_is_repaired(reply, expected):
+    """The two shapes `json` itself can be talked into reading. HANDOFF-050.
+
+    Measured 2026-09-04 against `translategemma-12b-it` over 52 replies: five
+    were not valid JSON and each cost its whole batch a request per segment.
+    """
+    mapping, how = parse_reply(reply)
+    assert mapping == expected
+    assert how == "repaired"
+
+
+def test_a_comma_inside_a_value_survives_the_trailing_comma_repair():
+    """The repair is a scan and not a substitution, and this reply is why.
+
+    `,(\\s*[}\\]])` over the whole reply is the obvious spelling, and it is
+    global: this one carries a real trailing comma *and* the sequence `, }`
+    inside a translated value, so the substitution takes a character out of the
+    sentence and the result parses anyway. Nothing downstream could see that —
+    the JSON is valid, the placeholders match, `lx check` is green — so the only
+    place it can be prevented is in the repair itself.
+    """
+    mapping, how = parse_reply('{"s1": "以 {a, } 表示", "s2": "乙。",}')
+    assert how == "repaired"
+    assert mapping["s1"] == "以 {a, } 表示"
+
+
+def test_a_truncated_reply_is_refused_rather_than_read_by_a_regex():
+    """Shape 3 is deliberately not repaired, and this test pins the decision.
+
+    Reading the finished `"key": "value"` pairs out with a regex does recover
+    it — `research/handoff-046/tolerant.py` is that rung, and it was built,
+    measured and refused. It is lossy by construction: it keeps what it can
+    match and drops the rest, and what it drops from a truncated reply is the
+    trailing id, which is the only evidence `misattributed` has for the drift
+    shape HANDOFF-046 measured. So the reply is refused whole, `run_batch`
+    re-asks its segments one at a time, and the batch costs what it has always
+    cost. `docs/decisions.md`, 2026-09-07.
+    """
+    with pytest.raises(ValueError):
+        parse_reply('{\n "s1": "\u7532\u3002",\n "s2": "\u4e59\u3002",\n "s3": "\u4e19')
+
+
+def test_a_fence_is_stripped_from_the_reply_and_never_from_inside_a_value():
+    """`re.M` anchors `^` at every raw newline, including the ones inside a value.
+
+    Measured 2026-09-07: with `re.M` this reply came back six characters short —
+    both fence lines deleted out of the middle of a translated code block — and
+    the control-character repair below then made the mangled text parse, so the
+    run banked it with `lx check` green and no placeholder to notice. At the
+    parent commit the same reply raised and the segment was re-asked, which is
+    what kept the defect invisible until the repairs could read it. A repair may
+    change a reply's syntax; it may not take content out of it.
+    """
+    value = "\u5b89\u88dd\u65b9\u5f0f\uff1a\n```\npip install lx\n```\n\u5b8c\u6210\u3002"
+    mapping, how = parse_reply('{"s1": "' + value + '"}')   # raw newlines: shape 2
+    assert how == "repaired"
+    assert mapping == {"s1": value}
+    # And a fence around the whole reply is still what it always was.
+    assert parse_reply('```json\n{"s1": "a"}\n```')[0] == {"s1": "a"}
 
 
 def test_config_layering_keeps_new_defaults():

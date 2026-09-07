@@ -241,24 +241,154 @@ def _system_prompt(source_lang, target_lang, tone, mode, context=False, style=""
 
 # ── response parsing ───────────────────────────────────────────────────────
 
-_FENCE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.M)
+#: A fence around the WHOLE reply, and nowhere else. The first spelling was
+#: `re.M`, which anchors `^` at every line start — including the ones a raw
+#: newline inside a string value creates — so a fenced code block the model had
+#: translated lost both its fence lines out of the middle of a sentence. That
+#: was harmless while the mangled reply then failed to parse and was harmless no
+#: longer the moment the repairs below could read what was left of it: measured
+#: 2026-09-07, a target six characters shorter than the model wrote, banked with
+#: `lx check` green. A repair may change a reply's syntax; it may not take
+#: content out of it.
+_FENCE = re.compile(r"\A\s*```(?:json)?[ \t]*\r?\n|\r?\n[ \t]*```\s*\Z")
 
 
-def parse_reply(text):
-    """Extract the mapping from a model reply that may be wrapped or chatty."""
-    cleaned = _FENCE.sub("", text).strip()
-    try:
-        data = json.loads(cleaned)
-    except json.JSONDecodeError:
-        start, end = cleaned.find("{"), cleaned.rfind("}")
-        if start == -1 or end <= start:
-            raise ValueError(f"no JSON object in reply: {cleaned[:200]!r}") from None
-        data = json.loads(cleaned[start : end + 1])
+def _escape_controls_in_strings(text):
+    """Escape the C0 controls a model left raw inside a JSON string.
+
+    A literal newline inside a string is the second of the three shapes
+    HANDOFF-050 measured. A scan rather than a substitution because the same
+    byte is legal between tokens and illegal inside one, and only a reader that
+    knows which side of a quote it is on can tell those apart. Lossless: every
+    character the model wrote is still in the text `json` is handed.
+    """
+    out, in_str, esc = [], False, False
+    for ch in text:
+        if not in_str:
+            in_str = ch == '"'
+        elif esc:
+            esc = False
+        elif ch == "\\":
+            esc = True
+        elif ch == '"':
+            in_str = False
+        elif ch < " ":
+            out.append(f"\\u{ord(ch):04x}")
+            continue
+        out.append(ch)
+    return "".join(out)
+
+
+def _strip_trailing_commas(text):
+    """Remove a comma standing between the last value and its closing bracket.
+
+    Outside string literals only, and that is the whole of why this is a scan.
+    The obvious spelling is one substitution of ``,(\\s*[}\\]])`` over the reply,
+    which is global: a reply carrying both a real trailing comma *and* the
+    sequence ``, }`` inside a translated sentence then parses after the edit and
+    delivers the sentence with a character taken out of it. Nothing downstream
+    could see that — the JSON is valid and the placeholders match — so the only
+    place it can be prevented is here. Measured 2026-09-07: over 6118 corrupted
+    replies the substitution returned the wrong text for 2480 of them, against
+    none for this scan.
+    """
+    out, comma_at, in_str, esc = [], None, False, False
+    for ch in text:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            out.append(ch)
+            continue
+        if ch in "}]" and comma_at is not None:
+            out[comma_at] = ""
+        if ch == ",":
+            comma_at = len(out)
+        elif not ch.isspace():
+            comma_at = None
+        if ch == '"':
+            in_str = True
+        out.append(ch)
+    return "".join(out)
+
+
+def _as_map(data):
+    """The mapping a parsed reply means, or ``ValueError`` if it means none."""
     if isinstance(data, list):
-        data = {d["id"]: d.get("text", d.get("target", "")) for d in data}
+        rows = {d["id"]: d.get("text", d.get("target", "")) for d in data
+                if isinstance(d, dict) and "id" in d}
+        # A non-empty list of things that are not answers is not an answer
+        # sheet. Guarded rather than left to `d["id"]`, which raised `TypeError`
+        # out of a function every caller catches `ValueError` from by name.
+        if data and not rows:
+            raise ValueError("reply is not an object")
+        data = rows
     if not isinstance(data, dict):
         raise ValueError("reply is not an object")
     return {str(k): v for k, v in data.items() if isinstance(v, str)}
+
+
+def parse_reply(text):
+    """``(mapping, how)`` from a reply that may be wrapped, chatty or malformed.
+
+    ``how`` is ``clean`` or ``repaired``. It is returned rather than swallowed
+    because a silent repair of a backend's malformed output is a backend nobody
+    ever notices is malformed — `translate_segments` counts it and says so once
+    at the end, beside what the run cost.
+
+    Measured 2026-09-04 against `translategemma-12b-it` over 52 replies from the
+    maintainer's own book: **5 of them were not valid JSON**, none was a
+    truncation at `max_tokens`, and each cost its whole batch — twenty-five
+    requests where one would have done — because the only answer this function
+    had was to raise. Invariant 5 is the argument: a defect that can be
+    corrected deterministically is corrected rather than reported.
+
+    **A repair may change a reply's syntax; it may not take content out of it.**
+    That is the line, and everything here is on one side of it. Both repairs are
+    string-aware scans that hand their result to `json.loads`, so what comes
+    back is JSON the standard library agreed to and every answer the model wrote
+    is still in it. A reply neither repair can reach still raises, and
+    `run_batch` re-asks its segments one at a time exactly as it always has.
+
+    A third rung was built, measured and **refused**: reading the finished
+    ``"key": "value"`` pairs out with a regex, which is what
+    `research/handoff-046/tolerant.py` does. It is lossy by construction — it
+    keeps what it can match and drops the rest — and every one of the four
+    defects an adversarial pass found in it came from that. Two are worth
+    naming here because they are the reason this docstring states a rule rather
+    than a preference: what it drops from a truncated reply is the trailing id,
+    which is the *only* evidence `misattributed` has for the drift shape
+    HANDOFF-046 measured; and a value it cannot decode has to be guessed at,
+    which turned `\\alpha` into a raw backspace character in a delivered file
+    with `lx check` at exit 0. `docs/decisions.md`, 2026-09-07.
+    """
+    cleaned = _FENCE.sub("", text).strip()
+    try:
+        return _as_map(json.loads(cleaned)), "clean"
+    except json.JSONDecodeError:
+        pass
+    start, end = cleaned.find("{"), cleaned.rfind("}")
+    if start == -1 or end <= start:
+        raise ValueError(f"no JSON object in reply: {cleaned[:200]!r}") from None
+    body = cleaned[start : end + 1]
+    try:
+        return _as_map(json.loads(body)), "clean"
+    except json.JSONDecodeError:
+        pass
+    # Least-edited candidate first, so a reply needing one repair is not
+    # reported through the other as well. Neither scan is a no-op risk: each is
+    # inert on a reply that does not carry the shape it repairs.
+    escaped = _escape_controls_in_strings(body)
+    for candidate in (_strip_trailing_commas(body), escaped,
+                      _strip_trailing_commas(escaped)):
+        try:
+            return _as_map(json.loads(candidate)), "repaired"
+        except json.JSONDecodeError:
+            continue
+    raise ValueError(f"no JSON object in reply: {cleaned[:200]!r}")
 
 
 def misattributed(asked, mapping, sources, lang, cfg):
@@ -774,8 +904,42 @@ def translate_segments(segments, doc, cfg, provider_name=None, mode="draft",
     #: move, and the contract forbids parsing `log` precisely so that a sentence
     #: like this can be added to it without one.
     discarded = 0
+    #: Replies the backend got syntactically wrong, and what reading them cost.
+    #: Counted for `discarded`'s reason and reported the same way: a run whose
+    #: backend cannot hold to JSON is a run that will keep paying for repairs,
+    #: and a repair nobody is told about is a backend nobody ever notices is
+    #: malformed. `replies` counts both request paths, because `retry_one` sends
+    #: one too, and it is incremented *before* the parse — a reply no repair
+    #: could reach is the most malformed reply there is, and counting it after
+    #: kept it out of both halves of the sentence and silenced the sentence
+    #: entirely on a run where every batch reply was unreadable.
+    replies = repaired = unreadable = 0
     lock = threading.Lock()
     progress(f"{provider.describe()} · {len(segments)} segment(s) in {len(batches)} batch(es)")
+
+    def read_reply(reply, where):
+        """Parse one completion, and say out loud what reading it cost.
+
+        Both request paths come through here, so a malformed reply is counted
+        once wherever it arrived. The line is emitted outside the lock because
+        `progress` is a caller's sink and may block or raise — a browser
+        closing its job log, a broken pipe on a terminal — and a sink that
+        does either must not hold the counters the run reports at the end.
+        """
+        nonlocal replies, repaired, unreadable
+        with lock:
+            replies += 1
+        try:
+            mapping, how = parse_reply(reply)
+        except ValueError:
+            with lock:
+                unreadable += 1
+            raise
+        if how == "repaired":
+            with lock:
+                repaired += 1
+            progress(f"{where}: the reply was not valid JSON and was repaired before use")
+        return mapping
 
     def retry_one(seg):
         """One segment, alone — and since 2026-09-04 that means no neighbours.
@@ -805,7 +969,7 @@ def translate_segments(segments, doc, cfg, provider_name=None, mode="draft",
             reply = provider.complete(
                 system,
                 _user_message([seg], glossary, mode, context, style_blocks) + note)
-            got = parse_reply(reply).get(seg["id"], "")
+            got = read_reply(reply, f"segment {seg['id']}").get(seg["id"], "")
         except Exception as e:  # noqa: BLE001 - surfaced to the caller
             return None, str(e)
         return accept(seg, got, lang, cfg)
@@ -814,7 +978,7 @@ def translate_segments(segments, doc, cfg, provider_name=None, mode="draft",
         try:
             reply = provider.complete(
                 system, _user_message(batch, glossary, mode, context, style_blocks))
-            mapping = parse_reply(reply)
+            mapping = read_reply(reply, f"batch {idx + 1}/{len(batches)}")
         except Exception as e:  # noqa: BLE001
             progress(f"batch {idx + 1}/{len(batches)} failed ({e}); retrying segment by segment")
             mapping = {}
@@ -883,6 +1047,18 @@ def translate_segments(segments, doc, cfg, provider_name=None, mode="draft",
         line = usage_line(spent)
         if line:
             progress(line)
+        if repaired or unreadable:
+            told = []
+            if repaired:
+                told.append(f"{repaired} had to be repaired before use")
+            if unreadable:
+                told.append(f"{unreadable} could not be read at all, and each of those cost "
+                            f"a request per segment")
+            progress(
+                f"of {replies} repl{'y' if replies == 1 else 'ies'} from this backend, "
+                + " and ".join(told)
+                + ". A backend that does this often is the wrong one for this work — "
+                  "`lx models` lists what else is served.")
         if discarded:
             progress(
                 f"{discarded} of {len(batches)} repl{'y' if discarded == 1 else 'ies'} "

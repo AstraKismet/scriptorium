@@ -415,6 +415,151 @@ def test_style_sheet_request_shape_is_message_content_and_nothing_else(
     assert "She says 您 to no one." not in body["messages"][0]["content"]
 
 
+MALFORMED = {"shape": "clean", "requests": []}
+#: The tail every end-of-run report about a misbehaving backend carries.
+_ADVICE = ("A backend that does this often is the wrong one for this work — "
+           "`lx models` lists what else is served.")
+
+
+def _reply_in_shape(shape, ids):
+    """The three shapes HANDOFF-050 measured, built over whatever ids were asked.
+
+    A single-id request is `retry_one`'s, and `truncated` answers it cleanly:
+    answering it badly too would measure the retry loop rather than the repair.
+    `short` is not one of the three — it is a valid reply that simply stops one
+    id early, and it exists to force a `retry_one` request whose *own* reply is
+    malformed. Nothing else in the suite reaches that path, because the three
+    real shapes all answer every id, and `read_reply`'s whole claim is that both
+    request paths come through it.
+    """
+    pairs = [f'  "{i}": "已翻譯。{i}"' for i in ids]
+    if shape == "trailing-comma":
+        return "{\n" + ",\n".join(pairs) + ",\n}"
+    if shape == "raw-newline":
+        pairs = [f'  "{i}": "已翻譯。\n{i}"' for i in ids]
+        return "{\n" + ",\n".join(pairs) + "\n}"
+    if shape == "truncated":
+        if len(ids) == 1:
+            return "{\n" + ",\n".join(pairs) + "\n}"
+        return "{\n" + ",\n".join(pairs[:-1]) + f',\n  "{ids[-1]}": "已翻'
+    if shape == "short":
+        if len(ids) == 1:
+            return "{\n" + ",\n".join(pairs) + ",\n}"
+        return "{\n" + ",\n".join(pairs[:-1]) + "\n}"
+    return "{\n" + ",\n".join(pairs) + "\n}"
+
+
+class MalformingHandler(BaseHTTPRequestHandler):
+    """Answers every id it was asked for, in JSON the model got syntactically wrong.
+
+    What this needs a real socket for is the *request count*. The defect
+    HANDOFF-050 repairs is that one unreadable reply cost a request per segment,
+    and only the far end can count those — a stub provider would let the test
+    assert that the mapping came back and miss the whole of what it cost.
+    """
+
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        body_in = json.loads(self.rfile.read(n))
+        user = body_in["messages"][1]["content"]
+        ids = [i["id"] for i in json.loads(user[user.index("["):])]
+        MALFORMED["requests"].append(ids)
+        answer = _reply_in_shape(MALFORMED["shape"], ids)
+        body = json.dumps({"choices": [{"message": {"content": answer}}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+@pytest.fixture(scope="module")
+def malforming():
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), MalformingHandler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{httpd.server_address[1]}/v1"
+    httpd.shutdown()
+
+
+def _run_against(url, shape, log):
+    MALFORMED["shape"] = shape
+    MALFORMED["requests"].clear()
+    segments = [{"id": f"s000{i}", "kind": "para", "masked": f"Sentence number {i}."}
+                for i in range(1, 5)]
+    doc = {"lang": "zh-TW", "tone": "literary", "segments": segments}
+    cfg = dict(_cfg(url), glossary="", dnt="",
+               batch={"size": 4, "concurrency": 1, "context": 0})
+    return translate_segments(segments, doc, cfg, provider_name="local",
+                              progress=log.append)
+
+
+@pytest.mark.parametrize("shape", ["trailing-comma", "raw-newline"])
+def test_a_repairable_reply_costs_one_request_and_not_one_per_segment(malforming, shape):
+    """The whole of HANDOFF-050, measured where it is paid: at the socket.
+
+    Before the repair every one of these replies raised, `run_batch` set
+    `mapping = {}`, and all four segments went to `retry_one` — five requests for
+    a batch of four. The assertion is the request list, not the results: a parser
+    that recovered the mapping *and* still retried every segment would pass a
+    test that only looked at what came back.
+    """
+    log = []
+    results, failures = _run_against(malforming, shape, log)
+    assert failures == []
+    assert set(results) == {"s0001", "s0002", "s0003", "s0004"}
+    assert MALFORMED["requests"] == [["s0001", "s0002", "s0003", "s0004"]]
+    assert (f"of 1 reply from this backend, 1 had to be repaired before use. {_ADVICE}"
+            in log), log
+
+
+def test_a_truncated_reply_still_costs_a_request_per_segment_and_says_so(malforming):
+    """Shape 3 is refused, so its cost is unchanged — and that is reported, not hidden.
+
+    A regex that reads the finished pairs out would turn these five requests
+    into two, and it was refused: it drops the trailing id, which is the only
+    evidence `misattributed` has for the drift shape. The run says what that
+    decision costs rather than leaving the reader to infer it from a silence.
+    """
+    log = []
+    results, failures = _run_against(malforming, "truncated", log)
+    assert failures == []
+    assert set(results) == {"s0001", "s0002", "s0003", "s0004"}
+    assert MALFORMED["requests"] == [["s0001", "s0002", "s0003", "s0004"],
+                                     ["s0001"], ["s0002"], ["s0003"], ["s0004"]]
+    assert (f"of 5 replies from this backend, 1 could not be read at all, and each of "
+            f"those cost a request per segment. {_ADVICE}" in log), log
+
+
+def test_a_malformed_reply_to_a_retry_is_repaired_and_counted_too(malforming):
+    """`read_reply` claims both request paths, and only this test holds it to it.
+
+    Every other shape answers every id, so no `retry_one` request is ever made
+    and the per-segment call site is unpinned: `parse_reply(reply)[0]` there
+    passes the whole suite while silently reporting a healthy backend on a run
+    whose every retry came back malformed.
+    """
+    log = []
+    results, failures = _run_against(malforming, "short", log)
+    assert failures == []
+    assert set(results) == {"s0001", "s0002", "s0003", "s0004"}
+    assert MALFORMED["requests"] == [["s0001", "s0002", "s0003", "s0004"], ["s0004"]]
+    assert "segment s0004: the reply was not valid JSON and was repaired before use" in log
+    assert (f"of 2 replies from this backend, 1 had to be repaired before use. {_ADVICE}"
+            in log), log
+
+
+def test_a_clean_reply_says_nothing_about_repairs(malforming):
+    """The other half: the report must not fire on a backend that is behaving."""
+    log = []
+    results, failures = _run_against(malforming, "clean", log)
+    assert failures == []
+    assert set(results) == {"s0001", "s0002", "s0003", "s0004"}
+    assert not any("repaired" in line or "could not be read" in line for line in log), log
+
+
 def test_a_stalled_read_gives_an_actionable_message(stalling):
     """A read timeout must reach the user as advice, not as a bare OSError.
 

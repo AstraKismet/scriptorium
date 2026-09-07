@@ -3,6 +3,212 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-09-07 · A repair may change a reply's syntax; it may not take content out of it
+
+`translate.parse_reply` accepted valid JSON, a reply wrapped in a code fence, and
+a reply padded with commentary. It accepted nothing else. When it raised,
+`run_batch` set `mapping = {}` and every segment of the batch went to
+`retry_one` — at the default `batch.size`, twenty-five requests where one would
+have done.
+
+HANDOFF-050 measured the rate on 2026-09-04 against `translategemma-12b-it` over
+52 replies from the maintainer's own book: **5 of them, about 10%, were not valid
+JSON**, none was a truncation at `max_tokens`, and every one was repairable
+deterministically. That measurement is the package's and not this entry's, and it
+cannot be re-derived here — `research/handoff-046/sweep.json`, the file those 52
+raw replies lived in, is no longer on disk. What is owned below is a property,
+measured on generated corpora. Nothing here is a rate.
+
+Three shapes, in the order the package saw them:
+
+1. a **trailing comma** before the closing brace — `"s0025": "…",\n}`;
+2. a **raw control character inside a string**, usually a newline the model did
+   not escape;
+3. an **unterminated final string** — the model wrote its last value and stopped,
+   so there is no closing quote and no closing brace at all.
+
+Invariant 5 is the argument and it was anticipated: the 2026-07 entry *Provider
+requests stay minimal by default* already settles that JSON is obtained "by
+prompt plus a tolerant parser", because `response_format` is a request field
+invariant 7 refuses. The parser was the half nobody had written.
+
+### The rule, which is what this entry is really for
+
+**A repair may change a reply's syntax. It may not take content out of it.**
+
+Shapes 1 and 2 are on the right side of that line: both repairs are string-aware
+character scans, both hand their result to `json.loads`, and every answer the
+model wrote survives into what the standard library agrees to read. A reply
+neither can reach still raises, and `run_batch` re-asks its segments one at a
+time exactly as it always has.
+
+Shape 3 is on the wrong side, and that is why it does not ship.
+
+### What ships
+
+**`parse_reply` returns `(mapping, how)`**, `how` being `clean` or `repaired`.
+It is returned rather than swallowed because a silent repair of a backend's
+malformed output is a backend nobody ever notices is malformed.
+
+**Two rungs, least-edited first**, so a reply needing one repair is not reported
+through the other as well. `_strip_trailing_commas` removes a comma standing
+between the last value and its bracket; `_escape_controls_in_strings` rewrites a
+raw C0 control as its escape. Both are inert on a reply that does not carry the
+shape they repair, so trying them in order costs nothing and prefers the smaller
+edit.
+
+**Both are scans and not substitutions, and that is not tidiness.**
+`re.sub(r",(\s*[}\]])", r"\1", body)` is the obvious spelling — it is what the
+prototype used — and it is global: a reply carrying both a real trailing comma
+*and* the sequence `, }` inside a translated value parses after the edit and
+delivers the sentence with a character taken out of it. The JSON is valid, the
+placeholder multiset matches, `lx check` is green; nothing downstream can see it,
+so the repair is the only place it can be prevented. Measured: over 9688
+corrupted replies the substitution returns the wrong text for 3570 of them,
+against none for the scan. That ratio is the probe's composition — its corpus is
+deliberately seeded with values holding `, }` and `[1, 2, ]` — and not a rate
+anyone should expect from prose.
+
+**`_FENCE` is anchored to the whole reply**, and this was a live defect rather
+than a precaution. It was `re.M`, so `^` matched at every line start — including
+the ones a raw newline inside a *value* creates — and a fenced code block the
+model had translated lost both its fence lines out of the middle of a sentence.
+That was invisible while the mangled reply then failed to parse. It stopped being
+invisible the moment rung 2 could read what was left of it: measured 2026-09-07,
+a target six characters shorter than the model wrote, banked with `lx check`
+green. The regex is unchanged from before this work; what changed is that
+something downstream now accepts its output. **The rule above is not a rule about
+repairs only — it is a rule about every edit made to a reply before it is read.**
+
+**The run says what reading its replies cost.** `read_reply` is one closure both
+request paths share, so a malformed reply is counted once wherever it arrived;
+it prints a line naming the request, and `translate_segments` prints a summary
+beside the existing `discarded` one. Two details are the whole of that sentence
+being true rather than nearly true. The denominator is *replies* and not batches,
+because `retry_one` sends one too. And the count is taken **before** the parse,
+with a second counter for the replies no repair could reach — counting after put
+the most malformed reply there is into neither half of the sentence, and silenced
+the sentence entirely on the run that most needs it: a small local model that
+cannot hold a 25-item JSON object answers every batch request unreadably and
+every retry cleanly, and the first version of this reported nothing at all.
+`progress` is free text and the workbench contract forbids parsing `log`, so none
+of this cost a `contract_version` move — the argument `discarded` made on
+2026-09-04.
+
+### What does not ship, and why: the salvage rung
+
+Shape 3 is recoverable by reading the finished `"key": "value"` pairs out with a
+regex. `research/handoff-046/tolerant.py` is that rung, HANDOFF-050 asks for it
+by name, and it was built, measured against 6090 corrupted replies at 6090
+recovered, reviewed — and refused. Six adversarial lenses over the working tree
+found **four independent ways it stores wrong text with `lx check` at exit 0**,
+and all four are the same defect: it keeps what it can match and drops the rest.
+
+* **What it drops from a truncated reply is the trailing id, and that id is the
+  only evidence `misattributed` has.** The drift shape HANDOFF-046 measured puts
+  every answer one place late and the last answer under an id nobody asked for.
+  Whole, that reply is refused by arm 1 and every segment is re-asked. Truncated
+  mid-way through that last value — shape 3, the shape the rung exists for — the
+  extra id is exactly what the regex fails to match, arm 1 fires on nothing, arm
+  2 sees four distinct answers, arm 3 sees ratios inside the band, and four
+  misfiled wordings are banked through `on_batch` with `lx check` green.
+  Reproduced end to end. This is HANDOFF-050's own safety-net warning arriving in
+  a form its text did not predict: the intolerance was not merely *accidentally*
+  protective, it was protective **of the detector's input**.
+* **A value it cannot decode has to be guessed at.** A reply is on this path
+  precisely because no JSON parser would read it, so the unescaping is
+  hand-rolled. Measured: a segment carrying `Open C:\Users\me\Documents` came
+  back with three backslashes deleted, and `Write \alpha and \beta` wrote a raw
+  U+0008 backspace into a delivered `.md`. Both with `lx check` at exit 0, and
+  both against a source the pipeline really does hand the model — `mask.py` has
+  no backslash pattern, and 45 of the 3884 segments this repository's own
+  tracked documentation parses into reach the model with one.
+* **It reads the model's prose, and the shipped prompt teaches the model to write
+  the poison.** The system prompt ends with the literal example
+  `{"s0001": "...", "s0002": "..."}` and a real document's ids *are* `s0001`,
+  `s0002`. A reply whose answer object is perfectly good, followed by
+  `That is the shape you asked for: {"s0001": "...", "s0002": "..."}`, salvages
+  the prompt's placeholder over the model's translations — last occurrence wins —
+  and banks `...` as the target.
+* **Keys lifted out of commentary reach `misattributed` as extras**, so a backend
+  that answered every id correctly is reported as misattributing and its batch is
+  re-asked segment by segment — the exact cost this package exists to remove.
+
+Each has a fix. Together they are five hardenings to the one rung that no JSON
+parser vouches for, and the honest reading of a review that found four of them is
+that a fifth is waiting. The rung is also not what invariant 5 licenses: rungs 1
+and 2 *correct* a defect deterministically, and rung 3 *infers what the model
+meant*, which is judgement and belongs on the other side of invariant 4's line.
+
+So shape 3 keeps costing what it costs today, and the run now says so out loud
+rather than leaving the reader to infer it. **HANDOFF-050's acceptance criterion
+3 is therefore met for shapes 1 and 2 and deliberately not met for shape 3**;
+`handoff/90-later/HANDOFF-210` carries the remainder, the four failure modes, and
+the constraint any future attempt has to satisfy — be lossless, or hand what it
+dropped to `misattributed`.
+
+### What was measured
+
+*Never worse.* 48400 valid replies — one to three keys over sixteen values chosen
+to attack the two scans, in eight byte-level spellings including the
+`[{"id": …}]` list form, under five wrappers. The old parser read 46496 of them;
+the new one returned an identical mapping on **every one** and called every one
+`clean`. 0 disagreements.
+
+*Right text, not merely some text.* Valid replies corrupted in the three shapes,
+with the oracle being the object *before* the corruption, so it sits upstream of
+everything under test: 9688 of 9688 trailing-comma and 3570 of 3570 raw-control
+recovered with the exact mapping **and** the exact `how`, and 9656 of 9656
+truncated refused. No corruption was readable by the old parser, which is what
+makes them corruptions.
+
+*The instruments are not blind.* Ten mutants, each removing one thing the
+implementation claims to do, each killed — seven by the probe and the suite both,
+three (the reporting half, which the probe cannot see) by the suite alone. Three
+of the ten are defects that shipped in the first version of this work and that
+the first version of the probe could not see: the `re.M` fence, the global
+trailing-comma substitution, and counting a reply after parsing it. Two facts
+came out of that round and are worth carrying:
+
+* **The first probe could not tell a repair from a rescue.** Removing the
+  trailing-comma repair left the mapping identical and the probe green, because
+  the reply fell through to the *salvage* rung instead. Same answer by a worse
+  road is a regression, and only after the probe was taught to judge `how` did
+  that mutant die.
+* **A refusal reached by two paths needs two tests.** `parse_reply` refuses once
+  when there is no brace-delimited object and once after every repair has failed.
+  Every refusal test took the first, so replacing the second with
+  `return {}, "clean"` — which turns every unreadable reply into a batch of ids
+  with no answer, and looks to `run_batch` exactly like a parsed one — passed 823
+  tests.
+
+### Alternatives that lost
+
+**`response_format: json_object`.** Invariant 7, and it is a request field. It
+would also work on hosted APIs and not on the runtime this project's maintainer
+actually runs.
+
+**Repairing shape 3 by cutting the object back to its last complete pair and
+closing it**, so `json.loads` vouches for the result. It removes the guessing
+half but not the first one: the trailing id is still dropped, so
+`misattributed`'s arm 1 is still blind on the drift shape. Recorded in
+HANDOFF-210 rather than discarded — it is the better half of a solution that
+needs both halves.
+
+**Leaving `parse_reply` returning a bare mapping and adding a second function
+that reports `how`.** The projection would have been dead code the moment
+`retry_one` needed to count too, and every test comparing the two would have
+compared a value to itself — the trap `Format.render` is recorded under.
+
+**Moving `read_reply`'s progress line out of `run_batch`'s `try`.** A sink that
+raises there is caught by `except Exception` and discards a mapping that parsed
+correctly. Measured and left: `cli._out` on a closed pipe raises on the next line
+too, so the run dies with one request sent, identically to the parent commit; the
+workbench's sink is a `list.append` under a lock; and the default is
+`lambda msg: None`. There is no fourth sink, because invariant 8 leaves only two
+callers. The exposure is real and unreachable, and it is written down here so
+that the next sink added is measured against it.
+
 ## 2026-09-07 · The core/studio split buys one thing today, so that one thing was bought and the move was deferred behind a trigger
 
 A3 (2026-07-28) decided one repository and two internal packages: `core/` the
