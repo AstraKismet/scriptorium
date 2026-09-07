@@ -137,6 +137,7 @@ mean the translation is good; that is what review is for.
 | `lx extract SRC --lang L --from OLD` | carry another tracked document's translations across, holds and waivers included — what a split or a renamed file needs |
 | `lx todo SRC --lang L` | pending segments as JSON, for an agent to translate |
 | `lx terms SRC --lang L` | propose glossary rows from the source text (`--append` to add them) |
+| `lx glossary get\|set\|unset TERM [RENDERING]` | read and edit the terminology rows this project enforces |
 | `lx apply SRC --lang L --file F` | ingest translations, auto-normalize |
 | `lx hold SRC --lang L --ids A,B` | keep segments out of every queue that selects work |
 | `lx unhold SRC --lang L --ids A,B` | return held segments to the queues |
@@ -157,6 +158,7 @@ mean the translation is good; that is what review is for.
 | `lx status [--json] [--scan ROOT]` | project status; `--json` is the frozen contract in `docs/contracts/status-json.md` |
 | `lx models [--provider P]` | ask a backend which models it serves |
 | `lx audit [SRC] --lang L` | stored translations that sit closer to another source than to their own — the memory, or one document. Reports; never repairs, and never moves any exit code. Needs an embedding backend |
+| `lx renderings [SRC] --lang L` | where one source term was written more than one way; `--term NAME` lists every segment naming it, beside its target. Reports; writes nothing, and never moves any exit code |
 | `lx providers` / `lx stats` | backends / coverage |
 
 `--overwrite-human` on `translate`, `repair`, `run` and `apply` lets a model
@@ -178,7 +180,39 @@ the list, you decide the wording, and a row does nothing at all until you have.
 ```bash
 lx terms novel.md --lang zh-TW              # to stdout, redirect and edit
 lx terms novel.md --lang zh-TW --append     # add unseen ones to the glossary
+lx glossary get                             # what the project enforces now
+lx glossary set Ashcombe 灰岸               # decide a rendering, or change one
+lx glossary unset Ashcombe                  # stop enforcing the term
 ```
+
+`lx glossary` edits one row and leaves every other byte of `config/glossary.csv`
+alone — your comments, your ordering, your spacing, and the line endings the file
+already had. It refuses what the format cannot hold rather than writing a row
+nothing can read back: a comma, a line break, a severity that is not `error` or
+`warn`. It changes nothing else, either: a wording already banked in the
+translation memory still says what it said. Changing a row is not a repair — it
+is what arms the check.
+
+Which brings the other half. A character's name drifts across four hundred pages,
+and no per-segment rule can see it, because "this paragraph disagrees with
+another one" is invisible from inside either paragraph. `lx renderings` reads the
+whole book:
+
+```bash
+lx renderings --lang zh-TW                  # which names look inconsistent
+lx renderings --lang zh-TW --term Ashcombe  # every segment naming it, with its target
+```
+
+The sweep infers, so it reports and never moves an exit code, and it prints what
+it could not examine beside what it found — a report that cannot say *clean* has
+to say what it did not look at. `--term` infers nothing at all: it lists every
+segment whose source mentions the name beside its translation, which is how you
+find the variant used once that the sweep is structurally blind to.
+
+Then you decide, and nothing decides for you. `lx glossary set Ashcombe 灰岸`
+turns the guess into terminology, and from that moment `lx check` names every
+segment that disagrees, at an exit code, and `lx repair` re-translates them. The
+inference finds; the mechanical half adjudicates; the choice in between is yours.
 
 The glossary settles what a name *is*. It says nothing about how a person sounds,
 and in a novel that is most of the work. `config/style.txt` is where a project

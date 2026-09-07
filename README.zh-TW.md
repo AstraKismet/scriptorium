@@ -123,6 +123,7 @@ CI 上有一組語料庫在把關，裡面收了 55 份刻意刁難的輸入（M
 | `lx extract SRC --lang L --from OLD` | 把另一份已追蹤文件的譯文帶過來，連 hold 和 waiver 一起——拆書或改名時要用的 |
 | `lx todo SRC --lang L` | 以 JSON 吐出待譯 segment，供 agent 翻譯 |
 | `lx terms SRC --lang L` | 從原文挑出候選術語、開成詞彙表的列（加 `--append` 直接寫進去） |
+| `lx glossary get\|set\|unset TERM [RENDERING]` | 讀寫這個專案在管的術語列 |
 | `lx apply SRC --lang L --file F` | 收回譯文，自動正規化 |
 | `lx hold SRC --lang L --ids A,B` | 把 segment 排除在所有挑工作的佇列之外 |
 | `lx unhold SRC --lang L --ids A,B` | 讓被保留的 segment 回到佇列 |
@@ -143,6 +144,7 @@ CI 上有一組語料庫在把關，裡面收了 55 份刻意刁難的輸入（M
 | `lx status [--json] [--scan ROOT]` | 專案進度；`--json` 是凍結後的契約，見 `docs/contracts/status-json.md` |
 | `lx models [--provider P]` | 問後端它供應哪些模型 |
 | `lx audit [SRC] --lang L` | 找出離別人的原文比離自己更近的譯文——翻譯記憶，或單一文件。只回報，不修改，也不影響任何結束碼；需要一個 embedding 後端 |
+| `lx renderings [SRC] --lang L` | 同一個原文術語被寫成了幾種譯法；加 `--term NAME` 會把提到它的每一段連同譯文攤開。只回報，不寫檔，也不影響任何結束碼 |
 | `lx providers` / `lx stats` | 後端 / 覆蓋率 |
 
 `translate`、`repair`、`run` 都吃 `--dry-run`，只回報會做哪些工作，不會真的呼叫模型；
@@ -157,7 +159,34 @@ CI 上有一組語料庫在把關，裡面收了 55 份刻意刁難的輸入（M
 ```bash
 lx terms novel.md --lang zh-TW              # 印到 stdout，導出來慢慢改
 lx terms novel.md --lang zh-TW --append     # 沒收錄過的直接補進詞彙表
+lx glossary get                             # 現在到底在管哪些術語
+lx glossary set Ashcombe 灰岸               # 定下一個譯法，或改掉舊的
+lx glossary unset Ashcombe                  # 這個詞不再受管
 ```
+
+`lx glossary` 一次只動一列，`config/glossary.csv` 其他的位元組原封不動——你寫的
+註解、你排的順序、你留的空白、還有這個檔案本來的換行符。這個格式塞不下的東西它
+一律拒絕，而不是寫出一列讀不回來的資料：逗號、換行、`error` 和 `warn` 以外的
+severity。它也不動別的地方：已經進了翻譯記憶的譯法還是原來那句。改詞彙表不是
+修譯文，它是把檢查**開起來**。
+
+另外半件事是這樣的。一個角色的名字在四百頁裡慢慢走樣，逐段檢查的規則看不見它，
+因為「這一段和另一段不一致」這件事，站在任何一段裡面都看不出來。`lx renderings`
+是整本一起讀的：
+
+```bash
+lx renderings --lang zh-TW                  # 哪些名字看起來不一致
+lx renderings --lang zh-TW --term Ashcombe  # 提到它的每一段，連同譯文
+```
+
+掃描這一半會推論，所以它只回報、不動任何結束碼，而且每次都會把「哪些詞它看不了」
+連同結果一起印出來——一份不能宣稱乾淨的報告，就有義務講清楚它沒看什麼。
+`--term` 則完全不推論：原文提到這個名字的每一段，連同譯文一起攤開；掃描結構上看
+不見的那種「只用過一次的異體」，只有這條路找得到。
+
+接下來由你決定，而且沒有任何東西會替你決定。`lx glossary set Ashcombe 灰岸` 把猜測
+變成術語，從那一刻起 `lx check` 會逐段點名不一致的地方、帶著結束碼，`lx repair`
+會把它們重譯。推論負責找，機械的那一半負責裁決，中間那個判斷是你的。
 
 詞彙表定得下一個名字**是什麼**，定不下一個人**說起話來是什麼樣子**，而後者在小說裡
 才是大宗。這件事寫在 `config/style.txt`：

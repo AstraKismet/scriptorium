@@ -11,7 +11,7 @@ import sys
 import urllib.parse
 from collections import Counter
 
-from . import __version__, audit, formats, sentences
+from . import __version__, audit, formats, renderings, sentences
 from .checks import HELD, check_segment, is_held, is_waived, workable
 from .config import (
     DEFAULT_TONE,
@@ -25,6 +25,8 @@ from .config import (
     canonical_tone,
     dump_json,
     get_in,
+    glossary_lines,
+    glossary_rows,
     has_version_segment,
     load_config,
     load_dnt,
@@ -1209,7 +1211,8 @@ def _sentence_start(gap, previous, abbreviations):
     return any(ch in _SENTENCE_END for ch in gap)
 
 
-def candidate_terms(segments, min_count=2, abbreviations=(), stopwords=()):
+def candidate_terms(segments, min_count=2, abbreviations=(), stopwords=(),
+                    require_mid_sentence=True):
     """Rank runs of capitalized words by frequency. ``[{source, count, …}]``.
 
     Reads `seg["masked"]`, never the raw source, so code spans, URLs and
@@ -1243,6 +1246,15 @@ def candidate_terms(segments, min_count=2, abbreviations=(), stopwords=()):
     mid-sentence occurrence is a real name and would have been dropped. The bias
     is deliberate — a spare row costs one keystroke, a missing one costs the
     discovery this command exists for.
+
+    ``require_mid_sentence=False`` turns that filter off, and it exists for one
+    caller: `renderings._explained_by_a_longer_name`, which asks a different
+    question. Proposing a glossary row and explaining away a split are not the
+    same act — a proposal may not be a sentence's first word, an explanation only
+    has to be a longer source run that exists. Measured 2026-09-07: lowering
+    `min_count` alone does not reach it, because the mid-sentence filter drops a
+    name whose every occurrence opens a sentence at every count. It is a
+    parameter on the one extractor rather than a fourth copy of it.
     """
     abbreviations, stopwords = set(abbreviations), set(stopwords)
     counts, mid = Counter(), Counter()
@@ -1307,13 +1319,194 @@ def candidate_terms(segments, min_count=2, abbreviations=(), stopwords=()):
     # command's contract, not a field nobody got round to filling — and an
     # absent key asserts nothing.
     rows = [{"source": s, "target": "", "count": n,
-             "mid_sentence": mid[s], "examples": examples[s]}
-            for s, n in counts.items() if n >= min_count and mid[s]]
+             "mid_sentence": mid[s], "examples": examples.get(s, [])}
+            for s, n in counts.items()
+            if n >= min_count and (mid[s] or not require_mid_sentence)]
     # Frequency first, then the term itself: two candidates seen the same number
     # of times must come out in the same order on every machine, or `--append`
     # writes a different glossary depending on who ran it.
     rows.sort(key=lambda r: (-r["count"], r["source"]))
     return rows
+
+
+#: What a glossary row may say, and the only two spellings any reader compares
+#: against. Never validated on the way in — `config.glossary_row` takes whatever
+#: the fourth field says — so a third spelling sits in the file behaving as
+#: `warn` for ever, silently, at all three comparison sites (`checks.py`'s
+#: severity gate, `do_check`'s error count, `do_commit`'s bank gate). The writer
+#: below refuses to add one; the reader is left alone, because narrowing it
+#: would change what every existing project reads.
+SEVERITIES = ("error", "warn")
+
+
+def glossary_line(row):
+    """One row as the file spells it. The one place a row becomes bytes.
+
+    Named because two writers emit rows now — `append_glossary_rows` and the
+    editor below — and a second spelling of this is how the two would come to
+    disagree about what an empty `forbidden` list looks like.
+    """
+    return "{},{},{},{}".format(row.get("source", ""), row.get("target", ""),
+                                ";".join(row.get("forbidden") or ()),
+                                row.get("severity") or "error")
+
+
+def glossary_value(field, value):
+    """``value`` as this format can hold it, or a refusal naming what it cannot.
+
+    The glossary is read by splitting each line on `,` with **no quoting at
+    all**, so three characters are unrepresentable rather than merely awkward,
+    and a fourth class is invisible: `str.splitlines`, which the rest of the
+    world uses to read a text file, breaks on `\\x0b`, `\\x0c`, `\\x1c`-`\\x1e`,
+    `\\x85`, `U+2028` and `U+2029` where Python's line iterator does not — so a
+    rendering carrying one of those reads as two rows in half the tools that
+    open the file.
+
+    Stripped rather than refused for surrounding whitespace, because
+    `config.glossary_row` strips on the way in: writing a leading space would be
+    writing a byte the reader deletes. Invariant 5's line — a defect that can be
+    corrected deterministically is corrected rather than reported.
+    """
+    raw, value = value or "", (value or "").strip()
+    if raw and not value:
+        # Distinguished from `''`, which is a real value here — the row `lx terms
+        # --append` writes, enforcing nothing until somebody fills it in. A
+        # person who typed spaces meant something; silently turning that into
+        # "stop enforcing this term" is the one surprise a stripping rule can
+        # produce, and it is invisible afterwards.
+        raise ConfigError(
+            f"a {field} of nothing but whitespace is not a value: the glossary strips "
+            f"every field on the way in. Pass '' if the row should stop enforcing "
+            f"anything. Nothing was written.")
+    if "," in value:
+        raise ConfigError(
+            f"a {field} may not contain a comma. This glossary is read by splitting "
+            f"each line on `,` with no quoting at all, so the row would not read "
+            f"back. Nothing was written.")
+    if any(ch in value for ch in "\n\r\v\f\x1c\x1d\x1e\x85  "):
+        raise ConfigError(
+            f"a {field} may not contain a line break — one row is one line, and "
+            f"that includes the separators `str.splitlines` treats as one. Nothing "
+            f"was written.")
+    return value
+
+
+def _glossary_text(path):
+    """The glossary as text, or a refusal naming why it could not be read."""
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except FileNotFoundError:
+        raise ConfigError(
+            f"there is no glossary at {path}. `lx init` scaffolds one, and "
+            f"`lx terms SRC --lang L --append` creates it and proposes rows; this "
+            f"command edits a row that is already there.") from None
+    except OSError as e:
+        raise GlossaryWriteError(
+            f"could not read {path} ({e.strerror or e}). Check the path in "
+            f"lx.config.json, and that the file is not open in another program.") from None
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise GlossaryWriteError(
+            f"{path} is not valid UTF-8 (byte {e.start}). Every reader of this file "
+            f"decodes it as UTF-8, so re-save it in that encoding and try again. It "
+            f"is unchanged.") from None
+
+
+def _glossary_hit(path, text, source):
+    """``(line_index, content, terminator, row)`` for the one row ``source`` names.
+
+    ``None`` when no row names it. Two rows naming it is refused rather than
+    resolved: no reader takes the first — `checks.check_segment` and
+    `translate._glossary_hints` both loop over every row — so two rows for one
+    term are one term with two contradictory answers, and choosing between them
+    is judgement over a file whose state is already a defect.
+
+    Case-insensitively, because that is how every reader of the glossary matches
+    a term. Addressing case-sensitively would let `lx glossary set ashcombe …`
+    append a second row beside `Ashcombe` and arrive at exactly that state.
+    """
+    lines = glossary_lines(text)
+    hits = [(i, row) for i, row in glossary_rows(text)
+            if row["source"].lower() == source.lower()]
+    if len(hits) > 1:
+        where = ", ".join(str(i + 1) for i, _ in hits)
+        raise ConfigError(
+            f"{path} has {len(hits)} rows for {source!r}, on lines {where}. Every "
+            f"reader of this file loops over all of them, so those rows are one term "
+            f"with two answers and both are enforced. Open the file and keep one. "
+            f"Nothing was written.")
+    if not hits:
+        return None
+    index, row = hits[0]
+    return (index, lines[index][0], lines[index][1], row)
+
+
+def _glossary_write(path, text, expected):
+    """Replace ``path`` with ``text``, but only if it reads back as ``expected``.
+
+    The guard is not decoration. `config.glossary_row` recognizes a header at
+    raw line index 0 and nowhere else, so **removing a line renumbers every line
+    after it** — in a file with no header, deleting line 0 promotes the next
+    line into the header's position, and if that row's term happens to be
+    `source` one command silently removes two rows. Reproduced 2026-09-07.
+
+    Its blind spot has to be stated with it: it compares the *rows*
+    `config.glossary_rows` projects, so anything the parse drops — a fifth
+    comma-field, the spacing inside a padded field — it cannot see. That is why
+    the writer above splices one field of one line rather than rebuilding the
+    line, and why this is a backstop rather than the mechanism.
+
+    The write itself is `append_glossary_rows`' — a temporary file and
+    `os.replace`, `GlossaryWriteError` on any `OSError`, the real file provably
+    untouched. Read-only, or open in a spreadsheet, is not an exotic state for a
+    CSV a person maintains.
+    """
+    got = [row for _, row in glossary_rows(text)]
+    if got != expected:
+        raise ConfigError(
+            f"that edit would not read back as the rows it was meant to write, so "
+            f"{path} was left alone. The usual cause is the header: it is only "
+            f"recognized on the file's first line, so removing that line promotes "
+            f"the next one into its place. Move the header to the top first.")
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "wb") as f:
+            f.write(text.encode("utf-8"))
+        os.replace(tmp, path)
+    except OSError as e:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise GlossaryWriteError(
+            f"could not use {path} ({e.strerror or e}) — check that it is not "
+            f"read-only or open in another program. It is unchanged.") from None
+
+
+def _spliced(content, field, value):
+    """``content`` with comma-field ``field`` replaced, and nothing else moved.
+
+    A row is rewritten by replacing one field's characters inside the line's own
+    text, rather than by rebuilding the line from the parsed row. The difference
+    is every byte the parse drops: a person's spacing, and a fifth comma-field
+    `config.glossary_row` ignores but somebody put there on purpose. A canonical
+    rewrite loses both, and — measured 2026-09-07 — the post-condition guard
+    cannot see that it did, because it compares the parse.
+    """
+    parts = content.split(",")
+    while len(parts) <= field:
+        parts.append("")
+    head = parts[field]
+    lead = head[: len(head) - len(head.lstrip())]
+    trail = head[len(head.rstrip()):] if head.strip() else ""
+    parts[field] = lead + value + trail
+    return ",".join(parts)
+
+
+#: Which comma-field each writable part of a row lives in.
+_GLOSSARY_FIELDS = {"target": 1, "forbidden": 2, "severity": 3}
 
 
 def append_glossary_rows(cfg, rows):
@@ -1349,15 +1542,25 @@ def append_glossary_rows(cfg, rows):
         return 0
     path = cfg.get("glossary", "config/glossary.csv")
     tmp = path + ".tmp"
+    header = GLOSSARY_HEADER.encode("utf-8")
     # The read is inside the guard with the write. A glossary that cannot be
     # opened and one that cannot be replaced are the same problem to the person
     # holding the keyboard, and a traceback out of either is the same unhelpful
     # answer — so there is one refusal, not one plus a crash.
     try:
-        existing = GLOSSARY_HEADER.encode("utf-8")
+        existing = header
         if os.path.exists(path):
             with open(path, "rb") as f:
-                existing = f.read()
+                existing = f.read() or header
+                # A zero-byte file is a file with no header, and the header is
+                # recognized at raw line index 0 and nowhere else — so without
+                # this the first appended row lands at index 0 and vanishes if
+                # its term happens to be `source`, `lx terms` then reports it as
+                # new on the next run because `known` is read back through
+                # `load_glossary`, and the file quietly accumulates a duplicate
+                # of a row nothing can read. Reproduced 2026-09-07 on the parent
+                # build; `os.path.exists` is true for an empty file, which is
+                # why the missing-file branch above did not already cover it.
         # The file's own terminator, not this platform's. `lx init` writes LF, but
         # a glossary is hand-maintained and an editor on Windows may well have
         # saved it as CRLF — appending LF rows to that leaves a file with both, in
@@ -1369,7 +1572,7 @@ def append_glossary_rows(cfg, rows):
             # the first appended row would be glued onto the end of an existing
             # one, which is the one way a pure append can still destroy a row.
             existing += eol
-        body = b"".join(f"{r['source']},,,error".encode() + eol for r in rows)
+        body = b"".join(glossary_line(r).encode("utf-8") + eol for r in rows)
         parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
@@ -1463,6 +1666,219 @@ def cmd_terms(args, cfg):
     _out("# fill in the target column; a row with an empty target enforces nothing")
     for row in report["terms"]:
         _out(f"{row['source']},,,error")
+
+
+# ── glossary ───────────────────────────────────────────────────────────────
+#
+# `lx terms` proposes the rows a document needs and leaves the rendering empty,
+# because choosing it is judgement. This edits the rows a project has already
+# decided — the same split `lx config get` and `lx config set` make over
+# `lx.config.json`, and the reason the two are different commands rather than
+# modes of one: argparse enforces a group's combinations structurally, where a
+# flag table has to be maintained by hand and rots.
+#
+# Nothing here reads or writes a document, the state or the translation memory.
+# A wording already banked still says what it said — the memory key is
+# `(content_hash, context, segmentation_version, variant, tone)` and knows
+# nothing about the glossary — so changing a row is not a repair. What it does
+# is arm `checks.py`'s glossary rule, which then names the disagreeing segments
+# at an exit code. Measured 2026-09-07 end to end: after a row changed,
+# `.lx/tm.zh-TW.jsonl` was byte-identical, `lx check` exited 1 naming both
+# segments, and `lx extract --reset` handed the *old* wording straight back.
+
+
+def _glossary_notes(text):
+    """The two file states the writers refuse on, so a reader sees them first.
+
+    Not a lint of the file. These two and no others because they are exactly
+    what `_glossary_hit` and `_glossary_write` refuse on: without them a person
+    meets the refusal before they ever hear about the condition. Everything else
+    a glossary can be wrong about is somebody else's package.
+    """
+    notes, seen = [], {}
+    for index, row in glossary_rows(text):
+        key = row["source"].lower()
+        if key in seen:
+            notes.append({"note": "duplicate", "line": index + 1,
+                          "source": row["source"],
+                          "message": f"line {seen[key] + 1} names {row['source']!r} too, "
+                                     f"and every reader enforces both"})
+        seen.setdefault(key, index)
+        if (row["source"].lstrip("﻿").lower() == "source"
+                and row["target"].lower() == "target"):
+            notes.append({"note": "header", "line": index + 1, "source": row["source"],
+                          "message": "this is the column header being read as a row; a "
+                                     "byte-order mark, a comment or a blank line above "
+                                     "it takes it off line 1, which is the only line it "
+                                     "is recognized on"})
+    return notes
+
+
+def do_glossary_get(cfg, source=None):
+    """The rows this project enforces. ``{glossary, rows, notes}``.
+
+    ``line`` rides on every row and is a diagnostic, never an address: comments
+    and blank lines are invisible to the row index — the shipped header
+    contributes three of them — so nothing here addresses a row by number. It
+    earns its place on the refusals, which have to name a line for a person to
+    go and fix the file by hand.
+    """
+    path = cfg.get("glossary", "config/glossary.csv")
+    text = _glossary_text(path) if os.path.exists(path) else ""
+    rows = [dict(row, line=index + 1) for index, row in glossary_rows(text)]
+    if source is not None:
+        wanted = source.strip().lower()
+        rows = [r for r in rows if r["source"].lower() == wanted]
+        if not rows:
+            raise ConfigError(
+                f"{path} has no row for {source!r}. `lx glossary get` lists what it "
+                f"has, and `lx terms SRC --lang L` proposes the terms a document "
+                f"needs.")
+    return {"glossary": path, "rows": rows, "notes": _glossary_notes(text)}
+
+
+def do_glossary_set(cfg, source, target=None, forbidden=None, severity=None):
+    """Write one row's fields, adding the row when there is none.
+
+    Only the fields named are written: `--forbidden` and `--severity` left off
+    keep what the row already has, so fixing a name that drifted does not
+    quietly drop the variants somebody banned.
+
+    **A change no reader could observe writes nothing at all.** The comparison
+    is against the values `config.glossary_row` projects rather than against the
+    bytes, so `set X 紅門` on a row reading `, 紅門 ,` reports `unchanged`, and a
+    tracked file gets no diff and no mtime for a change nobody made.
+    """
+    path = cfg.get("glossary", "config/glossary.csv")
+    source = glossary_value("term", source)
+    if not source:
+        raise ConfigError("the term is empty.")
+    if source.startswith("#"):
+        raise ConfigError(
+            "a term may not begin with `#`: a line starting with `#` is a comment, so "
+            "the row would be written and never read. Nothing was written.")
+    if severity is not None and severity not in SEVERITIES:
+        raise ConfigError(
+            f"severity is `error` or `warn`, and this said {severity!r}. Nothing "
+            f"validates it on the way in, so a third spelling would sit in the file "
+            f"behaving as `warn` for ever. Nothing was written.")
+    fields = {}
+    if target is not None:
+        fields["target"] = glossary_value("rendering", target)
+    if forbidden is not None:
+        fields["forbidden"] = glossary_value("forbidden rendering", forbidden)
+    if severity is not None:
+        fields["severity"] = severity
+    if not fields:
+        raise ConfigError(
+            f"`lx glossary set {source}` names no rendering and no field to change. "
+            f"Pass a rendering, or --forbidden / --severity. Nothing was written.")
+
+    text = _glossary_text(path) if os.path.exists(path) else None
+    hit = _glossary_hit(path, text, source) if text is not None else None
+    if hit is None:
+        row = {"source": source, "target": fields.get("target", ""),
+               "forbidden": [x for x in fields.get("forbidden", "").split(";") if x],
+               "severity": fields.get("severity", "error")}
+        append_glossary_rows(cfg, [row])
+        return {"glossary": path, "source": source, "action": "added",
+                "line": None, "was": None, "now": glossary_line(row)}
+
+    index, content, eol, row = hit
+    stale = {name: value for name, value in fields.items()
+             if (";".join(row["forbidden"]) if name == "forbidden" else row[name]) != value}
+    if not stale:
+        return {"glossary": path, "source": source, "action": "unchanged",
+                "line": index + 1, "was": content, "now": content}
+
+    lines = glossary_lines(text)
+    fresh = content
+    for name, value in stale.items():
+        fresh = _spliced(fresh, _GLOSSARY_FIELDS[name], value)
+    lines[index] = (fresh, eol)
+    after = "".join(c + e for c, e in lines)
+    expected = [dict(r) for _, r in glossary_rows(text)]
+    for r in expected:
+        if r["source"].lower() == source.lower():
+            r.update({k: ([x for x in v.split(";") if x] if k == "forbidden" else v)
+                      for k, v in stale.items()})
+    _glossary_write(path, after, expected)
+    return {"glossary": path, "source": row["source"], "action": "changed",
+            "line": index + 1, "was": content, "now": fresh}
+
+
+def do_glossary_unset(cfg, source):
+    """Remove one row, so the term stops being enforced."""
+    path = cfg.get("glossary", "config/glossary.csv")
+    source = glossary_value("term", source)
+    text = _glossary_text(path)
+    hit = _glossary_hit(path, text, source)
+    if hit is None:
+        raise ConfigError(
+            f"{path} has no row for {source!r}, so there is nothing to remove. "
+            f"`lx glossary get` lists what it has.")
+    index, content, _, row = hit
+    lines = glossary_lines(text)
+    after = "".join(c + e for c, e in lines[:index] + lines[index + 1:])
+    expected = [r for i, r in glossary_rows(text) if i != index]
+    _glossary_write(path, after, expected)
+    return {"glossary": path, "source": row["source"], "action": "removed",
+            "line": index + 1, "was": content, "now": None}
+
+
+def _glossary_note_lines(report):
+    for note in report["notes"]:
+        _out(f"# line {note['line']}: {note['message']}")
+
+
+def cmd_glossary_get(args, cfg):
+    report = do_glossary_get(cfg, args.source)
+    if args.json:
+        # Projected key by key rather than dumped, because `HANDOFF-037` attaches
+        # a compiled pattern to every row and a compiled pattern is not
+        # JSON-serializable. A reader that dumps the row is the one way that
+        # repair can break something, and this is the only reader that emits a
+        # whole row.
+        _out(json.dumps({
+            "glossary": report["glossary"],
+            "rows": [{"source": r["source"], "target": r["target"],
+                      "forbidden": r["forbidden"], "severity": r["severity"],
+                      "line": r["line"]} for r in report["rows"]],
+            "notes": report["notes"],
+        }, ensure_ascii=False, indent=2))
+        return
+    # Comment-prefixed summary and canonical rows below it, which is
+    # `cmd_terms`' own default-branch convention: `lx glossary get > backup.csv`
+    # then produces a file `load_glossary` reads. It is not a byte copy — a
+    # comment and a padded field do not survive it — and that is why the file
+    # itself stays the thing under version control.
+    _out(f"# {len(report['rows'])} row(s) in {report['glossary']}"
+         if report["rows"] else
+         f"# no rows in {report['glossary']} — `lx terms SRC --lang L --append` "
+         f"proposes some")
+    _glossary_note_lines(report)
+    for row in report["rows"]:
+        _out(glossary_line(row))
+
+
+def cmd_glossary_set(args, cfg):
+    report = do_glossary_set(cfg, args.source, args.target, args.forbidden,
+                             args.severity)
+    if report["action"] == "added":
+        _out(f"{report['source']}: added as {report['now']}")
+        return
+    if report["action"] == "unchanged":
+        _out(f"{report['source']}: unchanged — {report['glossary']} already reads "
+             f"{report['now']}")
+        return
+    _out(f"{report['source']}: {report['was']} → {report['now']}")
+    _out("wording already banked is unchanged; `lx check SRC --lang L` names the "
+         "segments this row now disagrees with")
+
+
+def cmd_glossary_unset(args, cfg):
+    report = do_glossary_unset(cfg, args.source)
+    _out(f"{report['source']}: removed (was {report['was']})")
 
 
 # ── apply ──────────────────────────────────────────────────────────────────
@@ -2296,6 +2712,131 @@ def cmd_audit(args, cfg):
 def _ref(ref):
     """How a record is named in the report: a memory line or a segment id."""
     return f"line {ref['line']}" if "line" in ref else ref["seg"]
+
+
+def do_renderings(cfg, lang, src=None, term=None):
+    """Where one source term was written more than one way. ``dict``.
+
+    The seam behind `lx renderings`, and the only place the two subjects are
+    chosen between: ``src`` names one document, and its absence means every
+    document tracked in ``lang``. Absence is the useful case — a character's
+    name drifts across chapters, and a chapter is a document, so a per-document
+    sweep is blind to exactly the drift this exists for.
+
+    **It does not read the translation memory**, which is where it parts company
+    with `lx audit`'s otherwise identical shape. A memory record carries no
+    position and `store.load_tm` keeps the last record per key, so drift inside
+    the memory is invisible to a method that counts segments — and what it would
+    report is a record nothing reads. Segments are what a reviewer can act on.
+
+    ``term`` turns the inference off. With one named, every segment whose masked
+    source mentions it comes back with its target, whatever the floors say —
+    which is the only path left to the case the sweep cannot see, seven segments
+    right and the eighth wrong.
+    """
+    from .translate import mentions
+
+    docs = [load_doc(src, lang)] if src else tracked(lang)
+    docs = [d for d in docs if isinstance(d.get("source"), str)]
+    # One flat segment list with opaque, order-preserving ids, so `renderings`
+    # never has to know a document exists and a finding can still say which
+    # chapter to open. Zero-padded because the module sorts ids as strings.
+    segs, refs = [], {}
+    for doc in docs:
+        label = doc_label(doc["source"])
+        for seg in doc["segments"]:
+            key = f"{len(segs):06d}"
+            refs[key] = {"doc": label, "seg": seg["id"],
+                         "origin": seg.get("origin") or "",
+                         "review": seg.get("review") or "",
+                         "waived": bool(seg.get("waived"))}
+            segs.append(dict(seg, id=key))
+
+    glossary = load_glossary(cfg)
+    opts = cfg.get("terms") or {}
+    if term:
+        rows = [dict(refs[s["id"]], source=s["masked"], target=s.get("target") or "")
+                for s in renderings.occurrences(segs, term, mentions)]
+        return {"lang": lang, "source": docs[0]["source"] if src else None,
+                "documents": len(docs), "segments": len(segs), "term": term,
+                "glossary": next((r["target"] for r in glossary
+                                  if r["source"].lower() == term.lower()), None),
+                "occurrences": rows, "floors": list(renderings.FLOORS)}
+
+    terms = sorted({r["source"] for r in glossary if r.get("source")}
+                   | {r["source"] for r in candidate_terms(
+                       segs, opts.get("min_count", 2), opts.get("abbreviations", ()),
+                       opts.get("stopwords", ()))})
+    report = renderings.run(segs, glossary, terms, candidate_terms, mentions)
+    for bucket in ("findings", "unexamined", "no_finding"):
+        for row in report[bucket]:
+            row["ids"] = [refs[i] for i in row["ids"]]
+            row["unrendered"] = [refs[i] for i in row["unrendered"]]
+            row["by_rendering"] = {g: [refs[i] for i in ids]
+                                   for g, ids in row["by_rendering"].items()}
+    report.update({"lang": lang, "source": docs[0]["source"] if src else None,
+                   "documents": len(docs), "term": None})
+    return report
+
+
+def cmd_renderings(args, cfg):
+    """`lx renderings`. Exit 0 whenever it ran; exit 2 whenever it could not.
+
+    **Findings never move the exit code**, which is `cmd_audit`'s decision and
+    for the same two reasons. Invariant 10 makes `lx check`'s exit code the
+    evidence, and a number produced by a threshold is not evidence. And the
+    moment exit 1 means "found something", exit 0 means "found nothing", which
+    is one shell script away from "clean" — the claim this command cannot make
+    and prints its own floors to say so.
+
+    The remedy a finding points at is `lx glossary set`, which turns an
+    inference into the glossary rule's mechanical adjudication. That is the one
+    place a decision is made, and it is a person's.
+    """
+    report = do_renderings(cfg, args.lang, src=args.src, term=args.term)
+    if args.json:
+        _out(json.dumps(report, ensure_ascii=False, indent=2))
+        return
+    where = report["source"] or f"{report['documents']} document(s)"
+    if report["term"]:
+        _out(f"{where} [{report['lang']}]  {report['term']}  "
+             f"{len(report['occurrences'])} occurrence(s)"
+             + (f"  glossary {report['glossary']!r}"
+                if report["glossary"] else "  not in the glossary"))
+        for row in report["occurrences"]:
+            marks = "".join(m for m in (
+                " held" if row["review"] == HELD else "",
+                " waived" if row["waived"] else "",
+                f" {row['origin']}" if row["origin"] else "") if m)
+            _out(f"\n  {row['doc']} {row['seg']}{marks}")
+            _out(f"      source : {_one_line(row['source'])[:88]}")
+            _out(f"      target : {_one_line(row['target'])[:88] or '(untranslated)'}")
+        return
+    _out(f"{where} [{report['lang']}]  {report['segments']} segment(s)  "
+         f"{report['terms']} term(s)  {len(report['findings'])} flagged  "
+         f"{len(report['unexamined'])} not examined")
+    # Floored, `cmd_audit`'s line and for its measured reason: a negative slice
+    # counts from the tail while the arithmetic below counts from the head.
+    shown = max(0, args.max)
+    for row in report["findings"][:shown]:
+        _out(f"\n  {row['term']}  {row['occurrences']} occurrence(s)  {row['shape']}"
+             + (f"  glossary {row['glossary']!r}" if row["glossary"] else ""))
+        for rendering, ids in row["by_rendering"].items():
+            _out(f"      {rendering}  x{len(ids)}  "
+                 + ", ".join(f"{r['doc']} {r['seg']}" for r in ids[:6])
+                 + ("  ..." if len(ids) > 6 else ""))
+        if row["unrendered"]:
+            _out(f"      no rendering found in {len(row['unrendered'])} segment(s): "
+                 + ", ".join(f"{r['doc']} {r['seg']}" for r in row["unrendered"][:6]))
+        _out(f"      look: lx renderings --lang {report['lang']} --term {row['term']}")
+    if len(report["findings"]) > shown:
+        _out(f"\n  ... {len(report['findings']) - shown} more (use --max or --json)")
+    for row in report["unexamined"][:shown]:
+        _out(f"\n  {row['term']}  not examined: {row['why']}")
+    if len(report["unexamined"]) > shown:
+        _out(f"\n  ... {len(report['unexamined']) - shown} more not examined "
+             f"(use --max or --json)")
+    _out("\nthis report never says clean. " + "; ".join(report["floors"]) + ".")
 
 
 def cmd_stats(args, cfg):
@@ -4710,6 +5251,53 @@ def build_parser():
     tm.add_argument("--json", action="store_true")
     tm.set_defaults(fn=cmd_terms)
 
+    gl = sub.add_parser(
+        "glossary", help="read and edit the terminology rows this project enforces",
+        description="Read and edit config/glossary.csv. `lx terms` proposes the rows "
+                    "a document needs and leaves the rendering to you; this edits the "
+                    "rows you have already decided — the split `lx config get` and "
+                    "`lx config set` already make over lx.config.json. Nothing here "
+                    "reads or writes a document, the state or the translation memory: "
+                    "a wording already banked still says what it said, and "
+                    "`lx check` is what names the segments a changed row disagrees "
+                    "with.")
+    gl_sub = gl.add_subparsers(dest="action", required=True)
+
+    gl_get = gl_sub.add_parser(
+        "get", help="print every row; with a term, only the row that names it")
+    gl_get.add_argument("source", nargs="?", metavar="TERM",
+                        help="matched the way every reader of the glossary matches a "
+                             "term: case-insensitively, on the whole source string")
+    gl_get.add_argument("--json", action="store_true")
+    gl_get.set_defaults(fn=cmd_glossary_get)
+
+    gl_set = gl_sub.add_parser(
+        "set", help="write one row's rendering, adding the row if there is none",
+        description="Only the fields named are written: --forbidden and --severity "
+                    "left off keep what the row already has, so fixing a name that "
+                    "drifted does not quietly drop the variants somebody banned.")
+    gl_set.add_argument("source", metavar="TERM")
+    # Optional, so that `--severity` alone is a legal edit, and `""` is a real
+    # value: it is what `lx terms --append` writes, a row that enforces nothing
+    # until somebody fills it in.
+    gl_set.add_argument("target", nargs="?", metavar="RENDERING",
+                        help="how the term must render; pass '' for a row that "
+                             "enforces nothing yet")
+    gl_set.add_argument("--forbidden", metavar="A;B",
+                        help="renderings this term may not take, ;-separated in the "
+                             "file's own syntax; replaces the row's list")
+    # `choices` rather than a free string, so the refusal happens before any file
+    # is opened. Every reader compares to the literal `error`, so a third
+    # spelling is silently non-fatal everywhere.
+    gl_set.add_argument("--severity", choices=SEVERITIES,
+                        help="whether a violation fails `lx check`")
+    gl_set.set_defaults(fn=cmd_glossary_set)
+
+    gl_unset = gl_sub.add_parser(
+        "unset", help="remove a row, so the term stops being enforced")
+    gl_unset.add_argument("source", metavar="TERM")
+    gl_unset.set_defaults(fn=cmd_glossary_unset)
+
     a = sub.add_parser("apply", help="ingest translations")
     a.add_argument("src")
     a.add_argument("--lang", required=True)
@@ -4807,6 +5395,28 @@ def build_parser():
     au.add_argument("--json", action="store_true")
     au.add_argument("--max", type=int, default=25)
     au.set_defaults(fn=cmd_audit)
+
+    rn = sub.add_parser(
+        "renderings", help="where one source term was written more than one way",
+        description="Report the terms this book renders inconsistently. Reports; "
+                    "writes nothing, and never moves any exit code — the remedy is "
+                    "`lx glossary set`, after which `lx check` adjudicates the "
+                    "segments mechanically. With --term the inference is off and "
+                    "every segment naming that term is listed beside its target, "
+                    "which is the only way to see a variant used just once.")
+    # Optional, the axis that chooses the subject: one document when given, every
+    # document tracked in this language when not. Absence is the useful case — a
+    # name drifts across chapters and a chapter is a document. `lx audit` is the
+    # precedent for the shape; unlike it, this never reads the memory.
+    rn.add_argument("src", nargs="?",
+                    help="a document; omit for every document tracked in this language")
+    rn.add_argument("--lang", required=True)
+    rn.add_argument("--term", metavar="NAME",
+                    help="list every segment naming this term, beside its target, "
+                         "with nothing inferred")
+    rn.add_argument("--json", action="store_true")
+    rn.add_argument("--max", type=int, default=25)
+    rn.set_defaults(fn=cmd_renderings)
 
     m = sub.add_parser("commit", help="bank approved segments in the translation memory")
     m.add_argument("src")

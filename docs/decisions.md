@@ -3,6 +3,364 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-09-07 · The glossary becomes editable, and finding a drifted name is three layers rather than one
+
+HANDOFF-048. Two gaps the maintainer hit using the workbench on a real book on
+2026-09-04: `config/glossary.csv` could only be appended to, and nothing showed
+where one source term had been rendered two different ways. Their own steer on
+the second governs the whole design and is quoted here because every decision
+below answers to it — *flag the involved content that the source suggests is the
+same noun or character but whose translation is inconsistent, and let me review
+it quickly and decide whether to apply the change, not automate it.*
+
+Everything measured below was measured on 2026-09-07 unless dated otherwise.
+
+### The package's own premise was wrong, and the correction is the better argument
+
+The package said `checks.py`'s glossary rule cannot see a drift because a row
+proposed by `lx terms` has an empty target. That is true and it is not the
+interesting half. Built into a real project on disk and measured: with the three
+targets **filled in**, `lx check` found all three of the frozen case set's
+drifts, including the prefix case the set was built to be hard about. The rule
+works. What it cannot do is three other things:
+
+* **It requires the decision first.** It executes a rendering somebody has
+  already chosen; it does not discover that a name needs one.
+* **It names only the segments that disagree.** It never says what the *other*
+  rendering was, and it never lists the segments that comply — so a reviewer
+  cannot see the shape of the drift, only its violations.
+* **It reports a legitimate pronoun as an error.** `Ashcombe said nothing` →
+  他很久沒有說話 is competent Chinese and a glossary error at `error` severity,
+  and the only way to silence it — `lx waive` — writes `"waived": true` into the
+  tracked translation memory, where the mark belongs to the wording and travels
+  to the next document.
+
+So the answer is not one instrument but **three layers, and none of them
+subsumes another**:
+
+1. `lx renderings` sweeps the book and says which names are worth looking at.
+   It infers, so it reports and never gates.
+2. `lx renderings --term NAME` lists every segment naming that term beside its
+   target, with nothing inferred at all. It cannot produce a false positive, and
+   it is the only thing that finds a variant used once.
+3. `lx glossary set` writes the decision, and from that moment `checks.py`
+   adjudicates every segment mechanically, at an exit code, on three surfaces.
+
+The inference finds; the decidable half adjudicates; the decision in between is
+a person's. There is no "apply to all" anywhere, and there is nowhere to put one.
+
+### `lx glossary get / set / unset`, and why it is not a mode of `lx terms`
+
+The split is `lx config`'s over `lx.config.json`: `lx terms` proposes the rows a
+document needs and leaves the rendering empty because choosing it is judgement,
+and `lx glossary` edits the rows the project has already decided.
+
+*Lost:* folding the editor into `lx terms` as `--known` / `--term X --target Y`.
+Measured: argparse's `add_subparsers` and a `nargs="?"` positional cannot coexist
+— with both registered, `lx terms novel.md` and `lx terms set X` **both** exit 2
+— so the fold is a flag table with five hand-written combination refusals, a
+thirteenth exception class, and the removal of `required=True` from
+`lx terms --lang`, a contract `README.md:139` and `skill/SKILL.md:89` both state.
+A group gets every one of those from argparse for nothing.
+
+The naming rule (`docs/decisions.md`, 2026-08-14) says a noun reports, a verb
+mutates, and a noun command is named for what it *emits* rather than for the
+configuration key it reads — with `lx terms` is not `lx glossary` as its example.
+`lx glossary` is not a noun command: every leaf carries a verb and the bare word
+is a usage error, exactly as `lx config` and `lx routing` are. The rule's own
+operative test is whether a name lies about what it answers, and `lx glossary
+get` lists the glossary. The maintainer decided the name.
+
+**A row is addressed by its source term, case-insensitively**, because every
+reader of the glossary matches that way. Two rows naming one term is **refused**
+rather than resolved: no reader takes the first — `checks.check_segment` and
+`translate._glossary_hints` both loop over all of them, measured — so two rows
+are one term with two answers and both are enforced. Choosing between them is
+judgement over a file whose state is already a defect. `line` rides on every row
+of `--json` as a diagnostic and never as an address: comments and blank lines are
+invisible to the row index and the shipped header contributes three of them.
+
+### The write is a splice, and the guard behind it is a backstop with a blind spot
+
+`append_glossary_rows` gets "never rewrite or reorder an existing row" for free,
+because it only concatenates. An editor cannot, so the guarantee is built:
+**exactly one physical line changes, and inside it exactly the comma-fields
+named**. Everything else is the bytes that were there — comments, blank lines,
+row order, the padding inside an untouched field, a lone LF in a CRLF file, a
+missing final terminator, and a fifth comma-field `config.glossary_row` drops
+but somebody put there on purpose.
+
+*Lost:* rewriting the addressed line canonically from the parsed row. It reads
+identically and loses all of the above, and — this is the part worth carrying
+forward — **the post-condition guard cannot see that it did**, because the guard
+compares the rows the parse projects and the parse is what dropped them.
+
+The guard earns its place on a different failure. `config.glossary_row`
+recognizes a header at raw line index 0 and nowhere else, so removing a line
+renumbers every line after it: in a file with no header whose second row's term
+is literally `source`, deleting the first row promotes the second into the
+header's position and one command silently removes two rows. Reproduced; the
+guard catches it before `os.replace` and the file is untouched.
+
+**A rewritten line keeps its own terminator.** The whole-file detection
+`append_glossary_rows` does is for rows that do not exist yet; a line that
+already exists has already answered the question, which is what makes a file
+with mixed terminators need no policy at all.
+
+**A change no reader could observe writes nothing**, compared against the values
+the loader projects rather than against the bytes — a tracked file gets no diff
+and no mtime for a change nobody made.
+
+Four refusals, each of which leaves the file byte-identical and names what is
+wrong rather than that the command gave up: a comma, which the format cannot
+represent; a line separator, and that includes the six `str.splitlines` breaks on
+and Python's line iterator does not, because a rendering carrying one reads as
+two rows in half the tools that open the file; a value of nothing but whitespace,
+which is distinguished from `''` because `''` is a real value here; and a
+severity outside `{error, warn}`, refused by argparse `choices` before a path is
+resolved. That last one closes a live hole: nothing validates severity on the way
+in and all three comparison sites test against the literal `error`, so a typo'd
+value sits in the file behaving as `warn` for ever.
+
+### Editing a row invalidates nothing, and that has to be said out loud
+
+Measured end to end: after a row changed, `.lx/tm.zh-TW.jsonl` and `.lx/state.db`
+were **byte-identical**, `lx check` exited 1 naming both affected segments, and
+`lx extract --reset` handed the *old* wording straight back. The memory key is
+`(content_hash, context, segmentation_version, variant, tone)` and knows nothing
+about the glossary; it cannot be invalidated by this and must not pretend to be.
+What the person does instead is `lx check` → repair or `lx apply` → `lx commit`,
+and that loop closes because `store.load_tm` keeps the **last** record per key,
+so the correction wins on read without a line being deleted. `lx audit` is the
+only instrument that looks at the dead lines, and it examines the wordings
+anything reads rather than the lines of the file.
+
+### `lx renderings`, and why it is a module of its own rather than a rule
+
+`renderings.py` behind `cli.do_renderings`, on `audit.py`'s pattern. Not
+`checks.py`, on three independent grounds: an `ast` test pins that module's
+imports to `{re, collections, mask, mdparse}` and forbids `open` in it, while
+this needs the term extractor and the name matcher; `check_segment` is per
+segment and "this sentence disagrees with another one" is invisible from inside
+either; and invariant 4 keeps a thresholded rule out of the thing invariant 10
+calls the evidence.
+
+**Findings never move an exit code** — `lx audit`'s decision, and there is no
+`--strict`. The moment exit 1 means "found something", exit 0 means "found
+nothing", which is one shell script away from "clean", and this report prints its
+own floors to disown that word.
+
+**It sweeps the whole project by default**, `src` optional the way `lx audit`'s
+is. A name drifts across chapters and a chapter is a document, so a per-document
+sweep is blind to the case the command exists for — measured on the two-chapter
+fixture, where chapter one alone reports nothing. Unlike `lx audit` it does
+**not** read the translation memory: a memory record carries no position and
+`load_tm` keeps the last per key, so drift inside the memory is invisible to a
+method that counts segments, and what it would report is a record nothing reads.
+
+### The rule, and the four things that had to be measured out of it
+
+A rendering is a gram that stands in at least two of a term's own segments and in
+**no** segment whose source never names the term. Coverage takes the grams that
+between them account for those segments; a rendering that is a part of another
+survives coverage whole, so each is then asked whether some longer supported gram
+covers only part of its segments. Four filters sit on that, and every one of them
+replaced something that had been measured to fail:
+
+**Attribution to the longest source run.** `Ashcombe Hall` takes its segments
+away from `Ashcombe`, or the report says the surname has three renderings.
+
+**Two supporting segments, and it is not a knob.** *Lost:* a rule built
+specifically to reach a rival rendering used once — the case a proof-reader meets
+most, seven segments right and the eighth wrong. On the 26-segment case set it
+returned `帳是艾蓮諾` and `達西先生是從灰`. At support one every gram in a target
+passes the discriminative filter, so the "rendering" that comes back is the
+sentence. A term *named* fewer than twice is reported as unexamined with the
+`--term` query beside it; a rival *variant* used once is invisible to the sweep,
+and layer 2 is the answer.
+
+**Both forms written at the end of a phrase, twice each.** A Chinese name is
+followed by 的 constantly, so `X的` reaches support on any long book and splits
+`X` off itself. *Lost:* asking it of the short form only — the adversarial pass
+measured 184 of 200 terms reported on a 5000-segment book with 8 real drifts.
+*Lost:* asking the long form for a single occurrence — 的 does end a Chinese
+clause, and on five 240-segment books with nothing drifted that reported **all
+thirty names in all five**.
+
+**A delta more than one term makes is the language's grammar.** The per-term test
+above is scale-dependent, and that is measured rather than feared: on 240
+segments it reported nothing on a clean book and on 1200 segments of the same
+generator it reported 22 to 27 of 30 names, every one `X的` against `X`. So the
+corpus answers the question — 的 extends every name in the book, `特` extends
+`Marchmont` and nothing else — and **no table of particles is written down for
+any language**. Collected from the *candidates* rather than from the splits that
+survive: collected from the survivors, thirty names all extended by 的 produced
+thirty different deltas and the filter caught none of them, because which
+extension a term chooses varies with the length of its rendering. It can only
+remove findings, so a book with one name in it behaves as it did before.
+
+| 1200 segments, 30 names, three seeds | findings | true | false |
+|---|---|---|---|
+| nothing drifted, no corpus-wide filter | 22–27 | — | 22–27 |
+| **nothing drifted, filter on** | **1–2** | — | **1–2** |
+| six drifted, no filter | 24–26 | 5–6 | 18–20 |
+| **six drifted, filter on** | **7–9** | **5–6** | **1–4** |
+
+Cost, measured rather than estimated, because HANDOFF-037's neighbouring case
+took `lx check` from 0.62 s to 52.2 s: **5000 segments and 200 names in 2.22 s
+with a 13 MB peak**, five false findings on a book with nothing drifted. The gram
+index is built once over the corpus rather than once per term, and the term scan
+pre-filters with a plain substring test before the matcher's regex.
+
+### What it cannot see, and the recall this buys
+
+Printed with every report, because a report that cannot say clean has to say what
+it did not look at. What this finds reliably is two renderings with nothing in
+common — 灰岸 against 阿什科姆, found on the case set with the exact segment ids
+and no extras. Where one contains the other, or both are built on a shared core,
+it usually finds one rendering and reports nothing: `馬奇蒙` against `馬奇蒙特`
+needs both forms phrase-final twice, and `瑞德格瑞` against `阿德格瑞` is absorbed
+by the `德格瑞` they share.
+
+**That is a deliberate trade and the frozen case set's own score records it**:
+1 of 3 rather than 2 of 3, because the prefix case is now a documented miss. The
+alternative was measured on the same day — 2 of 3 on the case set, and 39 to 49
+false findings per 50 names on a book with nothing drifted, non-deterministic
+across `PYTHONHASHSEED`, and 161 s and 1 GB on a 5000-segment novel. A sweep with
+forty false findings is a sweep nobody reads.
+
+*Lost:* the zero-inference listing as the sweep. It finds everything because it
+refuses nothing — 50 names, 800 segments to read. It is not discarded; it is
+layer 2, where it is exactly right.
+
+### Two instruments, each blind to what the other saw
+
+Recorded because it is the methodological lesson of this package. The frozen case
+set was built before any design lane ran, and two things about it have to travel
+with its numbers.
+
+**Its scorer gave a perfect card to a detector that reported everything.**
+`want_renderings <= reported` is a superset test and the extra-id count was
+printed rather than scored, so a null detector attaching every gram in the book
+to every term scored 3/3 — higher than any real one. Two independent lanes found
+this. **No score from that harness is evidence without the absolute counts beside
+it.**
+
+**Five of its seven forbidden terms were never reached by the algorithm.** Three
+never enter `candidate_terms` at all and two are stopped by an arithmetic gate
+before any rendering logic runs, so "0 of 7" was 5/7 free.
+
+And the two synthetic books disagreed for a reason worth writing down. A
+generator with a 90-character pool makes every two-character rendering collide
+with a cross-word bigram, and the discriminative filter then fails for every name
+through no fault of the rule — so the instrument needs a 1200-character pool and
+a 3000-word Zipf vocabulary, and it must report its own collision count. But a
+generator of random words has no 的, no dialogue tag and no sentence-initial
+adverb, and cannot see the false-positive class that broke two versions of this
+rule. Neither book was usable alone. The one the decision rests on has both, and
+reports 0 collisions.
+
+### Three pre-existing defects in the loader, one fixed here and two scheduled
+
+**Fixed, because the new writer closes it by construction.** A zero-byte
+`config/glossary.csv` — `os.path.exists` is true for one, so the missing-file
+branch never fired — made `lx terms --append` write its first row at raw line
+index 0. If the term happened to be `Source` the header test swallowed it,
+`load_glossary` returned nothing, `lx terms` reported the same candidate as new
+on the next run because `known` is read back through the loader, and the file
+grew a permanent duplicate of a row nothing could read. Reproduced on the parent
+build.
+
+**Scheduled as HANDOFF-056, not fixed here**, because both change what every
+existing project reads and that is a decision with its own entry: a UTF-8
+byte-order mark — which Excel writes on every save, and this package's whole
+purpose is to make people edit this file more — takes the header off line 1 and
+it is read as an ordinary row; and a trailing `# note` after a row makes
+`severity` read as `error # note`, so that row can never fail a check again.
+`lx glossary get` names both conditions in its output today, which makes them
+visible rather than mysterious while they wait.
+
+### Verification, and the axes it varied
+
+`python -m pytest -q`: **2078 passed, 2 skipped**, from 2029 at the parent commit
+`faf2a6c`. `python -m ruff check src tests`: clean. Forty-nine of the new tests
+are in `tests/test_glossary.py` and `tests/test_renderings.py`.
+
+Axes varied, one at a time: **segments** (26 hand-labelled, 240, 1200, 5000);
+**names** (2, 30, 200); **drift shape** (disjoint, prefix, suffix,
+containment-by-a-longer-source-run, three-way); **glossary state** (a row with a
+target, a row with an empty target, no row); **segment state** (translated,
+pending, held, waived); **file shape** for the writer (CRLF, LF, a lone CR, a
+comment, a blank line, padding, a fifth comma-field, a missing final
+terminator, a duplicate source, a byte-order mark, a zero-byte file);
+**iteration order** (`PYTHONHASHSEED` 1, 7, 13 — one report).
+
+Axes held constant, and therefore unmeasured: **target language** — everything
+is Traditional Chinese, and a language written with spaces makes
+`_stands_alone` vacuous; **source language** — English, which `lx terms` already
+refuses to depart from; **translation quality** — every synthetic target is a
+competent one, and a book half-drafted by a model that answered by position has
+targets under the wrong sources, on which this would report the whole cast; and
+**a real book**, because there is none in this repository.
+
+### The mutation pass, and the guard it deleted
+
+Guards removed one at a time, each round restored from a copy rather than from
+git. Three rounds: fourteen mutants with **four** survivors, then sixteen with
+**two**, then fifteen with **none**. Every survivor was either a test nobody had
+written or a guard nothing could measure, which is the round doing its job
+rather than the code being fine.
+
+The filter got a test. **The pruning was deleted.** Over the frozen case set,
+the hand-written traps, six 1200-segment books and one of 5000 segments and 200
+names, its presence changed no finding at all and cost 0.4 s; what it existed
+for, keeping 灰 out of a report that means 灰岸, the coverage stage already does
+by breaking a tie on coverage with the longer gram. A guard nothing can measure
+and no mutant can kill is not a guard.
+
+Three other things the round found, each of which had passed a reading:
+`_separable` was untested and the test that looked like its test passed for
+another reason — the explanation pass was rescuing the case; the comma refusal
+was redundant with the post-condition guard on the *exit code* and not on the
+message, which is the half that matters, so its test now asserts the sentence;
+and the whole `X的` class was only visible because a mutant made it visible.
+
+### Two neighbouring packages, and what this one owes them
+
+**HANDOFF-037** attaches a compiled pattern to every glossary row and its own red
+line says the one way that repair can break something is a reader that serializes
+a row to JSON. `lx glossary get --json` is exactly that reader, and it is the
+first in the tree to emit all four fields of a row. It projects key by key rather
+than dumping the row, and a test asserts the emitted key set, so the constraint
+survives whoever writes that repair. Written into HANDOFF-037 as well, because a
+deferral that exists only in a deleted package's notes did not happen.
+
+**HANDOFF-052** builds `lx segments`, a whole-document projection of source
+beside target. `lx renderings --term` is a term-scoped, cross-document projection
+of the same fields. Neither subsumes the other, so 048 ships `--term` and 052
+inherits the field list — id, kind, status, origin, review, waived, source,
+target — so the two surfaces cannot describe a segment differently.
+
+### Neither contract version moves
+
+No HTTP endpoint is added — the workbench half is HANDOFF-204's, which the
+package left out on purpose because 204 rebuilds the page and would delete
+whatever this put on it. `lx status --json` gains no counter. `contract_version`
+stays at 4 and the status-json contract stays at 1, re-derived rather than
+assumed: `tests/test_contract.py` compares the endpoint set against
+`web/server.py` in both directions and neither file changed, and a new `cli.do_*`
+with no endpoint touches none of its assertions.
+
+When the workbench does get this, two things go with it. `cfg["glossary"]` is
+absent from `HTTP_WRITABLE_KEYS` and from every path-confining branch, so
+`append_glossary_rows`' recorded invariant-11 exemption — configuration is
+written by hand — is intact today and **expires the day that endpoint ships**, at
+which point `glossary`, `dnt`, `style` and `output_pattern` all need
+`cli.confined_path`. And the workbench's one write on a `lx renderings` card is a
+**glossary row**, never a segment: that is the step that turns an inference into
+the glossary rule's mechanical adjudication, and it is the only place a decision
+is made.
+
 ## 2026-09-06 · The damage already banked is two records, not eighteen, and finding it needs an instrument this project did not have
 
 HANDOFF-053. HANDOFF-046 stopped a model's misattributed answers reaching working
