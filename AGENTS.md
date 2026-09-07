@@ -443,6 +443,9 @@ src/scriptorium/
   audit.py       whether a stored translation belongs to the source it is filed
                  under — the one question `checks.py` cannot ask, because
                  answering it needs a network service and a threshold
+  renderings.py  where one source term was written more than one way — the other
+                 question `checks.py` cannot ask, because the evidence is the
+                 whole book rather than one segment
   store.py       .lx/state.db (document state, SQLite), the translation-memory
                  key, the memory itself (.lx/tm.*.jsonl, still JSONL and tracked)
   config.py      layered config, glossary, do-not-translate list, style sheet;
@@ -467,7 +470,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 2029 tests; no network (one is POSIX-only,
+python -m pytest -q                 # 2078 tests; no network (one is POSIX-only,
                                     #   one runs only where the filesystem folds case)
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
@@ -475,6 +478,10 @@ python -m scriptorium --help        # or `lx` after `pip install -e .`
 lx run docs/guide.md --lang zh-TW   # extract -> translate -> check -> repair -> render
 lx run book/ch1.md --lang zh-TW --limit 50    # at most 50 segments per pass; run it again to continue
 lx extract book/ch1.md --lang zh-TW --from book/whole.md   # carry a split or renamed file's translations across
+lx glossary get                     # the terminology rows this project enforces
+lx glossary set Ashcombe 灰岸       # decide a rendering, or change one
+lx renderings --lang zh-TW          # which names this book renders inconsistently
+lx renderings --lang zh-TW --term Ashcombe   # every segment naming it, with its target
 lx waive book/ch1.md --lang zh-TW --ids s0042   # stand by this wording: its errors report at warn
 lx models --provider llamacpp       # ask a backend which models it serves
 lx audit --lang zh-TW               # stored wordings that look filed under another source
@@ -763,6 +770,60 @@ own.
   and the same asymmetry decides how a malformed reply is treated:
   `Provider._vectors` refuses one whole where `_listing` drops a row. See
   `docs/decisions.md`, 2026-09-06.
+- **A glossary row is edited one line at a time, and every other byte stays.**
+  `lx glossary get|set|unset` is the editor and `config.glossary_rows` is the one
+  parser both it and `load_glossary` read through — the reader and the writer may
+  not disagree about which physical line is which row. A write splices the named
+  comma-fields into the line's own text rather than rebuilding it from the parsed
+  row, which is what keeps a person's spacing, a comment, the order, a line's own
+  terminator and a fifth comma-field the parse drops; a canonical rewrite loses
+  all of those and **the post-condition guard cannot see that it did**, because
+  the guard compares the parse. That guard earns its place elsewhere: the header
+  is recognized at raw line index 0 and nowhere else, so removing a line
+  renumbers every line after it, and in a headerless file deleting line 0 can
+  promote a row into the header's position and silently remove two.
+
+  A row is addressed by its source term, case-insensitively, and **two rows
+  naming one term is refused rather than resolved** — no reader takes the first,
+  both `checks.check_segment` and `translate._glossary_hints` loop over all of
+  them, so two rows are one term with two answers and both are enforced. What the
+  format cannot hold is refused before anything is written and named in the
+  refusal: a comma, a line separator (including the six `str.splitlines` breaks on
+  and Python's line iterator does not), a value of nothing but whitespace, and a
+  severity outside `{error, warn}` — the last one closing a live hole, since
+  nothing validates severity on the way in and all three comparison sites test
+  against the literal `error`.
+
+  **Editing a row invalidates nothing, and it is not a repair.** The memory key
+  knows nothing about the glossary, so `.lx/tm.*.jsonl` is byte-identical after a
+  write and `lx extract --reset` hands the old wording straight back. What the
+  edit does is arm `checks.py`'s glossary rule; the correction is banked by
+  `lx commit`, which wins on read because `store.load_tm` keeps the last record
+  per key. See `docs/decisions.md`, 2026-09-07.
+- **Where one source term was written more than one way is `renderings.py`, it
+  infers, and it may never move an exit code.** `lx audit`'s rule for the same
+  reason — invariant 10 makes `lx check`'s exit code the evidence and a number
+  produced by a threshold is not evidence — so `lx renderings` exits 0 whenever
+  it ran, prints its own floors, and has no `--strict`.
+
+  It is **three layers and none of them subsumes another**: the sweep says which
+  names are worth looking at, `--term NAME` lists every segment naming one beside
+  its target with nothing inferred at all, and `lx glossary set` turns the
+  decision into `checks.py`'s mechanical adjudication. The existing glossary rule
+  is not the answer on its own — measured 2026-09-07, with the targets filled in
+  it finds every drift, but it requires the decision first, never says what the
+  *other* rendering was, never lists the segments that comply, and reports a
+  legitimate pronoun as an error at `error` severity.
+
+  Two rules the sweep is built on and neither is a knob: a rendering needs two
+  supporting segments, and a delta more than one term makes is the target
+  language's grammar rather than anybody's rendering — `的` extends every Chinese
+  name in a book, `特` extends `Marchmont` and nothing else, so the corpus answers
+  the question and **no table of particles is written down for any language**.
+  What it finds reliably is two renderings with nothing in common; where they
+  share text it usually reports nothing, which is the trade that took a
+  1200-segment book from 22 false findings per thirty names to one. See
+  `docs/decisions.md`, 2026-09-07.
 - A document's line terminator is a document-level fact, held in `doc["eol"]` and
   re-imposed once at render — never carried inside a segment, where the model and
   the reviewer would both have to reproduce a control character neither can be

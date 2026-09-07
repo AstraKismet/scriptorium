@@ -724,28 +724,77 @@ def load_config(path="lx.config.json"):
     return _merge(DEFAULT_CONFIG, stored)
 
 
+#: One physical line, terminator included. `str.splitlines` is the wrong
+#: splitter and the difference is not academic: it also breaks on `\v`, `\f`,
+#: `\x1c`-`\x1e`, `\x85`, `U+2028` and `U+2029`, and Python's own line iterator
+#: — which is what `load_glossary` used before `glossary_rows` existed — breaks
+#: on `\r\n`, `\r` and `\n` and nothing else. A rendering containing one of
+#: those would be numbered differently by the two, and `cli` edits a row by
+#: line number.
+_GLOSSARY_LINE = re.compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+\Z")
+
+
+def glossary_lines(text):
+    """``[(content, terminator), …]``, numbered the way `open()` numbers lines.
+
+    The terminator is carried per line rather than detected for the file,
+    because a hand-maintained CSV can hold both — `cli.append_glossary_rows`
+    picks one only for rows that do not exist yet, and a line that already
+    exists has already answered the question.
+    """
+    out = []
+    for match in _GLOSSARY_LINE.finditer(text):
+        piece = match.group(0)
+        for eol in ("\r\n", "\r", "\n"):
+            if piece.endswith(eol):
+                out.append((piece[: -len(eol)], eol))
+                break
+        else:
+            out.append((piece, ""))
+    return out
+
+
+def glossary_row(index, content):
+    """The row `load_glossary` makes of one line, or ``None`` if it makes none.
+
+    Split out so that the reader and the writer cannot disagree about which
+    physical line is which row. The header is recognized at raw line index 0 and
+    nowhere else — that is the shipped behaviour, and it is why an editor may
+    not insert a line above the file's current first one.
+    """
+    line = content.strip()
+    if not line or line.startswith("#"):
+        return None
+    parts = [p.strip() for p in line.split(",")]
+    if index == 0 and parts[0].lower() == "source":
+        return None
+    if len(parts) < 2:
+        return None
+    return {
+        "source": parts[0],
+        "target": parts[1],
+        "forbidden": [x for x in (parts[2].split(";") if len(parts) > 2 and parts[2] else []) if x],
+        "severity": parts[3] if len(parts) > 3 and parts[3] else "error",
+    }
+
+
+def glossary_rows(text):
+    """``[(line_index, row), …]`` for every line of ``text`` that is a row.
+
+    The row index and the physical line index are **not** in bijection — the
+    shipped header contributes three lines and no rows — so a command that has
+    to address a line keeps the pair rather than counting rows.
+    """
+    return [(i, row) for i, (content, _) in enumerate(glossary_lines(text))
+            for row in [glossary_row(i, content)] if row]
+
+
 def load_glossary(cfg):
     path = cfg.get("glossary", "config/glossary.csv")
-    rows = []
     if not os.path.exists(path):
-        return rows
-    with open(path, encoding="utf-8") as f:
-        for i, line in enumerate(f):
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = [p.strip() for p in line.split(",")]
-            if i == 0 and parts[0].lower() == "source":
-                continue
-            if len(parts) < 2:
-                continue
-            rows.append({
-                "source": parts[0],
-                "target": parts[1],
-                "forbidden": [x for x in (parts[2].split(";") if len(parts) > 2 and parts[2] else []) if x],
-                "severity": parts[3] if len(parts) > 3 and parts[3] else "error",
-            })
-    return rows
+        return []
+    with open(path, encoding="utf-8", newline="") as f:
+        return [row for _, row in glossary_rows(f.read())]
 
 
 def load_dnt(cfg):
