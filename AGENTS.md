@@ -542,6 +542,12 @@ executable handoff".
   of promoting a package, not a follow-up.
 - **Acceptance criteria state a command and its expected exit code.** Prose is
   not an acceptance criterion.
+- **A named next package is read, not remembered.** Every statement of what comes
+  next — in a report, in a package, in an answer — is derived from the `priority`
+  and `blocked-by` of the files as they stand at that moment. A directory listing
+  carries neither field, and its id order is not the pickup order. A `package:`
+  blocker sorts before the package that names it, or the field stops meaning
+  anything; where it does not, decide it rather than carrying it.
 - **Done means deleted, and deleting is the deadline.** Delete on passing;
   anything still uncertain goes into the next package. Everything the package
   deferred to another one must already be written *into* that package, and any
