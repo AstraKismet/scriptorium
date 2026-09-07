@@ -30,7 +30,6 @@ import argparse
 import copy
 import json
 import os
-import re
 import sys
 
 import pytest
@@ -498,20 +497,16 @@ def test_the_similarity_module_needs_no_compiled_extension():
 
 
 def test_this_package_added_no_runtime_dependency():
-    """`pyproject.toml`'s `dependencies` is still empty, and that is invariant 1.
+    """Invariant 1, and the assertion lives one file over.
 
-    Parsed out of the file rather than imported from installed metadata: the
-    suite runs against the source tree with nothing installed, so metadata would
-    describe some other checkout or nothing at all.
+    `tests/test_import_boundary.py::test_the_split_trigger_has_not_fired` owns
+    the check, because an empty `dependencies` list means two things at once —
+    invariant 1 holds, *and* the core/studio split has nothing to partition yet,
+    which is HANDOFF-201's trigger. One fact, one home; this is the pointer, so
+    a reader of this file is not left thinking the criterion went unmet.
     """
-    with open(os.path.join(ROOT, "pyproject.toml"), encoding="utf-8") as f:
-        text = f.read()
-    match = re.search(r"^dependencies\s*=\s*\[(.*?)\]", text, re.M | re.S)
-    assert match, "pyproject.toml declares no `dependencies` key at all"
-    assert match.group(1).strip() == "", (
-        f"a runtime dependency appeared: {match.group(1).strip()}. Invariant 1 "
-        f"allows a pinned, vendorable, pure-Python one — but it is a decision "
-        f"with an entry in docs/decisions.md, not a line in a requirements list.")
+    from test_import_boundary import test_the_split_trigger_has_not_fired
+    test_the_split_trigger_has_not_fired()
 
 
 # ── the shape a client is promised ─────────────────────────────────────────

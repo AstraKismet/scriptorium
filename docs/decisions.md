@@ -3,6 +3,127 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-09-07 · The core/studio split buys one thing today, so that one thing was bought and the move was deferred behind a trigger
+
+A3 (2026-07-28) decided one repository and two internal packages: `core/` the
+engine and CLI — the artifact another repository vendors into `tools/` — and
+`studio/` the workstation. HANDOFF-201 is the file move, and it has been in
+`10-now/` since 2026-08-15.
+
+Distilling that package meant measuring it, and the measurement changed the
+decision. The move goes back to `90-later/` behind an explicit trigger; the one
+benefit that survived scrutiny was taken separately, at fifty lines.
+
+### The property A3 wanted is already true
+
+Measured at `e0e9108`, before any of this session's work:
+
+| A3's requirement | Measured |
+|---|---|
+| A consumer vendoring the engine does not pay for the workstation | **Runtime dependencies to partition: none.** `pyproject.toml`'s `dependencies` is `[]`, with a comment saying so on purpose. |
+| | **Import cost: none.** `import scriptorium.cli` loads 21 `scriptorium.*` modules and **zero** `web` ones — the single edge into the workbench is deferred inside `cmd_web`. |
+| | **Disk: 127 KB.** `src/scriptorium/web/` is 129,691 B — 60,647 of Python (**6.4%** of the package's Python bytes) and 69,044 of `static/index.html` — against 881,218 B for everything else. And `README.md` documents vendoring as `pip install -e ./tools/scriptorium`, a **source-tree copy**, where a subpackage nobody imports costs nothing. |
+
+So the sentence A3 is built on describes the tree as it stands. What the move
+still buys is that the boundary is **enforced rather than observed**: nothing
+stops the next convenient import, and the property above holds by habit.
+
+*Against that, the cost, also measured:* two `pyproject.toml` files; a
+**namespace decision** that reaches into two frozen contracts, because two
+distributions cannot both own a regular `scriptorium/` package and the PEP 420
+answer deletes `scriptorium.__version__`, which `GET /api/state` and
+`lx status --json` both put on the wire and two tests assert by identity; nine
+layout constants across eight test files; twenty-four `PYTHONPATH` lines; five
+files carrying the vendoring instruction; three CI jobs. Plus couplings no
+import graph sees — `web/server.py:60` finds its assets by `__file__`
+adjacency, `pyproject.toml:42` keys package-data on the import package name
+(and when that stops matching **the wheel builds and the workbench is a blank
+page**, a failure the file's own comment records happening once already), and
+the shipped `index.html` calls twelve of the fifteen endpoints by URL string.
+
+### So the benefit was bought without the move
+
+`tests/test_import_boundary.py`. It asserts the engine imports the workbench in
+**exactly one named place**, and that the import is still **deferred** — which
+is what makes the exception harmless and what a bare allowlist would not catch.
+
+Two details are measurements rather than taste. The exception is named by
+*function* (`cli.py`'s `cmd_web`) and not by line, because that import moved
+from `cli.py:5128` to `cli.py:5438` inside the single session that wrote this,
+and a guard pinned to a line reports on the day it is written and never again —
+`skeleton.render_blocks`' one-walk guard already paid for that lesson. And the
+walk is `ast.walk` over the whole tree rather than `tree.body`, because the only
+edge that exists is function-local: a module-level reader, and a grep over
+`^from`, both answer "none" and are both wrong.
+
+*Lost:* doing nothing. It is the same deferral without the enforcement, so it is
+strictly worse — it gives up the only benefit the measurement found.
+*Lost:* splitting HANDOFF-201 into a decision package plus a move package. It is
+a real option and it would have settled the namespace question before
+HANDOFF-204 creates `studio/web/`; it was not taken because the decision it
+would freeze is a decision about a tree HANDOFF-204 is about to change, and this
+package has already gone stale once for exactly that reason.
+
+### The trigger, and why it is a test
+
+**A prose trigger was refused on this package's own history.** HANDOFF-201
+carried *do not split until the contract is stable* as a sentence while
+`blocked-by` was empty, so the pickup rule — which cannot read prose — ranked it
+first and pointed a session straight at the move that sentence forbade. A
+constraint the machine cannot read is not a constraint.
+
+**Trigger 1, mechanical.** A runtime dependency appears.
+`test_the_split_trigger_has_not_fired` goes red the moment `dependencies` is
+non-empty, with a message naming the package. Somebody then decides which side
+it belongs to: the engine's, and the test is relaxed to name it; the
+workbench's, and **the split now buys something real** — a consumer vendoring
+the engine would be installing a dependency only the workstation uses, which is
+what invariant 1 and A3 both exist to prevent. That is the moment A3's argument
+stops being about the future.
+
+It is deliberately no cleverer. Mapping a distribution name to an import name is
+guesswork — `pyyaml` imports as `yaml` — and a guard that guesses is one that
+will one day be confidently wrong. Declaring a runtime dependency is already a
+rare, deliberate act invariant 1 requires a decision entry for; this asks for
+one sentence more in that entry.
+
+**Trigger 2, editorial, and it cannot be a test.** A consumer appears that
+installs the engine from a package index rather than copying the tree. Written
+down because nothing can watch for it.
+
+**Not a trigger: size.** HANDOFF-204 will commit a real frontend bundle into
+`web/static/` and grow that 127 KB. It is not a reason — the documented way to
+vendor is a source copy, where bytes nobody imports cost nothing. A threshold on
+size would sound decidable while tracking nothing that hurts anyone.
+
+### What the distillation found, which is the argument for §4's rule
+
+The two undistilled headings that started this were not a formatting debt. They
+marked a package nobody had re-read, and every figure in it had rotted at a
+different rate: the import seam it described as **nine names, four of them
+`do_*`** was **24 and 17**; the contract it called frozen at `contract_version =
+1` was at **4**; its **seventeen** divergences were **33**; its claim that
+HANDOFF-204 was "actively creating `studio/web/` across its M1–M4 milestones"
+was wrong three ways (that package is `pending`, `studio/` does not exist, and
+`studio/web/` appears in none of its milestones); it attributed the placement of
+`skill/` and `adapters/` to decision C6, which assigns them to no package; and
+two of its citations — the commit a prior graph was built on, and the
+`built_at_commit` stamped in `graphify-out/graph.json` — are **not objects in
+this repository**, so neither can be re-checked even in principle.
+
+**A package that was never distilled is a package nobody re-read**, and a
+pointer at a source stays true while a quotation of it does not. That is the
+argument for §4's rule being about the *act of promoting* rather than about
+tidiness: distillation is what forces the re-read, and the re-read is what
+catches the drift.
+
+*Also found, and left alone:* `studio/` does not today mean what the split needs
+it to mean. The 2026-08-14 entry pins the frontend source at `studio/web/` **and
+its build output inside `src/scriptorium/web/static/`**, so as tracked it is a
+Node source tree that writes into the core package. Whichever way that resolves
+is the move package's to decide, and it is written into HANDOFF-201 rather than
+here because it is a consequence of the split rather than a decision about it.
+
 ## 2026-09-07 · The margin and the near match: two surfaces that had no backend, and the budget that was quietly losing half of them
 
 HANDOFF-030, the last two deliverables HANDOFF-204 named that had **no endpoint
