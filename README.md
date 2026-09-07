@@ -150,6 +150,8 @@ mean the translation is good; that is what review is for.
 | `lx render SRC --lang L -o OUT` | rebuild the target document |
 | `lx blocks SRC --lang L` | the rebuilt document block by block, without writing it |
 | `lx sentences SRC --lang L` | how a segment's text divides into sentences |
+| `lx style SRC --lang L` | what the model is told about this book's voice — the register brief, the style sheet's always-on half, and the `[name]` blocks the named segments mention |
+| `lx suggest SRC --lang L` | near matches from the translation memory for a source the exact key misses by a word. Advisory: shows, never applies, and never moves an exit code |
 | `lx commit SRC --lang L` | bank approved wording in the translation memory |
 | `lx web` | local review workbench |
 | `lx config get\|set\|unset KEY [VALUE]` | read and write `lx.config.json` with dotted keys |

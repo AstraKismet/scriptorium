@@ -446,6 +446,8 @@ src/scriptorium/
   renderings.py  where one source term was written more than one way — the other
                  question `checks.py` cannot ask, because the evidence is the
                  whole book rather than one segment
+  suggest.py     near matches from the memory, for the sentence an exact key
+                 lookup misses by one word; pure stdlib, shows and never applies
   store.py       .lx/state.db (document state, SQLite), the translation-memory
                  key, the memory itself (.lx/tm.*.jsonl, still JSONL and tracked)
   config.py      layered config, glossary, do-not-translate list, style sheet;
@@ -470,8 +472,14 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 2078 tests; no network (one is POSIX-only,
-                                    #   one runs only where the filesystem folds case)
+python -m pytest -q                 # 2080 collected, no network. Four are
+                                    #   conditional on three different things, so
+                                    #   which two skip is a property of the machine
+                                    #   AND the account: one is POSIX-only, one
+                                    #   needs the privilege to create a directory
+                                    #   symlink, and a pair runs only where the
+                                    #   filesystem folds case. Compare the collected
+                                    #   count, never `N skipped`.
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
 
@@ -481,6 +489,8 @@ lx extract book/ch1.md --lang zh-TW --from book/whole.md   # carry a split or re
 lx glossary get                     # the terminology rows this project enforces
 lx glossary set Ashcombe 灰岸       # decide a rendering, or change one
 lx renderings --lang zh-TW          # which names this book renders inconsistently
+lx style book/ch1.md --lang zh-TW   # what the model is told about this book's voice
+lx suggest book/ch1.md --lang zh-TW # near matches from the memory, advisory
 lx renderings --lang zh-TW --term Ashcombe   # every segment naming it, with its target
 lx waive book/ch1.md --lang zh-TW --ids s0042   # stand by this wording: its errors report at warn
 lx models --provider llamacpp       # ask a backend which models it serves

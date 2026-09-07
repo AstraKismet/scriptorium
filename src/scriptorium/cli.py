@@ -11,7 +11,7 @@ import sys
 import urllib.parse
 from collections import Counter
 
-from . import __version__, audit, formats, renderings, sentences
+from . import __version__, audit, formats, renderings, sentences, suggest
 from .checks import HELD, check_segment, is_held, is_waived, workable
 from .config import (
     DEFAULT_TONE,
@@ -82,6 +82,7 @@ from .store import (
     save_segments,
     save_targets,
     save_waived,
+    segment_key,
     target_token,
     tm_lookup,
     tm_records,
@@ -1039,6 +1040,47 @@ def checked_margin(margin):
     return float(margin)
 
 
+def checked_cutoff(cutoff):
+    """``cutoff`` as a similarity ratio, or a refusal saying why it is not one.
+
+    `checked_margin`'s rule for the third bound this project takes from a
+    caller, and it closes the same two failures pointing the other way, because
+    a ratio is a floor where a margin is a ceiling:
+
+    * **A non-finite cutoff offers nothing, silently.** `float("nan")` is what
+      argparse's `type=float` makes of `nan`, and every comparison against a NaN
+      is false — so `--cutoff nan` reports an empty panel over a memory full of
+      matches, which reads exactly like a memory that holds none.
+    * **A cutoff at or below 0 offers everything**, at the cost the prefilters
+      exist to avoid: `suggest.near`'s length guard is derived from the cutoff,
+      so a zero admits every record in the memory to a full quadratic
+      comparison, and the request that used to take 300 ms takes minutes.
+
+    ``0`` is refused rather than read as "no floor", which is where this parts
+    company with `checked_limit` — there, `0` means unbounded and is the useful
+    reading. Here the useful reading of "no floor" is that every stored wording
+    is a suggestion, which is not a panel.
+
+    The upper bound is 1.0 because that is the width of the ratio range;
+    anything past it is a floor nothing can cross, a way to spell "suggest
+    nothing" that reads like a strict setting.
+    """
+    if cutoff is None:
+        return suggest.CUTOFF
+    if isinstance(cutoff, bool) or not isinstance(cutoff, (int, float)):
+        raise UnusableTarget(
+            f"`cutoff` is a number above 0 and at most 1, and this sent "
+            f"{type(cutoff).__name__}. It is how alike two sources have to be "
+            f"before the stored wording for one is offered beside the other.")
+    if not math.isfinite(cutoff) or not 0.0 < cutoff <= 1.0:
+        raise UnusableTarget(
+            f"`cutoff` is a number above 0 and at most 1 — the width of the ratio "
+            f"range, and {suggest.CUTOFF} is the default. A non-finite one offers "
+            f"nothing, because every comparison against it is false, and 0 or less "
+            f"offers every record in the memory.")
+    return float(cutoff)
+
+
 def bounded(segments, limit, what="limit"):
     """``segments`` capped at ``limit``, with ``limit`` refused if it is not one.
 
@@ -1086,11 +1128,10 @@ def cmd_todo(args, cfg):
     # Lazily, the way `do_extract` imports `accept`: importing `translate` pulls
     # in the provider stack, and `lx todo` is the command that exists precisely
     # because nobody here is calling a model.
-    from .translate import brief, mentions, style_notes, style_preamble_text
+    from .translate import mentions
 
     doc = load_doc(args.src, args.lang)
     glossary = load_glossary(cfg)
-    style_preamble, style_blocks = load_style(cfg)
     segments = pending_segments(doc, args.all, args.limit)
     items = []
     for seg in segments:
@@ -1110,12 +1151,18 @@ def cmd_todo(args, cfg):
     # Selected against the whole emitted set rather than per segment — the same
     # rule `translate.style_notes` applies to a batch, so an agent handed twenty
     # paragraphs sees exactly what the model would have seen for the same twenty.
-    notes = style_notes(segments, style_blocks)
+    #
+    # Through `do_style` since 2026-09-07, so this command, `lx style` and
+    # `POST /api/style` cannot come to disagree about what the voice is. It was
+    # assembled inline here first, and the margin surface would have been the
+    # second copy: three callers of two `translate` functions, "the same by
+    # inspection", which is what `do_commit` and `do_select` were each created to
+    # stop being.
+    voice = do_style(doc, cfg, [s["id"] for s in segments])
     _out(json.dumps({
         "source": doc["source"], "lang": doc["lang"], "tone": doc["tone"],
-        "voice": "\n\n".join(p for p in (brief(doc["lang"], doc["tone"]),
-                                         style_preamble_text(style_preamble)) if p),
-        "voice_notes": [{"names": b["names"], "notes": b["notes"]} for b in notes],
+        "voice": voice["voice"],
+        "voice_notes": voice["voice_notes"],
         "rules": "placeholders \u27e6n\u27e7 are opaque; copy them verbatim, "
                  "reorder if grammar needs it, never invent or drop them",
         "segments": items,
@@ -2484,6 +2531,269 @@ def cmd_sentences(args, cfg):
         _out(f"{row['id']}  {len(row['sentences'])} sentence(s)")
         for n, sentence in enumerate(row["sentences"], 1):
             _out(f"    {n:>3}  {_one_line(sentence)}")
+
+
+#: Segments one `lx suggest` / `POST /api/suggest` answers when none are named.
+#:
+#: A **default rather than a ceiling** — `limit=0` still means unbounded, the
+#: rule `checked_limit` states for every other bound here — but unlike every
+#: other default in this file it is not `0`, and that is deliberate: what a
+#: suggestion costs is CPU on this machine rather than money at a provider, and
+#: `suggest.WORK_BUDGET` bounds one segment against the memory while nothing
+#: would bound a novel's five thousand segments against it. An unbounded default
+#: on a read endpoint is a denial of service against your own workbench.
+#:
+#: **Five because it was measured, not because it is a batch.** Twenty-five —
+#: the batch this pipeline thinks in everywhere else — was the first value, by
+#: analogy, and the analogy is wrong: a translation batch is bounded by what a
+#: model costs and this is bounded by a quadratic comparison against every line
+#: of the memory.
+#:
+#: Measured 2026-09-07 against a frozen corpus of 1966 real English paragraphs
+#: (median 291 characters), best of three runs per probe: **one segment costs
+#: about 1.3 s at the median**, p90 2.1 s. So five is about six seconds for a
+#: request that names no ids, and ten — the value this was before the corpus was
+#: frozen — measured at thirteen. The first estimate said 0.8 s and came from a
+#: benchmark whose input moved when tracked Markdown was edited; the frozen one
+#: is the number.
+#:
+#: The probes are constructed near-matches, which pass the length guard more
+#: often than an arbitrary segment would, so this is the pessimistic end. On a
+#: small memory every value here is instant; the number only matters at the
+#: scale this feature exists for. The consumer it was built for — a workbench
+#: panel beside the segment being edited — passes one id and never meets it.
+SUGGEST_SEGMENTS = 5
+
+
+def _named_segments(doc, ids=None, limit=None, what="limit"):
+    """This document's segments, narrowed to ``ids`` and bounded by ``limit``.
+
+    Shared by the two read-only projections below, which is the only reason it
+    exists as a function: they must agree about what "no ids" means and about
+    which end of the document a bound takes.
+
+    ``ids`` names segments and is not a filter to be silently emptied — an id
+    matching nothing comes back as nothing, and the caller reports the
+    difference. The bound is applied after the narrowing and takes the front,
+    which is `do_select`'s rule for the same reason: a bound is on work, and
+    the front of the document is where a reviewer is.
+
+    **A bare string is refused rather than iterated**, which is `do_hold`'s
+    guard and is here for the identical reason: `{str(i) for i in "s0001"}` is
+    a set of six characters, so the request would match nothing and answer an
+    empty margin or an empty panel *while looking like it worked*. The contract
+    already records one endpoint that type-checks nothing and one of its fields
+    destroys work — divergence (28) — and a new endpoint should not join it.
+    """
+    if ids is not None:
+        if isinstance(ids, str) or not isinstance(ids, (list, tuple)):
+            raise UnusableTarget(
+                f"`ids` is a list of segment ids, and this request sent "
+                f"{type(ids).__name__}. A bare string would be read one character "
+                f"at a time and answer nothing while looking like it worked.")
+        ids = [sid for sid in (str(i).strip() for i in ids) if sid]
+    wanted = None if ids is None else set(ids)
+    rows = [s for s in doc["segments"] if wanted is None or s["id"] in wanted]
+    bound = checked_limit(limit, what)
+    return rows[:bound] if bound else rows
+
+
+def do_style(doc, cfg, ids=None):
+    """What the model is told about this book's voice, for a set of segments.
+
+    The seam `lx style` and `POST /api/style` share, and — since the same day it
+    landed — what `lx todo` emits as ``voice`` and ``voice_notes``. **Three
+    callers, one assembly**, which is the whole point: `AGENTS.md` treats an API
+    model, an agent in its own context and a human as three equal sources of a
+    translation, so a reviewer looking at the margin must be shown the string the
+    model was actually sent, not a second construction of it that agrees today.
+
+    Nothing here is new logic. `config.load_style` splits the sheet,
+    `translate.brief` and `translate.style_preamble_text` build the always-on
+    half, and `translate.style_notes` picks the per-batch blocks. This function
+    chooses the *segments* and nothing else.
+
+    **The block selection is `translate.style_notes`, and it may not be
+    re-derived anywhere else** — least of all in a browser. That function is
+    `translate.mentions`, whose docstring records that three copies of one
+    matching rule had accumulated before anybody noticed, and whose word-boundary
+    class reaches past ASCII on purpose: with ``[A-Za-z]``, ``Ana`` matches
+    inside ``Anaïs``.
+
+    **Selected against the whole set rather than per segment, because a batch is
+    a scene.** A character active in a scene is named somewhere in it even though
+    most individual paragraphs of their dialogue do not name them, so asking this
+    of one segment at a time loses exactly the dialogue the feature exists for.
+    A caller that wants the margin for one segment gets the honest answer for
+    that segment alone; a caller that passes the visible range gets what the
+    model would have been sent for it.
+    """
+    from .translate import brief, style_notes, style_preamble_text
+
+    preamble, blocks = load_style(cfg)
+    segments = _named_segments(doc, ids)
+    notes = style_notes(segments, blocks)
+    return {
+        "source": doc["source"],
+        "lang": doc["lang"],
+        "tone": doc["tone"],
+        "ids": [s["id"] for s in segments],
+        # The two halves ride to the model in different places — the preamble in
+        # the system prompt after the brief, a block in the user message beside
+        # the required terminology — and they are joined here because what a
+        # reviewer is owed is "what was said about the voice", not a transcript
+        # of which message carried it. `docs/decisions.md`, 2026-08-02.
+        "voice": "\n\n".join(p for p in (brief(doc["lang"], doc["tone"]),
+                                         style_preamble_text(preamble)) if p),
+        "voice_notes": [{"names": b["names"], "notes": b["notes"]} for b in notes],
+    }
+
+
+def do_suggest(doc, cfg, ids=None, cutoff=None, limit=None, most=None):
+    """Near matches from the memory for a set of segments. ``dict``.
+
+    The seam `lx suggest` and `POST /api/suggest` share. The rule is
+    :func:`suggest.near`; this chooses the segments, reads the memory once for
+    all of them, and hands each segment the key it already answers exactly so
+    the same wording is not shown twice.
+
+    **It writes nothing and it is advisory.** There is no apply path here and
+    deliberately none anywhere: a fuzzy hit differs in its placeholder set by
+    definition, so wording lifted from one renders a bare ``⟦2⟧`` in the other.
+    A reviewer who wants those words sends them through `lx apply` or
+    `POST /api/save` as their own, where `translate.accept` and the origin rules
+    see them like any other human write.
+
+    Three numbers travel with every answer rather than being left to be
+    discovered, because each one is a way the result can be less than it looks:
+    ``algorithm`` (the score is a `difflib` ratio and not a standard anybody else
+    implements), ``cutoff`` (nothing below it was offered), and per segment
+    ``truncated`` (the work budget stopped the search before the memory ran
+    out). A panel that quietly stopped looking is indistinguishable from a memory
+    that holds nothing.
+    """
+    lang = doc["lang"]
+    tone = doc.get("tone")
+    threshold = checked_cutoff(cutoff)
+    # `most` is checked here and defaulted here, and `0` travels through as
+    # `0` — which `suggest.near` reads as unbounded, the same reading
+    # `checked_limit` gives `limit`. Collapsing them with `or` would have
+    # turned "no cap" into the default of five, silently.
+    per = suggest.MAX_SUGGESTIONS if most is None else checked_limit(most, "most")
+    segments = _named_segments(
+        doc, ids, SUGGEST_SEGMENTS if limit is None else limit)
+    # Read once for the whole request rather than per segment: the memory is a
+    # file, and a novel's is thousands of lines.
+    tm = load_tm(lang)
+    records = list(tm.items())
+
+    rows = []
+    for seg in segments:
+        hits, examined, skipped = suggest.near(
+            seg["source"], records, cutoff=threshold, limit=per,
+            # The one key the exact lookup already answers. Passed rather than
+            # filtered afterwards so a record identical in text but banked under
+            # another context, variant or register still comes back — that is the
+            # case a reviewer most wants and the one an exact lookup cannot
+            # offer, and it scores 1.0 honestly.
+            skip={segment_key(seg, tone)})
+        rows.append({
+            "id": seg["id"],
+            "source": seg["source"],
+            "examined": examined,
+            "truncated": bool(skipped),
+            "suggestions": [{
+                "score": round(score, 4),
+                "source": rec.get("source") or "",
+                "target": rec.get("target") or "",
+                "context": rec.get("context"),
+                "tone": rec.get("tone"),
+                "variant": rec.get("variant"),
+                "waived": bool(rec.get("waived")),
+            } for score, _key, rec in hits],
+        })
+    return {
+        "source": doc["source"],
+        "lang": lang,
+        "tone": tone,
+        "algorithm": suggest.ALGORITHM,
+        "cutoff": threshold,
+        "records": len(records),
+        "segments": rows,
+    }
+
+
+def cmd_style(args, cfg):
+    """`lx style`. What the model is told about this book's voice.
+
+    A projection, so it exits 0 whenever it ran. There is nothing here for an
+    exit code to mean: a project with no style sheet is not a failing project,
+    it is a project whose narrator has not been described, and printing an empty
+    margin says so more usefully than a status would.
+    """
+    doc = load_doc(args.src, args.lang)
+    ids = [i.strip() for i in args.ids.split(",") if i.strip()] if args.ids else None
+    report = do_style(doc, cfg, ids)
+    if args.json:
+        _out(json.dumps(report, ensure_ascii=False, indent=2))
+        return
+    scope = f"{len(report['ids'])} segment(s)" if ids else "the whole document"
+    _out(f"{report['source']} -> {report['lang']} ({report['tone']}), {scope}")
+    if report["voice"]:
+        _out("")
+        _out("always sent:")
+        for line in report["voice"].splitlines():
+            _out(f"    {line}")
+    else:
+        _out("  nothing is sent about the voice — no register brief for this "
+             "language, and `config/style.txt` is empty or absent")
+    if report["voice_notes"]:
+        _out("")
+        _out("sent for these segments, because they name someone the sheet describes:")
+        for block in report["voice_notes"]:
+            _out(f"  [{', '.join(block['names'])}]")
+            for line in block["notes"].splitlines():
+                _out(f"    {line}")
+    elif report["voice"]:
+        _out("")
+        _out("  no [name] block matched — nothing character-specific was sent")
+
+
+def cmd_suggest(args, cfg):
+    """`lx suggest`. Near matches from the memory, and never an exit code.
+
+    `lx audit`'s rule and `lx renderings`': exit 0 whenever it ran. A number
+    produced by a threshold is not evidence, invariant 10 reserves that word for
+    `lx check`, and the moment a finding meant exit 1 a shell script would read
+    exit 0 as "this document is covered by the memory" — which is the one claim
+    this command cannot make.
+    """
+    doc = load_doc(args.src, args.lang)
+    ids = [i.strip() for i in args.ids.split(",") if i.strip()] if args.ids else None
+    report = do_suggest(doc, cfg, ids, cutoff=args.cutoff, limit=args.limit,
+                        most=args.most)
+    if args.json:
+        _out(json.dumps(report, ensure_ascii=False, indent=2))
+        return
+    _out(f"{report['source']} -> {report['lang']}, {report['records']} memory "
+         f"record(s), {report['algorithm']} at or above {report['cutoff']:g}")
+    offered = 0
+    for row in report["segments"]:
+        if not row["suggestions"]:
+            continue
+        offered += 1
+        _out("")
+        _out(f"{row['id']}  {_one_line(row['source'])}")
+        for hit in row["suggestions"]:
+            _out(f"  {hit['score']:.2f}  {_one_line(hit['source'])}")
+            _out(f"        -> {_one_line(hit['target'])}")
+        if row["truncated"]:
+            _out(f"  (the work budget stopped the search after {row['examined']} "
+                 f"record(s); there may be better matches further in)")
+    _out("")
+    _out(f"{offered} of {len(report['segments'])} segment(s) have a near match. "
+         f"Advisory: a fuzzy hit differs in its placeholder set by definition, so "
+         f"nothing here is applied — retype what you want, or `lx apply` it.")
 
 
 def do_commit(src, lang, cfg):
@@ -5370,6 +5680,46 @@ def build_parser():
                     help="split the masked source instead of the target")
     sn.add_argument("--json", action="store_true")
     sn.set_defaults(fn=cmd_sentences)
+
+    st = sub.add_parser(
+        "style", help="what the model is told about this book's voice",
+        description="Print the register brief and the style sheet exactly as they "
+                    "reach a request: the always-on half, and the [name] blocks the "
+                    "named segments happen to mention. Selection is against the whole "
+                    "set rather than each segment, because a batch is a scene.")
+    st.add_argument("src")
+    st.add_argument("--lang", required=True)
+    st.add_argument("--ids", help="comma-separated segment ids; default the whole "
+                                  "document, which is the widest possible block match")
+    st.add_argument("--json", action="store_true")
+    st.set_defaults(fn=cmd_style)
+
+    sg = sub.add_parser(
+        "suggest", help="near matches from the translation memory, advisory",
+        description="Wording already banked for a source that is nearly this one. "
+                    "Shows; never applies and never writes — a fuzzy hit differs in "
+                    "its placeholder set by definition, so applying one renders a "
+                    "bare placeholder. Never moves an exit code.")
+    sg.add_argument("src")
+    sg.add_argument("--lang", required=True)
+    sg.add_argument("--ids", help="comma-separated segment ids; default the first "
+                                  f"{SUGGEST_SEGMENTS}")
+    # `type=float` and then `checked_cutoff`, for `--margin`'s reason one line
+    # up: argparse takes `nan` and `0` for a float quite happily, and both are
+    # silent failures pointing in opposite directions — see there.
+    sg.add_argument("--cutoff", type=float, default=None,
+                    help=f"how alike two sources must be, 0 to 1 "
+                         f"(default {suggest.CUTOFF:g}; lower it to see more, at the "
+                         f"cost of comparing more of the memory)")
+    sg.add_argument("--limit", type=int, default=None,
+                    help=f"how many segments to answer (default {SUGGEST_SEGMENTS}; "
+                         f"0 for every one, which at novel scale is over a second "
+                         f"of CPU each)")
+    sg.add_argument("--most", type=int, default=None,
+                    help=f"suggestions per segment (default "
+                         f"{suggest.MAX_SUGGESTIONS}; 0 for every match)")
+    sg.add_argument("--json", action="store_true")
+    sg.set_defaults(fn=cmd_suggest)
 
     au = sub.add_parser(
         "audit", help="report stored translations that look filed under the wrong source",

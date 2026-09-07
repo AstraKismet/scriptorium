@@ -136,6 +136,8 @@ CI 上有一組語料庫在把關，裡面收了 55 份刻意刁難的輸入（M
 | `lx render SRC --lang L -o OUT` | 重建目標文件 |
 | `lx blocks SRC --lang L` | 重建後的文件，逐區塊列出，不寫檔 |
 | `lx sentences SRC --lang L` | 一個 segment 的文字如何切成句子 |
+| `lx style SRC --lang L` | 關於這本書的聲音，模型到底被告知了什麼：語域簡介、風格表中每次都會送出的那一半，以及所指定的 segment 提到了誰、就一併送出誰的 `[name]` 區塊 |
+| `lx suggest SRC --lang L` | 翻譯記憶裡差一個詞、因此精確鍵配不上的相近譯法。只提示不套用：模糊命中依定義就會在佔位符上對不起來，所以這裡不寫任何東西，也不影響任何結束碼 |
 | `lx commit SRC --lang L` | 把核可的譯法存進翻譯記憶 |
 | `lx web` | 本機審校工作台 |
 | `lx config get\|set\|unset KEY [VALUE]` | 用點號路徑讀寫 `lx.config.json` |

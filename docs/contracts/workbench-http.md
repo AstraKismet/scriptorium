@@ -210,8 +210,15 @@ one is not.
 
 ## Endpoints
 
-Fourteen. Every one is listed here; a test walks the dispatch chain in
+Seventeen. Every one is listed here; a test walks the dispatch chain in
 `web/server.py` and fails if the two lists disagree in either direction.
+
+**The count in that first word is prose and nothing tests it.** It said
+*Thirteen* while fourteen were served, then *Fourteen* while fifteen were —
+`POST /api/waive` landed 2026-09-03 and the sentence did not move. The list
+below is what a test compares against; this number is a courtesy and has been
+wrong twice. Corrected here to seventeen with `POST /api/style` and
+`POST /api/suggest`.
 
 Common to all of them:
 
@@ -492,6 +499,151 @@ The answer depends on the project's `terms.abbreviations` — the same list
 `lx terms` reads. A project that adds a word to it changes both answers together.
 
 Side effects: none.
+
+---
+
+### POST /api/style
+
+What the model is told about this book's voice, for a set of segments — the
+**style-sheet margin**. A reviewer reading a translation beside its source has no
+way to see why it sounds as it does; this is that missing half of the request.
+
+Backed by: `cli.do_style`. Equivalent to `lx style <src> --lang <lang>`, and the
+**same function** that fills `lx todo`'s `voice` and `voice_notes`. Three callers,
+one assembly: a margin built from a second construction of the voice would be
+showing a reviewer something the model was never sent.
+
+**Two halves, and they reach the model in different places.** The project style
+sheet says how *this book* sounds; the register brief says how the target
+language's prose is written. The always-on half — the brief plus the sheet's
+preamble — rides the system prompt, so that string stays byte-identical for every
+request of a run. A `[name]` block is per batch and rides the user message beside
+the required terminology. They are joined in `voice` here because what a reviewer
+is owed is *what was said about the voice*, not a transcript of which message
+carried it.
+
+**Nothing inside a block is parsed.** The header says who the block answers to and
+that is the whole of the structure; the body is the person's own prose. Deciding
+*whether* to send a block is mechanical, deciding what good narration sounds like
+is judgement, and invariant 4 is the line between them.
+
+**Request**
+
+| Key | Type | Meaning |
+|---|---|---|
+| `src` | string | Required. |
+| `lang` | string | Required. |
+| `ids` | array of string | Optional. Default is **the whole document**, which is the widest possible block match. An id naming no segment contributes nothing and is not an error. A bare string is `400`, not iterated one character at a time. |
+
+**Response**
+
+| Key | Type | Meaning |
+|---|---|---|
+| `source` | string | The document, in this surface's one spelling. |
+| `lang` | string | The language tag. |
+| `tone` | string or null | The register the document is frozen in. |
+| `ids` | array of string | The segments the answer is *about*, in document order — what `ids` resolved to, so a client can see that an id matched nothing. |
+| `voice` | string | The always-on half, exactly as it reaches a request. `""` when the language has no brief and the sheet is empty or absent. |
+| `voice_notes` | array of object | `{names, notes}` per matched block, in file order. `[]` when none matched. |
+
+**Selection is against the whole set of `ids` rather than against each segment,
+because a batch is a scene.** A character active in a scene is named somewhere in
+it even though most individual paragraphs of their dialogue do not name them, so
+asking this one segment at a time loses exactly the dialogue the feature exists
+for. A client showing a margin beside one segment gets the honest answer for that
+segment; a client that passes the visible range gets what the model would have
+been sent for it. **The two answers differ, and that is the rule rather than an
+inconsistency.**
+
+The matching rule is `translate.mentions` and a client **computes none of it**.
+Its word-boundary class reaches past ASCII deliberately: with `[A-Za-z]`, `Ana`
+matches inside `Anaïs`.
+
+Side effects: none. Reads the configured style sheet; a malformed or over-long
+one is `400` naming the file.
+
+---
+
+### POST /api/suggest
+
+Wording already banked for a source that is *nearly* this one — the **memory
+suggestions** panel. The memory answers exactly or not at all, and for a novel
+that is not enough: the second chapter says *She had not slept* where the first
+said *She had not slept well*.
+
+Backed by: `cli.do_suggest`. Equivalent to `lx suggest <src> --lang <lang>`.
+
+⚠️ **Advisory, and there is deliberately no apply path.** A fuzzy hit differs in
+its placeholder set by definition, so wording lifted from one segment into
+another renders a bare placeholder. Automatic application of fuzzy matches is
+deferred indefinitely, and **a client must not offer a one-click apply**: a
+reviewer who wants those words retypes them, or sends them through
+`POST /api/save` as their own, where `translate.accept` and the origin rules see
+them like any other human write. This endpoint writes nothing.
+
+**Request**
+
+| Key | Type | Meaning |
+|---|---|---|
+| `src` | string | Required. |
+| `lang` | string | Required. |
+| `ids` | array of string | Optional. Default is **the first `limit` segments**, not the whole document — see below. A bare string is `400`, not iterated one character at a time. |
+| `cutoff` | number | Optional, greater than 0 and at most 1. Default `0.7`. Anything else is `400`, including `0`, a negative, and a non-finite: a NaN offers nothing because every comparison against it is false, and a zero admits the whole memory to a quadratic comparison. |
+| `limit` | integer | Optional. How many **segments** to answer. Default `5`; `0` means every segment. Not a bool, not negative — `400` otherwise. |
+| `most` | integer | Optional. Suggestions **per segment**. Default `5`; `0` means every match above the cutoff. |
+
+**`limit` is the one default on this surface that is not "everything", and it is
+deliberate.** What a suggestion costs is CPU on the machine running the workbench
+rather than money at a provider, and the comparison is quadratic in the length of
+the two texts. Unbounded, one request would compare a novel's every segment
+against a novel's whole memory. Measured 2026-09-07 against a frozen corpus of
+1966 records of real English prose, **one segment costs about 1.3 s at the
+median and 2.1 s at p90**, so the default keeps a request that names no ids to
+roughly six seconds. A client drawing a panel beside one segment passes one id
+and never meets the default.
+
+**Response**
+
+| Key | Type | Meaning |
+|---|---|---|
+| `source` | string | The document. |
+| `lang` | string | The language tag. |
+| `tone` | string or null | The register the document is frozen in. |
+| `algorithm` | string | What produced the score. `"difflib.SequenceMatcher.ratio"` today. |
+| `cutoff` | number | The floor actually applied. |
+| `records` | integer | Lines in the memory that were available to match against. |
+| `segments` | array of object | One per answered segment, in document order. |
+
+Each `segments[]` entry carries `id`, `source` (the raw source text the
+comparison was made on), `examined` (records that reached the full comparison —
+the rest were rejected by a length bound or a cheap upper bound, or were never
+reached), `truncated`, and `suggestions`.
+
+⚠️ **`truncated` is `true` when a work budget stopped the search before the
+memory ran out, and it means there may be better matches that were never
+compared.** A panel that quietly stopped looking is indistinguishable from a
+memory that holds nothing, which is why this is a first-class part of the
+response and not an error.
+
+Each `suggestions[]` entry: `score` (number from 0 to 1, rounded to four places),
+`source` and `target` (the banked pair), `context`, `tone`, `variant` (the key
+axes the record carries, any of which may be `null`), and `waived` (whether the
+wording was banked from a segment a reviewer had waived). Best first, at most
+`most` of them; `[]` is the common answer.
+
+⚠️ **`score` is a `difflib` ratio and not a standard anybody else implements.** A
+second client computing its own would get different numbers. That is why
+`algorithm` travels in every response: read it, and do not compare scores across
+a change in it.
+
+**The segment's own exact memory hit is excluded**, because `POST /api/extract`
+has already offered it and listing it here would put one wording on the screen
+twice. **A record whose source text is identical but whose *key* differs is
+kept**, at a score of `1.0` — the same sentence banked under another context,
+variant or register. That is not a leak: it is the case an exact lookup
+structurally cannot offer, and the score is telling the truth.
+
+Side effects: none. Reads the language's translation memory.
 
 ---
 

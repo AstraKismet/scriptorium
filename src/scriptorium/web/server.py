@@ -41,6 +41,8 @@ from ..cli import (
     do_routing_set,
     do_select,
     do_sentences,
+    do_style,
+    do_suggest,
     do_translate,
     do_untracked,
     do_waive,
@@ -748,6 +750,27 @@ class _Handler(BaseHTTPRequestHandler):
             # to read it *inside* the lock or it validates against one snapshot
             # and writes into another.
             return _config_write(body)
+        if path == "/api/style":
+            # `cli.do_style` builds it, and the same function is what `lx style`
+            # prints and what `lx todo` emits as `voice`/`voice_notes`. Three
+            # callers, one assembly — a margin that showed a *second*
+            # construction of the voice would be showing a reviewer something the
+            # model was never sent, which is the whole of what this surface is
+            # for.
+            return do_style(load_doc(src, lang), cfg, body.get("ids"))
+        if path == "/api/suggest":
+            # Every shape check is `do_suggest`'s — `checked_cutoff` for the
+            # ratio and `checked_limit` for both bounds — so the CLI cannot walk
+            # around them and this endpoint cannot drift from it. Each raises
+            # `UnusableTarget`, which reaches the 400 below like every other
+            # refusal on this surface.
+            #
+            # `limit` is the one default on this surface that is not "everything":
+            # unbounded, one request would compare a novel's every segment against
+            # a novel's whole memory. See `cli.SUGGEST_SEGMENTS`.
+            return do_suggest(load_doc(src, lang), cfg, body.get("ids"),
+                              cutoff=body.get("cutoff"), limit=body.get("limit"),
+                              most=body.get("most"))
         if path == "/api/sentences":
             # No `src`, no `lang` and no path of any name — the editor's buffer is
             # what a reviewer is holding mid-edit and it belongs to no file yet.
