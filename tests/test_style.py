@@ -33,7 +33,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from scriptorium import translate as translate_mod  # noqa: E402
-from scriptorium.cli import do_extract, do_translate  # noqa: E402
+from scriptorium.cli import do_extract, do_style, do_translate  # noqa: E402
 from scriptorium.config import (  # noqa: E402
     DEFAULT_CONFIG,
     STYLE_BLOCK_MAX,
@@ -462,3 +462,167 @@ def test_the_scaffolded_style_sheet_injects_nothing(tmp_path, monkeypatch):
     assert load_style(DEFAULT_CONFIG) == ("", [])
     assert all(line.startswith("#") or not line.strip()
                for line in STYLE_HEADER.splitlines())
+
+
+# ── the margin: what a reviewer is shown about the voice ───────────────────
+#
+# `cli.do_style` is a projection and not new logic — the point of every test
+# below is that it is the *same* projection the model was given and the same one
+# `lx todo` hands an agent, because three constructions of one voice is how a
+# margin comes to show a reviewer something nobody was ever told.
+
+
+def test_the_margin_selects_the_blocks_the_fixture_names_and_no_others(
+        tmp_path, monkeypatch):
+    """The oracle is the fixture, not `style_notes`' own answer.
+
+    **Named from `BOOK` and `SHEET` by reading them**, which is the whole
+    discipline here: asserting `do_style(...)["voice_notes"] == style_notes(...)`
+    would compare the code under test to itself, pass against a mutant that
+    broke both, and prove nothing. That failure was measured twice in this
+    repository on 2026-08-15.
+
+    `BOOK` names Eleanor in its first paragraph and Thomas in its third, and
+    names Mrs Ashcombe nowhere at all. So over the whole document the answer is
+    exactly two blocks, in file order, and the third is the control: a sheet
+    entry that matches nothing must contribute nothing.
+    """
+    src, _ = _project(tmp_path, monkeypatch)
+    doc = load_doc(src, "zh-TW")
+
+    report = do_style(doc, CFG)
+
+    assert [b["names"] for b in report["voice_notes"]] == [
+        ["Eleanor Vance", "Eleanor"], ["Thomas"]]
+    assert ELEANOR_NOTE in report["voice_notes"][0]["notes"]
+    assert THOMAS_NOTE == report["voice_notes"][1]["notes"]
+    assert ABSENT_NOTE not in json.dumps(report, ensure_ascii=False)
+    # The comment header is stripped before anything is measured, so it can
+    # never reach a reviewer either.
+    assert COMMENT not in json.dumps(report, ensure_ascii=False)
+
+
+def test_the_margin_is_selected_against_the_batch_and_not_each_segment(
+        tmp_path, monkeypatch):
+    """A batch is a scene, so narrowing the ids narrows the answer.
+
+    The first paragraph names Eleanor and the third names Thomas, so asking
+    about the first alone must return Eleanor's block and *not* Thomas's — and
+    asking about a paragraph that names nobody must return neither, even though
+    both characters are in the document.
+
+    This is the rule rather than an inconsistency, and it is why the contract
+    says the two answers differ: a client showing a margin beside one segment is
+    asking a narrower question than one showing it beside the visible range.
+    """
+    src, _ = _project(tmp_path, monkeypatch)
+    doc = load_doc(src, "zh-TW")
+    ids = [s["id"] for s in doc["segments"]]
+
+    first = do_style(doc, CFG, [ids[0]])
+    assert [b["names"] for b in first["voice_notes"]] == [["Eleanor Vance", "Eleanor"]]
+
+    third = do_style(doc, CFG, [ids[2]])
+    assert [b["names"] for b in third["voice_notes"]] == [["Thomas"]]
+
+    # The second paragraph is "She had not expected that…" — a pronoun, no name.
+    silent = do_style(doc, CFG, [ids[1]])
+    assert silent["voice_notes"] == []
+
+    # And the pair together is the union, because the selection is over the
+    # joined text of the whole set.
+    both = do_style(doc, CFG, [ids[0], ids[2]])
+    assert [b["names"] for b in both["voice_notes"]] == [
+        ["Eleanor Vance", "Eleanor"], ["Thomas"]]
+
+
+def test_the_margin_is_the_string_the_model_was_actually_sent(
+        tmp_path, monkeypatch):
+    """Not a second construction of it — the same one, compared against a request.
+
+    A margin whose text merely resembles the prompt is worse than no margin: a
+    reviewer would be reasoning about wording the model never saw. So this runs
+    a translation through the recording provider and asserts the margin's two
+    halves are **substrings of the two messages that actually went out** — the
+    always-on half in the system prompt, the matched block in the user message,
+    which is the split `docs/decisions.md` 2026-08-02 decided.
+    """
+    src, doc = _project(tmp_path, monkeypatch)
+    stub = _Recorder()
+    _run(src, doc["segments"], stub, monkeypatch, batch=len(doc["segments"]))
+
+    report = do_style(load_doc(src, "zh-TW"), CFG)
+
+    assert report["voice"] in stub.systems[0]
+    for block in report["voice_notes"]:
+        assert block["notes"] in stub.requests[0]
+
+    # **Both halves named, and not only the containment above.** A substring
+    # check is satisfied by a margin that dropped something: measured
+    # 2026-09-07, a mutant returning the register brief alone still passed
+    # `report["voice"] in stub.systems[0]`, because the brief is a substring of
+    # the prompt too. What the margin owes is *everything* that was said about
+    # the voice, so the assertion has to name each half.
+    assert brief("zh-TW", "literary") in report["voice"]
+    assert PREAMBLE in report["voice"]
+
+
+def test_lx_todo_and_the_margin_are_one_assembly(tmp_path, monkeypatch, capsys):
+    """`cmd_todo` goes through `do_style`, so the two cannot drift apart.
+
+    Asserted as equality of both keys rather than by reading the source, because
+    what matters is the answer and not the call graph — but the reason it holds
+    is that there is exactly one assembly since 2026-09-07. `lx todo` selects
+    pending segments and the margin here is asked about the same ids, so the
+    two are answering one question.
+    """
+    src, _ = _project(tmp_path, monkeypatch)
+    from scriptorium.cli import cmd_todo
+    cmd_todo(argparse.Namespace(src=src, lang="zh-TW", all=False, limit=0), CFG)
+    payload = json.loads(capsys.readouterr().out)
+
+    doc = load_doc(src, "zh-TW")
+    report = do_style(doc, CFG, [item["id"] for item in payload["segments"]])
+
+    assert report["voice"] == payload["voice"]
+    assert report["voice_notes"] == payload["voice_notes"]
+
+
+def test_the_margin_says_which_segments_it_is_about(tmp_path, monkeypatch):
+    """`ids` is what the request resolved to, so a client can see a miss.
+
+    An id naming no segment is not an error — a reviewer's viewport can outlive
+    a re-extract — but it must not silently look like a match either, and the
+    only way a client can tell is by comparing what it asked for against what
+    came back.
+    """
+    src, _ = _project(tmp_path, monkeypatch)
+    doc = load_doc(src, "zh-TW")
+    real = doc["segments"][0]["id"]
+
+    report = do_style(doc, CFG, [real, "s9999"])
+    assert report["ids"] == [real]
+    assert report["voice_notes"][0]["names"] == ["Eleanor Vance", "Eleanor"]
+
+    empty = do_style(doc, CFG, ["s9999"])
+    assert empty["ids"] == []
+    assert empty["voice_notes"] == []
+    # The always-on half does not depend on the segments at all, so it survives
+    # a selection that matched nothing — which is what makes it "always on".
+    assert empty["voice"] == report["voice"]
+
+
+def test_the_margin_is_empty_rather_than_absent_without_a_sheet(
+        tmp_path, monkeypatch):
+    """Both keys are always present, `lx todo`'s rule for the same reason.
+
+    A consumer that has to branch on a missing key breaks the first time it
+    meets a project with no style sheet — and unlike `lx todo`, this surface is
+    the one a workbench draws a panel from on every segment.
+    """
+    src, _ = _project(tmp_path, monkeypatch, sheet=None)
+    report = do_style(load_doc(src, "zh-TW"), CFG)
+
+    assert report["voice_notes"] == []
+    # Not empty: the register brief is the always-on half even with no sheet.
+    assert brief("zh-TW", "literary") in report["voice"]

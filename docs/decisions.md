@@ -3,6 +3,184 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-09-07 · The margin and the near match: two surfaces that had no backend, and the budget that was quietly losing half of them
+
+HANDOFF-030, the last two deliverables HANDOFF-204 named that had **no endpoint
+and no CLI function at all**. The style-sheet margin — what the model was told
+about this book's voice — and memory suggestions, the near matches an exact key
+lookup cannot reach. Additive on the wire; `contract_version` stays at 4.
+
+Everything below was measured on 2026-09-07 unless dated otherwise.
+
+### The margin is a projection, and the work was refusing to build a second one
+
+`config.load_style` already split the sheet, `translate.style_notes` already
+picked the per-batch blocks, and `translate.brief` and
+`translate.style_preamble_text` already built the always-on half. `lx todo`
+assembled all four inline for an agent. So the margin needed no new logic at
+all — what it needed was for the assembly to stop being inline.
+
+**`cli.do_style` is that assembly, and it has three callers**: `lx style`,
+`POST /api/style`, and `lx todo`, which was rewritten to go through it. A margin
+built from a second construction of the voice is worse than no margin, because a
+reviewer would be reasoning about wording the model was never sent. This is the
+same move `do_commit` and `do_select` each made, and for the same reason —
+"equivalent by inspection" is what those two were created to stop being.
+
+**Selection stays against the whole batch rather than each segment, and the
+contract says so out loud**, because it is the one place a client could
+reasonably think the surface is inconsistent. A batch is a scene: a character
+active in a scene is named somewhere in it even though most individual
+paragraphs of their dialogue do not name them. So asking about one segment and
+asking about the visible range give different answers, and both are right.
+
+*Lost:* re-deriving the block match in the browser. It is `translate.mentions`,
+whose own docstring records that three copies of one matching rule accumulated
+before anybody noticed, and whose word-boundary class reaches past ASCII on
+purpose — with `[A-Za-z]`, `Ana` matches inside `Anaïs`.
+
+### The similarity algorithm, and the two `difflib` defaults that are wrong for prose
+
+`difflib.SequenceMatcher.ratio()` behind prefilters, scored as a ratio in
+`[0, 1]` with a floor of `0.70`, decided 2026-08-17. `rapidfuzz` is what
+everybody means by fuzzy matching and invariant 1 excludes its C++ by name, so
+the stdlib is the field. The score is *this implementation's* number rather than
+a standard, which is why `algorithm` travels in every response: a second client
+computing its own ratio would get different numbers, and a later change should be
+visible rather than silent.
+
+*Lost:* a token or character n-gram overlap, trivially reimplementable by another
+client but behaving differently on unspaced CJK; and a pure-Python Levenshtein,
+O(n·m) per candidate with no C to hide behind. *Lost, and this one was built and
+measured before it was refused:* **word-level comparison**. It is an order of
+magnitude faster and it makes `quick_ratio` a real filter — and it scores a
+source language written without spaces as a single token, silently, as a
+plausible number rather than an error.
+
+**`autojunk` is on by default and had to be turned off.** It discards any element
+occurring in more than 1% of a sequence longer than 200, which on a 500-character
+English paragraph makes the space character junk, and `e`, and every common
+letter. It exists for lines of code. `store.Carryover` had already reached the
+same conclusion about the same engine.
+
+**The character-level `quick_ratio` barely filters prose, and that is the fact
+the whole cost model rests on.** It is a multiset intersection over *characters*,
+and any two English paragraphs of similar length share nearly every character —
+measured, it rejects 13% where the length guard rejects 32% and 55% still reach
+the full quadratic comparison. It is kept because it is a valid upper bound, it
+is linear, and it is the sort key; not because it filters.
+
+*Lost, after being built:* a **branch-and-bound** — sort candidates by their
+upper bound, stop once `limit` results beat the best remaining one. Exact, free,
+and it saved **0 of 2209** full comparisons across six probes, because the prune
+cannot fire until `limit` matches are already in hand and the realistic case
+finds none. The sort survives it for a different reason: it decides what a
+budget drops.
+
+### The work budget was set by analogy, and the analogy lost 44% of the findings
+
+`suggest.WORK_BUDGET` bounds one segment against the whole memory, in
+character-pairs compared. The first value was **20M** — a ~300 ms ceiling, chosen
+because it looked like a sensible latency budget for a panel. Measured against
+1967 real English paragraphs (median 291 characters) from this repository's own
+tracked Markdown, with 37 probes of which 16 have a true match:
+
+| budget | median | max | truncated | recall |
+|---|---|---|---|---|
+| 20M | 394 ms | 474 ms | 24/37 | **56%** |
+| 50M | 823 ms | 1053 ms | 18/37 | 75% |
+| 100M | 761 ms | 2304 ms | 10/37 | 88% |
+| **200M** | 833 ms | 3328 ms | **0/37** | **100%** |
+| unbounded | 793 ms | 3309 ms | 0/37 | 100% |
+
+**A budget that fires routinely loses matches close to at random.** Truncation
+drops candidates in `quick_ratio` order, and `quick_ratio` is ≈1.0 for any two
+similar-length English paragraphs — so the order it drops in barely predicts the
+true ratio. At 20M that cost 44% of the findings while `truncated` reported only
+"there may be more", which a reviewer cannot distinguish from a memory that holds
+nothing.
+
+Note what the table says about the *median*: it is flat from 50M upward, because
+the budget only ever bites the expensive tail. **Buying full recall costs almost
+nothing typical.** So the budget's role changed rather than its value merely
+rising: it is a backstop against a pathological memory, not a routine cap, and
+200M is where it stops costing anything while still being a ceiling.
+
+`store.ALIGN_BUDGET` is the shape this copies, and the one difference is what
+happens at the ceiling. Alignment degrades to a worse *complete* answer, so it
+can be silent. This degrades to a *partial* one, so `truncated` is a first-class
+part of the response.
+
+### `SUGGEST_SEGMENTS` is five, it was twenty-five by analogy, and the number in between came from a broken instrument
+
+How many segments one request answers when none are named. Twenty-five was the
+first value — the batch this pipeline thinks in everywhere else — and the analogy
+is wrong: **a translation batch is bounded by what a model costs, and this is
+bounded by a quadratic comparison against every line of the memory.**
+
+It was then ten, on a measurement of ~0.8 s per segment, and that measurement was
+wrong for a reason worth recording: **the benchmark built its corpus by reading
+this repository's own tracked Markdown, and I was editing tracked Markdown as
+part of the same work.** Two runs of the same script disagreed — 833 ms against
+1415 ms — because the input had moved between them. Frozen to a file and
+re-measured best-of-three, one segment costs **1.3 s at the median and 2.1 s at
+p90** against 1966 real English paragraphs, which makes five about six seconds
+and ten about thirteen. A benchmark whose input changes when you work reports
+whatever you last did.
+
+It is the one default in `cli.py` that is not `0`. An unbounded default on a read
+endpoint is a denial of service against your own workbench, and the consumer this
+was built for — a panel beside the segment being edited — passes one id and never
+meets it.
+
+### What a suggestion may not do, and the two the mutation pass caught
+
+Four refusals, and the interesting half is that two of them were **not** actually
+enforced by the tests that claimed to enforce them until a mutation pass ran:
+
+* **It writes nothing.** There is no apply path and deliberately none anywhere —
+  a fuzzy hit differs in its placeholder set by definition, so lifting wording
+  from one segment renders a bare `⟦2⟧` in another. A reviewer who wants those
+  words retypes them or sends them through `POST /api/save` as their own.
+  ⚠️ The test compared a `load_doc` before against a `load_doc` after, and a
+  mutant that assigned the best suggestion to `seg["target"]` **survived it**,
+  because the mutation was in memory and the comparison re-read the database. It
+  now also asserts the document object the caller handed in is unchanged.
+* **A segment's own exact hit is excluded** — `POST /api/extract` has already
+  applied it — **and a record whose text is identical under a different key is
+  kept**, at a score of 1.0. That second half is the case an exact lookup
+  structurally cannot offer: the same sentence banked as a paragraph, wanted by a
+  heading. Filtering it out as "an exact match" would have been the obvious
+  implementation and would have thrown away the best answer this surface has.
+* **It never moves an exit code.** `lx audit`'s rule and `lx renderings`'.
+* **It adds no compiled dependency**, asserted rather than assumed: one test
+  reads `suggest.py` with `ast` and refuses any import outside the standard
+  library, and another parses `pyproject.toml` and refuses a non-empty
+  `dependencies`. Reading the *source* rather than importing, because a
+  conditional or function-local import of a compiled package would pass an
+  import check on a machine where the package is absent.
+
+The second mutant worth recording: the budget's guard is
+`spent + cost > budget`, checked **before** the comparison. A mutant changing it
+to `spent > budget` — checked after — survived the first version of its test,
+because that test used a budget so small that both guards stopped at the first
+candidate. Telling them apart needs a budget inside the window where the first
+comparison fits and the second would overflow, which took a measurement to
+construct.
+
+### Two things this did not do
+
+`POST /api/style` and `POST /api/suggest` are the sixteenth and seventeenth
+endpoints. Both inherited invariant 11's path confinement and the `lang`
+whitelist **without a line of code**, because `tests/test_contract.py`
+parametrizes those two checks over the documented endpoint list and the server's
+admission gate binds by the presence of a field rather than by an endpoint's
+name. Four tests appeared that nobody wrote.
+
+And the *Endpoints* section's opening word has now been wrong twice — "Thirteen"
+while fourteen were served, "Fourteen" while fifteen were. It says seventeen, and
+it says beside itself that nothing tests it and the list below is what does.
+
 ## 2026-09-07 · `ls` was never the board, and the queue's top priority was ninth in its own order
 
 A closing report named `HANDOFF-030` as the next package, "at priority 1". That
@@ -86,15 +264,61 @@ says an id does not change when a package moves, so `10-now/` legitimately holds
 **the cleared state** by §5, not an error, so treating it as one would fire on
 every completed dependency.
 
-### One thing found and not fixed
+### One thing found and not fixed — and then fixed the same day
 
-`HANDOFF-201` sits in `10-now/` carrying `## Background (pointer form — distil
+`HANDOFF-201` sat in `10-now/` carrying `## Background (pointer form — distil
 before promoting to 10-now)` and `## Acceptance criteria (draft — expand on
 promotion)`. It was promoted 2026-08-15, and both §4 and `AGENTS.md` make
-completing the distillation part of promoting. It is a red-line violation older
-than the report this entry is about, it is reported rather than repaired here,
-and the choice between distilling it and returning it to `90-later/` is the
-maintainer's.
+completing the distillation part of promoting. It was a red-line violation older
+than the report this entry is about, it was reported rather than repaired here,
+and the choice between distilling it and returning it to `90-later/` was the
+maintainer's. **They chose distilling, and it was done the same day.**
+
+What that distillation found is the part worth keeping, because it changes what
+the two headings were evidence *of*. They read like a formatting debt. They were
+a marker for a package that had also stopped being re-measured, and every figure
+in it had rotted at a different rate:
+
+- the `studio/` → `core/` import seam it described as **nine names, four of them
+  `do_*`** was **24 names, 17 of them `do_*`** — and one of the nine,
+  `pending_segments`, is not imported by the server at all any more. Twenty-five
+  days, ~2.7×. The direction is invariant 8 working, which is why nothing
+  flagged it;
+- the workbench contract it called frozen at `contract_version = 1` was at
+  **4**, and the *Known divergences* section it described as **seventeen**
+  entries, four of them the CLI-gap kind, held **33**, of which the CLI-gap kind
+  that is still open is **three** and the contract explicitly disclaims two of
+  those as not being leaked logic;
+- its sequencing section said HANDOFF-204 was "actively creating `studio/web/`
+  … across its M1–M4 milestones". HANDOFF-204 is `pending`, `studio/` does not
+  exist, and `studio/web/` appears in **no** milestone of it — M4 is `roots` and
+  `--allow-host`, which names no frontend directory;
+- it attributed the placement of `skill/` and `adapters/` in `core/` to decision
+  **C6**, which keeps those directories and repairs their dead paths and assigns
+  them to no package. The placement is a sound inference from C6's last clause;
+  it was not a decision anybody had taken;
+- and two of its citations point at nothing. `git cat-file -t abb1505` — the
+  commit whose graph "suggested `translate.py` as the seam" — answers
+  `fatal: Not a valid object name`, and so does the `built_at_commit` stamped
+  into the `graphify-out/graph.json` on disk, so the freshness gate it tells a
+  session to run cannot compute a distance at all and prints `?`.
+
+**A package that was never distilled is a package nobody re-read**, and the
+figures inside it decay silently because a pointer at a source stays true while
+a quotation of it does not. That is the argument for §4's rule being about the
+*act of promoting* rather than about tidiness: distillation is what forces the
+re-read, and the re-read is what catches the drift. The distilled version dates
+every measurement and says at the top to re-take them, which is the most a file
+in a gitignored directory can do about a tree that moves under it.
+
+*Not fixed here, deliberately:* `docs/contracts/workbench-http.md:213` says the
+surface has "Fourteen" endpoints and it serves fifteen — `POST /api/waive`
+landed 2026-09-03 and the prose did not move. No test catches it;
+`tests/test_contract.py` pins the endpoint *set* against `web/server.py` and
+never the word, behind a floor of `len(served) >= 10`. It was already recorded
+in `HANDOFF-047`, found there the same way — while measuring something else —
+and it stays that package's to fix, so that a one-word correction does not
+acquire three homes.
 
 ## 2026-09-07 · The glossary becomes editable, and finding a drifted name is three layers rather than one
 

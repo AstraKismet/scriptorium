@@ -474,6 +474,14 @@ def test_every_endpoint_returns_exactly_the_keys_the_contract_documents(base, pr
     # above bind by field presence, so they still cover an endpoint that ignores
     # both. The same argument `/api/config` already carries.
     record("POST", "/api/sentences", {"texts": ["One sentence. And another."]})
+    # Both read-only projections, and both are exercised with no optional field
+    # at all — their defaults are part of the documented shape, and a call that
+    # passed `ids` would leave the "no ids" branch of each unmeasured here. The
+    # fixture project has no style sheet and an empty memory, so `voice_notes`
+    # and every `suggestions` list come back empty: the key *set* is what this
+    # compares, and it must not depend on whether there was anything to say.
+    record("POST", "/api/style")
+    record("POST", "/api/suggest")
     record("GET", "/api/state", {})
     # Explicitly, because nothing here is automatic: `_documented_response_keys`
     # harvests the contract and `actual` is only what these calls record, so a
