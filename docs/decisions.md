@@ -181,8 +181,9 @@ and layer 2 is the answer.
 
 **Both forms written at the end of a phrase, twice each.** A Chinese name is
 followed by 的 constantly, so `X的` reaches support on any long book and splits
-`X` off itself. *Lost:* asking it of the short form only — the adversarial pass
-measured 184 of 200 terms reported on a 5000-segment book with 8 real drifts.
+`X` off itself. *Lost:* asking it of the short form only — the adversarial pass over an earlier
+version measured 184 of 200 terms reported on a 5000-segment book with 8 real
+drifts. That number is theirs, not re-run here; the two below are mine.
 *Lost:* asking the long form for a single occurrence — 的 does end a Chinese
 clause, and on five 240-segment books with nothing drifted that reported **all
 thirty names in all five**.
@@ -207,10 +208,11 @@ remove findings, so a book with one name in it behaves as it did before.
 | **six drifted, filter on** | **7–9** | **5–6** | **1–4** |
 
 Cost, measured rather than estimated, because HANDOFF-037's neighbouring case
-took `lx check` from 0.62 s to 52.2 s: **5000 segments and 200 names in 2.22 s
-with a 13 MB peak**, five false findings on a book with nothing drifted. The gram
-index is built once over the corpus rather than once per term, and the term scan
-pre-filters with a plain substring test before the matcher's regex.
+took `lx check` from 0.62 s to 52.2 s: **5000 segments and 200 names in 2.17 s
+with an 18 MB peak**, five false findings on a book with nothing drifted, on a
+generator reporting 2 collisions. The gram index is built once over the corpus
+rather than once per term, and the term scan pre-filters with a plain substring
+test before the matcher's regex.
 
 ### What it cannot see, and the recall this buys
 

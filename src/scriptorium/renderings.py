@@ -99,10 +99,12 @@ FLOORS = (
 
 #: How a finding is ordered, never whether it is reported.
 #:
-#: Measured 2026-09-07 on a 5000-segment synthetic book whose renderings were
-#: drawn from the same characters as its prose: 39 false findings against 7 true
-#: ones, and 29 of the 39 named three or more renderings while 6 of the 7 true
-#: ones named exactly two sharing nothing. Suppressing the two noisy shapes
+#: Measured by the adversarial pass over an earlier version of this rule,
+#: 2026-09-07, on a 5000-segment synthetic book whose renderings were drawn from
+#: the same characters as its prose — a shape this build reports far less on, so
+#: read the ratio rather than the counts: 39 false findings against 7 true ones,
+#: and 29 of the 39 named three or more renderings while 6 of the 7 true ones
+#: named exactly two sharing nothing. Suppressing the two noisy shapes
 #: would have removed 35 of 39 false and 1 of 7 true — and it would also silence
 #: 阿什科姆 against 阿希科姆, a one-character drift, which is the drift a reviewer
 #: is least able to catch by eye. So the shape orders the report and does not
@@ -241,16 +243,16 @@ def _separable(longer, shorter, here, remainder, targets):
     because attaching is what it is for, while a name is followed by a comma or a
     full stop sooner or later.
 
-    Measured 2026-09-07, in three rounds, and each round is a rule that lost.
-    Asking it of the short form alone took a 5000-segment synthetic book from 184
-    of 200 terms reported, with 8 real drifts, to 9 of 200 — a Chinese name is
-    followed by 的 constantly, so ``X的`` reaches support on any long book and
+    Three rounds, each a rule that lost. Asking it of the short form alone was
+    measured by the adversarial pass on a 5000-segment synthetic book, which took
+    184 of 200 terms reported, with 8 real drifts, to 9 of 200 — a Chinese name
+    is followed by 的 constantly, so ``X的`` reaches support on any long book and
     splits ``X`` off itself. Asking the long form for a *single* standing-alone
     occurrence was the next attempt and is not enough: 的 does end a Chinese
     clause, and on five 240-segment books with nothing drifted that reported all
-    thirty names in all five. Requiring ``MIN_SUPPORT`` on both sides is what
-    survived — and it is still scale-dependent, which is why `_grammar` exists
-    above it.
+    thirty names in all five — measured here, 2026-09-07. Requiring
+    ``MIN_SUPPORT`` on both sides is what survived, and it is still
+    scale-dependent, which is why `_grammar` exists above it.
 
     What it costs is in the module's floors: a rendering never written at the end
     of a phrase cannot be told from the same rendering with a particle stuck to
@@ -365,12 +367,13 @@ def _grammar(terms, per_term, targets, mention, live, index):
 
     **Why a corpus-wide pass exists at all.** The per-term test — both forms
     written at the end of a phrase, twice each — is scale-dependent, and that is
-    measured rather than feared: on a 240-segment synthetic book it reported
-    nothing with nothing drifted, and on the same generator at 4800 segments it
-    reported thirteen names, every one of them ``X的`` against ``X``. 的 does end
+    measured rather than feared: on 240-segment books it reported nothing with
+    nothing drifted, and on 1200-segment books of the same generator it reported
+    **22 to 27 of 30 names**, every one of them ``X的`` against ``X``. 的 does end
     a Chinese clause; it just takes a long book to do it twice. A rule whose
     precision falls as the book grows is the wrong way round for a command whose
-    subject is a novel.
+    subject is a novel. With this pass those same books report 1 to 2, and the
+    five or six real drifts are found either way.
 
     Collected from the **candidates** rather than from the splits that survive,
     because which extension a term happens to choose varies with the length of
