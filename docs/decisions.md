@@ -3,6 +3,99 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-09-07 · `ls` was never the board, and the queue's top priority was ninth in its own order
+
+A closing report named `HANDOFF-030` as the next package, "at priority 1". That
+file says `priority: 5`, and the next executable package was `HANDOFF-050`. Both
+halves came from 030 being the lowest id in a directory listing; neither
+frontmatter was opened.
+
+### The sentence, not the session
+
+`docs/conventions/handoff-workflow.md` §1's first row said **"No external tool.
+`ls` is the board."** §3 decides the order on `priority` and `blocked-by`. **A
+listing shows neither field, and its id order is not the pickup order.** Those
+two lines contradicted each other inside one file, and the report was obeying the
+first.
+
+So the repair starts at §1, not at the session. The cell now reads *"No external
+tool: the files are the record. A listing shows what exists; §3's order is inside
+them."* The row's subject is unchanged — it still argues for one file per package
+against an issue tracker, which is what "external tool" meant and what §7's
+migration note anticipates. What it no longer does is name a command that cannot
+answer the question §3 asks.
+
+*Lost:* leaving §1 alone and adding the rule to §3 only. The aphorism is the part
+people remember, and it would have gone on being remembered.
+
+**One sentence is now in both tracked files**, and exactly one: *A named next
+package is read, not remembered.* `AGENTS.md` carries it as a red line, because a
+constraint on session behaviour is what red lines are; the reasoning that follows
+it lives only in §3. The pickup-rule paragraphs were deliberately not touched on
+either side, so the two statements of the algorithm stay byte-comparable — the
+agreement surface §0 requires is one sentence long, which is the only size that
+survives editing.
+
+### The inversion, and why it is not simply a defect
+
+Deriving the order mechanically showed something older than the report:
+`HANDOFF-204` at `priority: 1` was blocked by `HANDOFF-030` at `priority: 5`, so
+the queue's highest-priority package sat **ninth** in the derived order with
+eight packages ahead of its own blocker. Nothing in the convention forbade it and
+nothing would have noticed.
+
+The maintainer's reading is what shaped the repair: an inversion **can be
+deliberate**, and then it says *start this the moment its blocker clears* — a
+real thing to want. So §8's new failure mode is not "an inversion exists" but
+"one is being carried that nothing has decided about", and the mechanical check
+below reports it as a warning that never moves an exit code.
+
+**Both packages moved to `priority: 3`**, each with a dated `rescheduled:` line.
+Derived order after: 030 first, then the three priority-3 defect fixes, then the
+rebuild chain.
+
+*Lost:* `030 → 1`, one edit instead of two, which puts ~1476 lines of feature and
+rebuild ahead of eleven small packages including a measured cost defect.
+*Lost:* moving 204, 208 and 201 to `90-later/`, which is honest about imminence
+but reverses the 2026-08-14 promotion and needs three files to move.
+*Lost, and this one is worth recording because it looked obviously right:*
+lowering `204` alone. It **creates two new inversions** — 201 and 208 would then
+be blocked by something sorting after them. It was caught by simulating the rule
+rather than reading it, before it reached the maintainer, which is the whole
+argument for deriving in one paragraph.
+
+### What may be mechanical here, and what may not
+
+§7 now records that deriving the order is a **per-machine matter**: the rule is
+tracked, a machine may keep a read-only helper that applies §3 and reports what
+it finds, and where one exists it is recorded in that machine's own notes. No
+tracked file names it — 2026-07-28's rule, that a tracked file records the
+artifact and the mechanism and never the tool, and that a rule telling the reader
+to run something "is the form that goes stale while still being obeyed".
+
+Two properties keep such a helper on the right side of §1's first row rather than
+becoming the second record it exists to prevent: **it never writes, and its
+output is never copied into anything that persists.** A derived order pasted into
+a report is a cached pointer that goes stale at the next deletion — §8's
+stale-neighbour failure, one step earlier in the lifecycle.
+
+What such a helper may **not** do is decide anything §3 leaves open. Two examples,
+both left alone deliberately: §2's id ranges are not checkable, because §2 also
+says an id does not change when a package moves, so `10-now/` legitimately holds
+201, 204 and 208; and a `package:` blocker naming a file that no longer exists is
+**the cleared state** by §5, not an error, so treating it as one would fire on
+every completed dependency.
+
+### One thing found and not fixed
+
+`HANDOFF-201` sits in `10-now/` carrying `## Background (pointer form — distil
+before promoting to 10-now)` and `## Acceptance criteria (draft — expand on
+promotion)`. It was promoted 2026-08-15, and both §4 and `AGENTS.md` make
+completing the distillation part of promoting. It is a red-line violation older
+than the report this entry is about, it is reported rather than repaired here,
+and the choice between distilling it and returning it to `90-later/` is the
+maintainer's.
+
 ## 2026-09-07 · The glossary becomes editable, and finding a drifted name is three layers rather than one
 
 HANDOFF-048. Two gaps the maintainer hit using the workbench on a real book on

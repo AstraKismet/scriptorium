@@ -25,7 +25,7 @@ The invariants worth keeping if this is ever ported again:
 
 | Design | Reasoning |
 |---|---|
-| One file per package | No external tool. `ls` is the board. Git does not track it (`handoff/` is in `.gitignore`), so queue churn never pollutes history. What is ignored is the *queue state*, never the *convention* — the convention lives in `AGENTS.md` and in this file, both tracked. |
+| One file per package | No external tool: the files are the record. A listing shows what exists; §3's order is inside them. Git does not track it (`handoff/` is in `.gitignore`), so queue churn never pollutes history. What is ignored is the *queue state*, never the *convention* — the convention lives in `AGENTS.md` and in this file, both tracked. |
 | Done means deleted | The queue only ever contains work not yet done. Deleting a file simultaneously clears every `blocked-by` that referenced it, so unblocking costs no bookkeeping. |
 | A package must be self-contained | The executing session has no memory of the one that wrote the package. Decisions, contracts and red lines must be **distilled into the package**, not merely pointed at. The one exception is section 4's rule for far-future packages. |
 | Ids are globally unique and never reused | They are the anchor for `blocked-by` references, and the mapping if this ever migrates to an issue tracker. |
@@ -64,6 +64,26 @@ handoff/
 
 Lowest folder in lexicographic order → lowest `priority` (1 is highest; ties
 break by id) → **skip anything whose `blocked-by` is not fully cleared**.
+
+**A named next package is read, not remembered.** Every statement of what comes
+next — in a report, in a package, in an answer — is derived from the `priority`
+and `blocked-by` of the files as they stand at that moment. A directory listing
+carries neither field, and its id order is not the pickup order.
+
+Nor is the derivation stable within one session. Completing a package clears
+every `blocked-by` that named it, which is §1's second row working as designed —
+so an order derived at the start of a session is already wrong by the time the
+closing report quotes it, and the report has to derive again.
+
+**A `package:` blocker sorts before the package that names it, or the priority
+field stops meaning anything.** The pickup rule copes either way, because
+deletion clears the blocker whatever its priority — but a reader who takes
+`priority` as the schedule is then planning against an order that will not
+happen. Where the inversion is deliberate it says *start this the moment its
+blocker clears*, which is a real thing to want; what is not acceptable is
+carrying one silently. Repair it with an edit to one of the two priorities, or
+record it in `docs/decisions.md` and say why. A **folder** inversion is the same
+defect and worse: folder dominates priority, so no priority edit can repair it.
 
 The two phrasings that start a session:
 
@@ -244,6 +264,16 @@ phrasings §3 defines, so the handover costs one paste and not a reconstruction.
   share no rule, and neither restates the other. A package is the unit of
   scheduling; a brief is the unit of dispatch, and §3 there says what a brief must
   carry beyond what the package already holds.
+- **Deriving the order mechanically is a per-machine matter.** The rule lives
+  here and in `AGENTS.md`. A machine may keep a read-only helper that applies §3
+  to the files and reports what it finds; where one exists it is recorded in that
+  machine's own notes and not here, because a tracked file records the artifact
+  and the mechanism and never the tool (`docs/decisions.md`, 2026-07-28). Two
+  properties are what keep such a helper on the right side of §1's first row
+  rather than making it a second record: **it never writes, and its output is
+  never copied into anything that persists.** A derived order pasted into a
+  report or a package is a cached pointer that goes stale at the next deletion —
+  §8's stale-neighbour failure, one step earlier in the lifecycle.
 - **A future issue tracker:** the frontmatter is already an issue-field mapping —
   title, labels, milestone, and `blocked-by` as dependencies. At that point
   "create a package" becomes "open an issue and reference its number locally",
@@ -291,3 +321,20 @@ subjects; neither supersedes the other.
   control. Conventions go in tracked `docs/`; `handoff/` holds work packages only.
 - *[adapted]* **Acceptance criteria written as prose.** Criteria without a command
   and an expected exit code are not acceptance criteria.
+- **Naming the next package from a listing.** §3 decides on `priority` and
+  `blocked-by`; a directory listing shows neither, and its id order is not the
+  pickup order. Observed 2026-09-07: a closing report named `HANDOFF-030` as next
+  at "priority 1". That file says `priority: 5`, and the next executable package
+  was `HANDOFF-050` — both halves came from 030 being the lowest id in the
+  listing, and neither frontmatter was opened. §1's first row said `ls` was the
+  board until the same day, which is where the habit came from; it now says the
+  order is inside the files.
+- **A blocker that sorts after the package it blocks.** The queue still runs
+  correctly — deletion clears a blocker whatever its priority — but `priority`
+  stops being readable as a schedule, and anyone planning from it plans against
+  an order that will not happen. Observed 2026-09-07: `HANDOFF-204` at
+  `priority: 1` was blocked by `HANDOFF-030` at `priority: 5`, so the queue's
+  highest-priority package sat ninth in the derived order with eight packages
+  ahead of its blocker. Both were moved to `priority: 3`. The state can be
+  deliberate — see §3 — so the failure is not the inversion itself but carrying
+  one that nothing has decided about.
