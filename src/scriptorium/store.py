@@ -617,6 +617,25 @@ def slot_map(originals):
             for i, o in enumerate(originals, 1)}
 
 
+def _run_positions(keys):
+    """``(offset within the run, run length)`` for every position, in one pass.
+
+    The two halves of what :meth:`Carryover.align` calls established, as one
+    comparable value. A key that occurs once anywhere answers ``(0, 1)`` on both
+    sides, so the guard is inert by construction on every segment that was never
+    contested rather than by a branch someone has to keep correct.
+    """
+    out, n = [None] * len(keys), 0
+    while n < len(keys):
+        m = n
+        while m < len(keys) and keys[m] == keys[n]:
+            m += 1
+        for x in range(n, m):
+            out[x] = (x - n, m - n)
+        n = m
+    return out
+
+
 class Carryover:
     """What a document already holds, and which entry a re-parsed segment inherits.
 
@@ -651,10 +670,12 @@ class Carryover:
         #: held no translation.
         self.entries = entries
         #: ``{key: [entry, ...]}`` — the *translated* entries under a key, in
-        #: document order. The fallback, and the old rule's whole world. An entry
-        #: is ``(target, origin, review, waived, slots)``, where ``slots`` is the
-        #: map the target's placeholders were written against and ``waived`` is
-        #: whether a reviewer had answered that wording's report.
+        #: document order. The old rule's whole world, and since 2026-09-08 the
+        #: answer only for a fresh segment the diff paired with nothing at all.
+        #: An entry is ``(target, origin, review, waived, slots)``, where
+        #: ``slots`` is the map the target's placeholders were written against
+        #: and ``waived`` is whether a reviewer had answered that wording's
+        #: report.
         self.by_key = by_key
 
     def __len__(self):
@@ -680,26 +701,58 @@ class Carryover:
         1% of a sequence longer than 200 — every repeated line of dialogue in a
         novel.
 
-        What the diff cannot place — text that moved, and a *new* occurrence of a
-        sentence the document already had — falls back to the last translated
-        entry under that key, which is the rule that carried everything before
-        2026-08-17. **The fallback does not carry a hold.** A hold is one
-        reviewer's statement about a position, and this is the branch that could
-        not establish one; carrying it would take a paragraph nobody has looked at
-        out of every queue, silently, which is how a run of new dialogue came back
-        `held` and rendered into the book.
+        **What is not established is still answered, and the answer is the best
+        one available rather than a worse one.** A pair the guard refuses keeps
+        the wording the diff paired it with; only a fresh segment the diff matched
+        to nothing at all — text that moved, a *new* occurrence of a sentence the
+        document already had — falls back to the last translated entry under its
+        key, which is the rule that carried everything before 2026-08-17. Neither
+        carries a hold or a waiver. Both are one reviewer's statement about a
+        position, and these are the branches that could not establish one;
+        carrying a hold in would take a paragraph nobody has looked at out of
+        every queue, which is how a run of new dialogue came back `held` and
+        rendered into the book.
 
-        **A block with no anchor is not evidence.** When every element of a
-        matching block carries the same key, a run has been matched against a run
-        and the diff simply took the first offset that fitted; if that run also
-        changed size, one of its members was added or removed and the offset is a
-        coin toss. Those blocks are refused rather than believed, and their
-        segments fall to the fallback — which is the answer this build gave
-        before, so the degenerate document (a file that is one sentence repeated,
-        with one occurrence deleted) is no worse than it was rather than newly
-        wrong in the direction that locks a model out of a position. A run whose
-        size did not change is placed, which is what carries forty identical
+        **That split is the whole of what refusing costs, and it was measured
+        before it was chosen.** Refusing *into* the key fallback hands every
+        member of a run the same entry, so a run of five distinct wordings comes
+        back as one wording five times and the other four are held by no segment
+        at all. Over 622 single-edit shapes at a chapter's density of repeated
+        lines: 52 stored wordings delivered to nobody before, 346 after, with
+        total wrong deliveries up from 320 to 512 and one entry duplicated onto
+        another position 204 times against 498. Keeping the diff's own pair
+        leaves all three at the number this build already had — 52, 320 and 204 —
+        and takes the silent misplacements to 0. The guard decides whether an
+        answer is presented as established; it does not decide what the answer
+        is. `docs/decisions.md`, 2026-09-08.
+
+        **A pair with no anchor is not evidence, and the pair is the unit.**
+        Where a matching block reaches into a run of one key, the diff took the
+        first offset that fitted; if that run also changed size, one of its
+        members was added or removed and the offset is a coin toss. So a pair is
+        *established* only when the run of equal keys it sits in is the same
+        length on both sides and the pair sits at the same offset inside it. A run
+        whose size did not change is placed, which is what carries forty identical
         paragraphs across an insertion.
+
+        **The block was the wrong unit and the document was the wrong scope**, and
+        the sentence above was true of neither until 2026-09-08. The scope: the
+        test compared a ``Counter`` over the whole document, so a key whose two
+        runs changed size in opposite directions left the tally equal and neither
+        was refused. The unit: it only ran where *every* element of the block
+        carried one key, which a block spanning an anchor never does — on
+        ``A C C B C C C E`` against ``A C C C B C C E`` the diff returns one block
+        of ``C C B C C``, so nothing was asked and four positions were presented
+        as established while each sat a member out of step. Being next to a
+        matched anchor is not evidence when the paragraphs between you and the
+        anchor are identical to each other. Together the two made the guard inert
+        on any document with unique prose in it: over 622 single-edit shapes at a
+        chapter's density of repeated lines it refused nothing, and scored equal
+        to having no guard at all in every column. One tuple comparison replaces
+        both, and its offset half is not decoration — the length alone leaves
+        89634 silent misplacements over the exhaustive corpus where the pair
+        leaves 88380, though on the novel-shaped corpora the two are equal to the
+        case.
 
         ``ambiguous`` is then simply "the diff could not place this and something
         was carried anyway": a new occurrence of a sentence the document already
@@ -708,36 +761,46 @@ class Carryover:
         """
         fresh = [(seg["id"], segment_key(seg, tone)) for seg in segments]
         keys = [key for _, key in fresh]
-        prior_runs, fresh_runs = Counter(self.keys), Counter(keys)
+        prior_runs, fresh_runs = _run_positions(self.keys), _run_positions(keys)
 
-        placed = {}
+        placed, paired = {}, {}
         for i, j, size in self._blocks(keys):
-            if not size:
-                continue                      # the sentinel block
-            block = {keys[j + d] for d in range(size)}
-            if len(block) == 1:
-                key = next(iter(block))
-                if prior_runs.get(key, 0) != fresh_runs[key]:
-                    continue
+            # Asked of every pair the diff made rather than of the block it
+            # arrived in: a block that spans an anchor is not homogeneous, so a
+            # test on the block never reaches the run at either end of it. The
+            # sentinel block needs no branch of its own — `range(0)` is empty.
             for d in range(size):
-                placed[fresh[j + d][0]] = self.entries[i + d]
+                sid, entry = fresh[j + d][0], self.entries[i + d]
+                # Kept even where the guard refuses the pair, because it is still
+                # the best answer anyone has for this position. A prior row that
+                # holds no translation is not an answer, and needs no branch to
+                # say so: it is stored as `None`, which the reader below already
+                # has to treat as "the diff paired this with nothing" for the
+                # segments no block reached.
+                paired[sid] = entry
+                if prior_runs[i + d] == fresh_runs[j + d]:
+                    placed[sid] = entry
 
         out = {}
         for sid, key in fresh:
             if sid in placed:
                 out[sid] = (placed[sid], False)
                 continue
-            rows = self.by_key.get(key)
-            # Neither `review` nor the waiver survives the fallback, and for
+            row = paired.get(sid)
+            if row is None:
+                rows = self.by_key.get(key)
+                row = rows[-1] if rows else None
+            # Neither `review` nor the waiver survives either branch, and for
             # one reason: both are a reviewer's statement about a *position*, and
-            # this is the branch that could not establish one. Carrying a hold in
-            # took a paragraph nobody had looked at out of every queue; carrying a
+            # neither branch could establish one. Carrying a hold in took a
+            # paragraph nobody had looked at out of every queue; carrying a
             # waiver in would go one worse and answer the report on a paragraph
             # nobody had read, which is the one thing a waiver must never do by
-            # itself. The provenance map does travel, because it describes the
-            # wording rather than the position.
-            entry = ((rows[-1][0], rows[-1][1], None, False, rows[-1][4])
-                     if rows else None)
+            # itself. The wording, the `origin` and the provenance map do travel,
+            # because they describe the wording rather than the position — and
+            # deleting them to avoid mislabelling them is the trade 2026-08-17
+            # refused everywhere else.
+            entry = (row[0], row[1], None, False, row[4]) if row else None
             out[sid] = (entry, entry is not None)
         return out
 

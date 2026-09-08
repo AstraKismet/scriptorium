@@ -946,20 +946,25 @@ def test_a_new_occurrence_of_an_old_sentence_is_named_and_carries_no_hold(
         tmp_path, monkeypatch):
     """Divergence (26), open and reported rather than hidden.
 
-    The author writes a line of dialogue the book already has. Every stored
-    paragraph is still in the document, so the diff carries all three to their
-    new positions — that part is not a guess. The *new* paragraph is: it matches
-    the key of a sentence that already exists, nothing establishes which of them
-    it is, and the pre-2026-08-17 rule handed it the last stored wording.
+    The author writes a line of dialogue the book already has, beside the one it
+    repeats, so the run before `Middle.` grew from one member to two. **Which of
+    the two was already there is established by nothing** — being next to a
+    matched anchor is not evidence when the paragraphs between you and the anchor
+    are identical to each other — so both are named. Every wording is still
+    handed over, and s0002 still receives the one the diff paired it with:
+    refusing to answer would delete wording to avoid mislabelling it, which is
+    the trade 2026-08-17 refused.
 
-    It still does, because refusing to answer would delete wording to avoid
-    mislabelling it and the other half of this package exists to stop that. Two
-    things are new. `lx extract` **names** it, since its run changed size and it
-    was not placed by the alignment. And the **hold does not ride the fallback**:
-    a hold is one reviewer's statement about a position, and this is the branch
-    that could not establish one — carrying it would take a paragraph nobody has
-    ever read out of every queue, leaving `lx check` green because a hold is a
-    warning, and render it into the book.
+    Until 2026-09-08 only s0001 was named. The diff returns `Yes. Middle. Yes.`
+    as one block, that block is not homogeneous, and the guard ran only on a
+    homogeneous one — so s0002 was presented as established on the strength of
+    difflib's block choice alone, with a person's wording and `origin: human`
+    riding on it unremarked.
+
+    The **hold does not ride** either branch: a hold is one reviewer's statement
+    about a position, and neither branch could establish one — carrying it would
+    take a paragraph nobody has ever read out of every queue, leaving `lx check`
+    green because a hold is a warning, and render it into the book.
     """
     _project(tmp_path, monkeypatch, doc=b"Yes.\n\nMiddle.\n\nYes.\n")
     doc, *_ = do_extract("d.md", "zh-TW", CFG)
@@ -972,15 +977,17 @@ def test_a_new_occurrence_of_an_old_sentence_is_named_and_carries_no_hold(
     (tmp_path / "d.md").write_bytes(b"Yes.\n\nYes.\n\nMiddle.\n\nYes.\n")
     doc, _reused, _rejected, notes = do_extract("d.md", "zh-TW", CFG)
     rows = {s["id"]: s for s in statedb.segments(tmp_path)}
-    # The three that existed, each still holding its own wording, origin and hold.
+    # Every stored wording is still in the document, on the position the diff
+    # paired it with — the guard decides what is *named*, not what is answered.
     assert (rows["s0002"]["target"], rows["s0002"]["origin"]) == ("好。", "human")
     assert (rows["s0003"]["target"], rows["s0003"]["origin"]) == ("中間。", "agent")
     assert (rows["s0004"]["target"], rows["s0004"]["origin"]) == ("是的。", "llm:draft")
     assert rows["s0004"].get("review") == "held", "the hold left the wording it was on"
-    # And the one the author just wrote.
-    assert notes["ambiguous"] == ["s0001"]
     assert rows["s0001"]["target"] == "是的。", "the old rule's answer, still given"
-    assert rows["s0001"].get("review") is None, "a hold rode a guess"
+    # Both members of the run that grew, because nothing tells them apart.
+    assert notes["ambiguous"] == ["s0001", "s0002"]
+    assert not any(rows[sid].get("review") for sid in ("s0001", "s0002")), \
+        "a hold rode a guess"
 
 
 def test_a_deletion_earlier_in_the_file_leaves_a_run_holding_its_own_wording(
@@ -1011,19 +1018,27 @@ def test_a_deletion_earlier_in_the_file_leaves_a_run_holding_its_own_wording(
     assert (reused, notes["ambiguous"]) == (2, [])
 
 
-def test_a_run_that_lost_a_member_hands_no_ones_origin_to_another_position(
+def test_a_run_that_lost_a_member_names_every_member_and_deletes_no_wording(
         tmp_path, monkeypatch):
     """Four byte-identical paragraphs and nothing else: the document that cannot
     be aligned, because there is no unique prose anywhere to anchor a match.
 
     Every rule is guessing here, so the one thing that must hold is that guessing
-    is not *upgraded*. The first version of this change matched the run against
-    itself at the first offset that fitted and handed the person's wording — and
-    `origin: human` — to a position the model had drafted, where origin
-    precedence then locks every later run out of it. A matching block whose
-    elements all share one key is refused when that key's run changed size, so
-    the answer degrades to the one this build gave before, and every segment is
-    named.
+    is not *presented as established*. The run changed size, so no member of it
+    is placed and all three are named.
+
+    **What they are named holding changed on 2026-09-08, and it is a
+    re-decision rather than a repair.** This build refused into the key
+    fallback, which hands every member the *last* translated row — three
+    distinct wordings collapsed onto one, the other two delivered to nobody, and
+    a person's wording among them. That was chosen on 2026-08-17 to keep
+    `origin: human` off a position the model had drafted; measured over 622
+    single-edit shapes it costs 294 further stored wordings delivered to nobody
+    and 294 further duplicate deliveries, which is the same harm by another
+    route. So the refusal keeps the pair the diff made and names it. The
+    exposure that buys back is real and is stated rather than argued away: an
+    `origin` can now ride a guess here, where before only the last row's could —
+    but it rides *one* position instead of three, and `lx extract` says so.
     """
     _project(tmp_path, monkeypatch, doc=b"Yes.\n\nYes.\n\nYes.\n\nYes.\n")
     doc, *_ = do_extract("d.md", "zh-TW", CFG)
@@ -1038,9 +1053,10 @@ def test_a_run_that_lost_a_member_hands_no_ones_origin_to_another_position(
     (tmp_path / "d.md").write_bytes(b"Yes.\n\nYes.\n\nYes.\n")
     doc, _reused, _rejected, notes = do_extract("d.md", "zh-TW", CFG)
     rows = statedb.segments(tmp_path)
-    assert [s["origin"] for s in rows] == ["llm:draft"] * 3, "a person's origin moved"
-    assert [s["target"] for s in rows] == ["丙。"] * 3, "the answer this build gave before"
-    assert notes["ambiguous"] == ["s0001", "s0002", "s0003"], "and it says so"
+    assert [s["target"] for s in rows] == ["甲。", "乙。", "丙。"], "nothing was deleted"
+    assert [s["origin"] for s in rows] == ["human", "llm:draft", "llm:draft"]
+    assert notes["ambiguous"] == ["s0001", "s0002", "s0003"], "and none is established"
+    assert not any(s.get("review") for s in rows), "no hold rode a guess"
 
 
 def test_a_run_carries_across_an_insertion_with_no_unique_text_to_anchor_it(
@@ -1068,6 +1084,189 @@ def test_a_run_carries_across_an_insertion_with_no_unique_text_to_anchor_it(
     assert [s["origin"] for s in rows] == [None, "human", "llm:draft", "agent"]
     assert rows[2].get("review") == "held", "the hold left the wording it was on"
     assert notes["ambiguous"] == []
+
+
+def test_two_runs_of_one_sentence_that_traded_a_member_are_all_named(
+        tmp_path, monkeypatch):
+    """The shape neither half of the old guard could see. HANDOFF-051.
+
+    `A C C B C C C E` becomes `A C C C B C C E`: one `Yes.` moved from the run
+    after `Bravo.` to the run before it. Every occurrence count is unchanged, so a
+    guard comparing a `Counter` over the whole document asks nothing — and it
+    would not have run in any case, because the diff returns `C C B C C` as one
+    block and that block is not homogeneous. Four positions were presented as
+    established while each sat a member out of step inside its run.
+
+    Both runs changed size, so no member of either is established. Every wording
+    is still delivered — four of them on the pair the diff made, the fifth on the
+    key fallback, because the diff matched it to nothing — and none of them keeps
+    a hold. The anchors are placed exactly as before, which is what makes this a
+    test of the guard rather than of the diff.
+    """
+    _project(tmp_path, monkeypatch,
+             doc=b"Alpha.\n\nYes.\n\nYes.\n\nBravo.\n\nYes.\n\nYes.\n\nYes.\n\nEcho.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    ids = [s["id"] for s in doc["segments"]]
+    do_apply("d.md", "zh-TW", CFG,
+             {ids[0]: "甲。", ids[2]: "二。", ids[3]: "乙。", ids[4]: "三。",
+              ids[5]: "四。", ids[6]: "五。", ids[7]: "丙。"}, origin="llm:draft")
+    do_apply("d.md", "zh-TW", CFG, {ids[1]: "一。"}, origin="human")
+    do_hold("d.md", "zh-TW", CFG, [ids[6]])
+
+    (tmp_path / "d.md").write_bytes(
+        b"Alpha.\n\nYes.\n\nYes.\n\nYes.\n\nBravo.\n\nYes.\n\nYes.\n\nEcho.\n")
+    doc, _reused, _rejected, notes = do_extract("d.md", "zh-TW", CFG)
+    rows = {s["id"]: s for s in statedb.segments(tmp_path)}
+    named = ["s0002", "s0003", "s0004", "s0006", "s0007"]
+    assert notes["ambiguous"] == named, "every member of both runs, in document order"
+    # `s0002` is the one the diff paired with nothing, so it takes the last
+    # stored wording under the key; the other four keep the pair they were made.
+    assert [rows[sid]["target"] for sid in named] == ["五。", "一。", "二。", "三。", "四。"]
+    assert not any(rows[sid].get("review") for sid in named), \
+        "a hold rode a position nothing established"
+    # A person's wording is still in the document and its `origin` came with it —
+    # on a position the diff guessed, which is why the id is named.
+    assert rows["s0003"]["origin"] == "human" and "s0003" in notes["ambiguous"]
+    # The three anchors are runs of one on both sides, so the guard is inert on
+    # them by construction rather than by a branch.
+    assert [rows[sid]["target"] for sid in ("s0001", "s0005", "s0008")] == \
+        ["甲。", "乙。", "丙。"]
+
+
+def test_a_run_that_did_not_change_is_placed_beside_one_that_did(
+        tmp_path, monkeypatch):
+    """The mirror, and the half the document-wide tally got backwards.
+
+    `A C C B C C C E` becomes `A C C B C C E`: the second run lost a member, the
+    first did not. A tally over the whole document moves, so a rule reading it
+    would refuse the intact run as well — the run's own size does not, so the
+    first run keeps every wording, origin and hold it had, established, while the
+    second is named. Two runs of one sentence are two separate questions.
+    """
+    _project(tmp_path, monkeypatch,
+             doc=b"Alpha.\n\nYes.\n\nYes.\n\nBravo.\n\nYes.\n\nYes.\n\nYes.\n\nEcho.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    ids = [s["id"] for s in doc["segments"]]
+    do_apply("d.md", "zh-TW", CFG,
+             {ids[0]: "甲。", ids[2]: "二。", ids[3]: "乙。", ids[4]: "三。",
+              ids[5]: "四。", ids[6]: "五。", ids[7]: "丙。"}, origin="llm:draft")
+    do_apply("d.md", "zh-TW", CFG, {ids[1]: "一。"}, origin="human")
+    do_hold("d.md", "zh-TW", CFG, [ids[1]])
+
+    (tmp_path / "d.md").write_bytes(
+        b"Alpha.\n\nYes.\n\nYes.\n\nBravo.\n\nYes.\n\nYes.\n\nEcho.\n")
+    doc, _reused, _rejected, notes = do_extract("d.md", "zh-TW", CFG)
+    rows = {s["id"]: s for s in statedb.segments(tmp_path)}
+    assert notes["ambiguous"] == ["s0005", "s0006"], "only the run that changed"
+    assert (rows["s0002"]["target"], rows["s0002"]["origin"]) == ("一。", "human")
+    assert rows["s0002"].get("review") == "held", "the hold stayed on its own position"
+    assert rows["s0003"]["target"] == "二。"
+    assert [rows[sid]["target"] for sid in ("s0005", "s0006")] == ["三。", "四。"]
+
+
+def test_a_run_split_by_an_insertion_is_named_without_losing_a_wording(
+        tmp_path, monkeypatch):
+    """What the rule gives up, pinned so a later package has to argue with it.
+
+    `A C C C C E` becomes `A C C X C C E`. Nothing was added to or removed from
+    the run — a different paragraph was written into the middle of it — so the
+    order-preserving answer is forced and the diff gets all four right. The run's
+    own size cannot see that: it reads one run of four against two runs of two,
+    and refuses all four.
+
+    So the whole cost here is **precision of the report**, not a wrong document:
+    four correct wordings are handed to a reviewer to check. That is what makes
+    refusal affordable, and it is why the refusal keeps the diff's pair. Measured
+    before it was accepted: a second clause admitting a pair whose key count is
+    unchanged and whose occurrence ordinals agree rescues this case and costs
+    silent misplacements elsewhere — 221 against 131 over 6469 two-edit
+    novel-shaped shapes. `docs/decisions.md`, 2026-09-08.
+    """
+    _project(tmp_path, monkeypatch,
+             doc=b"Alpha.\n\nYes.\n\nYes.\n\nYes.\n\nYes.\n\nEcho.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    ids = [s["id"] for s in doc["segments"]]
+    do_apply("d.md", "zh-TW", CFG,
+             {ids[0]: "甲。", ids[1]: "一。", ids[2]: "二。", ids[3]: "三。",
+              ids[4]: "四。", ids[5]: "丙。"}, origin="llm:draft")
+
+    (tmp_path / "d.md").write_bytes(
+        b"Alpha.\n\nYes.\n\nYes.\n\nElsewhere.\n\nYes.\n\nYes.\n\nEcho.\n")
+    doc, _reused, _rejected, notes = do_extract("d.md", "zh-TW", CFG)
+    rows = {s["id"]: s for s in statedb.segments(tmp_path)}
+    assert notes["ambiguous"] == ["s0002", "s0003", "s0005", "s0006"]
+    assert [rows[sid]["target"] for sid in ("s0002", "s0003", "s0005", "s0006")] \
+        == ["一。", "二。", "三。", "四。"], "the diff's answer, kept and named"
+    assert rows["s0004"]["target"] is None, "and the new paragraph carries nothing"
+
+
+def test_a_runs_one_translation_reaches_the_document_even_from_a_row_nothing_kept(
+        tmp_path, monkeypatch):
+    """A prior row that holds no translation is not an answer, so it is not kept.
+
+    Four identical interjections of which a reviewer translated only the last,
+    then one occurrence deleted. The diff pairs the three surviving positions
+    with three prior rows that hold nothing — and until 2026-09-08 it handed
+    those over: three empty positions, `ambiguous` empty, and the one stored
+    wording in the run delivered to no segment at all and named nowhere. It was
+    reachable from `lx extract` and no report mentioned it.
+
+    Nothing here is aimed at that defect. The run changed size, so the pairs are
+    not established; an untranslated row is not carried as the answer for a
+    position; and what is left is the key fallback, which reads translated rows
+    only. Pinned because it is a property of two decisions meeting rather than of
+    either, which is exactly the kind of thing a later edit removes without
+    noticing.
+    """
+    _project(tmp_path, monkeypatch,
+             doc=b"Open.\n\nYes.\n\nYes.\n\nYes.\n\nYes.\n\nClose.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    ids = [s["id"] for s in doc["segments"]]
+    do_apply("d.md", "zh-TW", CFG, {ids[4]: "唯一。"}, origin="human")
+
+    (tmp_path / "d.md").write_bytes(b"Open.\n\nYes.\n\nYes.\n\nYes.\n\nClose.\n")
+    doc, _reused, _rejected, notes = do_extract("d.md", "zh-TW", CFG)
+    rows = {s["id"]: s for s in statedb.segments(tmp_path)}
+    assert notes["ambiguous"] == ["s0002", "s0003", "s0004"]
+    assert [rows[sid]["target"] for sid in ("s0002", "s0003", "s0004")] == ["唯一。"] * 3, \
+        "the run's only wording reached the document"
+
+
+def test_a_run_the_diff_matched_at_a_different_offset_is_not_established(
+        tmp_path, monkeypatch):
+    """Why the guard compares the offset inside the run and not only its length.
+
+    `A B B` becomes `A B C B B`. There were two `Bravo.` and there are three, so
+    which two survived is unknowable — but the diff pairs the prior run's
+    **second** member with the *first* member of the fresh run of two, and that
+    run is two long on both sides. A guard reading only the run's length calls
+    that established and carries the hold with it.
+
+    The smallest shape where the two halves disagree, found by enumerating every
+    pair of key sequences over three keys with each side up to length seven: no
+    prior sequence shorter than three separates them at all, and of the 252 that
+    do this is the shortest. It is worth one test and not more — over the exhaustive
+    corpus the offset half removes 1254 silent misplacements of 89634, and on the
+    novel-shaped corpora it changes nothing at all. `docs/decisions.md`,
+    2026-09-08.
+    """
+    _project(tmp_path, monkeypatch, doc=b"Alpha.\n\nBravo.\n\nBravo.\n")
+    doc, *_ = do_extract("d.md", "zh-TW", CFG)
+    ids = [s["id"] for s in doc["segments"]]
+    do_apply("d.md", "zh-TW", CFG,
+             {ids[0]: "甲。", ids[1]: "一。", ids[2]: "二。"}, origin="llm:draft")
+    do_hold("d.md", "zh-TW", CFG, [ids[2]])
+
+    (tmp_path / "d.md").write_bytes(
+        b"Alpha.\n\nBravo.\n\nCharlie.\n\nBravo.\n\nBravo.\n")
+    doc, _reused, _rejected, notes = do_extract("d.md", "zh-TW", CFG)
+    rows = {s["id"]: s for s in statedb.segments(tmp_path)}
+    assert notes["ambiguous"] == ["s0002", "s0004", "s0005"], \
+        "s0004 is the one only the offset half refuses"
+    assert rows["s0004"]["target"] == "二。", "the diff's own pair, kept"
+    assert rows["s0004"].get("review") is None, "and the hold did not ride it"
+    assert rows["s0001"]["target"] == "甲。" and "s0001" not in notes["ambiguous"]
+    assert rows["s0003"]["target"] is None, "the new paragraph carries nothing"
 
 
 def test_the_alignment_has_a_budget_and_degrades_to_the_old_rule_over_it(

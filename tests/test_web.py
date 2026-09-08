@@ -1540,9 +1540,13 @@ def test_the_reply_names_a_segment_the_carryover_could_not_place(
         base, tmp_path, monkeypatch):
     """`ambiguous` — divergence (26)'s population, projected.
 
-    A sentence the document already held, written again: it matches the key of
-    one that exists, nothing establishes which, and the fallback hands it the
-    last stored wording under that key. Named rather than guessed at in silence.
+    A sentence the document already held, written again beside the one it
+    repeats: the run grew from one member to two and nothing establishes which of
+    them was already there, so both are named. Each still receives wording — the
+    one the diff paired it with, or the last stored wording under the key where
+    the diff paired it with nothing. Named rather than presented as established;
+    both of them since 2026-09-08, when the guard stopped asking its question
+    only of a matching block every element of which carries one key.
     """
     root = _doc_project(base, tmp_path, monkeypatch, b"Yes.\n\nMiddle.\n\nYes.\n")
     _extract(base)
@@ -1553,7 +1557,7 @@ def test_the_reply_names_a_segment_the_carryover_could_not_place(
 
     (root / "d.md").write_bytes(b"Yes.\n\nYes.\n\nMiddle.\n\nYes.\n")
     r = _extract(base)
-    assert r["ambiguous"] == ["s0001"], "the new occurrence is the one nothing places"
+    assert r["ambiguous"] == ["s0001", "s0002"], "the run that grew is what nothing places"
     assert r["kept"] == [] and r["replaced"] == []
 
 

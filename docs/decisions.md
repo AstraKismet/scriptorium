@@ -3,6 +3,144 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-09-08 · The carryover guard asked the wrong question of the wrong unit, and refusing was worse than the answer it refused
+
+`store.Carryover.align` decides which stored translation a re-parsed segment
+inherits, by diffing the prior key sequence against the fresh one. Its docstring
+said a matching block with no anchor in it is not evidence: a run matched against
+a run at the first offset that fitted, and *"if that run also changed size, one
+of its members was added or removed and the offset is a coin toss. Those blocks
+are refused."*
+
+The code did not do that, in two independent ways, and HANDOFF-051 had found one
+of them.
+
+**The scope was the document.** `prior_runs, fresh_runs = Counter(self.keys),
+Counter(keys)` counts every occurrence of a key anywhere, not the size of the run
+being examined, so a key whose two runs changed size in opposite directions left
+the tally equal and neither was refused. That is the package's finding and it is
+correct.
+
+**The unit was the block, and that is the larger half.** The test ran only where
+`len(block) == 1` — every element of the matching block carrying one key — and a
+block that spans an anchor never does. Measured on the package's own acceptance
+shape, against the real function: prior `A C C B C C C E`, fresh
+`A C C C B C C E` returns blocks `[(0,0,1), (1,2,5), (7,7,1)]`, the size-5 block
+is `C C B C C`, and the guard is never consulted. Four positions were presented
+as established while each sat one member out of step inside its run. Being next
+to a matched anchor is not evidence when the paragraphs between you and the
+anchor are identical to each other.
+
+Together the two made the guard inert on any document with unique prose in it.
+Over 622 single-edit shapes at a chapter's density of repeated lines it refused
+**nothing**, and scored equal to *no guard at all* in every column. The package's
+literal fix — the run's size, still decided per block — cannot satisfy the
+package's own acceptance criterion 3, because on that shape neither version of
+the test runs; measured, it moves the silent misplacement count from 133 to 133
+and breaks 9 correct placements to catch none.
+
+**So the guard is asked of every pair the diff makes.** A pair is *established*
+when `(offset within the run, run length)` is equal on both sides, and the two
+halves are one tuple comparison. The offset half is not decoration: length alone
+leaves 89634 silent misplacements over the exhaustive corpus where the pair
+leaves 88380, though on the novel-shaped corpora the two are equal to the case.
+
+### The finding that changed the shape of the repair
+
+Making the guard truthful, on its own, makes the product worse. A refusal was not
+a blank — it handed the position `by_key[key][-1]`, the last translated row under
+the key — so refusing a run of five distinct wordings returned one wording five
+times and delivered the other four to nobody. Measured over the 622 single-edit
+shapes, per contested position, against the incumbent:
+
+| | silent wrong | total wrong | duplicated | wordings delivered to nobody |
+|---|---|---|---|---|
+| incumbent (and *no guard at all*, identically) | 133 | 320 | 204 | 52 |
+| per-pair guard, refusing into the key fallback | 0 | 512 | 498 | 346 |
+| per-pair guard, keeping the pair the diff made | 0 | 320 | 204 | 52 |
+
+The middle row buys silence at the price of being wrong more often — it catches
+15 misplacements and breaks 305 correct ones, and at two edits 315 against 5851.
+So **the guard decides whether an answer is presented as established; it does not
+decide what the answer is.** A refused pair keeps the wording the diff paired it
+with, with `review` and `waived` stripped, and only a fresh segment the diff
+matched to nothing falls back to the last row under the key. Every column above
+then returns to the number this build already had, and the silent misplacements
+go to zero.
+
+That re-decides one bullet of 2026-08-17, which chose the key fallback for a
+refused block so that the degenerate document *"is no worse than it was rather
+than newly wrong in the direction that locks a model out of a position"*. The
+exposure it buys back is real and is not argued away: an `origin: human` can now
+ride the diff's guess onto a position a person did not write, where origin
+precedence keeps it. What the measurement adds is that the fallback was doing the
+same harm by another route and at greater volume — it put one row's `origin` on
+*every* member of the run, which is why duplicate deliveries rise from 204 to 498
+when it is used more. One position instead of three, and `lx extract` names it.
+
+### What it closed by construction, and what it did not
+
+A prior row that holds no translation is not an answer, so it is not kept as one.
+That closes a defect nothing had reported: a run of four identical paragraphs
+where only the last was ever translated, with one occurrence deleted, used to
+place three untranslated rows onto the three fresh positions with
+`ambiguous=False` and deliver the one stored wording to nobody. Measured on both
+builds — before, `t4` reaches no segment and nothing is named; after, all three
+positions receive it and all three are named.
+
+Unchanged, and scheduled rather than absorbed: over `ALIGN_BUDGET` the diff is
+skipped for the whole document, so a book of 3000 byte-identical paragraphs
+re-extracted **with no edit at all** returns 3000 ambiguous and 0 surviving
+holds — measured identically on both builds, and `lx run` re-extracts on every
+invocation. `handoff/10-now/HANDOFF-057`.
+
+Divergence (26) stays **open**: which of two identical paragraphs is which is
+still told apart by nothing. This package made the guard say so; it did not make
+the diff able to answer.
+
+### The alternatives, all measured on the same corpora
+
+- **The run's size, still per block** — the package's literal ask. Cannot satisfy
+  its own criterion 3. Breaks 9, catches 0.
+- **`run intact OR the occurrence ordinal`** (a pair whose key count is unchanged
+  document-wide and whose occurrence ordinals agree). Rescues the run *split* by
+  an insertion, where the order-preserving answer is forced and the diff gets it
+  right. Costs 221 silent misplacements against 131 over 6469 two-edit shapes.
+  Rejected: with the refusal no longer destructive, what it buys is a shorter
+  report rather than a better document, and it buys it by trusting a case the
+  guard cannot see the evidence for.
+- **`run intact AND the run's own ordinal`** (same number of maximal runs of that
+  key, same run ordinal). Takes silent misplacements to 1 at two edits. Rejected:
+  it names 19318 positions where `run intact` names 12820, for a difference that
+  no longer changes any delivered wording.
+- **Delete the guard.** Defensible on the incumbent's numbers — over 7091
+  novel-shaped documents it fires on 242 positions, of which 202 are correct
+  placements it breaks and 0 are misplacements it catches. Rejected because that
+  is an argument against refusing
+  *into the key fallback*, which is the half that changed; with the refusal
+  non-destructive the guard costs nothing but the report.
+
+### How it was measured, and what the measurement cannot see
+
+Every (prior, fresh) pair is built by applying a known edit script to a prior
+sequence whose items carry hidden identities, so the correct inheritance for each
+fresh position is known by construction. Only *contested* positions are scored —
+a key repeated on either side; every rule agrees on the rest. An instrument check
+reproduces the shipped `Carryover.align` exactly over 209085 shapes, including
+prior rows that hold no translation.
+
+Three things it cannot see, recorded because the next person will want them:
+a document that is byte-identical on both sides has no observable identity to get
+wrong, so a "moved" paragraph inside a run of identical ones is scored as correct
+for every rule; the corpus varies one and two single-element edits and never a
+moved or deleted *block*; and it scores instance identity, where two byte-identical
+paragraphs drafted by one model usually hold the same wording and the same
+`origin`, in which case a misplacement is a null event. The rate at which two
+identical source paragraphs in a real book hold *different* wordings is the
+number that decides how much any of this is worth, and it is not measured — the
+only state on this machine is one 14-segment example document with no repeated
+key at all.
+
 ## 2026-09-07 · A repair may change a reply's syntax; it may not take content out of it
 
 `translate.parse_reply` accepted valid JSON, a reply wrapped in a code fence, and
@@ -5327,7 +5465,9 @@ Three details are load-bearing and each was measured rather than reasoned:
   matched a run against a run at the first offset that fitted; if that run also
   changed size, the offset is a coin toss. Those blocks are refused, so the
   degenerate document degrades to the answer this build already gave rather than
-  becoming newly wrong.
+  becoming newly wrong. *(Both halves of this were re-decided on 2026-09-08 — the
+  block was the wrong unit, and refusing into the key fallback was worse than the
+  answer it refused. See that entry.)*
 - **A work budget** (`store.ALIGN_BUDGET`). `SequenceMatcher` is near-linear on
   mostly-distinct sequences and quadratic on ones that are not: a realistic
   five-thousand-segment novel takes 8 ms, a third of it repeated takes 80 ms, and
