@@ -907,9 +907,13 @@ def report_extract(src, lang, notes):
         # The half no alignment can fix: a run of identical paragraphs that
         # gained or lost a member has no evidence left about which wording
         # belongs where. Named rather than guessed at in silence. Divergence (26).
+        # The cause is deliberately not named here — it is also a new occurrence,
+        # or a paragraph that moved, and saying "that run changed size" was false
+        # of both. Each of these still holds wording; what it does not have is a
+        # reason to believe it is *this* position's.
         _out(f"  {len(notes['ambiguous'])} segment(s) repeat a sentence this document holds "
-             f"elsewhere, and that run changed size, so which stored wording belongs to which "
-             f"position is not established: {', '.join(notes['ambiguous'])}. Check their "
+             f"elsewhere, and which stored wording belongs to which position is not "
+             f"established: {', '.join(notes['ambiguous'])}. Check their "
              f"wording and `origin`.")
     if notes["register"]:
         was, now, held = notes["register"]

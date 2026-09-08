@@ -700,7 +700,7 @@ client must remember something.
 | `reused` | integer | Targets carried over from prior state or the memory **and accepted**. A stored target the acceptance path refused is carried over too, since 2026-08-17, and counts in `rejected` rather than here. |
 | `rejected` | integer | Segments where **every** proposal was refused by the acceptance path — a banked wording no longer fits the segment it matched. It counts **segments, not refusals**, and a refusal with an accepted proposal behind it is not one: that segment counts in `reused` and is named in `replaced`. Corrected here on 2026-08-19 — the value has never changed, but this row said "carryover or memory hits refused", which reads as a count of refusals and is `0` on the very case `replaced` was added to report. What *did* change, on 2026-08-17, is that a refusal no longer **deletes** this document's own stored target. See below. |
 | `kept` | array of string | Segment ids whose stored target the acceptance path refused and this endpoint **kept anyway**, with its `origin` and its `review`. They come back `status: "translated"` holding wording that fails validation, and `POST /api/doc` carries the error on the segment itself — so this array is a convenience, not the only way to find them. *Known divergences* (24), closed. |
-| `ambiguous` | array of string | Segment ids the position diff could not place, which took the last stored wording under their key instead: a new occurrence of a sentence the document already had, a paragraph that moved, or a member of a run of identical paragraphs that changed size. **Which stored wording belongs to which position is not established for these** — check their `origin`. Nothing else on this surface reports it. **Not capped:** past the alignment work budget the diff is skipped for the whole document and every carried segment lands here, which on a novel that is one sentence repeated is every segment in it. *Known divergences* (26), open. |
+| `ambiguous` | array of string | Segment ids the position diff could not establish: a new occurrence of a sentence the document already had, a paragraph that moved, or a member of a run of identical paragraphs that changed size. Each still receives wording — the one the diff paired it with, or, where the diff paired it with nothing, the last stored wording under its key. **Which stored wording belongs to which position is not established for these** — check their `origin`. Since 2026-09-08 the answer is decided per matched pair rather than per matching block, so a member of a changed run beside unique prose lands here too; before that it was silently established. Nothing else on this surface reports it. **Not capped:** past the alignment work budget the diff is skipped for the whole document and every carried segment lands here, which on a novel that is one sentence repeated is every segment in it. *Known divergences* (26), open. |
 | `replaced` | array of string | Segment ids where a translation-memory hit was accepted **over wording this document was already holding** — the stored target no longer fit the re-parsed segment and a banked one did. Since 2026-09-01 the wording that gives way is always a machine's (`llm:*`, `tm`, `tm:legacy`); what a person or an agent wrote is kept instead and named in `kept`. So the sentence is not gone — the memory still holds it — but the segment's `origin` is now `tm`, which is worth a reviewer's eye. Nothing else on this surface reports it, and unlike `kept` there is no error to find it by: the segment is `translated` and passes every validator. *Known divergences* (27), **closed**. The array narrowed and the key did not move, exactly as `rejected` did not on 2026-08-17: it means what the run did. |
 | `waived_source` | array of string | Segment ids that took a banked wording whose memory line carries `"waived": true` — a reviewer waived it where it was committed. **The waiver did not travel**: the segment arrives unwaived, so `lx check` reports the issue here and this reader decides for themselves. Named because nothing else on this surface would say so — the segment comes back `translated` and, like `replaced`, there is no error to find it by until the check runs. Present and empty when it did not happen. |
 
@@ -2205,10 +2205,19 @@ pass over it. Neither was a regression: (26) is what position cannot reach and
     the document already holds matches no unused position, so it takes the last
     stored wording under that key — the old rule's answer, and possibly another
     position's — though it no longer takes that position's *hold* with it. And a
-    **run of identical paragraphs that changed size**, where every element of the
-    matching block carries the same key, has no anchor at all: the diff would
-    place it at the first offset that fits, which is a coin toss, so those blocks
-    are refused and their members fall to the same fallback. Both are named by
+    **run of identical paragraphs that changed size** has no anchor at all: the
+    diff places it at the first offset that fits, which is a coin toss, so every
+    member of it is named. Corrected here on 2026-09-08, twice over. This said
+    "where every element of the matching block carries the same key", which was
+    the code's own test and reached almost nothing — a block spanning an anchor is
+    not homogeneous, so a run beside unique prose was silently established; the
+    question is asked of each matched **pair** now, and the run beside an anchor
+    is named like any other. And it said those members "fall to the same
+    fallback", which they no longer do: a named member keeps the wording the diff
+    paired it with, without its hold or its waiver, and only a segment the diff
+    paired with nothing takes the last stored wording under the key. Refusing into
+    that fallback was measured to deliver the wrong wording more often than the
+    guess it replaced, not less. `docs/decisions.md`, 2026-09-08. Both are named by
     `lx extract`, and by `POST /api/extract`'s `ambiguous` since version 3 —
     which closed the reporting gap (24) had, without closing this entry: naming
     a segment nothing can place is not placing it. The residue is bounded — every candidate wording is

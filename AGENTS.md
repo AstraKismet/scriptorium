@@ -472,7 +472,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 2133 collected, no network. Four are
+python -m pytest -q                 # 2138 collected, no network. Four are
                                     #   conditional on three different things, so
                                     #   which two skip is a property of the machine
                                     #   AND the account: one is POSIX-only, one
@@ -959,11 +959,26 @@ own.
   **Which stored entry a re-parsed segment inherits is decided by position**, in
   the one place that has one — the document's own prior state, never the memory
   key. `store.Carryover.align` **diffs the stored key sequence against the fresh
-  one** and takes the matching blocks; what it cannot place falls back to the
-  last stored wording under that key, without its hold, and is named by
-  `lx extract`. Without this a document holding one sentence twice held one entry
-  for two positions and the last row read filled both, carrying its `origin`:
-  divergence (25), and the hole under origin precedence that needed no race.
+  one** and takes the matching blocks; what it cannot establish keeps the wording
+  the diff paired it with, without its hold or its waiver, and is named by
+  `lx extract`. Only a segment the diff paired with nothing falls back to the last
+  stored wording under that key. Without this a document holding one sentence
+  twice held one entry for two positions and the last row read filled both,
+  carrying its `origin`: divergence (25), and the hole under origin precedence
+  that needed no race.
+
+  **What is established is decided per matched pair, and the guard never decides
+  what the answer is.** A pair is established when the run of equal keys it sits
+  in has the same length on both sides and the pair sits at the same offset inside
+  it; anything else is delivered anyway and named. Both halves were wrong until
+  2026-09-08: the test compared a `Counter` over the *whole document*, and it ran
+  only where every element of the matching block carried one key — which a block
+  spanning an anchor never does, so the guard was inert on any document with
+  unique prose in it and scored equal to having none. Making it truthful while it
+  still refused *into* the key fallback was measured to be a net regression, which
+  is why the two changes are one change: refusing that way collapsed a run of
+  distinct wordings onto the last one and delivered the rest to nobody.
+  `docs/decisions.md`, 2026-09-08.
 
   **A memory hit answers over this document's own wording only when that wording
   is a machine draft.** `store.is_regenerable_origin` — `llm:*`, `tm`,
