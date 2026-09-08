@@ -2391,61 +2391,57 @@ def test_a_port_already_taken_is_one_sentence_and_not_a_traceback(tmp_path, monk
     assert "another program" in msg
 
 
-def test_the_page_never_sends_a_register_key_to_the_extract_endpoint():
-    """The re-extract control is a *plain* re-extract, and this is what holds it.
+def test_the_served_page_carries_no_script_of_its_own():
+    """The precondition that makes the register guard's new home complete.
 
-    **Both keys, because either one alone changes the register.** `reset` is read
-    for truthiness and type-checked by nothing -- contract *Known divergences*
-    (28) -- so the string `"false"` is a reset, and a reset discards a document's
-    translations. It is refused without a `tone` since contract version 3, but
-    only when `tone` is blank, so a control that grew the two together sails past
-    that guard. And `tone` **on its own** needs no `reset` to do the damage:
-    `cli.do_extract` resolves `tone or stored or config`, so one sent on a
-    `literary` novel refreezes it, and nothing crosses a register -- the whole
-    book comes back untranslated. The contract *withdrew* the instruction to
-    forward `GET /api/doc`'s `tone` for the same reason: nothing validates a
-    register value, so a client that guesses is not refused, it is handed the
-    wrong one.
+    **This replaced a test that read this same file and can no longer work.**
+    Until HANDOFF-204 the workbench was one hand-written page, and
+    `test_the_page_never_sends_a_register_key_to_the_extract_endpoint` scanned it
+    for a `reset` or a `tone` shaped like a request-body key -- either of which
+    changes the register a document is frozen in, and nothing crosses a register
+    change, so the whole book comes back untranslated. `reset` is read for
+    truthiness and type-checked by nothing (*Known divergences* (28)), so the
+    string `"false"` is a reset.
 
-    So the page may not carry either **in the shape of an object key**, which is
-    the narrowest thing still decidable without executing the JavaScript -- and
-    nothing in this repository does execute it. The bare word was the first
-    spelling and matched prose: "replacing a `<select>`'s options resets its
-    value" is a comment about a different bug, and `doc.tone` is read to *show*
-    the register in a dialog, which is the one use that is correct. What must not
-    exist is a key in a request body.
+    That test's own docstring named the gate it was: *"Adding a 'start over'
+    control is therefore an edit to this test as well ... that control has to ask
+    a person which register, and that is a decision rather than a line of
+    plumbing."* The control exists now, it asks, and the register it sends is one
+    a person typed.
 
-    Three spellings, not one: the object-literal key, the quoted form, and the
-    property assignment `body.reset = true` -- which is neither of the first two
-    and is ordinary JavaScript. The last was missed by the first version of this
-    check and found by an adversarial pass over it.
+    The scan moved to `tests/test_studio_contract.py`, over
+    `studio/web/src/**/*.ts*` -- the frontend's own source, which is what a
+    person edits. The rule there is not "never" any more, it is "once": the two
+    spellings may appear at a call site in exactly one function, `store.ts`'s
+    `reExtract`, and a second call site is a second chance to send a string.
 
-    **What it still cannot see**, said rather than left to be discovered: a
-    computed key. `{[k]: true}` is invisible to anything that does not run the
-    code, and a mutation pass over this guard confirms that mutant survives while
-    eleven literal spellings die. It is the residual, and closing it means a
-    JavaScript harness this repository does not have.
+    **Leaving the old test in place would have been worse than deleting it.**
+    `static/index.html` is a build artifact now -- a shell that loads a bundle --
+    so the scan would have found nothing and passed while proving nothing, which
+    is the failure mode this project has recorded three times under other names.
 
-    Adding a "start over" control is therefore an edit to this test as well,
-    which is the gate: that control has to ask a person which register, and that
-    is a decision rather than a line of plumbing.
-
-    A false positive is cheap and self-explanatory; the failure it prevents is
-    silent and destroys a book's worth of work.
+    What is asserted here is the one thing the source-tree scan cannot see: that
+    the *served* page carries no JavaScript of its own. If it did, a control
+    could be written into the shipped page without ever appearing in the source
+    the other test reads.
     """
     with open(os.path.join(web_server.STATIC, "index.html"), encoding="utf-8") as f:
         page = f.read()
-    # `\bkey\s*:` is the object-literal spelling, the quoted forms are the
-    # computed one, and `.key =` is the property assignment. `--reset` in prose
-    # and a bare read of `doc.tone` are none of the three.
-    found = re.findall(
-        r"""(?:\b(?:reset|tone)\s*:|["'](?:reset|tone)["']|\.\s*(?:reset|tone)\s*=[^=])""",
-        page)
-    assert not found, (
-        f"web/static/index.html carries {found} -- a `reset` or a `tone` shaped "
-        "like a request-body key. Either one changes the register a document is "
-        "frozen in, and nothing carries across a register change, so this is "
-        "either a start-over control -- which must ask a person which register, "
-        "and needs this test updated with that decision recorded -- or an "
-        "accident."
+    # A `<script>` with a `src` and no body is a reference to the bundle. A
+    # `<script>` with a body is a second place logic can live, and the guard over
+    # the source tree cannot see into it.
+    bodies = [
+        body for body in re.findall(r"<script\b[^>]*>(.*?)</script>", page, re.S | re.I)
+        if body.strip()
+    ]
+    assert not bodies, (
+        "src/scriptorium/web/static/index.html carries inline JavaScript. The "
+        "register guard in tests/test_studio_contract.py scans studio/web/src/, "
+        "so anything written directly into the served page is outside every "
+        "check this repository has."
+    )
+    assert re.search(r'<script[^>]+src="/[^"]+\.js"', page), (
+        "the served page loads no bundle. Run `npm run build` in studio/web/ and "
+        "commit what it writes -- the built output is tracked so that `lx web` "
+        "works from a bare checkout with no Node installed."
     )

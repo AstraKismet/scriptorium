@@ -1,0 +1,30 @@
+{
+  "name": "scriptorium-workbench",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "The review workbench. Source lives here; the build is committed into src/scriptorium/web/static/ so lx web works from a bare checkout with no Node installed.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "virtua": "0.51.2",
+    "zustand": "5.0.15"
+  },
+  "devDependencies": {
+    "@testing-library/react": "16.3.3",
+    "@testing-library/user-event": "14.6.7",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.7",
+    "@vitejs/plugin-react": "6.1.1",
+    "jsdom": "30.0.1",
+    "typescript": "5.9.3",
+    "vite": "8.2.2",
+    "vitest": "5.0.0"
+  }
+}
