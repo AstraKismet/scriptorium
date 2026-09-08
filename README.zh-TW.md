@@ -134,6 +134,7 @@ CI 上有一組語料庫在把關，裡面收了 55 份刻意刁難的輸入（M
 | `lx repair SRC --lang L` | 只重譯失敗的 segment（`--limit N`） |
 | `lx run SRC --lang L` | 跑完整條流程；加 `--polish` 會多跑一次流暢度潤稿，加 `--limit N` 可限制每一輪的量 |
 | `lx render SRC --lang L -o OUT` | 重建目標文件 |
+| `lx segments SRC --lang L` | 依文件順序攤開已存的每一段：原文與譯文並排，附上 origin、是否保留、是否豁免，以及這段譯文的 `⟦n⟧` 還講不講得通目前的編號。`--ids`、`--origin`、`--status`、`--limit` 可縮小範圍，`--brief` 把每段文字砍成一行。只投影不判斷，它的 `--json` 也不是凍結契約 |
 | `lx blocks SRC --lang L` | 重建後的文件，逐區塊列出，不寫檔 |
 | `lx sentences SRC --lang L` | 一個 segment 的文字如何切成句子 |
 | `lx style SRC --lang L` | 關於這本書的聲音，模型到底被告知了什麼：語域簡介、風格表中每次都會送出的那一半，以及所指定的 segment 提到了誰、就一併送出誰的 `[name]` 區塊 |
@@ -570,7 +571,7 @@ Markdown 與純文字目前都可以端到端跑完：抽取、翻譯、驗證�
 ## 開發
 
 ```bash
-python -m pytest -q                # 2138 tests，不碰網路
+python -m pytest -q                # 2162 tests，不碰網路
 python -m ruff check src tests
 ```
 

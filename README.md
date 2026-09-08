@@ -148,6 +148,7 @@ mean the translation is good; that is what review is for.
 | `lx repair SRC --lang L` | re-translate only failing segments (`--limit N`) |
 | `lx run SRC --lang L` | the whole loop, with `--polish` for a fluency pass and `--limit N` to bound it |
 | `lx render SRC --lang L -o OUT` | rebuild the target document |
+| `lx segments SRC --lang L` | every stored segment in document order, source beside target, with its origin, its hold, its waiver and whether its placeholders still speak the document's numbering. `--ids`, `--origin`, `--status` and `--limit` narrow it; `--brief` cuts each text to one line. A projection: it detects nothing, and its `--json` is not a frozen contract |
 | `lx blocks SRC --lang L` | the rebuilt document block by block, without writing it |
 | `lx sentences SRC --lang L` | how a segment's text divides into sentences |
 | `lx style SRC --lang L` | what the model is told about this book's voice — the register brief, the style sheet's always-on half, and the `[name]` blocks the named segments mention |
@@ -664,7 +665,7 @@ that lost.
 ## Development
 
 ```bash
-python -m pytest -q                # 2138 tests, no network
+python -m pytest -q                # 2162 tests, no network
 python -m ruff check src tests
 ```
 

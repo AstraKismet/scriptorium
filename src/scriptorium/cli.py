@@ -2480,9 +2480,15 @@ def cmd_render(args, cfg):
          + (f" ({missing} without a usable translation)" if missing else ""))
 
 
-#: How much of a block's text one terminal line shows. Long enough that a
-#: paragraph is recognizable, short enough that a book-length document is still
-#: something a person can scroll.
+#: How much of a segment's or a block's text one terminal line shows. Long
+#: enough that a paragraph is recognizable, short enough that a book-length
+#: document is still something a person can scroll.
+#:
+#: Two commands now: `lx blocks` always cuts to it, and `lx segments --brief`
+#: does. One number rather than two, which is the argument `lx untracked`'s
+#: `--max` help already makes for sharing a default across the commands that
+#: truncate — the alternative here was a second width chosen by feel, and the
+#: unnamed literal `88` six other lines reach for is what that looks like.
 _BLOCK_PREVIEW = 60
 
 
@@ -2497,6 +2503,26 @@ def _one_line(text):
                 .replace("\n", "\\n").replace("\t", "\\t"))
 
 
+def _preview(text, limit=0):
+    """``text`` on one terminal line, cut at ``limit`` with an ellipsis.
+
+    ``limit`` of 0 means the whole line, which is `checked_limit`'s reading of
+    the same value and the reason this takes a width rather than a flag: `lx
+    blocks` always cuts and `lx segments` cuts only under `--brief`, and one
+    function taking a hard-coded `True` from one caller reads as a rule nobody
+    chose. The ellipsis lives here so the two commands cannot come to disagree
+    about what a cut line looks like.
+
+    **The cut is on the escaped line, not on the source text**, which is
+    `cmd_blocks`' behaviour unchanged and is the right one for a bound whose
+    unit is terminal columns: `\\n` occupies two of them. It costs a cut that can
+    land between a backslash and its letter, which is visible as a stray `\\`
+    and not worth a second pass to prevent.
+    """
+    line = _one_line(text)
+    return line[:limit] + "…" if limit and len(line) > limit else line
+
+
 def cmd_blocks(args, cfg):
     blocks, missing = do_blocks(args.src, args.lang, cfg, args.fallback)
     if args.json:
@@ -2506,10 +2532,7 @@ def cmd_blocks(args, cfg):
     for block in blocks:
         head = f"{block['id'] or '-':>6}  {(block['kind'] or 'skeleton'):9}"
         head += f"{(block['from'] or ''):7}"
-        body = _one_line(block["text"])
-        if len(body) > _BLOCK_PREVIEW:
-            body = body[:_BLOCK_PREVIEW] + "…"
-        _out(f"{head}{body}")
+        _out(f"{head}{_preview(block['text'], _BLOCK_PREVIEW)}")
     _out(f"{len(blocks)} block(s), {missing} without a usable translation")
 
 
@@ -2572,9 +2595,10 @@ SUGGEST_SEGMENTS = 5
 def _named_segments(doc, ids=None, limit=None, what="limit"):
     """This document's segments, narrowed to ``ids`` and bounded by ``limit``.
 
-    Shared by the two read-only projections below, which is the only reason it
+    Shared by the three read-only projections below, which is the only reason it
     exists as a function: they must agree about what "no ids" means and about
-    which end of the document a bound takes.
+    which end of the document a bound takes. `do_segments` passes no bound at
+    all — see there for why a reading command may not have one.
 
     ``ids`` names segments and is not a filter to be silently emptied — an id
     matching nothing comes back as nothing, and the caller reports the
@@ -2600,6 +2624,141 @@ def _named_segments(doc, ids=None, limit=None, what="limit"):
     rows = [s for s in doc["segments"] if wanted is None or s["id"] in wanted]
     bound = checked_limit(limit, what)
     return rows[:bound] if bound else rows
+
+
+#: The two states `store._segment` derives from a segment's target text. Written
+#: down because `--status` refuses anything else, and a filter that answered
+#: nothing for a misspelled value is indistinguishable from a document holding
+#: none of that state. Deliberately not moved into `store.py`: the derivation
+#: there is one expression over one segment, and this is the *vocabulary a caller
+#: may name*, which is a different fact about the same two words.
+_SEGMENT_STATES = ("pending", "translated")
+
+
+def do_segments(doc, ids=None, origins=None, status=None, limit=None):
+    """This document's stored segments, source beside target. ``dict``.
+
+    The seam behind `lx segments`, and the reverse of the case invariant 8
+    usually catches: `GET /api/doc` has shown a reviewer a segment's source
+    beside its target since the workbench existed — and its `origin`, `review`
+    and `waived` since each of those landed — while nothing on the command line
+    could. `lx todo` carries no ``target`` at all, whatever `--all` does, so it
+    cannot answer this however it is invoked; `lx blocks` projects the rebuilt
+    output rather than the state, so it carries no source and no `origin`;
+    `lx check --json` names a segment only where a rule fired; and
+    `lx status --json` deliberately carries no segment text. What was left was
+    opening `.lx/state.db` by hand — which this project puts off limits for the
+    bookshelf consumer precisely because the storage layer is free to change,
+    and the reason applies to a person at a terminal too.
+
+    **A projection, not a report.** It detects nothing, scores nothing, and
+    orders by nothing but document position. The stored ``issues`` are not
+    carried: they are the last `lx check`'s findings frozen on to the row, stale
+    the moment a reviewer edits the wording. Recomputing them — which
+    `GET /api/doc` does, with `do_check(persist=False)` — was the other option
+    and is what this command must not become: a listing carrying severities and
+    exiting 0 is a verdict a reader will take for one, and `lx check` is one
+    command away. Taking no ``cfg`` is what makes that structural rather than a
+    resolution.
+
+    **Both texts, under `store.load_doc`'s own key names.** ``source`` is the
+    document's own words and ``masked`` is what the model was sent; a reader
+    needs each for something the other cannot do. A target holds `⟦n⟧`, so
+    ``masked`` is what lines the placeholders up against it — **except on a
+    ``stranded`` row**, see below — and only ``source`` says what `⟦1⟧` stood in
+    for. Naming them apart also keeps one spelling from carrying two answers:
+    `do_renderings`' occurrence rows call the *masked* text ``source`` — it is
+    the text `translate.mentions` matched against — while `do_suggest`'s and
+    `do_audit`'s call the *raw* text ``source``, so the two already disagree,
+    and a third command picking a side would have deepened that rather than
+    settled it. Of the keys `do_renderings` also emits, ``origin``, ``review``
+    and ``waived`` are spelled and typed exactly as it spells them, empty rather
+    than null and a bool; ``kind``, ``status``, ``masked`` and ``stranded`` have
+    no counterpart there at all.
+
+    **``stranded`` is the row this command would otherwise lie about.** A
+    wording carrying `target_slots` was left behind by a re-parse: its `⟦n⟧`
+    mean the map they were written in, not the one `masked` speaks, so the two
+    lines do *not* correspond and what a reviewer reads off them is not what the
+    document delivers — in either direction. `do_commit` already treats it as a per-segment state with a remedy
+    of its own — re-word the segment — and this row is where a reviewer would
+    have to see it. The flag is the presence of that map and nothing more; the
+    render still reads it and still substitutes correctly.
+
+    **The filters.** ``ids`` is `_named_segments`' rule, including its refusal of
+    a bare string; ids that name nothing come back in ``unknown`` rather than
+    being silently absent. ``origins`` matches the emitted origin with the
+    surrounding blanks trimmed from **both** sides — exact otherwise, and never
+    by prefix, because `llm` would cover `llm:draft`, `llm:polish` and
+    `llm:repair` today and whatever a later build invents tomorrow. The empty
+    string is a value like any other and selects the segments nothing has
+    written. ``status`` is one of `_SEGMENT_STATES`. ``limit`` is a *display*
+    bound and is taken after the filters, which is `do_select`'s rule for the
+    same reason: a run of rows the filters exclude must not eat the bound.
+    """
+    # Before the filters, because a malformed bound is malformed whether or not
+    # this call would have reached it — `checked_limit`'s own doctrine, and the
+    # reason it is separable from applying the slice.
+    bound = checked_limit(limit)
+    rows = _named_segments(doc, ids)
+    known = {s["id"] for s in doc["segments"]}
+    unknown = [] if ids is None else [str(i).strip() for i in ids
+                                      if str(i).strip() and str(i).strip() not in known]
+    if origins is not None:
+        if isinstance(origins, str) or not isinstance(origins, (list, tuple)):
+            raise UnusableTarget(
+                f"`origin` is a list of origin names, and this request sent "
+                f"{type(origins).__name__}. A bare string would be read one "
+                f"character at a time and select nothing while looking like it "
+                f"worked.")
+        # Trimmed on both sides. `lx apply --origin` stores free text verbatim,
+        # so a stored `"  human  "` is reachable by the name a reader copies off
+        # this command's own output — and a comma list is typed with a space
+        # after the comma. An origin whose identity is its surrounding blanks is
+        # not a different origin anybody meant.
+        wanted = {str(o).strip() for o in origins}
+        rows = [s for s in rows if (s.get("origin") or "").strip() in wanted]
+    if status is not None:
+        if status not in _SEGMENT_STATES:
+            raise UnusableTarget(
+                f"`status` is one of {', '.join(_SEGMENT_STATES)}, and this "
+                f"request sent {status!r}. A state this build never derives "
+                f"would answer an empty listing, which reads exactly like a "
+                f"document holding none of it.")
+        rows = [s for s in rows if s["status"] == status]
+    return {
+        "source": doc["source"],
+        "lang": doc["lang"],
+        "tone": doc.get("tone"),
+        # `total` is the document and `len(segments)` is what came back, because
+        # a filtered listing is otherwise indistinguishable from a complete one
+        # — the rule `do_suggest` states for the three numbers that travel with
+        # every answer it gives.
+        "total": len(doc["segments"]),
+        # The request as it was sent, echoed rather than re-derived, with
+        # `unknown` beside it for the part of it that reached nothing. Nested,
+        # because a top-level `origin` meaning *the filter* beside a row
+        # `origin` meaning *the value* is one spelling with two answers again.
+        "filters": {
+            "ids": None if ids is None else list(ids),
+            "origin": None if origins is None else list(origins),
+            "status": status,
+            "limit": bound,
+        },
+        "unknown": unknown,
+        "segments": [{
+            "id": s["id"],
+            "kind": s["kind"],
+            "status": s["status"],
+            "origin": s.get("origin") or "",
+            "review": s.get("review") or "",
+            "waived": bool(s.get("waived")),
+            "stranded": bool(s.get("target_slots")),
+            "source": s["source"],
+            "masked": s["masked"],
+            "target": s.get("target") or "",
+        } for s in (rows[:bound] if bound else rows)],
+    }
 
 
 def do_style(doc, cfg, ids=None):
@@ -2725,6 +2884,83 @@ def do_suggest(doc, cfg, ids=None, cutoff=None, limit=None, most=None):
         "records": len(records),
         "segments": rows,
     }
+
+
+def cmd_segments(args, cfg):
+    """`lx segments`. Exit 0 whenever it ran, and 2 whenever it could not.
+
+    `cmd_renderings`' pair and `cmd_audit`'s: there is nothing here for a
+    *finding* to mean, because there are none. A document with an untranslated
+    paragraph in it is not a failing document, it is one somebody is still
+    working on, and `lx check` is the command whose exit code invariant 10 makes
+    the evidence.
+
+    **The whole text by default, and `--brief` to cut it.** The obvious shape is
+    the other way round — every neighbouring listing truncates, `lx blocks` at
+    `_BLOCK_PREVIEW` and `lx renderings --term` at an unnamed literal 88 — and it
+    loses on a measurement, recorded with its corpus in `docs/decisions.md`: most
+    of this project's own paragraphs are longer than either width, so a cutting
+    default would hide most of the words of most rows. The command exists
+    because a reviewer cannot see a translation beside its source; a default
+    showing a fifth of each is the same complaint one command later. `--limit`
+    bounds the rows for a reader who is not a terminal.
+
+    ``masked`` is printed only where it differs from ``source``, which on prose
+    is almost nowhere — but where it differs it is the only line whose `⟦n⟧` can
+    be compared against the target's, and on a ``stranded`` row not even that,
+    which is why the row says so. `--json` carries both always, so a consumer
+    never has to tell "no markup" from "an older build".
+    """
+    doc = load_doc(args.src, args.lang)
+    ids = [i.strip() for i in args.ids.split(",") if i.strip()] if args.ids else None
+    # By presence, never by truthiness, and empty fields **kept** — the two
+    # halves of one defect. `--origin ""` is what a reader types for "the ones
+    # nothing has written", and a falsy test made it mean *no filter*: the whole
+    # document back, which is the complement of what was asked. Empties are kept
+    # for the same reason, so that request has a value to match. `--ids` drops
+    # them instead, because no segment has an empty id and there is nothing for
+    # one to select. Neither is "the CLI's reading of a comma list": `cli.py` has
+    # three, and this is the pair each flag needs.
+    origins = ([o.strip() for o in args.origin.split(",")]
+               if args.origin is not None else None)
+    report = do_segments(doc, ids, origins, args.status, args.limit)
+    if args.json:
+        _out(json.dumps(report, ensure_ascii=False, indent=2))
+        return
+    rows = report["segments"]
+    _out(f"{report['source']} -> {report['lang']} ({report['tone']}), "
+         f"{len(rows)} of {report['total']} segment(s)")
+    if report["unknown"]:
+        # `_named_segments` names an id that matches nothing as the caller's to
+        # report, and a listing that is simply shorter is how a typo becomes a
+        # conclusion about the document.
+        _out(f"  {len(report['unknown'])} id(s) named nothing: "
+             + ", ".join(report["unknown"]))
+    width = _BLOCK_PREVIEW if args.brief else 0
+    for row in rows:
+        # Bracketed, because `origin` is free text: `lx apply --origin held`
+        # stores that string, and an unmarked column would put it beside a real
+        # hold in the same shape.
+        marks = [f"[{m}]" for m in ("held" if row["review"] == HELD else "",
+                                    "waived" if row["waived"] else "",
+                                    "stranded" if row["stranded"] else "") if m]
+        _out("")
+        # Padded on `cmd_blocks`' pattern, so the twins scan the same way and a
+        # run of rows reads as columns rather than as ragged prose. `rstrip`
+        # because a segment with no origin and no marks would otherwise end in
+        # the padding, and trailing blanks are what `_one_line` exists to expose
+        # rather than to add.
+        _out(f"  {row['id']:>6}  {row['kind']:9}{row['status']:12}"
+             f"{'  '.join([row['origin']] + marks) if row['origin'] else '  '.join(marks)}"
+             .rstrip())
+        _out(f"      source : {_preview(row['source'], width)}")
+        if row["masked"] != row["source"]:
+            _out(f"      masked : {_preview(row['masked'], width)}")
+        _out(f"      target : "
+             f"{_preview(row['target'], width) if row['target'] else '(untranslated)'}")
+        if row["stranded"]:
+            _out("      note   : this wording's ⟦n⟧ speak the numbering it was "
+                 "written in, not the one `masked` shows — re-word it to clear this")
 
 
 def cmd_style(args, cfg):
@@ -5675,6 +5911,60 @@ def build_parser():
                     help="segments with no usable target fall back to source")
     bl.add_argument("--json", action="store_true")
     bl.set_defaults(fn=cmd_blocks)
+
+    # Next to `blocks` because they are twins over one document: that one
+    # projects what the rebuilt file says, this one what the state holds. The
+    # pair is the whole point — `blocks` has no source and no `origin`, so it
+    # cannot answer the question a reviewer opens a chapter with.
+    sm = sub.add_parser(
+        "segments", help="every stored segment, source beside target",
+        description="Project this document's stored state in document order: "
+                    "id, kind, status, origin, review, waived, stranded, and "
+                    "both texts — `source` as the document wrote it and `masked` "
+                    "as the model was sent it, because it is `masked` whose "
+                    "placeholders line up against the target. Except where "
+                    "`stranded` is true: that wording's placeholders speak the "
+                    "numbering it was written in, the two lines do not "
+                    "correspond, and the remedy is to re-word the segment. A "
+                    "projection and "
+                    "not a report: it detects nothing, scores nothing, orders by "
+                    "nothing but position, exits 0 whenever it ran and 2 "
+                    "whenever it could not, and leaves the findings stored on a "
+                    "segment to `lx check`, whose exit code is the evidence. Its "
+                    "`--json` is NOT a frozen contract — the two this project "
+                    "freezes are docs/contracts/workbench-http.md and "
+                    "docs/contracts/status-json.md, and neither grows a third by "
+                    "accident.")
+    sm.add_argument("src")
+    sm.add_argument("--lang", required=True)
+    sm.add_argument("--ids", help="comma-separated segment ids; default every "
+                                  "segment. An id that names nothing is reported "
+                                  "rather than silently absent")
+    sm.add_argument("--origin", metavar="NAME[,NAME]",
+                    help="list only segments carrying one of these origins. "
+                         "Matched with the surrounding blanks trimmed off both "
+                         "sides, exact otherwise and never by prefix — `lx apply "
+                         "--origin` takes free text, so there is no closed set to "
+                         "widen to, and llm:draft, llm:polish, llm:repair, human, "
+                         "agent, tm, tm:legacy and carryover are what this build "
+                         "writes today. An empty field selects the segments "
+                         "nothing has written, so `--origin \"\"` is that set and "
+                         "`--origin human,` is human plus that set. An origin "
+                         "containing a comma is not expressible here")
+    sm.add_argument("--status", choices=_SEGMENT_STATES,
+                    help="list only segments in this state, which is derived "
+                         "from whether the stored target has text in it")
+    sm.add_argument("--limit", type=int, default=0,
+                    help="most rows to answer, taken after the filters; 0 for "
+                         "all of them. A display bound and not a bound on work — "
+                         "nothing here spends anything — for the reader who is "
+                         "an agent rather than a terminal with a pager")
+    sm.add_argument("--brief", action="store_true",
+                    help=f"cut each text at {_BLOCK_PREVIEW} characters of the "
+                         f"escaped line, for scanning a novel rather than reading "
+                         f"it. --json is never truncated")
+    sm.add_argument("--json", action="store_true")
+    sm.set_defaults(fn=cmd_segments)
 
     sn = sub.add_parser("sentences", help="how a segment's text divides into sentences")
     sn.add_argument("src")

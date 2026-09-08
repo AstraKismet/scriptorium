@@ -3,6 +3,261 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-09-08 · A reviewer at a terminal can read a translation beside its source, and `source` was already two columns
+
+`GET /api/doc` has returned a segment's source beside its target since the
+workbench existed, and its `origin`, `review` and `waived` since each of those
+landed. Nothing on the command line could. `lx todo` carries **no target at
+all** — `--all` widens which segments it emits and not what a row holds, so it
+cannot answer this however it is invoked; `lx blocks` projects the rebuilt
+output rather than the state, so it carries no source and no `origin`;
+`lx check --json` names a segment only where a rule fired; and `lx status
+--json` deliberately carries no segment text at all. What was left was opening
+`.lx/state.db` by hand — which this project puts off limits for the bookshelf
+consumer precisely because the storage layer is free to change, and the reason
+does not stop applying because the reader is a person.
+
+Invariant 8 usually catches the other direction. This is the reverse case: the
+workbench could show something the CLI could not, and `lx segments SRC --lang L`
+is the answer. `cli.do_segments` is the seam, so a later endpoint would share
+it; none is added here, and none should be added without the version decision
+`docs/contracts/workbench-http.md` gates.
+
+**It is a projection and not a report, and the line is drawn at the stored
+`issues`.** They are sitting on the segment body — `do_check` persists them —
+and carrying them would have cost nothing and looked helpful. They are not
+carried: they are the last `lx check`'s findings frozen on to the row, stale the
+moment a reviewer edits the wording, and a listing that showed them would be a
+report whose severities nobody had recomputed. Invariant 10 makes `lx check`'s
+exit code the evidence and this command has no exit code to move; it exits 0
+whenever it ran, which is `lx audit`'s rule and `lx renderings`'. Nothing is
+counted, nothing is scored, and the order is document position and nothing else.
+HANDOFF-052 gave a different reason for that, and it is corrected here rather
+than repeated. The package said a stored-state misattribution scanner had been
+measured and rejected "because the signal is not there", 0 flagged of 83 real
+segments. The entry of 2026-09-04 says the opposite in as many words: the
+*reply-side* detector finds zero of chapter one's 83 usable stored segments
+**structurally**, because it reads a reply and a reply is where a shift is
+visible at all, and "the signal does not exist" was a conclusion generalized
+from one instrument and wrong — a cross-lingual embedding separates the
+populations cleanly. That instrument shipped as `lx audit` on 2026-09-06, and
+the figure to carry forward is that command's own rather than the first look's:
+17 lines of the tracked memory hold a misattributed target and **2** of them are
+what a reader would read, because `store.load_tm` keeps the last record per key.
+The 2026-09-04 entry's "18 of 208" is the line count the entry of 2026-09-06
+corrects by name in its own title. So the reason this command detects nothing
+is not that detection is impossible here. It is that detection already has two homes
+carrying the threshold and the network service it needs, `lx audit` and
+`lx renderings`, and a listing that implied it had checked anything would be a
+second and weaker answer to the question those two already answer — without any
+of the floors they print beside their findings.
+
+**`source` already meant two things, and this is the third command that had to
+pick.** `do_renderings`' occurrence rows call the *masked* text `source` — it is
+the text `translate.mentions` matched against — and `GET /api/doc` does the
+same. `do_suggest`'s rows and `do_audit`'s call the *raw* text `source`, because
+a `difflib` ratio and an embedding are both taken over prose. Two against two,
+and no spelling satisfies both.
+
+The command carries **both, under `store.load_doc`'s own key names**: `source`
+is `seg["source"]` and `masked` is `seg["masked"]`. That is not a compromise
+between the two camps, it is the only shape that loses nothing — a stored target
+holds `⟦n⟧`, so it is `masked` that lines the placeholders up against it (except
+on a `stranded` row, below), and only `source` says what `⟦1⟧` stood in for. It
+is also the shape with no new vocabulary in it: this command projects a stored
+segment, and it uses that segment's own names for both texts, so a reader
+normalizing between the two commands has
+`renderings.source == segments.masked` and nothing to guess. *Lost:* picking one
+and giving the other a new name. `raw` invents a word the store does not use,
+and `text` would have been this codebase's third meaning for that key — `lx todo`
+already calls the masked source `text` and `lx blocks` calls the rendered,
+unmasked, polished string `text`.
+
+The row is `{id, kind, status, origin, review, waived, stranded, source, masked,
+target}`. HANDOFF-052 required the per-segment keys to be spelled as
+`lx renderings --term` spells them, and that could not be taken literally,
+because four of the ten have no counterpart there at all: `kind`, `status`,
+`masked` and `stranded`. Of the six that do, `origin`, `review` and `waived` are
+spelled and typed exactly as renderings spells them. The id is the deviation:
+renderings calls it **`seg`** and emits no `id` key in any row — the flat
+cross-document key it builds is internal, so `id` is *free* there rather than
+occupied — while `GET /api/doc`, `do_suggest`, `do_blocks` and `lx todo` all call
+a segment's id `id`. A single-document command has no reason to reach for the
+cross-document spelling, so `id` here.
+
+The `""`-versus-`null` half is a genuine fork and the argument that first
+decided it was wrong. Counting honestly: `GET /api/doc` emits `null` and the
+frozen wire contract pins it, `do_audit` — a CLI seam — emits `null`, and
+`do_renderings` emits `""`. On the CLI alone that is one to one, so "this is the
+CLI rather than the wire" settles nothing. What settles it is the wire's own
+stated reason, which does not apply here: `null` exists there so a client cannot
+mistake "not held" for "an older server", and what actually answers that is the
+key being *always present*, which both spellings are. Given a free choice, `""`
+keeps every text field one type, so a consumer writes `row["review"] == "held"`
+without a null guard. The cost is real and is recorded rather than left to be
+discovered: a future endpoint over this seam has to convert, and `lx segments`
+and `GET /api/doc` now answer one question two ways. That belongs in
+`docs/contracts/workbench-http.md`'s *Known divergences*, which is where this
+project records exactly that shape; HANDOFF-052 puts the contract out of scope,
+so it is scheduled rather than done — see the end of this entry.
+
+**`stranded` is the row this command would otherwise lie about**, and it is the
+one field the package did not ask for. A wording carrying `target_slots` was left
+behind by a re-parse: its `⟦n⟧` mean the map they were written in, not the one
+`masked` speaks. Reproduced with the 2026-09-01 case, a `config/dnt.txt` edit
+that swaps one protected term for another:
+
+    source : The mill at Ashcombe burned in the spring of that year.
+    masked : The mill at ⟦1⟧ burned in the spring of that year.     ⟦1⟧ = Ashcombe
+    target : ⟦1⟧ 在那年春天燒掉了。                                    ⟦1⟧ = mill
+
+A reviewer lining those two `⟦1⟧` up reads the target as saying *Ashcombe*
+burned. The file this state renders says the *mill* did, and — measured on that
+document — the render is the one that is right: it reads `target_slots` and
+substitutes what the wording meant. Which side is mistaken is not the point.
+The correspondence a reviewer is relying on does not hold, `lx check` reports
+it at *warn* only, and the command built so that a person could catch a misfiled
+translation would have been the surface that hid the mismatch.
+
+And the render being right is precisely why nothing else was going to say so.
+`do_commit` already treats this as a per-segment state with a remedy of its
+own — re-word the segment — so the row carries the flag, the terminal form marks
+it `[stranded]` and prints that remedy, and the docstring's claim about `masked`
+carries the exception.
+
+**The whole text by default, and `--brief` cuts it.** The package expected the
+opposite and said so: truncation with a flag to disable is the obvious answer,
+and every neighbouring listing does it, `lx blocks` at `_BLOCK_PREVIEW` (60) and
+`lx renderings --term` at an unnamed literal 88. It loses on a measurement, and
+the corpus is named here because the first version of this sentence carried a
+figure nobody could re-derive. **Corpus: `git ls-tree -r --name-only 5b7b498`
+filtered to `*.md`, each blob read with `git show` and parsed by `mdparse.parse`,
+counting `len(seg["source"])` over `kind == "para"`.** A parent revision rather
+than the working tree, because this change edits six tracked Markdown files and
+adds a hundred-odd lines to the largest of them — the input would otherwise move
+while the sentence citing it was being written. That corpus is 56 files and
+**2311 paragraphs: median 380 characters, 88.5% longer than 88 and 93.2% longer
+than 60.** So a cutting default hides most of the words of seven paragraphs in
+eight, from the one command that exists because a reviewer cannot see a
+translation beside its source — the same complaint, one command later. The
+corpus is documentation prose and is dominated by one file (`docs/decisions.md`
+is 1295 of the 2311); no novel is tracked here, so it is what this repository can
+show rather than the material the command is for. The default prints everything,
+`--brief` cuts each text at `_BLOCK_PREVIEW`, and `--json` is never truncated.
+
+The one line the terminal form omits by default is `masked`, printed only where
+it differs from `source`, because on prose it almost never does and a permanent
+second label would be the source repeated on nearly every row; `--json` carries
+it unconditionally, so no consumer has to tell "no markup" from "an older build".
+
+**`--limit` is a display bound, and the argument for having none was wrong.**
+The first version of this entry refused any bound on two grounds. The first —
+"a bound belongs on work" — is contradicted by this project's own precedent:
+`--max` on `check`, `audit`, `renderings` and `untracked` is a display bound on
+read-only commands that exit 0. The second was a scheduling collision with
+HANDOFF-055, and that package's *OUT* section explicitly excludes validating
+`--max` in `checked_limit`'s style because it is a display bound; its *IN* is one
+helper shared by three commands. A `--limit` routed through `checked_limit` and
+sliced after the filters touches nothing it owns. And the deferral was written
+into no package, which is the red line about a deferral that exists only in a
+deleted file's OUT list.
+
+What the bound is for is the second reader HANDOFF-052 names: "an agent doing it
+in its own context". A person pipes a novel to a pager; an agent cannot.
+Measured on a real document at book scale — this repository's own
+`docs/decisions.md` at `5b7b498`, 1971 segments, extracted and listed untranslated
+— one answer is **1.87 MB** of `--json`, or 1.47 MB of terminal form. `--brief`
+bounds the *width* rather than the rows: it cuts the terminal form to a quarter,
+367 KB, and does not apply to `--json` at all, which is the form an agent reads.
+`--json --limit 25` is 17.8 KB. The default is still 0, so reading a chapter is
+unchanged, and the slice is taken **after** the filters — `do_select`'s rule,
+because a run of excluded rows must not eat the bound.
+
+**The filters, and the empty origin that inverted one of them.** `ids` is
+`_named_segments`' rule, refusal of a bare string included — `{str(i) for i in
+"s0001"}` is a set of six characters, which selects nothing while looking like it
+worked — and an id that names nothing comes back in `unknown` rather than as a
+listing that is merely shorter. `origins` matches the emitted origin with the
+surrounding blanks trimmed from **both** sides, exact otherwise and never by
+prefix: `--origin llm` would cover `llm:draft`, `llm:polish` and `llm:repair`
+today and whatever a later build invents tomorrow, and `lx apply --origin` takes
+free text so there is no closed vocabulary to reason from. Trimming both sides
+rather than the request alone is what lets a reader re-query a value the command
+itself printed — `lx apply --origin "  human  "` stores that string verbatim, and
+a one-sided trim answered zero rows and exit 0 for both the copied spelling and
+the obvious one.
+
+`--origin ""` was the sharper defect and it pointed the opposite way from the one
+this project keeps naming. Read by truthiness the flag was *absent*, so the
+request a reader types for "the ones nothing has written" came back with the
+whole document — selecting everything while looking like it filtered. It is read
+by presence now, and the empty field is kept rather than dropped, so `--origin ""`
+is that set and `--origin human,` is `human` plus that set. `--ids` still drops
+empties, because no segment has an empty id and there is nothing for one to
+select; the two flags read a comma list differently and that is deliberate, not
+an inconsistency to be tidied. `cli.py` already had three readings of a comma
+list before this one — `cmd_translate` splits bare, `lx hold` and `lx unhold`
+drop empties without stripping, and five other sites strip and drop — and
+uniformity here would cost the only spelling that reaches a real set of
+segments. The earlier claim that `--status pending` reaches those segments
+instead was false in both halves, measured: `lx apply --origin ""` exits 0 and
+stores a **translated** row whose origin is `""`, and `--status pending` does
+not list it.
+
+`status` is `pending` or `translated`, the two `store._segment` derives, refused
+rather than silently answering an empty listing that reads exactly like a
+document holding none of that state.
+
+**A held segment is listed like any other.** `checks.workable` is the one
+exclusion every work-selecting predicate applies, and a reading command is not
+one of them: a reviewer holds a segment precisely because it is theirs to finish,
+so hiding it from the command they would finish it in inverts the feature.
+
+**What the command does not do, and the axes nobody argued.** `src` is required,
+where `lx audit` and `lx renderings` both make it optional and read its absence
+as "the whole project" — this command is document-scoped because HANDOFF-052
+scoped it that way, and a project-wide form is a different question (which
+document is a reviewer reading?) rather than a flag left off. Recomputing the
+findings was the other real option for `issues`, and it is what `GET /api/doc`
+does with `do_check(persist=False)`; it is refused because a listing that carries
+severities and exits 0 is a verdict a reader will take for one, and taking no
+`cfg` makes that structural rather than a resolution.
+
+A third flag was considered and refused, and the line between it and `stranded`
+is worth stating because both look like the same defect. A stored wording whose
+substitution would be malformed renders the untranslated marker: the row says
+`status: translated` with a target in it, and the delivered file has none of it.
+Measured — a target carrying `⟦9⟧` where the segment has one slot: `lx blocks`
+answers `from: "marker"`, and `lx check` answers **error**, rule `tags`, exit 1,
+on an instance `mask.unrenderable` makes unwaivable. That is the whole
+difference. The reviewer is told by the command whose exit code invariant 10
+makes the evidence, so putting it on this row would be the second answer this
+command exists not to give. `stranded` is on the row because `lx check` reports
+it at *warn* and exit 0 is reachable over the file — nothing else was going to
+say it. `do_segments(doc, ids,
+origins, status, limit)` takes a loaded document rather than a `(src, lang)`
+pair, which is `do_style`'s and `do_suggest`'s shape and the minority shape in
+`cli.py`; the endpoints for both already call `load_doc` themselves. `--json` is
+**not** a frozen contract and the help text says so.
+
+`cmd_blocks`' truncation moved into `_preview(text, limit)` in the same change,
+so the ellipsis has one home rather than two; it cuts the *escaped* line, which
+is `cmd_blocks`' behaviour unchanged and the right unit for a bound measured in
+terminal columns. `lx renderings --term`'s `[:88]` is left alone: it cuts without
+an ellipsis, which is a different behaviour and somebody else's line to change.
+
+**Scheduled rather than done**, because HANDOFF-052 puts the contract and the
+storage layer out of scope: two *Known divergences* entries in
+`docs/contracts/workbench-http.md` for the three axes on which `lx segments` and
+`GET /api/doc` answer one question differently (`source` raw here and masked
+there, `origin`/`review` empty here and null there, `issues` carried there and
+not here); the correction of that document's `GET /api/doc` note that no CLI
+command emits this shape and `lx todo` is the nearest; and
+`sqlite3.DatabaseError`, which is in none of `cli.main`'s branches, so a
+`.lx/state.db` that is not a database answers a traceback and exit 1 from every
+reader — `lx blocks` included, byte for byte, so it is `store`'s to fix rather
+than this command's.
+
 ## 2026-09-08 · The carryover guard asked the wrong question of the wrong unit, and refusing was worse than the answer it refused
 
 `store.Carryover.align` decides which stored translation a re-parsed segment
@@ -1810,6 +2065,11 @@ Two things for the maintainer before any repair, neither a defect:
 - `lx web` is the only surface that shows source, target and `origin` side by
   side. A terminal cannot. That gap is HANDOFF-052, and it was found by being
   unable to write the first line of a remediation procedure.
+  **Closed 2026-09-08**: the first step of that procedure is
+  `lx segments <src> --lang <L>`, which shows source, target, `origin`, the hold,
+  the waiver and whether the wording speaks the numbering the document has now.
+  Marked in place rather than rewritten, because the sentence is what the
+  remediation section was actually written against — see the entry of that date.
 
 ## 2026-09-04 · A split carries across from the document it came from, and the memory route that was going to do it is lossy
 
