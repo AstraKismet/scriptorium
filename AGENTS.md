@@ -472,7 +472,7 @@ because drawing it early is nearly free.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 2138 collected, no network. Four are
+python -m pytest -q                 # 2162 collected, no network. Four are
                                     #   conditional on three different things, so
                                     #   which two skip is a property of the machine
                                     #   AND the account: one is POSIX-only, one
@@ -496,6 +496,7 @@ lx waive book/ch1.md --lang zh-TW --ids s0042   # stand by this wording: its err
 lx models --provider llamacpp       # ask a backend which models it serves
 lx audit --lang zh-TW               # stored wordings that look filed under another source
 lx audit book/ch1.md --lang zh-TW   # the same question of one document's segments
+lx segments book/ch1.md --lang zh-TW          # every stored segment, source beside target
 lx blocks docs/guide.md --lang zh-TW --json   # the rendered document, block by block
 lx sentences docs/guide.md --lang zh-TW       # where its sentences begin and end
 lx web                              # review workbench on 127.0.0.1:8787
@@ -679,6 +680,25 @@ own.
   both sides and every gate here compares ids. `checks.py`'s `numbering` rule
   reports the segment at warn, since the wording still does not speak the
   numbering its source has.
+
+  **A reader that only shows the two texts is a reader of that map too**, which
+  is the shape 2026-09-08 added: `lx segments` prints the masked source beside
+  the stored target, and on a segment carrying `target_slots` their `⟦n⟧` mean
+  different maps, so the two line up on the page and not in the document. It
+  does not unmask; it carries the fact, as a `stranded` row that the terminal
+  form marks and that names the remedy `do_commit` already names — re-word the
+  segment. Anything that puts a stored target next to anything numbered has to
+  answer this question, whether or not it substitutes.
+- **A per-segment projection names both texts, because `source` alone means two
+  different things here.** `do_renderings`' rows and `GET /api/doc` call the
+  *masked* text `source`; `do_suggest`'s and `do_audit`'s call the *raw* text
+  `source`. Neither is wrong — one matched against the masked text, the other
+  compares prose — and a new projection that picks a side silently changes what
+  a column holds. `do_segments` carries both under `store.load_doc`'s own key
+  names, `source` and `masked`, so the mapping between the commands is
+  decidable rather than remembered. The same care applies to `text`, which
+  already means the masked source in `lx todo` and the rendered, unmasked,
+  polished string in `lx blocks`: it is not available for a third meaning.
 - **How much of a document goes to the model in one run is `limit`, and it is one
   cap applied once.** Since 2026-09-02 it bounds every branch of `do_select`
   except an explicitly named `ids` — it reached the pending branch alone before
