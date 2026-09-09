@@ -104,10 +104,18 @@ export const go = (to: string): void => { window.location.hash = to }
  *
  * For view state a person did not navigate to: which paragraph they are on,
  * which filter is showing. `hashchange` does not fire for `replaceState`, so the
- * subscribers are told directly.
+ * subscribers have to be told — and **not on this tick**.
+ *
+ * `announce` notifies `useSyncExternalStore`, and every caller of this function
+ * is inside an effect. Called there, it would force React to re-render the whole
+ * tree from within a commit, before that commit's remaining effects have run.
+ * The microtask makes this path the same shape as the other one: a `hashchange`
+ * from the browser is a task, so React is never mid-commit when it arrives, and
+ * a route that moves itself should not behave differently from one a person
+ * navigated to.
  */
 export function replace(to: string): void {
   if (window.location.hash === to) return
   window.history.replaceState(null, '', to)
-  announce()
+  queueMicrotask(announce)
 }

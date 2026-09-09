@@ -456,7 +456,11 @@ src/scriptorium/
   translate.py   batching, concurrency, JSON tolerance, per-segment retry, and
                  `misattributed` — whether a reply answers the request it was sent
   providers/     openai_compat (primary), anthropic; base holds transport + retry
-  web/           local review workbench, a shell over cli.py
+  web/           the workbench's HTTP surface, a shell over cli.py; static/ is
+                 studio/web/'s committed build output and is not edited by hand
+studio/web/      the workbench itself. React 19 + Zustand + virtua under Vite;
+                 contract.ts is the shared type definition, api.ts the client,
+                 store.ts the cold state, drafts.ts the text that must not enter it
 skill/           Claude Skill packaging (SKILL.md + reference/)
 adapters/        AGENTS.md fragment and OpenCode rule, both thin pointers
 docs/            decisions.md (the record), conventions/, contracts/,
@@ -469,10 +473,16 @@ packages. `core/` is the engine and CLI — the artifact another repository can
 vendor into `tools/`. `studio/` is the workstation. The boundary is drawn now
 because drawing it early is nearly free.
 
+`studio/web/` is the first thing on that side of the line, since 2026-09-09, and
+it arrived without moving any Python: the frontend is a separate source tree with
+its own toolchain, and `tests/test_import_boundary.py` never walks it because it
+is outside `src/scriptorium/`. What it does not do is make the engine depend on
+Node — see the invariant below.
+
 ## Commands
 
 ```bash
-python -m pytest -q                 # 2162 collected, no network. Four are
+python -m pytest -q                 # 2187 collected, no network. Four are
                                     #   conditional on three different things, so
                                     #   which two skip is a property of the machine
                                     #   AND the account: one is POSIX-only, one
@@ -482,6 +492,11 @@ python -m pytest -q                 # 2162 collected, no network. Four are
                                     #   count, never `N skipped`.
 python -m ruff check src tests
 python -m scriptorium --help        # or `lx` after `pip install -e .`
+
+cd studio/web && npm ci             # only to CHANGE the workbench; `lx web`
+npm run typecheck                   #   needs none of this, because the build
+npm test                            #   is committed. 27 tests, jsdom, no network
+npm run build                       # writes src/scriptorium/web/static/ — commit it
 
 lx run docs/guide.md --lang zh-TW   # extract -> translate -> check -> repair -> render
 lx run book/ch1.md --lang zh-TW --limit 50    # at most 50 segments per pass; run it again to continue
@@ -652,6 +667,63 @@ own.
   construction. It stayed a whitelist after document state moved into SQLite, where
   `lang` is a column value: two of the three paths it feeds are still files, and a
   check that narrows as storage changes is a check nobody can rely on.
+- **The workbench's build is committed, and `src/scriptorium/web/static/` is
+  generated.** Source in `studio/web/`, output here, tracked. That is the only
+  arrangement where the product does not become conditional on a toolchain
+  invariant 1 spent its argument on not needing — a bare interpreter, CI, an
+  agent sandbox and a locked-down machine all get a working workbench with no
+  Node. Committed output has one failure mode and it is silent, so CI rebuilds
+  and compares: `npm run build` is part of any change under `studio/web/`, and
+  `tests/test_studio_contract.py` asserts the page asks for a bundle that is
+  beside it and that the output stayed **flat** — a hashed `assets/` subdirectory
+  buys nothing on a transport that forbids caching, and cost a wheel once.
+
+  Two things the frontend may not do, and both are the same rule the CLI follows.
+  **No pipeline logic**: not the sentence boundary, not the style-block matcher,
+  not routing resolution, not which segments a mode selects. And **no second copy
+  of a server rule** — the settings screens send one key per request and render
+  the refusal, so `cli.writable_key` stays the only answer to what is writable.
+
+- **Hot state never enters the store, and the target field is uncontrolled.**
+  `studio/web/src/drafts.ts` holds the text a reviewer is typing, outside React,
+  because a store that re-renders the segment list on a keystroke is a
+  virtualized list for nothing. The `<textarea>` takes `defaultValue` and is read
+  from the DOM: React's open IME defect is `#3926` — not `#8683`, which closed in
+  2018 — and its destructive half is React writing `node.value` back
+  mid-composition, which a controlled input re-opens. Every Enter-shaped shortcut
+  is guarded on `isComposing` for the other half of the same problem: Enter is
+  the candidate-confirmation key in every Chinese input method, and this project
+  exists to write Chinese. The one place that writes `node.value` is the effect
+  that adopts a stored target, and it is guarded three ways — an unsaved edit
+  wins, a focused field is never written into, and identical text is left alone.
+
+- **The frontend reads `contract_version` at startup and refuses a number it does
+  not know.** That refusal is the entire reason the field exists. `contract.ts`
+  pins it, and three guards chain so the pin cannot drift: type-level assertions
+  fail `tsc` when its `RESPONSE_KEYS` and the interfaces disagree,
+  `tests/test_studio_contract.py` compares that same object against the contract
+  document endpoint by endpoint, and `tests/test_contract.py` compares the
+  document against a live reply. Interface ≡ array ≡ document ≡ server.
+
+- **A run is followed, not owned, and one run at a time is a data rule.** Two
+  `llm:*` writes to one segment are last-write-wins with no token and no check,
+  and nothing on the wire lists running jobs — so the page keeps the job id in
+  `sessionStorage` and picks the run up again after a reload, or the guard dies
+  with the page. A failed poll is retried rather than treated as the end: HTTP/1.0
+  closes every connection and an occasional failure is ordinary. There is no
+  Stop, because there is no endpoint that could cancel one; the control says
+  "stop following" and says what that does not do.
+
+- **Everything the virtualized ledger does depends on the browser producing
+  frames.** `virtua` measures with a `ResizeObserver`, and those are delivered as
+  part of the rendering steps — so a tab that is hidden, occluded or in the
+  background delivers none, the list measures a viewport of zero and renders no
+  rows, with no error anywhere. That is the platform, not a defect to guard
+  against in a page nobody is looking at. It is written down because from the
+  inside it is indistinguishable from a bug in this project's own code, and it
+  cost an afternoon on 2026-09-09: `document.visibilityState` is the tell, and a
+  forced screenshot is what makes an automated browser paint.
+
 - **The rendered document has one walk, and it is `skeleton.render_blocks`.**
   `render` is its join, `formats.Format` carries a `render_blocks` slot beside
   `render`, and a test reads every module in `src/` with `ast` to assert the node

@@ -9,15 +9,41 @@
  * at dispatch, so it finishes against the document it started on and says which
  * one when that is no longer the one on screen.
  */
+import { useMemo } from 'react'
+
 import { useStore } from '../store'
 import * as routes from '../router'
+
+/**
+ * Chapter order, not byte order.
+ *
+ * The wire hands these back sorted by the flattened document identity, so
+ * `book/ch1.md` < `book/ch10.md` < `book/ch2.md` — and a novel is twenty
+ * chapters, so a reader reaches the end of one and comes back to a list in the
+ * wrong order twenty times. Sorting for **display** is the client's own business
+ * and no rule of the pipeline's: nothing here decides what a document *is*, only
+ * which line it is drawn on.
+ */
+const byChapter = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
 
 export function Rail() {
   const state = useStore(s => s.state)
   const at = useStore(s => s.at)
+  const doc = useStore(s => s.doc)
   const say = useStore(s => s.say)
   const extract = useStore(s => s.extract)
   const open = useStore(s => s.open)
+
+  const docs = useMemo(
+    () => [...(state?.docs ?? [])].sort((a, b) =>
+      byChapter.compare(a.source, b.source) || byChapter.compare(a.lang, b.lang)),
+    [state],
+  )
+  const untracked = useMemo(
+    () => [...(state?.untracked ?? [])].sort((a, b) =>
+      byChapter.compare(a.source, b.source) || byChapter.compare(a.lang, b.lang)),
+    [state],
+  )
 
   if (!state) return <aside />
 
@@ -33,28 +59,37 @@ export function Rail() {
 
       <div className="rail">
         <h2>Tracked</h2>
-        {state.docs.length === 0 && <p className="none">None yet.</p>}
-        {state.docs.map(d => (
-          <button
-            key={d.source + ' ' + d.lang}
-            type="button"
-            className="doc"
-            aria-current={current(d.source, d.lang)}
-            onClick={() => { routes.go(routes.doc(d.source, d.lang)) }}
-          >
-            <b>{d.source}</b>
-            <small>{d.lang} · {d.done}/{d.total}</small>
-            <span className="meter">
-              <i style={{ width: `${Math.round((100 * d.done) / Math.max(d.total, 1))}%` }} />
-            </span>
-          </button>
-        ))}
+        {docs.length === 0 && <p className="none">None yet.</p>}
+        {docs.map(d => {
+          // The open document's own numbers, live. `GET /api/state` loads every
+          // segment of every document in the project to compute these, so it is
+          // not called after a run — and the document on screen already knows
+          // what it holds.
+          const mine = current(d.source, d.lang) && doc
+          const done = mine ? doc.report.translated : d.done
+          const total = mine ? doc.report.segments : d.total
+          return (
+            <button
+              key={d.source + ' ' + d.lang}
+              type="button"
+              className="doc"
+              aria-current={current(d.source, d.lang)}
+              onClick={() => { routes.go(routes.doc(d.source, d.lang)) }}
+            >
+              <b>{d.source}</b>
+              <small>{d.lang} · {done}/{total}</small>
+              <span className="meter">
+                <i style={{ width: `${Math.round((100 * done) / Math.max(total, 1))}%` }} />
+              </span>
+            </button>
+          )
+        })}
 
         <h2>Not yet extracted</h2>
-        {state.untracked.length === 0 && (
+        {untracked.length === 0 && (
           <p className="none">Nothing new matches <code>sources</code>.</p>
         )}
-        {state.untracked.map(c => (
+        {untracked.map(c => (
           <button
             key={c.source + ' ' + c.lang}
             type="button"

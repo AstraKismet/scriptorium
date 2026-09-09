@@ -33,9 +33,27 @@ import * as api from '../api'
 import { useStore } from '../store'
 import { isError, type StyleResponse, type SuggestResponse } from '../contract'
 
-/** Long enough that arrowing down a chapter does not fire a request per row,
- *  short enough that stopping on a paragraph feels like it answered. */
-const SETTLE = 450
+/**
+ * Long enough that arrowing down a chapter does not fire a request per row.
+ *
+ * It is 700 rather than something friendlier because of what the *server* pays:
+ * `POST /api/style` and `POST /api/suggest` each call `store.load_doc` before
+ * they begin, which reads every skeleton node and every segment row of the whole
+ * document. On a five-thousand-segment novel a margin that refetched on every
+ * focus change would be a full document read per paragraph looked at.
+ */
+const SETTLE = 700
+
+/**
+ * What the style margin already answered, for this document.
+ *
+ * The answer depends on the segment's own text and on a style sheet that does
+ * not move while a page is open, so a second look at a paragraph is free.
+ * Cleared when the document changes, because ids are reassigned from `s0001` on
+ * every parse and a cached answer keyed on one would then be about other text.
+ */
+let styleCache = new Map<string, StyleResponse>()
+let cachedFor = ''
 
 interface Margin {
   style: StyleResponse | null
@@ -60,11 +78,18 @@ export function Margin() {
 
   useEffect(() => {
     if (!src || !focused) { setMargin(EMPTY); return }
+    const scope = `${src}|${lang}`
+    if (cachedFor !== scope) { styleCache = new Map(); cachedFor = scope }
+    const cached = styleCache.get(focused)
+    if (cached) { setMargin({ ...EMPTY, style: cached }); return }
     let live = true
     setMargin(EMPTY)
     const timer = setTimeout(() => {
       void api.postStyle({ src, lang, ids: [focused] })
-        .then(style => { if (live) setMargin(m => ({ ...m, style })) })
+        .then(style => {
+          styleCache.set(focused, style)
+          if (live) setMargin(m => ({ ...m, style }))
+        })
         .catch((e: unknown) => { if (live) setMargin(m => ({ ...m, error: String(e) })) })
     }, SETTLE)
     // The sequence token this surface needs three times over, spelled as a
@@ -120,7 +145,21 @@ export function Margin() {
           {margin.style
             ? (
               <>
-                <p className="voice">{margin.style.voice || '(no brief and no style sheet)'}</p>
+                {/*
+                  Collapsed, and only this half. The always-on part is the target
+                  language's register brief plus the style sheet's preamble: it is
+                  document-static, it is the same string on every request of a run,
+                  and it is forty lines long. Left open it pushes the two things
+                  that *change* with the cursor — the scene's own blocks and the
+                  memory's near matches — off the bottom of the panel, which is
+                  what it did on the first run of this page.
+                */}
+                <details>
+                  <summary style={{ cursor: 'pointer', color: 'var(--muted)', fontSize: 12 }}>
+                    the standing brief — same for every request of a run
+                  </summary>
+                  <p className="voice">{margin.style.voice || '(no brief and no style sheet)'}</p>
+                </details>
                 {margin.style.voice_notes.map((note, i) => (
                   <div key={i} style={{ marginTop: 10 }}>
                     <div className="block-names">{note.names.join(', ')}</div>

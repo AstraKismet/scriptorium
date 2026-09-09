@@ -110,3 +110,43 @@ jobs:
             exit 1
           fi
           echo "check correctly exited non-zero"
+
+  workbench:
+    name: workbench (studio/web)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The frontend's build is committed into the Python package, because `lx web`
+    # has to work from a bare checkout with no Node installed — invariant 1's four
+    # protected situations. Committed output has one failure mode and it is
+    # silent: the source moves and the bundle does not, so the page a user gets is
+    # the one from three commits ago. This job is what makes that loud.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: studio/web/package-lock.json
+
+      - run: npm ci
+        working-directory: studio/web
+
+      - run: npm run typecheck
+        working-directory: studio/web
+
+      - run: npm test
+        working-directory: studio/web
+
+      - run: npm run build
+        working-directory: studio/web
+
+      - name: the committed build is the one this source produces
+        run: |
+          set -euo pipefail
+          if ! git diff --exit-code --stat -- src/scriptorium/web/static; then
+            echo "::error::studio/web/ has moved and src/scriptorium/web/static/ has not." >&2
+            echo "Run 'npm run build' in studio/web/ and commit what it writes." >&2
+            exit 1
+          fi
+          echo "the committed bundle matches the source"

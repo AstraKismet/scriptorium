@@ -13,7 +13,7 @@
  * The one write this file makes to `node.value` is in an effect, and it is
  * guarded three ways — see below.
  */
-import { memo, useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 
 import { ask } from './Confirm'
 import { Marked, sameSlots } from '../marks'
@@ -36,8 +36,17 @@ export const SegmentRow = memo(function SegmentRow({ seg }: { seg: Segment }) {
   const setWaive = useStore(s => s.setWaive)
 
   const box = useRef<HTMLTextAreaElement>(null)
-  const [dirty, setDirty] = useState(() => drafts.has(seg.id))
   const [slotsDiffer, setSlotsDiffer] = useState(false)
+
+  // **Read from the registry, never held beside it.** A row that kept its own
+  // `dirty` flag was told when an edit began and never when it ended: `save()`
+  // forgets the entry, and the dot stayed on wording that had been written
+  // minutes ago. The registry is the one place that knows, so the row asks it —
+  // and it only notifies on a crossing, so this costs nothing per keystroke.
+  const dirty = useSyncExternalStore(
+    drafts.subscribe,
+    useCallback(() => drafts.has(seg.id), [seg.id]),
+  )
 
   /**
    * Adopt a stored target that moved underneath this row.
@@ -75,8 +84,7 @@ export const SegmentRow = memo(function SegmentRow({ seg }: { seg: Segment }) {
   const touched = () => {
     const el = box.current
     if (!el) return
-    const crossed = drafts.set(seg.id, el.value, seg.target)
-    if (crossed) setDirty(drafts.has(seg.id))
+    drafts.set(seg.id, el.value, seg.target)
     // Advisory only, and it never gates anything: what a target may contain is
     // `translate.accept`'s question and `checks.py`'s, both on the server. This
     // is the placeholder warning arriving while there is still time to fix it,
@@ -106,6 +114,31 @@ export const SegmentRow = memo(function SegmentRow({ seg }: { seg: Segment }) {
     await save()
     const now = useStore.getState().doc?.segments.find(s => s.id === seg.id)
     if (!now || useStore.getState().running) return
+    // **A hold does not stop this control, and that is the one place the two
+    // sit beside each other.** `ids` outranks the hold exclusion — the contract
+    // says so in as many words, because naming an id is a person pointing rather
+    // than a queue sweeping — so the button two rows below "Hold" is precisely
+    // the thing a hold does not protect against. Origin precedence does not
+    // cover it either: the write is `llm:*` over whatever is there, and `review`
+    // is not `origin`.
+    if (now.review === 'held') {
+      const anyway = await ask(
+        'Send a held segment to the model?',
+        [
+          `${seg.id} is held, which keeps every queue that selects work off it.`,
+          '',
+          'Naming a segment is not a queue, so this run reaches it anyway — that is',
+          'deliberate, and it is why the hold does not refuse it here. The hold itself',
+          'survives: the write touches the target, the status and the origin, and never',
+          'the review field.',
+          '',
+          'What is replaced is the wording you were keeping.',
+        ].join('\n'),
+        'Send it anyway',
+        true,
+      )
+      if (!anyway) return
+    }
     let over = false
     if (now.origin === 'human') {
       over = await ask(
@@ -173,6 +206,13 @@ export const SegmentRow = memo(function SegmentRow({ seg }: { seg: Segment }) {
           onFocus={() => { setFocused(seg.id) }}
           onBlur={() => { void save() }}
           onKeyDown={e => {
+            // **Never while the IME is composing.** Enter is the candidate-
+            // confirmation key in every Chinese input method, and this is a
+            // workbench for writing Chinese: a shortcut that fires mid-composition
+            // banks half a sentence and moves the caret away from it. React's own
+            // defect is about writing `node.value` back; this is the other half,
+            // and no framework closes it for you.
+            if (e.nativeEvent.isComposing) return
             if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
               e.preventDefault()
               void save()

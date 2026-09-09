@@ -59,12 +59,35 @@ function Refusal({ title, body }: { title: string; body: React.ReactNode }) {
 
 function FailedBody() {
   const why = useStore(s => s.bootError)
+  const retry = useStore(s => s.bootstrap)
   return (
     <>
       <p>{why}</p>
+      {/*
+        The most likely cause is not a missing project, and saying so is the
+        difference between a person fixing this in a minute and reinstalling
+        something. `GET /api/state` raises whole on a `providers` block it cannot
+        read — no `docs`, no `cwd`, not even a `contract_version` — so a
+        hand-edited configuration takes the bootstrap down, and the screen that
+        would repair it is behind the bootstrap.
+
+        It is deliberately **not** answered by opening a blind settings form:
+        that screen draws from the projection this request failed to return, so
+        it would be a form with nothing in it offering to write keys nobody can
+        see. A terminal can read the file; this page cannot.
+      */}
+      <p>
+        A configuration this build cannot read takes this whole request down, so the
+        likeliest cause is <code>lx.config.json</code> rather than a missing project.
+        Run <code>lx providers</code> in the same directory — it names the block it
+        could not read — and fix it with <code>lx config set</code> or in the file.
+      </p>
       <p>
         <code>lx web</code> serves this page from the directory it was started in. If that
         directory has no <code>lx.config.json</code>, run <code>lx init</code> there first.
+      </p>
+      <p>
+        <button type="button" onClick={() => void retry()}>Try again</button>
       </p>
     </>
   )

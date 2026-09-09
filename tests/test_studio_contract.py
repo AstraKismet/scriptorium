@@ -34,7 +34,6 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from scriptorium.web.server import CONTRACT_VERSION  # noqa: E402
-
 from test_contract import _documented, _documented_response_keys, _read  # noqa: E402
 
 _ROOT = os.path.join(os.path.dirname(__file__), "..")
@@ -172,7 +171,21 @@ _RESET_OR_TONE = re.compile(
 #: single call site, `reExtract`. `store.test.ts` is the executed half of this
 #: guard — it asserts that what goes on the wire is a JSON boolean and a register
 #: a person chose — and it cannot do that without naming them.
-_MAY_NAME_RESET = {"src/contract.ts", "src/store.ts", "src/store.test.ts"}
+#:
+#: `App.test.tsx` is here for a different and weaker reason, said out loud rather
+#: than hidden in the set: it holds a `GET /api/doc` fixture, and `tone` is a key
+#: of that **reply**. The scan reads text and cannot tell a request from a
+#: response, so a fixture describing what the server sends trips a guard about
+#: what the client sends. The list is the price of a guard that needs no parser,
+#: and the property it protects is unchanged — a module that is not on it and
+#: names either key is a new place a register can be sent from, and somebody has
+#: to look at it.
+_MAY_NAME_RESET = {
+    "src/contract.ts",
+    "src/store.ts",
+    "src/store.test.ts",
+    "src/App.test.tsx",
+}
 
 
 def test_only_one_place_in_the_frontend_names_reset_or_tone_on_a_request():

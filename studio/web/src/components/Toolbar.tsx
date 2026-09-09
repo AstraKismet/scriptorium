@@ -71,7 +71,7 @@ export function Toolbar() {
     // holding the only copy.
     if (drafts.size()) {
       say(
-        `  ${drafts.ids().join(', ')} could not be saved, and a re-extract ` +
+        `  ${drafts.ids().slice(0, 20).join(', ')} could not be saved, and a re-extract ` +
         `renumbers segments — copy that wording somewhere before trying again`,
         'bad',
       )
@@ -288,7 +288,9 @@ function StartOver({ onClose, onChoose }: {
           placeholder="type a register"
           value={register}
           onChange={e => { setRegister(e.target.value) }}
-          onKeyDown={e => { if (e.key === 'Enter') void go() }}
+          // Never while the IME is composing: Enter confirms a candidate, and
+          // this control discards a document.
+          onKeyDown={e => { if (!e.nativeEvent.isComposing && e.key === 'Enter') void go() }}
         />
       </label>
       <span className="note-line" style={{ maxWidth: 'none' }}>

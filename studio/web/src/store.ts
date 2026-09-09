@@ -112,6 +112,10 @@ interface Store {
 
   save: () => Promise<boolean>
   runJob: (mode: Mode, ids?: string[], overwriteHuman?: boolean, note?: string) => Promise<void>
+  /** Pick up a run this page started before it was reloaded. */
+  resume: () => Promise<void>
+  /** Stop following a run. It is **not** cancelled — nothing can cancel one. */
+  abandon: () => void
   setHold: (ids: string[], held: boolean) => Promise<void>
   setWaive: (ids: string[], waived: boolean) => Promise<void>
   check: () => Promise<void>
@@ -145,6 +149,135 @@ const same = (a: DocAddress | null, b: DocAddress | null): boolean =>
 
 const reason = (e: unknown): string =>
   e instanceof Error ? e.message : String(e)
+
+/**
+ * Name a list of segment ids in a log line, bounded.
+ *
+ * `ambiguous` is documented as **not capped**: past the alignment work budget
+ * the position diff is skipped for the whole document and every carried segment
+ * lands in it, which on a novel that is one sentence repeated is every segment
+ * in the book. A line naming five thousand ids is not a line anybody reads.
+ */
+function names(ids: string[], most = 20): string {
+  if (ids.length <= most) return ids.join(', ')
+  return `${ids.slice(0, most).join(', ')} and ${ids.length - most} more`
+}
+
+/**
+ * The job this page is following, kept where a reload can find it.
+ *
+ * One run at a time is a **correctness** rule here rather than tidiness — two
+ * `llm:*` writes to one segment are last-write-wins with no token and no check —
+ * and a flag in memory cannot enforce it across F5. Nothing on the wire lists
+ * running jobs (`GET /api/state` carries no job at all and `POST /api/job` needs
+ * an id you already hold), so the id has to survive the reload or the guard is
+ * gone with the page. `sessionStorage` and not `localStorage`: a job dies with
+ * the server process, so an id from last week is an id for "no such job".
+ *
+ * It is honest about what it does *not* fix: a second tab, or `lx translate` in
+ * a terminal, is still a second writer and nothing here can see it.
+ */
+const HELD_JOB = 'scriptorium.job'
+
+interface HeldJob { id: string; src: string; lang: string }
+
+let abandoned = false
+
+function remember(job: HeldJob): void {
+  try { sessionStorage.setItem(HELD_JOB, JSON.stringify(job)) } catch { /* private mode */ }
+}
+
+function forgetJob(): void {
+  try { sessionStorage.removeItem(HELD_JOB) } catch { /* private mode */ }
+}
+
+function remembered(): HeldJob | null {
+  try {
+    const raw = sessionStorage.getItem(HELD_JOB)
+    if (!raw) return null
+    const held = JSON.parse(raw) as HeldJob
+    return held.id && held.src && held.lang ? held : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Follow a run to a terminal state.
+ *
+ * **A failed poll is not the end of a run.** `protocol_version` is HTTP/1.0, so
+ * every response closes the connection and there is no keep-alive; an occasional
+ * failed poll is ordinary. The predecessor abandoned the run on the first one,
+ * client-side, while the server thread kept writing — and the page then showed a
+ * document it had stopped following. So a failure is retried, and only a run of
+ * them gives up, with a sentence saying the run is still going.
+ */
+async function follow(
+  set: (partial: Partial<Store>) => void,
+  get: () => Store,
+  id: string,
+  where: DocAddress,
+): Promise<void> {
+  let seen = 0
+  let misses = 0
+  abandoned = false
+  for (;;) {
+    await new Promise(r => { setTimeout(r, 700) })
+    if (abandoned) return
+    let answer
+    try {
+      answer = await api.postJob(id)
+    } catch (e) {
+      misses += 1
+      if (misses < 10) continue
+      get().say(
+        `  gave up polling after ${misses} failed attempts (${reason(e)}). The run has ` +
+        `not been cancelled — re-open the document to see what it wrote.`,
+        'bad',
+      )
+      return
+    }
+    misses = 0
+    // A job record, or a 200 carrying `error` alone. Told apart by the
+    // **absence of `done`**, never by the presence of `error`: a live record
+    // carries `error: null` throughout, and a failed one carries a sentence
+    // while still being a record.
+    if (!isJobRecord(answer)) {
+      get().say('  ' + answer.error, 'bad')
+      break
+    }
+    for (const l of answer.log.slice(seen)) get().say('  ' + l)
+    seen = answer.log.length
+    if (!answer.done) continue
+
+    for (const [segId, why] of answer.failures) {
+      get().say(`  unresolved ${segId}: ${why}`, 'bad')
+    }
+    if (answer.refused.length) {
+      get().say(
+        `  ${names(answer.refused)}: a person wrote this, so the run was not ` +
+        `allowed to replace it — the model was still called and still cost tokens. ` +
+        `Re-draft the row and confirm, or ` +
+        `\`lx translate ${where.src} --lang ${where.lang} ` +
+        `--ids ${answer.refused.join(',')} --overwrite-human\`.`,
+        'bad',
+      )
+    }
+    if (answer.error) get().say('  ' + answer.error, 'bad')
+    // The five integers, kept structurally. The run has already *said* what it
+    // cost, once, through `translate.usage_line` on the same `progress` sink
+    // `lx` prints from — so nothing here words that sentence a second time. This
+    // is the field the contract added precisely because a client may not parse
+    // the log.
+    set({ runCost: { usage: answer.usage, at: where.src, lang: where.lang } })
+    break
+  }
+
+  // A run that finishes after somebody opened another document must not repaint
+  // that one and have its tally read as this run's result.
+  if (same(get().at, where)) await get().refresh()
+  else get().say(`  ${where.src} [${where.lang}] finished; reopen it to see the result`, 'warn')
+}
 
 /**
  * The one place in this source tree that names `reset` or `tone` on a request.
@@ -184,21 +317,21 @@ async function reExtract(
     // summed.
     if (r.kept.length) {
       get().say(
-        `  ${r.kept.join(', ')}: kept a stored target whose placeholders no longer ` +
+        `  ${names(r.kept)}: kept a stored target whose placeholders no longer ` +
         `match this document — fix the wording, or re-draft the row on its own`,
         'bad',
       )
     }
     if (r.replaced.length) {
       get().say(
-        `  ${r.replaced.join(', ')}: a banked wording replaced a machine draft that no ` +
+        `  ${names(r.replaced)}: a banked wording replaced a machine draft that no ` +
         `longer fits; their origin is now tm, and a hold on one of them is gone`,
         'warn',
       )
     }
     if (r.ambiguous.length) {
       get().say(
-        `  ${r.ambiguous.join(', ')}: the position diff could not place these — a ` +
+        `  ${names(r.ambiguous)}: the position diff could not place these — a ` +
         `paragraph that moved, a new occurrence of a sentence this document already ` +
         `had, or a member of a run of identical paragraphs that changed size. They ` +
         `took the last stored wording under their key, without its hold, so check ` +
@@ -208,7 +341,7 @@ async function reExtract(
     }
     if (r.waived_source.length) {
       get().say(
-        `  ${r.waived_source.join(', ')}: took a banked wording a reviewer waived ` +
+        `  ${names(r.waived_source)}: took a banked wording a reviewer waived ` +
         `where it was committed. The waiver did not travel — these arrive unwaived ` +
         `and the finding is reported here for you to decide`,
         'warn',
@@ -314,6 +447,10 @@ export const useStore = create<Store>()((set, get) => ({
     // the machine and can block for most of a minute against an unreachable
     // backend. The document list must not wait on that.
     void get().loadModels()
+    // A run this page started before it was reloaded is still running, and the
+    // one-run-at-a-time rule is a data rule rather than a UI one. Picking it up
+    // again is the only way a reload does not silently license a second writer.
+    void get().resume()
   },
 
   reloadState: async () => {
@@ -436,13 +573,13 @@ export const useStore = create<Store>()((set, get) => ({
       const lost = Object.keys(r.conflicts)
       if (lost.length) {
         get().say(
-          `  ${lost.join(', ')} changed underneath this edit and were not written — ` +
+          `  ${names(lost)} changed underneath this edit and were not written — ` +
           `the wording on screen for them is now the stored one`,
           'bad',
         )
       }
       if (r.unknown.length) {
-        get().say(`  ${r.unknown.join(', ')} name no segment and were ignored`, 'warn')
+        get().say(`  ${names(r.unknown)} name no segment and were ignored`, 'warn')
       }
       await get().refresh()
       return !held.length && !lost.length
@@ -521,56 +658,48 @@ export const useStore = create<Store>()((set, get) => ({
         get().say('  nothing to do', 'warn')
         return
       }
-
-      let seen = 0
-      for (;;) {
-        await new Promise(r => { setTimeout(r, 700) })
-        const answer = await api.postJob(job.id)
-        // A job record, or a 200 carrying `error` alone. Told apart by the
-        // **absence of `done`**, never by the presence of `error`: a live record
-        // carries `error: null` throughout, and a failed one carries a sentence
-        // while still being a record.
-        if (!isJobRecord(answer)) {
-          get().say('  ' + answer.error, 'bad')
-          break
-        }
-        for (const l of answer.log.slice(seen)) get().say('  ' + l)
-        seen = answer.log.length
-        if (!answer.done) continue
-
-        for (const [id, why] of answer.failures) {
-          get().say(`  unresolved ${id}: ${why}`, 'bad')
-        }
-        if (answer.refused.length) {
-          get().say(
-            `  ${answer.refused.join(', ')}: a person wrote this, so the run was not ` +
-            `allowed to replace it — the model was still called and still cost tokens. ` +
-            `Re-draft the row and confirm, or ` +
-            `\`lx translate ${where.src} --lang ${where.lang} ` +
-            `--ids ${answer.refused.join(',')} --overwrite-human\`.`,
-            'bad',
-          )
-        }
-        if (answer.error) get().say('  ' + answer.error, 'bad')
-        // The five integers, kept structurally. The run has already *said* what
-        // it cost, once, through `translate.usage_line` on the same `progress`
-        // sink `lx` prints from — so nothing here words that sentence a second
-        // time. This is the field the contract added precisely because a client
-        // may not parse the log.
-        set({ runCost: { usage: answer.usage, at: where.src, lang: where.lang } })
-        break
-      }
-
-      // A run that finishes after somebody opened another document must not
-      // repaint that one and have its tally read as this run's result.
-      if (same(get().at, where)) await get().refresh()
-      else get().say(`  ${where.src} [${where.lang}] finished; reopen it to see the result`, 'warn')
-      await get().reloadState()
+      remember({ id: job.id, ...where })
+      await follow(set, get, job.id, where)
     } catch (e) {
       get().say('  ' + reason(e), 'bad')
     } finally {
+      forgetJob()
       set({ running: false })
     }
+  },
+
+  resume: async () => {
+    const held = remembered()
+    if (!held || get().running) return
+    set({ running: true })
+    get().say(`— following ${held.id}, started before this page was loaded —`, 'warn', true)
+    try {
+      await follow(set, get, held.id, { src: held.src, lang: held.lang })
+    } catch (e) {
+      get().say('  ' + reason(e), 'bad')
+    } finally {
+      forgetJob()
+      set({ running: false })
+    }
+  },
+
+  abandon: () => {
+    // **Nothing is cancelled.** There is no endpoint that could, and the run's
+    // thread keeps writing whatever this page does — so the honest control is
+    // "stop following", and it says exactly that. Without it a backend that
+    // blocks forever (a llama.cpp router loading a model does not answer 503, it
+    // waits) leaves every run control on this page disabled with no way out but
+    // restarting `lx web`.
+    if (!get().running) return
+    abandoned = true
+    forgetJob()
+    set({ running: false })
+    get().say(
+      '  stopped following this run. It has not been cancelled — there is no way to ' +
+      'cancel one — so the server is still writing, and what it writes will be there ' +
+      'when you re-open the document.',
+      'warn',
+    )
   },
 
   setHold: async (ids, held) => {
@@ -596,7 +725,7 @@ export const useStore = create<Store>()((set, get) => ({
       // prepared and the write — a batch or another client landing in between.
       if (r.stale.length) {
         get().say(
-          `  ${r.stale.join(', ')}: the wording changed while this was in flight, ` +
+          `  ${names(r.stale)}: the wording changed while this was in flight, ` +
           `so the waiver was not applied — read it again and decide`,
           'warn',
         )
@@ -665,7 +794,7 @@ export const useStore = create<Store>()((set, get) => ({
       )
       if (r.stranded.length) {
         get().say(
-          `  ${r.stranded.join(', ')}: this wording speaks a numbering the document has ` +
+          `  ${names(r.stranded)}: this wording speaks a numbering the document has ` +
           `moved on from. It renders as written, so nothing is broken — but banked it ` +
           `would shadow a correct record. Re-word the segment against the source as it ` +
           `stands now`,

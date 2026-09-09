@@ -1,0 +1,24 @@
+{
+  // The two config files, and only those.
+  //
+  // They run in Node and the application does not: `src/` is typed with
+  // `vite/client` alone, so a component reaching for `process` or `fs` does not
+  // compile. Splitting the two tsconfigs is what keeps that true — a single one
+  // wide enough for the dev-server proxy is also wide enough for a browser
+  // module to import `node:path` and be told nothing.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "types": ["node"],
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["vite.config.ts", "vitest.config.ts"]
+}

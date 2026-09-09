@@ -21,6 +21,8 @@ export function LogDrawer() {
   const log = useStore(s => s.log)
   const cost = useStore(s => s.runCost)
   const clear = useStore(s => s.clearLog)
+  const running = useStore(s => s.running)
+  const abandon = useStore(s => s.abandon)
   const box = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -41,6 +43,23 @@ export function LogDrawer() {
             <span><b>{cost.usage.total.toLocaleString()}</b> total</span>
             <span><b>{cost.usage.reported}</b>/{cost.usage.replies} replies reported</span>
           </div>
+        )}
+        {running && (
+          // Not a Stop button, and the label says so. There is no cancel
+          // endpoint on this surface and there is no way to add one from here,
+          // so the honest act is to stop *following*: the server thread carries
+          // on writing either way. Without this control a backend that blocks
+          // rather than answering — which is what a llama.cpp router does while
+          // it loads a model — leaves every run control disabled until `lx web`
+          // is restarted.
+          <button
+            type="button"
+            className="quiet"
+            onClick={abandon}
+            title="The run is not cancelled — nothing can cancel one. This only stops watching it."
+          >
+            Stop following
+          </button>
         )}
         <button type="button" className="quiet" onClick={clear}>Clear</button>
       </div>
