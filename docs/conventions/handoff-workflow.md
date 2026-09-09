@@ -157,6 +157,17 @@ For example:
 - `lx check examples/sample.md --lang zh-TW` → expect exit 0
 ```
 
+**A baseline written as an absolute number rots into a criterion that passes on
+anything.** Observed 2026-09-10: HANDOFF-045 required a suite count "above 1932",
+which was the number on the day the package was written; five packages landed in
+the week before it was executed and its own parent commit was already at 2234, so
+the criterion would have been satisfied by a change that deleted three hundred
+tests. Write the comparison against something that moves with the tree — the
+parent commit's own `python -m pytest -q --collect-only` — or state the absolute
+number *and* the commit it was taken at, so the next reader can see it has aged.
+A count that only ever goes up is a weak criterion in any case; prefer a named
+test that fails before the change and passes after it.
+
 ## 5. Structured `blocked-by`
 
 One entry per blocker, in `kind: detail` form.

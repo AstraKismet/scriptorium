@@ -249,11 +249,24 @@ which is the trade this whole entry is about.
 said so too broadly in draft.** Two different questions hide behind "an old
 `.lx/`", and only one of them is a repair.
 
-Asked of a legacy *slot map* — `unmask(text, {"1": {"original": "`⟦1⟧`"}})` and
-the six other shapes the old `mask` really writes — the ordered resolution leaves
-the literal alone and returns the correct text where the five rounds returned five
-backtick pairs. That is measured, and it is why `lx render` over the re-extracted
-document above writes the author's sentence.
+Asked of a legacy *slot map*, the ordered resolution is usually a repair: on the
+seven shapes the old `mask` writes from a source that spells the token —
+`unmask(text, {"1": {"original": "`⟦1⟧`"}})` among them — it leaves the literal
+alone and returns the correct text where the five rounds returned five backtick
+pairs. That is why `lx render` over the re-extracted document above writes the
+author's sentence.
+
+*Usually, and the exception is worth the sentence*, because the seven are a
+measurement and not a rule and this file has recorded that confusion six times.
+The old build's do-not-translate pass could swallow a token whole, so a legacy
+map can hold a slot whose original is a bare token and which **is** a reference:
+`mask("c[^1] here", dnt=["⟦1⟧"])` on that build gave `{'1': '[^1]', '2': '⟦1⟧'}`,
+where the terminal rule now reads slot 2 as a literal and answers `c⟦1⟧ here`
+instead of `c[^1] here`. It needs a `config/dnt.txt` term that is itself a token
+to construct, the guard makes it unreachable going forward, and the old build had
+its own separate defect on the same input — but the honest statement is that
+`unmask`'s claim is about maps `mask` produced, and every repair it happens to
+perform on an older one is a bonus rather than a promise.
 
 Asked of a legacy *stored target*, it is not a repair and cannot be. The old
 build showed the model `A ⟦1⟧ and ⟦1⟧ end.` — one token standing for two

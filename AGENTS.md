@@ -615,7 +615,9 @@ executable handoff".
   package. `90-later/` may use pointers, but completing the distillation is part
   of promoting a package, not a follow-up.
 - **Acceptance criteria state a command and its expected exit code.** Prose is
-  not an acceptance criterion.
+  not an acceptance criterion, and neither is a baseline number frozen on the day
+  the package was written — compare against something that moves with the tree,
+  or name the commit the number was taken at.
 - **A named next package is read, not remembered.** Every statement of what comes
   next — in a report, in a package, in an answer — is derived from the `priority`
   and `blocked-by` of the files as they stand at that moment. A directory listing
