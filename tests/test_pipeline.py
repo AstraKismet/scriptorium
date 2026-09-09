@@ -1684,17 +1684,43 @@ def test_slot_order_is_numeric_and_nine_is_resolved_before_ten():
     assert not placeholder_ids(restored)
 
 
-def test_a_slot_key_this_module_never_wrote_does_not_end_the_render():
-    """`"²".isdigit()` is true and `int("²")` raises, which is why the ordering
-    key asks `isdecimal`.
+@pytest.mark.parametrize("key", [
+    "²",            # isdigit, not an integer
+    "1" * 4301,     # isdecimal, and `int()` refuses a decimal string this long
+    "-1", "+1", "1_0", "①", "١٢٣", "007", "", " 1",
+])
+def test_a_slot_key_this_module_never_wrote_does_not_end_the_render(key):
+    """The ordering key sorts these; it must not try to parse them.
 
-    Nothing `mask` writes can trip it — the keys are `str(counter)` — but the map
-    also arrives from `.lx/state.db` and from a hand-editable `.lx/tm.*.jsonl`,
-    and `unmask` sits under `lx check` and `lx render`. A key it does not
-    understand sorts last; it does not become a traceback where invariant 10
-    promised an exit code.
+    Nothing `mask` writes can produce one — the keys are `str(counter)` — but the
+    map also arrives from `.lx/state.db` and from a hand-editable
+    `.lx/tm.*.jsonl`, and `unmask` sits under `lx check` and `lx render`, where
+    invariant 10 promised an exit code rather than a traceback.
+
+    The 4301-digit row is the one that matters and the one a `"²"`-only test
+    misses: `int()` raises `ValueError` above 4300 digits on every CI leg, and
+    the first version of this function called `int()` on every key. Found by an
+    adversarial pass, and `store.slot_originals` had been wrapping the identical
+    call in `except (TypeError, ValueError)` in this same module's neighbour the
+    whole time.
     """
-    assert unmask("⟦1⟧", {"1": {"original": "x"}, "²": {"original": "y"}}) == "x"
+    assert unmask("⟦1⟧", {"1": {"original": "x"}, key: {"original": "y"}}) == "x"
+
+
+def test_slot_order_survives_a_key_it_cannot_parse_without_losing_nine_before_ten():
+    """The two rules do not get to trade against each other.
+
+    Dropping `int()` must not cost the numeric order that
+    `..._nine_is_resolved_before_ten` above depends on, so this asks for both at
+    once: an unparseable key in the map, and the 9-inside-10 inversion still
+    resolved the right way round.
+    """
+    text = '`a` `b` `c` `d` `e` `f` `g` `h` <i title="`j`">k</i>'
+    masked, slots = mask(text)
+    slots["1" * 4301] = {"original": "never referenced"}
+    restored = unmask(masked, slots)
+    assert restored == text
+    assert not placeholder_ids(restored)
 
 
 def test_polishing_a_rendered_line_that_names_the_token_leaves_it_alone():
@@ -1756,6 +1782,41 @@ def test_a_slot_never_names_a_slot_numbered_after_it():
     assert nested >= len(nesting), (
         "no slot original names another slot, so this test proved nothing — "
         f"expected at least {len(nesting)} from the shapes above, saw {nested}")
+
+
+def test_reseat_refuses_a_segment_that_spells_a_placeholder_rather_than_guessing():
+    """A behaviour change this package makes, pinned because nothing else sees it.
+
+    `reseat` seats an original **by content**, and after the pre-pass a segment
+    that spells the token has a nested original — `` `⟦1⟧` `` holding the slot the
+    pre-pass made — which does not occur verbatim in the unmasked literal. So it
+    declines, which is the rule it has had since 2026-08-17 reaching a class of
+    segment it used to mis-seat: over the 27 such segments in this repository's
+    own tracked Markdown, re-seating goes from 3 placed / 21 refused / **3
+    silently changed** to 1 placed / 26 refused / **0 silently changed**.
+
+    Nothing in the corpus covers this.
+    `test_every_corpus_segment_reseated_by_accept_still_renders_the_file` has
+    `reseated` in its name and calls `accept` with no `slots=`, so the branch that
+    reaches `mask.reseat` short-circuits and what it exercises is
+    `normalize.reseat_outer_blanks`. Measured 2026-09-10 by an adversarial pass.
+    """
+    source = "Use `⟦1⟧` here."
+    was_masked, was = mask(source, ())
+    _now_masked, now = mask(source, ("Use",))
+    assert was["2"]["original"] == "`⟦1⟧`", "the nested original is the whole case"
+
+    out, why = reseat(was_masked, was, now)
+    assert out is None
+    assert "cannot place" in why, why
+
+    # And the ordinary segment is unaffected: no literal, no nesting, seats fine.
+    plain = "Use `code` here."
+    plain_masked, plain_was = mask(plain, ())
+    _m, plain_now = mask(plain, ("Use",))
+    out, why = reseat(plain_masked, plain_was, plain_now)
+    assert why is None, why
+    assert unmask(out, plain_now) == plain
 
 
 def test_agents_md_spells_a_placeholder_and_survives_extract_and_render(tmp_path):

@@ -120,6 +120,21 @@ matters: `Ashcombe` flush between two tokens is still masked, and in
 `Flight 737 leaves from <b>Gate 3</b> now.` with terms `737` and `3`, the gate
 number is masked and the `3` inside `⟦3⟧` is not.
 
+**What that guard actually closed is an invariant 3 breach, not a round trip.**
+On a document holding twelve code spans and nothing else — no literal token
+anywhere — a `config/dnt.txt` naming `3` produced this masked text on the old
+build:
+
+```
+⟦1⟧ ⟦2⟧ ⟦⟦13⟧⟧ ⟦4⟧ ⟦5⟧ ⟦6⟧ ⟦7⟧ ⟦8⟧ ⟦9⟧ ⟦10⟧ ⟦11⟧ ⟦12⟧ and z
+```
+
+`⟦⟦13⟧⟧` is what the model was shown. The five rounds unwound it on the way back,
+so `unmask(*mask(text, dnt)) == text` held and no test anywhere could see it. It
+is the same defect as the rest of this entry seen from the other end — the
+pipeline's token space colliding with something it did not own — and it is the
+reason the guard is part of the repair rather than a tidy-up beside it.
+
 An adversarial lane, given the design and no knowledge of this guard, rebuilt the
 design from the brief and produced the same class of counterexample
 independently — `dnt=['1']`, `dnt=['⟦']`, `dnt=['⟧']`, and the flight sentence.
@@ -182,17 +197,41 @@ The translation memory is untouched: `seg_hash` is taken over the segment's
 **source**, never its masked text, so no key moves and every banked entry still
 answers. `STATE_VERSION` stays at 3 because the slot record shape is unchanged.
 
-Slot *ids* do move for a document that spells the token, since the pre-pass
-numbers first. Three consequences, and none is a migration: `lx extract`
-re-parses on every invocation; a stored target written against the old numbering
-fails the multiset comparison in `translate.accept`, so it is **kept rather than
-deleted** on divergence (24)'s path and named in `lx extract`'s report; and
-`lx check` then reports it, which is the point — the exchange this repair makes
-is a green check over a corrupted file for a red check over an untouched one. A
-document that spells no token gets a byte-identical masked text and slot map,
-asserted over all 58 corpus fixtures rather than assumed. The one bit that really
-does change on disk is the `slots` array on a `.lx/tm.*.jsonl` line for an
-affected document — additive, diffable, and in a tracked file.
+Slot *ids* do move, for **two** populations and not one. The obvious one is a
+document that spells the token, since the pre-pass numbers first. The other is a
+project whose `config/dnt.txt` holds a term that can match inside a token — a
+digits-only term, or one carrying a bracket — where the guard now declines a
+match the old build took, so the document has one slot fewer and the ids after it
+shift. That second population spells no token anywhere and would be missed by a
+reader who took the first sentence as the whole rule; it is also the population
+whose old masked text carried `⟦⟦13⟧⟧` to the model.
+
+Three consequences, and none is a migration: `lx extract` re-parses on every
+invocation; a stored target written against the old numbering fails the multiset
+comparison in `translate.accept`, so it is **kept rather than deleted** on
+divergence (24)'s path and named in `lx extract`'s report; and `lx check` then
+reports it, which is the point — the exchange this repair makes is a green check
+over a corrupted file for a red check over an untouched one. Outside those two
+populations the masked text and the slot map are byte-identical, asserted over
+all 58 corpus fixtures rather than assumed. The one bit that really does change
+on disk is the `slots` array on a `.lx/tm.*.jsonl` line for an affected document
+— additive, diffable, and in a tracked file.
+
+**`mask.reseat` refuses more than it did, and that is the direction to refuse
+in.** Over the 27 segments of this repository's own tracked Markdown whose source
+spells a token, re-seating a wording from one dnt map into another goes from 3
+placed / 21 refused / **3 silently changed** to 1 placed / 26 refused / **0
+silently changed**. A nested original does not occur verbatim in the unmasked
+literal, and `reseat` seats by content, so it declines rather than guessing — the
+rule it has had since 2026-08-17, now reaching a class of segment it used to
+mis-seat. The cost is that a memory hit or a carryover for one of those segments
+is refused and the wording re-translated. It was measured rather than noticed,
+because nothing tests `mask.reseat` over the corpus:
+`test_every_corpus_segment_reseated_by_accept_still_renders_the_file` has
+`reseated` in its name and calls `accept(seg, seg["masked"], "zh-TW", CFG)` with
+no `slots=`, so the branch that would reach `mask.reseat` short-circuits and what
+it exercises is `normalize.reseat_outer_blanks`. That gap is a scheduled package
+rather than one more thing in this one.
 
 **The migration was run rather than reasoned about.** A project built by the old
 build from `` Use `⟦1⟧` here to mark a gap. ``, translated, banked and rendered,
@@ -206,23 +245,66 @@ correctly restored. Nothing is deleted at any point, and the memory line keeps
 its `slots` array. The cost is a red exit code on a segment that had a green one,
 which is the trade this whole entry is about.
 
-That also **falsifies a sentence this entry carried in draft**: that a `.lx/`
-state written by the old build and never re-extracted would render "one kind of
-wrong instead of another". On a legacy map the ordered resolution leaves the
-literal alone and returns the correct text, in all seven shapes the old `mask`
-really writes — measured. It is wrong only where the literal's id also names
-another slot in the same map, and there the old build was wrong too, and by more.
-`unmask`'s identity *claim* is still about maps `mask` produced; on the maps
-already on disk it happens to be a repair as well.
+**A legacy state is healed by `lx extract` and by nothing else, and this entry
+said so too broadly in draft.** Two different questions hide behind "an old
+`.lx/`", and only one of them is a repair.
+
+Asked of a legacy *slot map* — `unmask(text, {"1": {"original": "`⟦1⟧`"}})` and
+the six other shapes the old `mask` really writes — the ordered resolution leaves
+the literal alone and returns the correct text where the five rounds returned five
+backtick pairs. That is measured, and it is why `lx render` over the re-extracted
+document above writes the author's sentence.
+
+Asked of a legacy *stored target*, it is not a repair and cannot be. The old
+build showed the model `A ⟦1⟧ and ⟦1⟧ end.` — one token standing for two
+different things — and the model faithfully copied both, so the loss is inside
+the wording. Measured: the new build over that state, **without** re-extracting,
+writes byte-for-byte what the old build wrote and `lx check` exits 0 on both.
+Neither better nor worse, and silent. Re-extract and it is loud: `tags`,
+`lost=['2'] extra=['1']`, exit 1, the segment named.
+
+So the honest statement is the narrow one. `lx run` and `lx extract` re-parse on
+every invocation and reach it; a project driven only through `lx check`,
+`lx render`, `lx blocks`, `lx segments` or `lx status` never does, and nothing
+tells its reader to. That is neither a regression nor something this package
+introduced — it is a pre-existing silent state the repair can clear but does not
+force — and `STATE_VERSION` deliberately stays at 3 rather than making every
+project in the world re-extract every document for a defect two narrow
+populations have. It is scheduled instead.
 
 One thing is given up, recorded rather than hidden: a do-not-translate term that
 *contains* a placeholder sequence can no longer be masked as a unit, because
 after the pre-pass it no longer occurs in the text as written. Its placeholder
 half is protected as a slot and its word half becomes ordinary prose, with no
-signal — invariant 3 quietly narrowed for that one shape. Refusing such a term
-where `config/dnt.txt` is read would close it and is decidable under invariant 4;
-it is a config-loading rule rather than a masking one, so it is scheduled and not
-done here.
+signal — invariant 3 quietly narrowed for that one shape.
+
+**No rule is added to `checks.py`, and the reason belongs here** so the next
+reader does not go looking for one. After the pre-pass a literal in the source
+has a slot like anything else, so `unresolved` answers empty and there is nothing
+left to report. What has no signal is the do-not-translate term above and the two
+follow-ups below, and none of them is a property of a segment.
+
+### What this leaves for somebody else
+
+Four packages, all found by the adversarial pass over this work and none of them
+in scope here. **HANDOFF-065**: the legacy state above — decide between bumping
+`STATE_VERSION` to 4, which is non-destructive and self-healing but makes every
+project re-extract, and a mechanically decidable legacy-row detector (an id in
+`masked` with no key in `slots`, or an id appearing twice there), measured at 0
+false positives over 1876 corpus segments and catching all 7 affected ones.
+**HANDOFF-062**: `config/dnt.txt` is hand-edited and `load_dnt`
+validates nothing, so a term containing a token is silently unprotected and a
+digits-only term protects a different set of occurrences in every segment.
+Refusing both shapes at the door is decidable, and the glossary's own refusals
+are the precedent. **HANDOFF-063**: nothing in either corpus reaches
+`mask.reseat` — the test whose name says `reseated` calls `accept` without
+`slots=` and exercises `normalize.reseat_outer_blanks` instead — and the pre-pass
+makes `reseat` decline every nested original. **HANDOFF-064**: this defect from
+the target side. `mask.repair_placeholders` accepts `[` as one of its four
+bracket variants and runs on every proposal, so a translation that legitimately
+writes `[1]` or `【1】` has it rewritten into a placeholder reference and is then
+refused for a mismatch. That one lands on long-form prose rather than on
+documentation, which is what this project is for.
 
 ### The property the package asked for exists for Markdown and did not for prose
 

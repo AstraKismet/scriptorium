@@ -538,10 +538,22 @@ def unmask(text, slots):
     rewritten bytes.
     """
     done = {}
-    # `isdecimal` and not `isdigit`: `"²".isdigit()` is true and `int("²")`
-    # raises, so a key this module did not write sorts last instead of ending
-    # the render with a `ValueError`.
-    for sid in sorted(slots, key=lambda s: (0, int(s)) if s.isdecimal() else (1, 0)):
+    # Numeric order **without calling `int`**, because a key this module did not
+    # write is exactly the kind that ends a render with a `ValueError`: `"²"` is
+    # `isdigit` but is not an integer, and CPython refuses to parse a decimal
+    # string longer than 4300 digits at all. `store.slot_originals` already wraps
+    # its own `int(slot key)` in `except (TypeError, ValueError)` for the second
+    # of those — the neighbour knew, and the first version of this line did not.
+    # This function sits under `lx check`, where invariant 10 promised an exit
+    # code rather than a traceback, so it does not raise in the first place.
+    #
+    # For a decimal string with no leading zeros — every key `mask` writes —
+    # length then lexicographic **is** numeric order, so `"9"` still resolves
+    # before `"10"`. A key carrying a leading zero is ordered by that rule rather
+    # than by value; the cost is a token left verbatim, which is visible and
+    # which :func:`unresolved` reports.
+    for sid in sorted(slots, key=lambda s: (0, len(s), s) if s.isdecimal()
+                      else (1, 0, s)):
         original = slots[sid]["original"]
         done[sid] = original if PH_RE.fullmatch(original) else PH_RE.sub(
             lambda m: done.get(m.group(1), m.group(0)), original)

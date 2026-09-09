@@ -523,7 +523,7 @@ Node — see the invariant below.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 2297 collected, no network. Four are
+python -m pytest -q                 # 2308 collected, no network. Four are
                                     #   conditional on three different things, so
                                     #   which two skip is a property of the machine
                                     #   AND the account: one is POSIX-only, one
@@ -1420,6 +1420,17 @@ own.
   records from its own masking step; entering a segment without them is what
   multiplies the "green but broken" rate with every format added. The model still
   sees a bare `⟦n⟧`: the type lives beside the slot map, never inside the token.
+
+  **And it must number inside-out.** `mask.unmask` resolves a slot map once, in
+  increasing id order, so a slot whose original holds another slot's token must
+  name a *smaller* id. That is free for `mask.mask` — `re.sub` never rescans its
+  own replacement, so a span can only contain a token an earlier pattern pass
+  produced — and it is not free for a masking step somebody else writes. A format
+  that numbers outside-in puts a bare `⟦n⟧` into a rendered file, which
+  `docs/contracts/workbench-http.md` divergence (31) says is not reliably an
+  `lx check` error. `tests/test_pipeline.py::test_a_slot_never_names_a_slot_numbered_after_it`
+  pins the property for this module's own output and cannot pin it for a format
+  that does not exist yet, so it is stated here. `docs/decisions.md`, 2026-09-10.
 - A `routing` value is a provider name or `{"provider", "model"}`, and the bare
   string is never migrated to the object form — every configuration on disk uses
   it. One function answers which backend and which model a stage uses,
