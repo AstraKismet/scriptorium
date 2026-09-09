@@ -93,10 +93,12 @@ segments as JSON, translate them yourself, and `lx apply` to put them back.
 **1. Split and mask.** The document becomes a list of translatable segments;
 everything else stays in a skeleton. Code spans, math, URLs, link and reference
 targets, footnotes, HTML tags, entities, template variables and any term in
-`config/dnt.txt` are replaced with `⟦n⟧` placeholders. Block syntax — headings,
-list bullets, blockquote markers, table pipes — is not masked but never leaves
-the skeleton, so the model does not see it either. Supporting new inline syntax
-means a new pattern in `mask.py`, not a new sentence in a prompt.
+`config/dnt.txt` are replaced with `⟦n⟧` placeholders — and so is a `⟦n⟧` the
+source itself spells, masked before any of the others so that every placeholder
+downstream is one the pipeline put there. Block syntax — headings, list bullets,
+blockquote markers, table pipes — is not masked but never leaves the skeleton, so
+the model does not see it either. Supporting new inline syntax means a new
+pattern in `mask.py`, not a new sentence in a prompt.
 
 **2. Translate what is new.** Segments already in the translation memory are
 offered back, and taken only if their placeholders still match the segment they
@@ -115,7 +117,7 @@ any error, so a build can gate on it.
 **4. Render by substitution.** Translations are refilled into the original
 skeleton, never re-serialized from a parse tree. This is why front matter, fenced
 code, table alignment, indentation and line endings survive byte for byte — a CI
-corpus of 56 deliberately awkward inputs, 35 Markdown and 21 plain text, asserts
+corpus of 58 deliberately awkward inputs, 36 Markdown and 22 plain text, asserts
 it on Linux and Windows, from the bytes on disk to the bytes written back.
 
 Per-segment errors compound, which is why steps 1 and 4 are code rather than

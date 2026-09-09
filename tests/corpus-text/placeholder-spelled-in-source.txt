@@ -1,0 +1,11 @@
+Chapter One
+
+The manuscript marked a gap with ⟦1⟧ and the editor left it standing.
+
+She wrote https://example.com/notes and then ⟦1⟧ again, one line apart.
+
+Inside the address itself: https://example.com/⟦1⟧ is where it lives.
+
+Two together ⟦2⟧⟦3⟧, a wide one ⟦987654321⟧, and a zero ⟦0⟧.
+
+⟦8 and 9⟧ is not a token at all, and stays as ordinary prose.

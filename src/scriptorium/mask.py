@@ -157,7 +157,31 @@ def _pair_tags(slots, tags):
 def mask(text, dnt=()):
     """Return ``(masked_text, {slot_id: record})``; see the module docstring.
 
-    Inline markup is masked first, then verbatim do-not-translate terms.
+    A source that spells ``⟦n⟧`` itself is masked **first**, before any host
+    syntax, so that every placeholder in the text this returns is one this
+    function produced. Without that step the two are the same characters and
+    nothing downstream can tell them apart. It cost both halves of invariant 2a,
+    measured 2026-09-10:
+
+    *Silently*, where the literal sits inside a span something else masks —
+    ``mask("Use `⟦1⟧` here.")`` stored the whole code span as slot 1's original,
+    and :func:`unmask` then substituted into the document's own words.
+
+    *Loudly*, where it stands in prose — ``mask("A `x` and ⟦1⟧ end.")`` returned
+    ``A ⟦1⟧ and ⟦1⟧ end.``: two tokens with one slot between them. The stray one
+    resolves to nothing, so `checks.py` reported the segment on the `tags` rule
+    at error severity and `skeleton.render_blocks` wrote the untranslated marker
+    over the paragraph. A document whose prose names the token could not be
+    translated at all, and no re-wording by a reviewer would have helped, because
+    the source was never the problem.
+
+    It is not an entry in :data:`INLINE_PATTERNS` because it is not a host
+    syntax: that table says how Markdown writes a link, and this says that the
+    pipeline's own token space belongs to the pipeline. Being first is what makes
+    every later ``out`` in this function unambiguous, so it could not have sat
+    anywhere but the front of that table in any case.
+
+    Inline markup is masked next, then verbatim do-not-translate terms.
     ASCII terms match at word boundaries, so ``Go`` will not match inside
     ``Google``.
     """
@@ -184,7 +208,11 @@ def mask(text, dnt=()):
         tags.append((str(counter[0]), m.group(0)))
         return ph
 
-    out = text
+    # The pre-pass the docstring argues for. `re.sub` never rescans its own
+    # replacement, so this reads raw source and nothing else: after it, every
+    # ⟦n⟧ in `out` is one `take` produced, and that is the property every line
+    # below depends on.
+    out = PH_RE.sub(lambda m: take(m.group(0)), text)
     for name, pat in INLINE_PATTERNS:
         # re.sub scans left to right, so `tags` comes out in document order,
         # which is what the pairing stack needs.
@@ -193,9 +221,25 @@ def mask(text, dnt=()):
     for term in dnt:
         if not term or term not in out:
             continue
+        # A term is masked where the *source* says it occurs, and by this point
+        # `out` also carries tokens this function produced — which `term_pattern`
+        # matches as happily as anything else. A term of `⟦1⟧` swallows a real
+        # slot whole; so does a term of `12`, because
+        # `(?<![A-Za-z0-9])12(?![A-Za-z0-9])` matches inside ⟦12⟧, the brackets
+        # being neither letters nor digits. Refusing the overlapping *match*
+        # rather than the whole term is what keeps `Ashcombe` masked in
+        # `⟦1⟧Ashcombe⟦2⟧`, where a term sits flush against two of them.
+        # Measured 2026-09-10.
+        taken = [m.span() for m in PH_RE.finditer(out)]
+
+        def seat(m, t=term, seats=taken):
+            if any(m.start() < end and start < m.end() for start, end in seats):
+                return m.group(0)
+            return take(t)
+
         # `term_pattern` rather than the rule inline, because `reseat` has to
         # decide "does this term occur here" exactly the way this does.
-        out = term_pattern(term).sub(lambda _m, t=term: take(t), out)
+        out = term_pattern(term).sub(seat, out)
     return out, slots
 
 
@@ -454,7 +498,7 @@ def unrenderable(seg):
 
 
 def unmask(text, slots):
-    """Restore placeholders, following nesting a few levels deep.
+    """Restore placeholders in one scan, so an original is reproduced verbatim.
 
     ``slots`` is the record map :func:`mask` returns, and only that. Accepting
     the older ``{id: str}`` shape here as well was the alternative, and it loses:
@@ -462,17 +506,46 @@ def unmask(text, slots):
     every pair in it silently read as standalone, which is the defect the records
     exist to remove, in a file that looks current. It is refused at the door
     instead — see ``store.load_doc``.
-    """
-    def repl(m):
-        rec = slots.get(m.group(1))
-        return m.group(0) if rec is None else rec["original"]
 
-    out = text
-    for _ in range(5):
-        prev, out = out, PH_RE.sub(repl, out)
-        if out == prev:
-            break
-    return out
+    **The text is scanned once and substituted text is never re-scanned.** Until
+    2026-09-10 this ran ``PH_RE.sub`` over its own *output* five times, to follow
+    a slot whose original holds another slot's token. That case is real and
+    reachable five ways — ``htmltag``, ``linkdest``, ``var`` and ``url`` each
+    match a span an earlier pattern has already put a token inside — so the loop
+    was not dead weight and deleting it was not the repair. What the rounds could
+    not tell it apart from is a slot whose original holds a token the **source**
+    spelled, and there they substituted into the document's own words:
+    ``unmask("⟦1⟧", {"1": {"original": "`⟦1⟧`"}})`` returned five backtick pairs,
+    and on a multi-slot segment the literal id resolved to whichever slot
+    happened to hold it, so the rendered line named a different original
+    entirely. Two lines of this repository's own `AGENTS.md` came out wrong with
+    `lx check` at exit 0.
+
+    So nesting is followed **in the slot map**, where the two are distinguishable,
+    rather than in the text, where they are not. Each slot is resolved once, in
+    increasing id order, and an original that is *itself* a bare token is
+    terminal: that is a placeholder :func:`mask`'s pre-pass lifted out of the
+    source, never a reference to another slot. Increasing id order is the whole
+    of the ordering argument, and it is a fact about :func:`mask` rather than a
+    hope — ``re.sub`` does not rescan its own replacement, so a span can only
+    ever contain a token an *earlier* pattern pass produced, and an earlier pass
+    took a smaller counter. ``tests/test_pipeline.py`` pins that over the corpus
+    instead of leaving it to be re-derived.
+
+    An id with no record is returned verbatim, exactly as before — that is what
+    `docs/contracts/workbench-http.md` divergence (31) reports on, and a slot
+    map that names a *later* id degrades to the same visible token rather than to
+    rewritten bytes.
+    """
+    done = {}
+    # `isdecimal` and not `isdigit`: `"²".isdigit()` is true and `int("²")`
+    # raises, so a key this module did not write sorts last instead of ending
+    # the render with a `ValueError`.
+    for sid in sorted(slots, key=lambda s: (0, int(s)) if s.isdecimal() else (1, 0)):
+        original = slots[sid]["original"]
+        done[sid] = original if PH_RE.fullmatch(original) else PH_RE.sub(
+            lambda m: done.get(m.group(1), m.group(0)), original)
+    return PH_RE.sub(lambda m: done.get(m.group(1), m.group(0)), text)
 
 
 _VARIANTS = re.compile(
