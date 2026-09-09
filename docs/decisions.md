@@ -3,6 +3,360 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-09-10 · The pipeline's own token belongs to the pipeline, and a source that spells it is content
+
+Closing HANDOFF-045. `mask.mask` masks a literal `⟦n⟧` before it masks anything
+else; the do-not-translate pass may no longer swallow a token the masker made;
+and `mask.unmask` scans its input once, following nesting in the slot map rather
+than in the text. Both corpora gain the fixture they were missing, and the
+plain-text one gains the property as well — nothing there had ever rendered a
+document and compared it to the file. Nothing moves: not `STATE_VERSION`, not
+`SCHEMA_VERSION`, not `SEGMENTATION_VERSION`, and neither `contract_version`.
+
+### The defect was two defects, and the package had measured one
+
+`mask` wrote `⟦n⟧` into a string and then read `⟦n⟧` back out of that same
+string, so a document spelling the token itself was indistinguishable from the
+pipeline's own work. Which half you get depends only on where the literal sits.
+
+**Silent**, where it sits inside a span something else masks. The literal ends up
+*inside* an original, and `unmask`'s five rounds substituted into the document's
+own words: `unmask("⟦1⟧", {"1": {"original": "`⟦1⟧`"}})` returned five backtick
+pairs. On a multi-slot segment it is worse than repetition, because the literal
+id resolves to whichever slot happens to hold it and the rendered line then names
+a different original entirely.
+
+**Loud**, where it stands in bare prose. There the literal survives into the
+masked text with no slot behind it — `mask("A `x` and ⟦1⟧ end.")` returns
+`('A ⟦1⟧ and ⟦1⟧ end.', {'1': '`x`'})`. `mask.unresolved` answers `['1']`, so
+`mask.unrenderable` is true, so `checks.py` reports the segment on `tags` at
+**error** severity and `skeleton.render_blocks` writes the untranslated marker
+over the whole paragraph. A document whose prose names the token could not be
+translated at all, and no re-wording by a reviewer would have helped, because the
+source was never the problem.
+
+**The blast radius is 22 segments across four tracked files**, not two lines of
+one. Measured at the parent commit over all 56 tracked Markdown files it had,
+with this project's own parser:
+6252 segments, 42 literal tokens inside segments and 30 in the skeleton where
+they were always free. The 22 that fail identity are in `AGENTS.md` (2),
+`docs/decisions.md` (18), `docs/contracts/status-json.md` (1) and
+`examples/walkthrough.md` (1) — the last being a document this project is meant
+to translate, not merely one it is written in. Five more carry a literal and
+round-trip anyway, because their id collides with no slot; they are the reason a
+regression test framed as "these files round-trip today" would have been
+satisfied by the broken build.
+
+**And there is a second site.** `normalize.polish_rendered` masks the *rendered*
+text, spaces it and unmasks, with `pangu` on by default for zh-TW — it is the
+last stop of `lx render` and of `lx blocks`. So the document corrupted there is a
+*translation* that mentions the token: `跑 ⟦1⟧ 然後看 ⟦1⟧ 。` restored the same
+code span into both. No corpus fixture can reach it, because its input is this
+pipeline's output rather than anybody's source file. The package listed it as
+"check `normalize.py` too, the same five rounds are reachable from a second
+caller"; it is a second *collision*, not a second loop, and it is fixed here by
+construction because `polish_rendered` calls the same `mask`. That is the
+argument for the repair living in `mask.py` rather than at a call site.
+
+**This corrects the record.** 2026-09-03, *The domain of the gate*, item 3 says
+of this defect that "the ids all resolve and the multisets agree, so no gate in
+this family can see it". True of the case it measured — `AGENTS.md`, where every
+literal is inside backticks — and false in general: in bare prose the id resolves
+to nothing, the gate does see it, and it takes the paragraph out of the file. The
+same entry's *Lost, deliberately* clause worried that a fourth gate clause would
+"refuse a document whose source legitimately spells `⟦1⟧` inside backticks". The
+first clause was already refusing the ones that do not. An enumeration read as a
+definition, for the seventh recorded time.
+
+### Whether the loop was the defect, asked first because the package said to
+
+It is not, and establishing that had to come before choosing a repair.
+`unmask`'s five rounds exist for a slot whose original holds *another* slot's
+token, and that is reachable five ways — measured, not reasoned: `htmltag` over
+`code`, `htmltag` over `url`, `linkdest` over `code`, `var` over `code`, and
+`url` over `code`. Each is an ordinary Markdown shape where an earlier pattern
+has already put a token inside the span a later one matches.
+
+*Lost:* "delete the loop, one pass is the whole fix" — the package's own leading
+candidate, offered conditional on exactly this question. It leaves a real token
+unresolved in all five. What the loop could not do is tell those apart from a
+token the source spelled, because in the text they are the same characters.
+
+### The repair: make the two distinguishable, then never re-scan
+
+**`mask` masks a literal first.** One `PH_RE.sub` over the raw source, before any
+host syntax. `re.sub` never rescans its own replacement, so that pass reads raw
+source and nothing else — and after it, *every* `⟦n⟧` in the working text is one
+`mask` produced. It is not an entry in `INLINE_PATTERNS` because it is not a host
+syntax: that table says how Markdown writes a link, and this says the pipeline's
+own token space belongs to the pipeline.
+
+**`unmask` follows nesting in the map, not in the text.** Each slot is resolved
+once, in increasing id order, substituting only what is already resolved; then
+the text is substituted once. The ordering is a fact about `mask` rather than a
+hope — `re.sub` does not rescan its replacement, so a span can only contain a
+token an *earlier* pattern pass produced, and an earlier pass took a smaller
+counter — and it is pinned by a test over the corpus plus the five nesting shapes
+rather than left to be re-derived. One rule cannot be derived from the ordering
+and carries the whole of the distinction: **an original that is itself a bare
+token is terminal**, because that is a placeholder the pre-pass lifted out of the
+source, never a reference. Remove it and `⟦2⟧ and ⟦1⟧` renders `⟦2⟧ and ⟦2⟧`.
+
+### The third change, which the package did not ask for and a sweep found
+
+The do-not-translate pass runs last, over text that already holds tokens, and
+`term_pattern` matches one as happily as anything else. Two shapes reach it: a
+term of `⟦1⟧` swallows a real slot whole, and so does a term of `12`, because the
+word-boundary look-around is `(?<![A-Za-z0-9])12(?![A-Za-z0-9])` and the brackets
+of `⟦12⟧` are neither letters nor digits. Both take a slot out of the map and put
+a terminal literal in its place.
+
+It was invisible before the pre-pass — the five rounds happened to restore the
+round trip while the map was already wrong — and became a hard identity failure
+the moment `unmask` stopped re-scanning. **24863 of 300000** swept strings failed
+on it, every one carrying a dnt list this project's tests had never used. The
+guard refuses the overlapping *match* and never the term, which is the half that
+matters: `Ashcombe` flush between two tokens is still masked, and in
+`Flight 737 leaves from <b>Gate 3</b> now.` with terms `737` and `3`, the gate
+number is masked and the `3` inside `⟦3⟧` is not.
+
+**What that guard actually closed is an invariant 3 breach, not a round trip.**
+On a document holding twelve code spans and nothing else — no literal token
+anywhere — a `config/dnt.txt` naming `3` produced this masked text on the old
+build:
+
+```
+⟦1⟧ ⟦2⟧ ⟦⟦13⟧⟧ ⟦4⟧ ⟦5⟧ ⟦6⟧ ⟦7⟧ ⟦8⟧ ⟦9⟧ ⟦10⟧ ⟦11⟧ ⟦12⟧ and z
+```
+
+`⟦⟦13⟧⟧` is what the model was shown. The five rounds unwound it on the way back,
+so `unmask(*mask(text, dnt)) == text` held and no test anywhere could see it. It
+is the same defect as the rest of this entry seen from the other end — the
+pipeline's token space colliding with something it did not own — and it is the
+reason the guard is part of the repair rather than a tidy-up beside it.
+
+An adversarial lane, given the design and no knowledge of this guard, rebuilt the
+design from the brief and produced the same class of counterexample
+independently — `dnt=['1']`, `dnt=['⟦']`, `dnt=['⟧']`, and the flight sentence.
+All of them hold identity on what shipped.
+
+### The alternatives that lost
+
+*Lost: renumber so a generated id never collides with a literal one.* Cheapest,
+and it makes the round trip hold. It cannot see the loud half: the literal stays
+in the masked text with no slot, so `unresolved` still fires, `lx check` still
+exits 1, and the render still writes the marker over the paragraph. It also
+leaves the model looking at a bare `⟦n⟧` nothing protected — against invariant 3,
+which is why the pre-pass is the right shape and not merely a working one.
+
+*Lost: store fully expanded originals at mask time*, so nesting never exists and
+`unmask` is trivially one `sub`. It works on the text and breaks the map: the
+inner slot is then referenced by nothing, and `mask.reseat` iterates every slot
+in `now` and requires each original to occur exactly as often as the map has ids
+for it. An orphan `` `x` `` occurring only inside `<a title="`x`">` is either
+seated into a claimed span or refused, and either way the segment stops carrying.
+
+*Lost: expand recursively, guarding a cycle with a visiting set.* Correct on
+everything `mask` produces, and it also resolves a map that names a *later* id,
+which the ordered form leaves verbatim. It loses on a property the ordered form
+has for free: a 3000-slot chain raises `RecursionError` from inside `lx render`,
+where the ordered form returns. The adversarial lane implemented this spelling
+from the brief and found four legacy-map shapes that raise — every one of them a
+map today's `mask` really writes into `.lx/state.db`. On the ordered form all
+four return the correct text. A map naming a later id cannot come out of `mask`,
+and when one arrives the ordered form degrades to a visible token, which
+`unresolved` already reports, rather than to rewritten bytes.
+
+*Lost, on 2026-09-03 and not reopened: widen the render gate.* It is the mirror
+of this repair rather than a substitute: with `mask` unambiguous, a source
+spelling `⟦1⟧` leaves no unresolvable id for that gate to false-positive on,
+which is what the earlier entry was protecting.
+
+### What the mutation pass found
+
+Seven mutants, each removing one guard, against the whole suite. Five died at
+once: the pre-pass, the terminal rule, the do-not-translate guard, `unmask` back
+to five rounds, and `unmask` as a flat substitution with no map resolution.
+
+**Two survived, and one of them was a real defect the tests could not see.**
+Spelling the slot order `sorted(slots)` makes it *textual*, where `"10"` sorts
+before `"9"` — so a slot numbered 10 whose original names slot 9 is resolved
+before the thing it names, and `⟦9⟧` is written verbatim into the delivered
+document. It needs ten slots in one segment *and* the nesting to fall after the
+ninth: `` `a` `b` `c` `d` `e` `f` `g` `h` <i title="`j`">k</i> `` does it, and
+that mutant passed the whole suite as it then stood, 2265 tests including every
+one this package had already written. The same inversion repeats at 99/100. The
+second survivor is `isdecimal` → `isdigit`, equivalent on every map `mask` writes
+and not on a hand-edited one — `"²".isdigit()` is true and `int("²")` raises,
+which would end `lx check` with a traceback where invariant 10 promised an exit
+code. Both have a test now and both die.
+
+### Cost, and what it does not do
+
+The translation memory is untouched: `seg_hash` is taken over the segment's
+**source**, never its masked text, so no key moves and every banked entry still
+answers. `STATE_VERSION` stays at 3 because the slot record shape is unchanged.
+
+Slot *ids* do move, for **two** populations and not one. The obvious one is a
+document that spells the token, since the pre-pass numbers first. The other is a
+project whose `config/dnt.txt` holds a term that can match inside a token — a
+digits-only term, or one carrying a bracket — where the guard now declines a
+match the old build took, so the document has one slot fewer and the ids after it
+shift. That second population spells no token anywhere and would be missed by a
+reader who took the first sentence as the whole rule; it is also the population
+whose old masked text carried `⟦⟦13⟧⟧` to the model.
+
+Three consequences, and none is a migration: `lx extract` re-parses on every
+invocation; a stored target written against the old numbering fails the multiset
+comparison in `translate.accept`, so it is **kept rather than deleted** on
+divergence (24)'s path and named in `lx extract`'s report; and `lx check` then
+reports it, which is the point — the exchange this repair makes is a green check
+over a corrupted file for a red check over an untouched one. Outside those two
+populations the masked text and the slot map are byte-identical, asserted over
+all 58 corpus fixtures rather than assumed. The one bit that really does change
+on disk is the `slots` array on a `.lx/tm.*.jsonl` line for an affected document
+— additive, diffable, and in a tracked file.
+
+**`mask.reseat` refuses more than it did, and that is the direction to refuse
+in.** Over the 27 segments of this repository's own tracked Markdown whose source
+spells a token, re-seating a wording from one dnt map into another goes from 3
+placed / 21 refused / **3 silently changed** to 1 placed / 26 refused / **0
+silently changed**. A nested original does not occur verbatim in the unmasked
+literal, and `reseat` seats by content, so it declines rather than guessing — the
+rule it has had since 2026-08-17, now reaching a class of segment it used to
+mis-seat. The cost is that a memory hit or a carryover for one of those segments
+is refused and the wording re-translated. It was measured rather than noticed,
+because nothing tests `mask.reseat` over the corpus:
+`test_every_corpus_segment_reseated_by_accept_still_renders_the_file` has
+`reseated` in its name and calls `accept(seg, seg["masked"], "zh-TW", CFG)` with
+no `slots=`, so the branch that would reach `mask.reseat` short-circuits and what
+it exercises is `normalize.reseat_outer_blanks`. That gap is a scheduled package
+rather than one more thing in this one.
+
+**The migration was run rather than reasoned about.** A project built by the old
+build from `` Use `⟦1⟧` here to mark a gap. ``, translated, banked and rendered,
+then handed to the new build. Old build: `lx render` writes thirteen backtick
+pairs and says nothing. New build: `lx extract` exits 0 and keeps the wording,
+naming the segment and the remedy; `lx check` exits 1 with the `tags` error
+`lost=['2'] extra=['1']` and a `numbering` warning; `lx segments` shows the
+wording, marks it `[stranded]` and says to re-word it; and `lx render` exits 0
+and writes `` 這裡用 `⟦1⟧` 標記一個缺口。 `` — the author's own sentence,
+correctly restored. Nothing is deleted at any point, and the memory line keeps
+its `slots` array. The cost is a red exit code on a segment that had a green one,
+which is the trade this whole entry is about.
+
+**A legacy state is healed by `lx extract` and by nothing else, and this entry
+said so too broadly in draft.** Two different questions hide behind "an old
+`.lx/`", and only one of them is a repair.
+
+Asked of a legacy *slot map* — `unmask(text, {"1": {"original": "`⟦1⟧`"}})` and
+the six other shapes the old `mask` really writes — the ordered resolution leaves
+the literal alone and returns the correct text where the five rounds returned five
+backtick pairs. That is measured, and it is why `lx render` over the re-extracted
+document above writes the author's sentence.
+
+Asked of a legacy *stored target*, it is not a repair and cannot be. The old
+build showed the model `A ⟦1⟧ and ⟦1⟧ end.` — one token standing for two
+different things — and the model faithfully copied both, so the loss is inside
+the wording. Measured: the new build over that state, **without** re-extracting,
+writes byte-for-byte what the old build wrote and `lx check` exits 0 on both.
+Neither better nor worse, and silent. Re-extract and it is loud: `tags`,
+`lost=['2'] extra=['1']`, exit 1, the segment named.
+
+So the honest statement is the narrow one. `lx run` and `lx extract` re-parse on
+every invocation and reach it; a project driven only through `lx check`,
+`lx render`, `lx blocks`, `lx segments` or `lx status` never does, and nothing
+tells its reader to. That is neither a regression nor something this package
+introduced — it is a pre-existing silent state the repair can clear but does not
+force — and `STATE_VERSION` deliberately stays at 3 rather than making every
+project in the world re-extract every document for a defect two narrow
+populations have. It is scheduled instead.
+
+One thing is given up, recorded rather than hidden: a do-not-translate term that
+*contains* a placeholder sequence can no longer be masked as a unit, because
+after the pre-pass it no longer occurs in the text as written. Its placeholder
+half is protected as a slot and its word half becomes ordinary prose, with no
+signal — invariant 3 quietly narrowed for that one shape.
+
+**No rule is added to `checks.py`, and the reason belongs here** so the next
+reader does not go looking for one. After the pre-pass a literal in the source
+has a slot like anything else, so `unresolved` answers empty and there is nothing
+left to report. What has no signal is the do-not-translate term above and the two
+follow-ups below, and none of them is a property of a segment.
+
+### What this leaves for somebody else
+
+Four packages, all found by the adversarial pass over this work and none of them
+in scope here. **HANDOFF-065**: the legacy state above — decide between bumping
+`STATE_VERSION` to 4, which is non-destructive and self-healing but makes every
+project re-extract, and a mechanically decidable legacy-row detector (an id in
+`masked` with no key in `slots`, or an id appearing twice there), measured at 0
+false positives over 1876 corpus segments and catching all 7 affected ones.
+**HANDOFF-062**: `config/dnt.txt` is hand-edited and `load_dnt`
+validates nothing, so a term containing a token is silently unprotected and a
+digits-only term protects a different set of occurrences in every segment.
+Refusing both shapes at the door is decidable, and the glossary's own refusals
+are the precedent. **HANDOFF-063**: nothing in either corpus reaches
+`mask.reseat` — the test whose name says `reseated` calls `accept` without
+`slots=` and exercises `normalize.reseat_outer_blanks` instead — and the pre-pass
+makes `reseat` decline every nested original. **HANDOFF-064**: this defect from
+the target side. `mask.repair_placeholders` accepts `[` as one of its four
+bracket variants and runs on every proposal, so a translation that legitimately
+writes `[1]` or `【1】` has it rewritten into a placeholder reference and is then
+refused for a mismatch. That one lands on long-form prose rather than on
+documentation, which is what this project is for.
+
+### The property the package asked for exists for Markdown and did not for prose
+
+HANDOFF-045 put in scope "the round-trip property extended so it goes through
+`skeleton.render` and not only through skeleton substitution — that gap is what
+hid this". Half right, and the half it is right about is the one that matters
+more here.
+
+**For Markdown the property already existed.** Measured with the fixture added
+and nothing else changed, against the parent commit: two corpus-wide sweeps go
+through `render()` and both fail on it —
+`test_every_corpus_segment_reseated_by_accept_still_renders_the_file` on
+`missing == 4`, the loud half, and
+`test_docio.py::test_document_survives_extract_render_and_write` at byte 209, the
+silent half. What was missing was the fixture. There are zero literal tokens
+anywhere in `tests/corpus/` or `tests/corpus-text/`, which is the other half of
+the package's own "why nothing catches it". `identity_roundtrip` keeps the reason
+its own docstring gives for not calling `render`: a failure there could be a
+masking defect rather than a skeleton one, and the separation is the point.
+
+**For plain text it did not exist, and that is now closed.**
+`test_plaintext_roundtrip_byte_for_byte` is about the skeleton and says so.
+`tests/test_blocks.py::test_every_plain_text_fixture_joins_back` does call
+`do_render` — and what it compares is the block map against the render against a
+second walk, all three of which can agree while all three are wrong. Nothing in
+it holds the source. So no test anywhere rendered a plain-text document and
+compared the result to what the file says, in the format novels arrive in.
+`test_every_plain_text_fixture_renders_back_to_its_own_text` does that now, over
+all 22 fixtures, comparing text rather than bytes because `write_document` always
+writes UTF-8 and a Big5 fixture's rendered bytes are deliberately not its source
+bytes. It is paired with `tests/corpus-text/placeholder-spelled-in-source.txt`,
+whose second and third paragraphs fail on the parent commit — one where a literal
+collides with a masked URL and one where a URL swallows a literal and the restore
+writes the address five times.
+
+Two smaller corrections. The sweep that really is blind on the Markdown side is
+`test_every_corpus_segment_translated_to_itself_is_structurally_clean`, whose
+`_STRUCTURAL` set is `containment`, `escaping` and `eol` while the loud half is
+reported on `tags`; that has a test of its own now. And the package's baseline of
+"above 1932" is its parent commit's number with five packages landed since — the
+tree was at 2234 collected.
+
+### Evidence
+
+`lx extract` then `lx render --fallback` over a copy of `AGENTS.md` is by
+construction a pure round trip, and was not one: two lines differed, at byte
+70612. It is byte-identical now, 98688 bytes, `cmp` exit 0. Identity holds over
+300000 random strings across a 45-atom alphabet and eight do-not-translate lists,
+66430 exhaustive strings over a placeholder-heavy alphabet, and the adversarial
+lane's own 646201-case sweep — zero failures on each, against 22, 1 and 6 for the
+build being replaced, all three controls re-run here rather than quoted.
+
 ## 2026-09-10 · Byte fidelity is a property of the document, and the skeleton queries it
 
 HANDOFF-208, narrowed to its first half. Invariant 2a claims every byte the

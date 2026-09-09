@@ -27,6 +27,8 @@ The properties covered, one file each, and every fixture is named here because
 - `form-feed-chapters.txt` — a form feed used as a chapter separator
 - `line-separator-control-chars.txt` — every character `str.splitlines()`
   breaks on that `str.split("\\n")` does not
+- `placeholder-spelled-in-source.txt` — prose that spells the pipeline's own
+  `⟦n⟧` token, beside a URL that collides with it and inside one that swallows it
 - `trailing-blank-line-only.txt` — a trailing blank line and nothing else
 - `empty.txt`, `whitespace-only.txt`, `blank-lines-only.txt` — the three
   degenerate inputs
@@ -158,6 +160,44 @@ def test_plaintext_roundtrip_byte_for_byte(path):
     # never goes through `split_terminator`, so a CR is still a character here.
     got = b"".join(data[a:b] for a, b in byte_spans(data, encoding, parts))
     assert got == data, _explain(path.name, data, got)
+
+
+@pytest.mark.parametrize("path", [pytest.param(p, id=p.name) for p in _corpus_files()])
+def test_every_plain_text_fixture_renders_back_to_its_own_text(
+        tmp_path, monkeypatch, path):
+    """The same corpus, through `render` — which is where `unmask` lives.
+
+    `test_plaintext_roundtrip_byte_for_byte` above is about the skeleton and says
+    so; `tests/test_blocks.py::test_every_plain_text_fixture_joins_back` does call
+    `do_render`, but what it compares is the block map against the render against
+    a second walk. All three can agree while all three are wrong — it is an
+    internal consistency check, and nothing in it holds the source. So until
+    2026-09-10 nothing anywhere rendered a plain-text document and compared the
+    result to what the file says. `tests/corpus/` did not have that gap, because
+    `tests/test_docio.py::test_document_survives_extract_render_and_write` sweeps
+    the Markdown corpus exactly this way; plain text is the format novels arrive
+    in, and it had no equivalent.
+
+    Compared as **text** rather than bytes, which is not a weakening:
+    `docio.write_document` always writes UTF-8, so a Big5 fixture's rendered bytes
+    are deliberately not its source bytes — see
+    `test_source_encoding_write_would_break_invariant_2a`. Everything the render
+    can get wrong is visible in the decoded string.
+
+    `fallback=True` with nothing translated, so this measures restoration with no
+    deliberate change mixed in: that branch does not call `polish`.
+    """
+    raw = path.read_bytes()
+    root = tmp_path / "proj"
+    root.mkdir()
+    monkeypatch.chdir(root)
+    (root / path.name).write_bytes(raw)
+
+    do_extract(path.name, "zh-TW", CFG)
+    got, _missing = do_render(path.name, "zh-TW", CFG, fallback=True)
+    want, _encoding = decode_document(raw, ENCODINGS, name=path.name)
+    assert got == want, _explain(path.name, want.encode("utf-8"),
+                                 got.encode("utf-8"))
 
 
 def test_corpus_text_is_present_and_holds_only_plain_text():

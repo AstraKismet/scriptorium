@@ -3,6 +3,7 @@
 import os
 import pathlib
 import re
+import subprocess
 import sys
 
 import pytest
@@ -16,6 +17,7 @@ from scriptorium.checks import (  # noqa: E402
 )
 from scriptorium.config import DEFAULT_CONFIG, load_dnt  # noqa: E402
 from scriptorium.mask import (  # noqa: E402
+    PH_RE,
     mask,
     placeholder_ids,
     repair_placeholders,
@@ -23,7 +25,11 @@ from scriptorium.mask import (  # noqa: E402
     unmask,
 )
 from scriptorium.mdparse import parse, render  # noqa: E402
-from scriptorium.normalize import normalize, reseat_outer_blanks  # noqa: E402
+from scriptorium.normalize import (  # noqa: E402
+    normalize,
+    polish_rendered,
+    reseat_outer_blanks,
+)
 from scriptorium.translate import _LANG_TERMS, _system_prompt, accept, parse_reply  # noqa: E402
 
 SAMPLE = """\
@@ -1502,6 +1508,350 @@ def test_masking_is_reversible():
     masked, slots = mask(text, [])
     assert "go build" not in masked
     assert unmask(masked, slots) == text
+
+
+# --- a source that spells the pipeline's own token ---------------------------
+#
+# `mask` wrote ⟦n⟧ and then read ⟦n⟧ back out of its own output, so a document
+# that spells the token itself was indistinguishable from the pipeline's own
+# work. Two failure modes and only one of them was visible; both are invariant
+# 2a. See `docs/decisions.md`, 2026-09-10.
+#
+#   silent — the literal sits inside a span something else masks, so it ends up
+#            *inside* an original. `unmask`'s five rounds then substituted into
+#            the document's own words: `unmask("⟦1⟧", {"1": {"original":
+#            "`⟦1⟧`"}})` returned five backtick pairs, and on a multi-slot
+#            segment the literal id resolved to whichever slot happened to hold
+#            it, so the rendered line named a different original entirely.
+#
+#   loud   — the literal stands in prose, so it survives into the masked text
+#            with no slot behind it. `checks.py` reported the segment on `tags`
+#            at error severity and `skeleton.render_blocks` wrote the
+#            untranslated marker over the whole paragraph. A document whose prose
+#            names the token could not be translated at all.
+#
+# The rows below are every context the masker has a pattern for, and several it
+# has none for — which is where the loud half lives, so leaving them out would
+# test only the half that was already suspected.
+#
+# **The literal ids are chosen to collide.** A source spelling ⟦99⟧ in a segment
+# with three slots round-trips on the unrepaired build too, because the id
+# resolves to nothing and the old loop left it alone — so a row written that way
+# asserts the identity without ever having been able to catch the defect.
+# Measured 2026-09-10: 17 of these 23 rows fail against the parent commit, and
+# the six that do not are the four `must not break` rows at the end, whose
+# literal cannot collide with anything by construction, plus the two
+# do-not-translate rows whose bite is in a neighbouring test's assertion on the
+# slot map rather than in the identity. Written with the ids that read most
+# naturally instead, only 7 of them failed.
+
+
+@pytest.mark.parametrize("context, text, dnt", [
+    # would have caught it: the literal collides with a slot the masker made
+    ("bare prose",             "A `x` and ⟦1⟧ end.", ()),
+    ("code span",              "Use `⟦1⟧` here.", ()),
+    ("code span, two ids",     "(`⟦2⟧粗體⟦1⟧` renders", ()),
+    ("link destination",       "See [the token](⟦1⟧) now.", ()),
+    ("reference destination",  "See [style][⟦1⟧] now.", ()),
+    ("html attribute",         '<span title="⟦1⟧">marked</span>', ()),
+    ("autolink",               "<https://example.com/⟦1⟧>", ()),
+    ("url",                    "See https://example.com/a⟦1⟧ end.", ()),
+    ("variable",               "Set {{⟦1⟧}} now.", ()),
+    ("footnote",               "A note[^⟦1⟧] here.", ()),
+    ("math",                   "Formula $⟦1⟧$ stays.", ()),
+    ("adjacent",               "`x`⟦1⟧⟦2⟧ together", ()),
+    ("reordered",              "`x` and ⟦2⟧ and ⟦1⟧", ()),
+    ("do-not-translate",       "Ashcombe and ⟦1⟧ here.", ("Ashcombe",)),
+    ("dnt term holds a token", "Widget⟦1⟧ here", ("Widget⟦1⟧",)),
+    ("nesting over a literal", '<a title="`⟦1⟧`">link</a>', ()),
+    ("tag pair round one",     "<b>⟦1⟧</b>", ()),
+    # the do-not-translate pass swallowing a token: the identity survives it on
+    # the old build, and `..._never_swallows_a_token_the_masker_made` below is
+    # where the slot map says what really happened
+    ("dnt term is a token",    "c[^1] here", ("⟦1⟧",)),
+    ("dnt term is numeric",
+     "`a` `b` `c` `d` `e` `f` `g` `h` `i` `j` `k` `l` z", ("12",)),
+    # must not break: nothing here can collide, and that is the point — the
+    # repair must not start rewriting a literal that was always safe
+    ("wide id",                "`x` and ⟦987654321⟧ here", ()),
+    ("zero",                   "`x` and ⟦0⟧ here", ()),
+    ("only a token",           "⟦7⟧", ()),
+    ("not a token",            "⟦8 and 9⟧ stays prose", ()),
+])
+def test_a_source_that_spells_a_placeholder_is_reproduced_verbatim(context, text, dnt):
+    masked, slots = mask(text, dnt)
+    assert unmask(masked, slots) == text, context
+
+
+def test_a_slot_whose_original_is_a_token_spells_a_placeholder_and_is_terminal():
+    """The one rule that cannot be derived from the id ordering.
+
+    `unmask` resolves the map in increasing id order, so an original naming a
+    lower id is expanded from what is already resolved. That is right for a
+    nested slot and wrong for a slot the pre-pass made, whose original *is* a
+    token — the source's own characters, not a reference. This source separates
+    them: two literals written in descending order, so the second slot's original
+    names the first slot's id and means nothing of the kind.
+
+    Drop `PH_RE.fullmatch` from `unmask` and this returns `⟦2⟧ and ⟦2⟧`, which
+    is why the assertion is on the text and not on the slot map.
+    """
+    text = "⟦2⟧ and ⟦1⟧"
+    masked, slots = mask(text)
+    assert slots["1"]["original"] == "⟦2⟧"
+    assert slots["2"]["original"] == "⟦1⟧"
+    assert unmask(masked, slots) == text
+
+
+def test_a_do_not_translate_term_never_swallows_a_token_the_masker_made():
+    """The do-not-translate pass runs last, over text that already holds tokens.
+
+    `term_pattern` matches one as happily as anything else, and two shapes reach
+    it: a term that *is* a token, and a term of digits — `12` matches inside
+    ⟦12⟧, whose brackets are neither letters nor digits, so the word-boundary
+    look-around does not stop it. Both took a real slot out of the map. The guard
+    refuses the overlapping match rather than the term, which is the half that
+    matters: a term flush against two tokens is still masked.
+    """
+    masked, slots = mask("c[^1] here", ["⟦1⟧"])
+    assert masked == "c⟦1⟧ here"
+    assert slots["1"]["original"] == "[^1]"
+
+    spans = "`a` `b` `c` `d` `e` `f` `g` `h` `i` `j` `k` `l` z"
+    masked, slots = mask(spans, ["12"])
+    assert slots["12"]["original"] == "`l`"
+    assert unmask(masked, slots) == spans
+
+    masked, slots = mask("`x`Ashcombe`y`", ["Ashcombe"])
+    assert [k for k, v in slots.items() if v["original"] == "Ashcombe"] == ["3"]
+
+    # The guard refuses the overlapping *match*, never the term, so a digit that
+    # really is prose is still protected where it stands. Both `3`s here are the
+    # same term: one is a token's id and one is a gate number.
+    flight = "Flight 737 leaves from <b>Gate 3</b> now."
+    masked, slots = mask(flight, ["737", "3"])
+    assert masked == "Flight ⟦3⟧ leaves from ⟦1⟧Gate ⟦4⟧⟦2⟧ now."
+    assert slots["4"]["original"] == "3"
+    assert unmask(masked, slots) == flight
+
+
+def test_a_paragraph_that_spells_a_placeholder_can_be_translated_at_all():
+    """The loud half, at the two surfaces that reported it.
+
+    Not a `mask`/`unmask` assertion: this one never reached `unmask`, because
+    `checks.py` failed the segment and the render replaced it. A repair that
+    fixed only the substitution would leave `lx check` at exit 1 on every
+    paragraph naming the token, and this is the test that says so.
+    """
+    text = "# Heading\n\nThe token ⟦1⟧ sits in bare prose.\n"
+    nodes, segs = parse(text)
+    for seg in segs:
+        seg["target"] = seg["masked"]
+        tags = [i["message"] for i in check_segment(seg, "zh-TW", CFG, [], [])
+                if i["rule"] == "tags"]
+        assert not tags, f"{seg['id']}: {tags}"
+    out, missing = render({"nodes": nodes, "segments": segs, "lang": "zh-TW"}, CFG)
+    assert missing == 0
+    assert out == text
+
+
+def test_slot_order_is_numeric_and_nine_is_resolved_before_ten():
+    """Found by a mutation round, and it is a real defect rather than a nicety.
+
+    `unmask` resolves the map in increasing id order. Spell that `sorted(slots)`
+    and the order is *textual*, where `"10"` comes before `"9"` — so a slot
+    numbered 10 whose original names slot 9 is resolved before the thing it
+    names, and the token survives verbatim into the delivered document.
+
+    It needs ten slots in one segment *and* the nesting to happen after the
+    ninth, which is why nothing else here reaches it: the mutant passed all 2265
+    tests before this one existed. The same inversion repeats at 99/100 and
+    999/1000; one case is enough, because the rule being tested is that the key
+    is numeric.
+    """
+    text = '`a` `b` `c` `d` `e` `f` `g` `h` <i title="`j`">k</i>'
+    masked, slots = mask(text)
+    assert slots["9"]["original"] == "`j`"
+    assert slots["10"]["original"] == '<i title="⟦9⟧">', (
+        "this fixture no longer produces the 9-inside-10 inversion, so it "
+        "measures nothing — fix the fixture, and check the pattern order")
+
+    restored = unmask(masked, slots)
+    assert restored == text
+    # The harm is not the inequality above but this: a token nobody can resolve,
+    # written into a file. `checks.py` would report it and the reader would see
+    # ⟦9⟧ in their book.
+    assert not placeholder_ids(restored)
+
+
+@pytest.mark.parametrize("key", [
+    "²",            # isdigit, not an integer
+    "1" * 4301,     # isdecimal, and `int()` refuses a decimal string this long
+    "-1", "+1", "1_0", "①", "١٢٣", "007", "", " 1",
+])
+def test_a_slot_key_this_module_never_wrote_does_not_end_the_render(key):
+    """The ordering key sorts these; it must not try to parse them.
+
+    Nothing `mask` writes can produce one — the keys are `str(counter)` — but the
+    map also arrives from `.lx/state.db` and from a hand-editable
+    `.lx/tm.*.jsonl`, and `unmask` sits under `lx check` and `lx render`, where
+    invariant 10 promised an exit code rather than a traceback.
+
+    The 4301-digit row is the one that matters and the one a `"²"`-only test
+    misses: `int()` raises `ValueError` above 4300 digits on every CI leg, and
+    the first version of this function called `int()` on every key. Found by an
+    adversarial pass, and `store.slot_originals` had been wrapping the identical
+    call in `except (TypeError, ValueError)` in this same module's neighbour the
+    whole time.
+    """
+    assert unmask("⟦1⟧", {"1": {"original": "x"}, key: {"original": "y"}}) == "x"
+
+
+def test_slot_order_survives_a_key_it_cannot_parse_without_losing_nine_before_ten():
+    """The two rules do not get to trade against each other.
+
+    Dropping `int()` must not cost the numeric order that
+    `..._nine_is_resolved_before_ten` above depends on, so this asks for both at
+    once: an unparseable key in the map, and the 9-inside-10 inversion still
+    resolved the right way round.
+    """
+    text = '`a` `b` `c` `d` `e` `f` `g` `h` <i title="`j`">k</i>'
+    masked, slots = mask(text)
+    slots["1" * 4301] = {"original": "never referenced"}
+    restored = unmask(masked, slots)
+    assert restored == text
+    assert not placeholder_ids(restored)
+
+
+def test_polishing_a_rendered_line_that_names_the_token_leaves_it_alone():
+    """The second corruption site, and the one no corpus fixture can reach.
+
+    `normalize.polish_rendered` masks the *rendered* text, spaces it, and unmasks
+    — so its input is this pipeline's own output rather than anybody's source
+    file, and `pangu` is on by default for zh-TW (`config.DEFAULT_CONFIG`). It is
+    the last stop of `lx render` and of `lx blocks`.
+
+    So the document that gets corrupted here is a *translation* that mentions the
+    token, which is an ordinary thing for this project's own zh-TW documentation
+    to do. Before the repair the code span beside it was copied over the token:
+    `跑 ⟦1⟧ 然後看 ⟦1⟧ 。` unmasked both to the same slot. It is fixed by
+    construction rather than by a change here — `polish_rendered` calls the same
+    `mask` — which is the argument for the repair living in `mask.py` and not at
+    a call site.
+    """
+    line = "跑 `lx check` 然後看 ⟦1⟧ 。"
+    assert polish_rendered(line, "zh-TW", CFG) == line
+    # and it still does the job it exists for
+    assert polish_rendered("中文abc中文", "zh-TW", CFG) == "中文 abc 中文"
+
+
+def test_a_slot_never_names_a_slot_numbered_after_it():
+    """The premise `unmask`'s increasing-id order rests on, pinned rather than argued.
+
+    `re.sub` does not rescan its own replacement, so a span can only ever contain
+    a token an *earlier* pattern pass produced, and an earlier pass took a smaller
+    counter. That is a fact about `mask` and it is one edit away from stopping
+    being true — a pattern reordered, a second masking pass added — at which
+    point `unmask` would leave a real token in a rendered file with nothing
+    reporting it.
+
+    Asked of the whole corpus *and* of the five shapes that nest, because the
+    corpus alone is nearly free of nesting and would pass vacuously.
+    """
+    nesting = ['<a title="`x`">link</a>', "<a href=https://e.com/p>t</a>",
+               "[t](`x`)", "Set {{`x`}} now.", "See https://e.com/a`b` end.",
+               '<a title="`⟦1⟧`">link</a>']
+    sources = list(nesting)
+    for path in _corpus_files():
+        _nodes, segs = parse(path.read_bytes().decode("utf-8"))
+        sources.extend(seg["source"] for seg in segs)
+
+    nested = 0
+    for source in sources:
+        _masked, slots = mask(source)
+        for sid, rec in slots.items():
+            if PH_RE.fullmatch(rec["original"]):
+                continue                      # a literal the pre-pass lifted out
+            for inner in placeholder_ids(rec["original"]):
+                if inner not in slots:
+                    continue
+                nested += 1
+                assert int(inner) < int(sid), (
+                    f"slot {sid} names {inner}, which `unmask` has not resolved "
+                    f"yet when it reaches {sid}: {source!r}")
+    assert nested >= len(nesting), (
+        "no slot original names another slot, so this test proved nothing — "
+        f"expected at least {len(nesting)} from the shapes above, saw {nested}")
+
+
+def test_reseat_refuses_a_segment_that_spells_a_placeholder_rather_than_guessing():
+    """A behaviour change this package makes, pinned because nothing else sees it.
+
+    `reseat` seats an original **by content**, and after the pre-pass a segment
+    that spells the token has a nested original — `` `⟦1⟧` `` holding the slot the
+    pre-pass made — which does not occur verbatim in the unmasked literal. So it
+    declines, which is the rule it has had since 2026-08-17 reaching a class of
+    segment it used to mis-seat: over the 27 such segments in this repository's
+    own tracked Markdown, re-seating goes from 3 placed / 21 refused / **3
+    silently changed** to 1 placed / 26 refused / **0 silently changed**.
+
+    Nothing in the corpus covers this.
+    `test_every_corpus_segment_reseated_by_accept_still_renders_the_file` has
+    `reseated` in its name and calls `accept` with no `slots=`, so the branch that
+    reaches `mask.reseat` short-circuits and what it exercises is
+    `normalize.reseat_outer_blanks`. Measured 2026-09-10 by an adversarial pass.
+    """
+    source = "Use `⟦1⟧` here."
+    was_masked, was = mask(source, ())
+    _now_masked, now = mask(source, ("Use",))
+    assert was["2"]["original"] == "`⟦1⟧`", "the nested original is the whole case"
+
+    out, why = reseat(was_masked, was, now)
+    assert out is None
+    assert "cannot place" in why, why
+
+    # And the ordinary segment is unaffected: no literal, no nesting, seats fine.
+    plain = "Use `code` here."
+    plain_masked, plain_was = mask(plain, ())
+    _m, plain_now = mask(plain, ("Use",))
+    out, why = reseat(plain_masked, plain_was, plain_now)
+    assert why is None, why
+    assert unmask(out, plain_now) == plain
+
+
+def test_agents_md_spells_a_placeholder_and_survives_extract_and_render(tmp_path):
+    """This repository's own working agreement is one of these documents.
+
+    `lx extract` then `lx render --fallback` is by construction a pure round
+    trip: nothing is translated, so every byte out is a byte in. It was not one.
+    Two lines of `AGENTS.md` came back naming a different original than the
+    source did, with `lx check` at exit 0 — the measurement HANDOFF-045 was
+    written from, and the reason a hand-written fixture was not enough on its
+    own: the file that documents this pipeline is exactly the population.
+
+    Driven through the real commands rather than through `parse`/`render`,
+    because the silent half survived every in-process assertion this file had.
+    """
+    root = pathlib.Path(__file__).resolve().parent.parent
+    raw = (root / "AGENTS.md").read_bytes()
+    spelled = placeholder_ids(raw.decode("utf-8"))
+    assert spelled, ("AGENTS.md no longer spells a placeholder token, so this "
+                     "test measures nothing — fix the test, not the document")
+
+    (tmp_path / "AGENTS.md").write_bytes(raw)
+    env = {**os.environ, "PYTHONPATH": str(root / "src")}
+
+    def _lx(*args):
+        return subprocess.run([sys.executable, "-m", "scriptorium", *args],
+                              cwd=str(tmp_path), env=env, capture_output=True)
+
+    assert _lx("init").returncode == 0
+    for cmd in (("extract", "AGENTS.md", "--lang", "zh-TW"),
+                ("render", "AGENTS.md", "--lang", "zh-TW", "--fallback",
+                 "-o", "out.md")):
+        r = _lx(*cmd)
+        assert r.returncode == 0, r.stderr.decode("utf-8", "replace")
+    assert (tmp_path / "out.md").read_bytes() == raw
 
 
 def test_dnt_respects_word_boundaries():
@@ -3036,7 +3386,10 @@ def test_unknown_tone_falls_back_for_a_language_with_no_brief_at_all():
 # 112k-character manual long enough for a per-block defect to hide in
 # (`long-manual.md`).
 #
-# Three of them are load-bearing rather than decorative.
+# A source that spells the pipeline's own token as ordinary content
+# (`placeholder-spelled-in-source.md`).
+#
+# Four of them are load-bearing rather than decorative.
 #
 # `cr-only-terminators.md` is what separates a real terminator fix from one that
 # special-cases "\r\n": the latter passes every other fixture here and still
@@ -3056,6 +3409,30 @@ def test_unknown_tone_falls_back_for_a_language_with_no_brief_at_all():
 # name, a void element between a real pair. `test_unbalanced_markup_renders`
 # below is the half that also exercises restoration; this parametrization only
 # proves the skeleton survives parsing it.
+#
+# `placeholder-spelled-in-source.md` writes ⟦n⟧ — the pipeline's own token — as
+# ordinary document content, in every context the masker has a pattern for and in
+# several it has none.
+#
+# It is the fixture the corpus was missing rather than a property it could not
+# express, which is worth saying because HANDOFF-045 scheduled the property.
+# Measured against the parent commit, with the file added and nothing else
+# changed: `test_corpus_roundtrips_byte_for_byte` **passes**, because that
+# harness substitutes each segment's *source* and never unmasks — and two sweeps
+# that already go through `render()` fail, one on each half of the defect.
+# `test_every_corpus_segment_reseated_by_accept_still_renders_the_file` fails on
+# `missing == 4`: the loud half, where the literal stands in prose, survives into
+# the masked text with no slot behind it, and the render writes the untranslated
+# marker over four whole paragraphs. `test_docio.py::test_document_survives_
+# extract_render_and_write` fails at byte 209: the silent half, where the literal
+# sits inside a code span and the bytes come back with five backtick pairs where
+# the source had one.
+#
+# `test_every_corpus_segment_translated_to_itself_is_structurally_clean` passes
+# on it either way — `_STRUCTURAL` is `containment`, `escaping` and `eol`, and
+# the loud half is reported on `tags`. That is the gap
+# `test_a_paragraph_that_spells_a_placeholder_can_be_translated_at_all` covers.
+# See `docs/decisions.md`, 2026-09-10.
 #
 # Red line: a fixture is never edited to make a test pass. If one fails, either
 # the parser is wrong or the fixture is not valid input — decide which, and say

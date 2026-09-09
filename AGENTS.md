@@ -107,6 +107,20 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    before a request is built. New syntax support means a new pattern in
    `mask.py`, not a new instruction in a prompt.
 
+   **A source that spells `⟦n⟧` itself is masked first, before any host syntax.**
+   That is not a pattern in the table; it is what makes the table's answers
+   readable at all. Until 2026-09-10 the two were the same characters — `mask`
+   wrote `⟦n⟧` into a string and read `⟦n⟧` back out of that same string — so a
+   literal sitting inside another slot's original was re-substituted inside its
+   own restored text, and one standing in prose survived into the masked text
+   with no slot behind it, where `checks.py` failed the segment on `tags` and the
+   render wrote the untranslated marker over the paragraph. 22 segments of this
+   repository's own tracked Markdown, across four files, and `lx check` at exit 0
+   over the first kind. Because the pre-pass lives inside `mask`, it holds at
+   both sites that mask: the parsers, and `normalize.polish_rendered`, which
+   masks the *rendered* text and so corrupted a translation that merely mentioned
+   the token. `docs/decisions.md`, 2026-09-10.
+
    *Known gap, measured:* `**bold**`, `_italics_`, `~~strike~~` and link-text
    brackets currently reach the model unmasked. The direction is to finish the
    masking, not to weaken the rule.
@@ -452,7 +466,10 @@ src/scriptorium/
                  touches a user document; `byte_spans`, which answers where a
                  run of characters came from in the file
   formats.py     the format registry: extension -> parser, and each format's knobs
-  mask.py        markup protection: ⟦n⟧ slot records, tag pairing, DNT terms, bracket repair
+  mask.py        markup protection: ⟦n⟧ slot records, tag pairing, DNT terms, bracket
+                 repair, and the pipeline's own token space — a source that spells
+                 ⟦n⟧ is masked before any host syntax, so every token downstream is
+                 one this module made
   mdparse.py     markdown -> (skeleton nodes, segments)
   textparse.py   plain text -> the same pair; encoding, paragraph and chapter heuristics
   skeleton.py    walk(): the one iteration of doc["nodes"]. render_blocks() is
@@ -506,7 +523,7 @@ Node — see the invariant below.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 2234 collected, no network. Four are
+python -m pytest -q                 # 2308 collected, no network. Four are
                                     #   conditional on three different things, so
                                     #   which two skip is a property of the machine
                                     #   AND the account: one is POSIX-only, one
@@ -548,7 +565,13 @@ Run tests before proposing a change as finished. They are fast and cover the
 round-trip property, which is the thing most likely to break silently. That
 property is exercised by `tests/corpus/` for Markdown and `tests/corpus-text/`
 for plain text — one input file per property, read as bytes and substituted back
-into the skeleton without going through `render()`. The plain-text corpus is
+into the skeleton without going through `render()`. That is `identity_roundtrip`
+and it is deliberately narrow: a failure through `render` could be a masking
+defect rather than a skeleton one. The corpus is swept through `render` as well,
+by `test_every_corpus_segment_reseated_by_accept_still_renders_the_file` and by
+`test_docio.py` — worth knowing, because on 2026-09-10 a package concluded from
+the sentence above that the render-going property did not exist and scheduled
+building it. It did exist; what was missing was a fixture. The plain-text corpus is
 compared as bytes *through its detected encoding*, because for that format the
 encoding is part of the format. Each directory holds one syntax and a test
 asserts it: a `.txt` dropped into `tests/corpus/` would be read by the wrong
@@ -1067,8 +1090,12 @@ own.
   too**, as `slots` — the originals in id order — so a hit is repaired by the same
   function; a line banked before that field existed is offered only where a
   renumbering could not have moved it, which is decidable because `mask` numbers
-  inline matches before terms and a markup slot's id is a pure function of the
-  source text. `docs/decisions.md`, 2026-08-17.
+  a literal the source spells, then inline matches, then terms — and a markup
+  slot's id is a pure function of the source text. The first of those three is
+  2026-09-10's and it does not weaken the conclusion, because the pre-pass reads
+  the source and nothing else: what the sentence protects against is
+  `config/dnt.txt` moving underneath a banked wording, and terms are still last.
+  `docs/decisions.md`, 2026-08-17 and 2026-09-10.
 
   **A refusal does not delete what the segment already held.** Since 2026-08-17,
   and this is the line between the two: the gate answers whether wording may be
@@ -1393,6 +1420,17 @@ own.
   records from its own masking step; entering a segment without them is what
   multiplies the "green but broken" rate with every format added. The model still
   sees a bare `⟦n⟧`: the type lives beside the slot map, never inside the token.
+
+  **And it must number inside-out.** `mask.unmask` resolves a slot map once, in
+  increasing id order, so a slot whose original holds another slot's token must
+  name a *smaller* id. That is free for `mask.mask` — `re.sub` never rescans its
+  own replacement, so a span can only contain a token an earlier pattern pass
+  produced — and it is not free for a masking step somebody else writes. A format
+  that numbers outside-in puts a bare `⟦n⟧` into a rendered file, which
+  `docs/contracts/workbench-http.md` divergence (31) says is not reliably an
+  `lx check` error. `tests/test_pipeline.py::test_a_slot_never_names_a_slot_numbered_after_it`
+  pins the property for this module's own output and cannot pin it for a format
+  that does not exist yet, so it is stated here. `docs/decisions.md`, 2026-09-10.
 - A `routing` value is a provider name or `{"provider", "model"}`, and the bare
   string is never migrated to the object form — every configuration on disk uses
   it. One function answers which backend and which model a stage uses,
