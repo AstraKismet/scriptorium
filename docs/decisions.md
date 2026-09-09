@@ -3,6 +3,98 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-09-09 · The workbench is rebuilt, and what the frozen contract was frozen for
+
+HANDOFF-204. The 374-line inline page it replaces had grown to 69KB, rebuilt its
+whole segment list with `innerHTML =` on every repaint, and put the rendered
+chapter into one `<pre>` inside a `<dialog>`. The rebuild is React 19 + Zustand +
+virtua under Vite, source in `studio/web/`, **build committed** into
+`src/scriptorium/web/static/`. No endpoint moved and `contract_version` is still
+4: the whole point of freezing the surface in 2026-08-13 was that this could be
+written against something that does not move, and it was.
+
+**What the contract bought, measured rather than claimed.** Every request shape
+was written from the document; nothing was discovered by calling the server and
+looking. The one thing that had to be *added* is a guard against the document and
+the client drifting, and it is three links rather than one:
+`contract.ts`'s `RESPONSE_KEYS` is pinned to its own interfaces by type-level
+assertions that fail `tsc` in both directions; `tests/test_studio_contract.py`
+compares that object against the contract's `**Response**` tables endpoint by
+endpoint, in the **Python** suite, so it does not depend on anybody running
+`npm`; and `tests/test_contract.py` already compared the document against a live
+reply. Interface ≡ array ≡ document ≡ server, and there is no edit that leaves
+all three green while the four disagree. *Lost:* generating the types from the
+Markdown. It makes the type file a build artifact of a document nobody validates,
+and the failure it prevents — a hand translation drifting — is exactly what a
+comparison catches for a tenth of the machinery.
+
+**The build is committed, and that is invariant 1's argument rather than a
+convenience.** *Lost:* building in CI and not tracking the output. The failure
+lands on the four situations the project protects — a bare interpreter, CI, an
+agent sandbox, a locked-down machine — plus the one workflow whose failure is a
+bad release. Committed output has one failure mode and it is silent, so CI
+rebuilds and diffs; two builds of one source were verified byte-identical before
+that check was written, because a non-deterministic bundler would have made it a
+permanently red job. The output is **flat** — three files, fixed names, no
+hashes. Content hashing buys nothing on a transport that sends
+`Cache-Control: no-store` with no `ETag` and closes every connection, and a
+hashed `assets/` subdirectory is what shipped a blank page in a wheel once.
+
+**Five things the page must do that the contract does not say**, because the
+contract describes the wire and not a client. Each was a defect in the page being
+replaced, and each is now a rule in `AGENTS.md`: throw on a non-2xx and never on
+the presence of `error` in a body, since `GET /api/models` and `POST /api/job`
+both answer `200` carrying one; send no `model` and no `provider` unless a person
+chose them, because a seeded box is draft's answer riding on Polish and Repair;
+read every control into a snapshot before the first `await`; label a run bound
+"at most" and never "the next N"; and treat `reset` and `tone` as the two fields
+the server type-checks with nothing.
+
+That last one had been held by a regex over `index.html` asserting the page never
+mentioned either word — a test whose own docstring named the gate it was: *"Adding
+a 'start over' control is therefore an edit to this test as well."* The control
+exists now. The scan moved to `studio/web/src/`, the rule moved from "never" to
+"**once**" — both spellings may appear at a call site in exactly one function —
+and the behaviour it was really about is asserted by an executed test that reads
+the request body: `reset` is the JSON boolean and `tone` is a register a person
+typed. Leaving the old test in place would have been worse than deleting it:
+`static/index.html` is a build artifact now, so it would have passed while
+proving nothing.
+
+**Two maintainer requirements with a complaint behind them, both structural
+rather than cosmetic.** The preview is a page (`#/read`), and it is deliberately
+**not editable** — the text there is rendered bytes, placeholders gone and markup
+restored, which no endpoint accepts as a target; a field there would be a field
+whose contents cannot be saved, so a click goes to the ledger instead. And
+backends and routing are two screens, because they have different save semantics
+and the form that mixed them saved only the first stage changed.
+
+**The two-tier state rule is the one that decides whether this is usable.** Text
+being typed lives in a module-level map outside React, so the virtualized list
+does not re-render on a keystroke; the `<textarea>` is uncontrolled, which makes
+React's open IME defect `#3926` unreachable rather than mitigated; and every
+Enter-shaped shortcut is guarded on `isComposing`, because Enter is the
+candidate-confirmation key in every Chinese input method and this project exists
+to write Chinese. *Lost:* an editor component. CodeMirror 6 is the mature answer
+for a code editor and this is not one, and the only thing it buys — highlighting
+while composing — is exactly the state where a contenteditable editor is least
+reliable with a CJK IME.
+
+**An afternoon went to a defect that was not one, and the lesson is the entry.**
+The ledger rendered no rows in an automated browser, repeatably, with no error
+anywhere. Two plausible causes were found, fixed, and written up with
+measurements — padding on the virtualizer's scroll container, and a synchronous
+store notification from inside a React commit — before a probe showed
+`document.visibilityState === "hidden"`, `requestAnimationFrame` never firing and
+a fresh `ResizeObserver` on `document.body` never delivering. `ResizeObserver` is
+delivered as part of the rendering steps, so a tab that is not being painted
+measures nothing, and a virtualizer that measures nothing renders nothing. Both
+"fixes" were then re-measured in a painting tab: the padding was fine and is
+back. What is kept is the deferral, on its own merits rather than on a
+measurement it never earned, and the platform fact is now in `AGENTS.md`. **A
+symptom reproduced only through an instrument is a fact about the instrument
+until the instrument is checked.**
+
 ## 2026-09-08 · A reviewer at a terminal can read a translation beside its source, and `source` was already two columns
 
 `GET /api/doc` has returned a segment's source beside its target since the

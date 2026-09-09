@@ -508,11 +508,42 @@ command for that yet.
 lx web        # http://127.0.0.1:8787
 ```
 
+![The review workbench: an English source beside its Traditional Chinese
+translation, a validation failure written in the margin, and wording the
+translation memory already holds for a nearly identical
+sentence](docs/workbench.webp)
+
 Source and target side by side, placeholders highlighted, validation failures
 shown as marginalia beside the segment that caused them. Translate, polish,
-repair, check, preview and commit from the toolbar. A field saves when it loses
-focus, and the text is normalized on the way in, including repairing placeholder
-brackets a model mangled.
+repair, check, read, write and commit from the toolbar. A field saves when it
+loses focus, and the text is normalized on the way in, including repairing
+placeholder brackets a model mangled. The segment list is virtualized, so a
+chapter and a five-thousand-segment novel scroll the same way.
+
+**A margin, for the two questions a reviewer could not previously ask.** Beside
+the segment you are on: what the model was actually told about this book's voice
+— the same assembly a request carries, not a second construction of it — and
+wording already banked for a source *nearly* like this one, since the memory
+answers exactly or not at all and the second chapter says *She had not slept*
+where the first said *She had not slept well*. Near matches are advisory and
+there is deliberately no apply button: a fuzzy hit differs in its placeholder set
+by definition, so wording lifted from one segment into another renders a bare
+`⟦2⟧`. Retype what you want and it is your wording.
+
+**Hold and waive, per segment.** *Hold* keeps every queue that selects work off a
+paragraph you are still thinking about — the draft pass, the repair set, the
+polish set — while leaving it editable, and naming it explicitly still reaches
+it. *Waive* answers a finding you have read and decided to stand by: the rule
+keeps its name and its message and reports at `warn` instead of failing the
+build, and it is pinned to the exact wording it was granted over, so editing the
+text drops it.
+
+**Reading is a page, not a dialog.** *Read* shows the chapter as it renders —
+continuous prose, in a reading measure, with untranslated paragraphs marked and
+failing ones ruled in red down the margin. Clicking a paragraph takes you to it
+in the ledger, and coming back lands on the same paragraph; the address carries
+it, so a reload does too. Sentence boundaries come from Python, so what you see
+here is the same rule `lx sentences` and CI see.
 
 **One paragraph at a time, and a source that changed under you.** Each row
 carries its own small button, labelled with the stage it will send — `polish` on
@@ -531,10 +562,16 @@ to be told which register and is deliberately not a button.
 **Backends are chosen here too, without editing a file.** The toolbar picks the
 backend and — from a list the backend itself publishes — the model for the next
 run; left alone, the model box sends nothing and each stage uses its own
-configured model. *Backends…* adds or edits one: `kind`, `base_url`, `model`,
-`api_key_env`, `timeout`, `temperature`, and which backend runs `draft`,
-`polish` and `repair`. A local runtime, a server elsewhere on your network and a
-cloud API are all reachable from that form.
+configured model. *Backends* adds or edits a profile: `kind`, `base_url`,
+`model`, `api_key_env`, `timeout`, `temperature`, `max_tokens`, `retries`. A
+local runtime, a server elsewhere on your network and a cloud API are all
+reachable from that form.
+
+*Routing* is a **separate screen**, and the split is not cosmetic. What a profile
+contains and which profile serves each stage are two different questions with two
+different save semantics — per-field writes against one named provider, versus
+three independent keys — and the one form that mixed them saved only the first
+stage you changed.
 
 Every rule it enforces is the CLI's. The page sends one key per request and
 renders whatever `lx config set` would have said, so the two surfaces cannot
@@ -549,7 +586,12 @@ credential are sent. A backend cannot be deleted from the browser; that is
 `lx config unset` or the file.
 
 It is a shell over the same functions the CLI calls, so there is no second
-implementation to drift.
+implementation to drift. Its source is a React application under `studio/web/`
+and its **build is committed** into the Python package, so `lx web` works from a
+bare checkout with no Node installed — which is the same requirement that keeps
+the pipeline free of compiled dependencies. It reads the contract version at
+startup and refuses to run against a number it does not know, rather than
+half-working against a surface that has moved underneath it.
 
 It binds to loopback, and loopback was never the whole answer: any page in your
 browser can POST to a local port. So every path it is given — the source, and the

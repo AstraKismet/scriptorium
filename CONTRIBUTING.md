@@ -18,12 +18,35 @@ pip install -e .          # optional; provides the `lx` command
 There are no runtime dependencies to install, and there will never be a compiled
 one. Without installing, `python -m scriptorium` works in place of `lx`.
 
+**The workbench needs nothing either.** Its build is committed into the package,
+so `lx web` works from this checkout as it stands. Node is only for changing it:
+
+```bash
+cd studio/web
+npm ci
+npm run dev        # a dev server on :5173, proxied to a running `lx web`
+```
+
 ## Before you propose a change as finished
 
 ```bash
-python -m pytest -q             # 2162 collected; no network, no model
+python -m pytest -q             # 2187 collected; no network, no model
 python -m ruff check src tests
 ```
+
+If you changed anything under `studio/web/`, three more, and the last one is the
+one people forget:
+
+```bash
+cd studio/web
+npm run typecheck
+npm test
+npm run build      # and commit what it writes into src/scriptorium/web/static/
+```
+
+The built bundle is tracked on purpose — see *Where things live* — so a source
+change that is not rebuilt ships the previous page. CI compares the two and fails
+if they have come apart.
 
 Both must be clean, and CI runs them on Python 3.9 and 3.12 across Ubuntu and
 Windows. The cross-platform half is not ceremony: line-ending fidelity is
@@ -90,8 +113,16 @@ src/scriptorium/
   config.py    layered config, glossary, do-not-translate list
   translate.py batching, concurrency, JSON tolerance, per-segment retry
   providers/   openai_compat (primary), anthropic
-  web/         local review workbench, a shell over cli.py
+  web/         the workbench's HTTP surface, a shell over cli.py — and
+               static/, which is studio/web/'s committed build output
+studio/web/    the workbench itself: React, built with Vite, source only
 ```
+
+**`src/scriptorium/web/static/` is generated. Do not edit it by hand.** The
+frontend's source is `studio/web/`, and its build is committed here rather than
+produced at install time because `lx web` has to work on a bare interpreter, in
+CI, inside an agent sandbox and on a locked-down machine — the same four
+situations invariant 1 protects the pipeline's dependency list for.
 
 `cli.py` is the product. The skill, the adapters and the web UI are all callers
 of it, and none of them may implement pipeline logic of its own — if a surface

@@ -19,3 +19,9 @@ tests/corpus/** -text
 # reviewable patch and a screen of noise.
 tests/corpus-text/** -text -diff
 tests/corpus-text-undecodable/** -text -diff
+
+# Images are bytes. `text=auto` guesses, and a guess that goes the wrong way on a
+# screenshot rewrites it into something no viewer opens.
+*.webp binary
+*.png binary
+*.gif binary
