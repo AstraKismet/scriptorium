@@ -4,17 +4,34 @@
 else — the same rule as `tests/corpus/`, and for the same reason: every file in
 it is collected as a fixture, so the explanation lives here.
 
-The properties covered, one file each: hard-wrapped prose separated by blank
-lines; one paragraph per line; indent-marked paragraphs with no blank lines; a
-block set off by a uniform indent, so that its continuation lines carry one;
-CRLF; terminators already mixed; no trailing newline; CR-only terminators; a
-UTF-8 byte-order mark; UTF-16 with a mark in both byte orders; Windows Big5;
-chapter headings beside the lines that must not be read as one; scene breaks and
-bare numerals; a form feed used as a chapter separator; every character
-`str.splitlines()` breaks on that `str.split("\\n")` does not; a trailing blank
-line and nothing else; and the three degenerate inputs.
+The properties covered, one file each, and every fixture is named here because
+`test_the_module_docstring_names_every_plain_text_fixture` asserts it:
 
-Three of them are load-bearing rather than decorative.
+- `wrapped-paragraphs.txt` — hard-wrapped prose separated by blank lines
+- `one-paragraph-per-line.txt` — one paragraph per line, no blank lines
+- `indented-paragraphs.txt` — indent-marked paragraphs with no blank lines
+- `indented-verse.txt` — a block set off by a uniform indent, so its
+  continuation lines carry one
+- `crlf.txt` — uniformly CRLF
+- `mixed-terminators.txt` — terminators already mixed, the recorded residual
+- `cr-only-terminators.txt` — CR-only, which is text and not a terminator
+- `no-trailing-newline.txt` — the file that does not end with a line break
+- `bom-utf8.txt`, `bom-utf16-le.txt`, `bom-utf16-be.txt` — byte-order marks
+- `big5-cp950.txt` — Windows Big5
+- `big5-duplicate-spellings.txt` — Big5 spelled the way the duplicate-encoding
+  block spells it
+- `chapter-headings.txt` — chapter titles beside the lines that must not read
+  as one
+- `scene-breaks.txt` — scene breaks and bare numerals, which have nothing to
+  translate
+- `form-feed-chapters.txt` — a form feed used as a chapter separator
+- `line-separator-control-chars.txt` — every character `str.splitlines()`
+  breaks on that `str.split("\\n")` does not
+- `trailing-blank-line-only.txt` — a trailing blank line and nothing else
+- `empty.txt`, `whitespace-only.txt`, `blank-lines-only.txt` — the three
+  degenerate inputs
+
+Four of them are load-bearing rather than decorative.
 
 `big5-cp950.txt` contains 裏, which Python's `big5` codec rejects and `cp950`
 accepts. Before the candidate list was measured on 2026-08-02 this file fell
@@ -31,6 +48,18 @@ that already begins U+FEFF with the bare `utf-16` codec emits two marks.
 "Does a blank line exist" is true of it, and would join its two one-line
 paragraphs into a single segment.
 
+`big5-duplicate-spellings.txt` carries all ten sequences of the Big5
+duplicate-encoding block — the ones `CP950_NOT_REVERSIBLE` below pins — and it
+is the fixture the whole of HANDOFF-208 exists for. It is built so they land on
+*both* sides of the segment/skeleton line: the box rules have no letters and
+become skeleton, while 十 (`A2CC`) and 卅 (`A2CE`) are ordinary translatable
+prose and become segments. That split is the measurement that decided the
+design on 2026-09-10 — a representation that keeps bytes on raw nodes alone
+cannot reach two of the ten in plain text and, measured, none of the ten in
+Markdown, where the whole chapter merges into one segment. It also fails the
+assertion this file used to make, `_substituted(text).encode(encoding) == data`,
+which is why that assertion is now a byte-span comparison instead.
+
 Red line, inherited from `tests/corpus/`: a fixture is never edited to make a
 test pass. If one fails, either the parser is wrong or the fixture is not valid
 input — decide which, and say so in the commit.
@@ -38,6 +67,7 @@ input — decide which, and say so in the commit.
 
 import os
 import pathlib
+import sqlite3
 import sys
 
 import pytest
@@ -46,10 +76,16 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from scriptorium import formats  # noqa: E402
 from scriptorium.checks import check_segment  # noqa: E402
-from scriptorium.cli import do_extract, do_render  # noqa: E402
+from scriptorium.cli import do_bytes, do_extract, do_render  # noqa: E402
 from scriptorium.config import DEFAULT_CONFIG, TEXT_DEFAULTS  # noqa: E402
-from scriptorium.docio import UndecodableDocument, decode_document, write_document  # noqa: E402
+from scriptorium.docio import (  # noqa: E402
+    UndecodableDocument,
+    byte_spans,
+    decode_document,
+    write_document,
+)
 from scriptorium.normalize import normalize  # noqa: E402
+from scriptorium.store import SourceBytesMissing  # noqa: E402
 from scriptorium.textparse import describe, parse  # noqa: E402
 
 CORPUS = pathlib.Path(__file__).parent / "corpus-text"
@@ -74,8 +110,8 @@ def _explain(name, expected, actual):
             f"  lengths : expected {len(expected)}, actual {len(actual)}")
 
 
-def _substituted(text, opts=None):
-    """Put each segment's source back into the skeleton.
+def _parts(text, opts=None):
+    """The skeleton's ordered partition of ``text``: one string per node.
 
     Deliberately not through ``render()``, which also unmasks and normalizes: a
     failure there could be a masking defect rather than a skeleton defect, and
@@ -84,22 +120,43 @@ def _substituted(text, opts=None):
     """
     nodes, segs = parse(text, (), opts if opts is not None else OPTS)
     by_id = {s["id"]: s for s in segs}
-    return "".join(n["v"] if n["t"] == "raw" else by_id[n["id"]]["source"] for n in nodes)
+    return [n["v"] if n["t"] == "raw" else by_id[n["id"]]["source"] for n in nodes]
+
+
+def _substituted(text, opts=None):
+    """Put each segment's source back into the skeleton."""
+    return "".join(_parts(text, opts))
 
 
 # ── the skeleton guarantee, on bytes (invariant 2a) ──────────────────────────
 
 @pytest.mark.parametrize("path", [pytest.param(p, id=p.name) for p in _corpus_files()])
 def test_plaintext_roundtrip_byte_for_byte(path):
-    """Detect, decode, parse, substitute, re-encode — and get the file back.
+    """Detect, decode, parse, and slice the file back out of itself.
 
-    Bytes on both ends rather than text, because for plain text the encoding is
-    part of the format: a parser that round-trips the characters and loses the
-    codec has not preserved the file.
+    Two assertions, and separating them is the point. The first is about the
+    *parser*: the nodes are an exact ordered partition of the text it was
+    handed, so their concatenation is that text. The second is about the
+    *bytes*: each part's own span of the file, taken with :func:`byte_spans`,
+    reassembles the file exactly.
+
+    **Neither of them re-encodes, and that is what changed on 2026-09-10.**
+    This test used to assert ``_substituted(text).encode(encoding) == data``,
+    which conflates the two properties and is *false for a correct parser*
+    whenever the codec is not injective: cp950 has ten sequences whose
+    character re-encodes to different bytes, so the old form could only ever
+    pass on files that happen to avoid them, and
+    ``big5-duplicate-spellings.txt`` — added the same day — makes that concrete.
+    Re-encoding was the lossy step, never the guarantee; this is the genuine
+    byte-identity the round trip always claimed.
     """
     data = path.read_bytes()
     text, encoding = decode_document(data, ENCODINGS, name=path.name)
-    got = _substituted(text).encode(encoding)
+    parts = _parts(text)
+    assert "".join(parts) == text, f"{path.name}: the nodes do not partition the text"
+    # No `eol` argument: this test calls `parse` on the decoded text directly and
+    # never goes through `split_terminator`, so a CR is still a character here.
+    got = b"".join(data[a:b] for a, b in byte_spans(data, encoding, parts))
     assert got == data, _explain(path.name, data, got)
 
 
@@ -110,6 +167,29 @@ def test_corpus_text_is_present_and_holds_only_plain_text():
     names = [p.name for p in _corpus_files()]
     assert names, "tests/corpus-text/ is empty"
     assert all(n.endswith(".txt") for n in names), f"non-.txt fixtures: {names}"
+
+
+def test_the_module_docstring_names_every_plain_text_fixture():
+    """The mirror of `tests/test_pipeline.py::test_the_roster_above_names_every_fixture`.
+
+    Plain text has never had this guard and Markdown has had one since
+    2026-08-21, which is the whole reason to add it: that day the Markdown
+    roster was found describing 27 properties for 35 files, so eight fixtures
+    had been added with no record of what they were for. Nothing was stopping
+    the same drift here, and a fixture nobody can explain is a fixture nobody
+    dares delete.
+
+    Deliberately the weakest decidable check — the *name* has to appear.
+    Whether the sentence around it is still true is judgement, and invariant 4
+    runs the line between the two.
+    """
+    roster = pathlib.Path(__file__).read_text(encoding="utf-8")
+    roster = roster[:roster.index('"""', roster.index('"""') + 3)]
+    unnamed = sorted(p.name for p in _corpus_files() if p.name not in roster)
+    assert not unnamed, (
+        f"tests/corpus-text/ holds fixtures this module's docstring does not "
+        f"name: {unnamed}. Add each with what it is the one input file for — the "
+        f"directory holds no README because anything in it would be collected.")
 
 
 def test_markdown_corpus_holds_only_markdown():
@@ -165,9 +245,15 @@ def test_cp950_decode_is_not_injective_and_the_characters_are_what_survives():
     characters a BBS-era Traditional Chinese `.txt` rules its chapters with, so
     this is the primary corpus, not a corner. What the reader gets is still
     right, because rendering encodes UTF-8 and never goes back through cp950 —
-    the characters survive and the bytes would not. Byte-exactness here needs
-    raw skeleton nodes held as bytes rather than as JSON text, which is
-    scheduled, and this test is what will fail loudly when it lands.
+    the characters survive and the bytes would not.
+
+    **This test said it would fail when the byte work landed. It did not, and
+    the sentence was wrong rather than the outcome.** What HANDOFF-208 changed
+    on 2026-09-10 is where the bytes come *from*: the state keeps the file
+    itself and slices it, so nothing re-encodes and the property below is
+    untouched. Re-encoding is still lossy, still the reason the design is what
+    it is, and still exactly what a future caller must not reach for — which is
+    what this test now guards rather than predicts.
     """
     for raw, (char, reencoded) in CP950_NOT_REVERSIBLE.items():
         assert raw.decode("cp950") == char
@@ -209,8 +295,18 @@ def test_source_encoding_write_would_break_invariant_2a(tmp_path):
     Nothing writes a document back in its source encoding today; `write_document`
     takes no encoding at all. If it ever grows one and honours a document's
     recorded `encoding`, a Big5 novel's chapter rules become different bytes on
-    every save. Delete this test only together with the BLOB work that makes
-    byte-exactness real — not to make a new feature's tests pass.
+    every save.
+
+    **HANDOFF-208's red line permitted deleting this test once byte-exactness
+    was real. It landed on 2026-09-10 and the test stays**, because what it
+    guards was never the missing byte work: it is the standing rule that output
+    is always UTF-8 (`docs/decisions.md`, "Rendered output is always UTF-8"),
+    which 208 explicitly did not reopen. The byte guarantee now comes from
+    slicing the file the state kept, so no path re-encodes and both assertions
+    below are as true as they were — and the change that would break them is
+    the same change it always was. Deleting it would have removed the only
+    guard on `write_document`'s signature to celebrate a package that did not
+    touch it.
     """
     out = tmp_path / "ruled.txt"
     source = "╭══════╮\n"
@@ -715,3 +811,134 @@ def test_the_text_defaults_are_one_literal_shared_with_the_scaffolded_config():
 def test_the_untranslated_marker_is_the_format_s_own():
     assert "<!--" in formats.by_name("markdown").marker
     assert "<!--" not in TEXT.marker
+
+
+# ── HANDOFF-208: the skeleton gives back the source bytes (invariant 2a) ─────
+
+def _residue_document(eol="\n"):
+    """A document carrying every sequence `CP950_NOT_REVERSIBLE` pins.
+
+    Generated from that table rather than written out, so a sequence added to it
+    joins this document without anyone remembering to. The shape puts the
+    letterless rules on the skeleton side and the two translatable characters —
+    十 and 卅 — inside prose, which is the split the design turns on.
+    """
+    rules = [raw for raw, (char, _) in CP950_NOT_REVERSIBLE.items()
+             if not char.isalnum() and char not in "十卅"]
+    prose = [raw for raw in CP950_NOT_REVERSIBLE if raw not in rules]
+    blocks = [b"".join(rules)]
+    blocks += ["他走了".encode("cp950") + raw + "年，屋裏很冷。".encode("cp950")
+               for raw in prose]
+    body = ("第一章".encode("cp950") + b"\n\n"
+            + b"\n\n".join(blocks) + b"\n")
+    return body.replace(b"\n", b"\r\n") if eol == "\r\n" else body
+
+
+@pytest.mark.parametrize("path", [pytest.param(p, id=p.name) for p in _corpus_files()])
+def test_the_stored_skeleton_gives_back_the_source_bytes(tmp_path, monkeypatch, path):
+    """Criterion 3, through the real store: extract, then ask for the bytes.
+
+    Four assertions, and they catch different things — which is the whole reason
+    there are four. **(A)** the bytes of every position concatenate to the file.
+    **(B)** the spans are a contiguous cover: the first starts at 0, the last
+    ends at the length of the file, and each one begins where the last ended.
+    **(C)** and **(D)**, where the document is uniformly CRLF, no position's
+    bytes end with a lone ``\r`` and none begins with a lone ``\n``.
+
+    C and D are not decoration. A join-level oracle cannot see two adjacent
+    positions whose errors cancel, and the CRLF boundary is exactly that shape:
+    `docio.split_terminator` deletes one CR per line *before* the parser sees
+    the text, so a reconciliation that gives the CR to the position on the wrong
+    side still produces a contiguous cover of the whole file and still passes
+    (A) and (B). Measured 2026-09-10 against a deliberately reversed
+    reconciliation: (A) passes and (C)/(D) fire on every CRLF document. They are
+    the byte-level twins of `tests/test_cli.py`'s assertion that no node value
+    carries a CR, and they use no function from the implementation.
+    """
+    raw = path.read_bytes()
+    monkeypatch.chdir(tmp_path)
+    src = tmp_path / path.name
+    src.write_bytes(raw)
+
+    doc, _reused, _rejected, _notes = do_extract(str(src), "zh-TW", CFG)
+    rows = do_bytes(str(src), "zh-TW", CFG)
+
+    got = b"".join(r["bytes"] for r in rows)
+    assert got == raw, _explain(path.name, raw, got)                       # (A)
+
+    # An empty file parses to no nodes at all, which is the correct cover of
+    # nothing — hence the `or not raw` rather than a skip: the degenerate input
+    # is a fixture on purpose and this is what it should say.
+    assert (rows[0]["start"] == 0 and rows[-1]["stop"] == len(raw)          # (B)
+            if rows else not raw)
+    assert all(a["stop"] == b["start"] for a, b in zip(rows, rows[1:]))
+
+    if doc["eol"] == "\r\n":
+        assert not any(r["bytes"].endswith(b"\r") for r in rows), \
+            "a position ends on the CR whose LF belongs to the next one"   # (C)
+        assert not any(r["bytes"].startswith(b"\n") for r in rows), \
+            "a position begins on an LF whose CR was left behind"          # (D)
+
+
+@pytest.mark.parametrize("eol", ["\n", "\r\n"], ids=["lf", "crlf"])
+@pytest.mark.parametrize("suffix", [".txt", ".md"], ids=["text", "markdown"])
+def test_extract_stores_the_file_and_not_a_re_encode_of_it(
+        tmp_path, monkeypatch, suffix, eol):
+    """The one silent failure the design admits, and the fixture that sees it.
+
+    The realistic defect is a writer that hands the state ``text.encode(encoding)``
+    instead of the bytes it read. Every span is then computed correctly against
+    the *canonical* spelling, the cover is contiguous, the join equals the blob,
+    and nothing in the query can tell. What catches it is a document that
+    actually carries a non-canonical spelling — and measured 2026-09-10, **none
+    of the tracked fixtures did before `big5-duplicate-spellings.txt`**: the
+    corpus was 0 of 55 against that mutant, because `big5-cp950.txt` carries
+    none of the ten and everything else is UTF-8.
+
+    Markdown is here for the maintainer's settled decision that it is in scope.
+    `formats.markdown.encodings` is a *default*, not a constraint, so one config
+    line puts a `.md` on cp950 — and measured, `mdparse` merges this document
+    into one segment and one raw node, putting **none** of the ten sequences on
+    the skeleton side. A representation that kept bytes on raw nodes would
+    deliver nothing at all here; this one is exact, because what it slices is
+    the document.
+    """
+    monkeypatch.chdir(tmp_path)
+    raw = _residue_document(eol)
+    src = tmp_path / f"book{suffix}"
+    src.write_bytes(raw)
+    fmt = "markdown" if suffix == ".md" else "text"
+    cfg = dict(CFG, formats={**CFG.get("formats", {}), fmt: {"encodings": ["cp950"]}})
+
+    doc, _reused, _rejected, _notes = do_extract(str(src), "zh-TW", cfg)
+    assert doc["encoding"] == "cp950"
+    assert b"".join(r["bytes"] for r in do_bytes(str(src), "zh-TW", cfg)) == raw
+
+    # The premise, asserted rather than assumed: re-encoding really is lossy
+    # over this document, so the assertion above is not true for free.
+    text, _enc = decode_document(raw, ("cp950",), name=src.name)
+    assert text.encode("cp950") != raw
+    assert all(seq in raw for seq in CP950_NOT_REVERSIBLE), "the table drifted"
+
+
+def test_the_bytes_query_refuses_a_row_written_before_the_column(tmp_path, monkeypatch):
+    """A missing byte answer is refused by name, never guessed at.
+
+    `store.source_bytes` raises rather than returning `None`, because `b""` is a
+    real answer for an empty file and a caller that has to tell those apart will
+    one day forget. This is also why `STATE_VERSION` did not move for this work:
+    an older row is not *wrong*, which is that constant's own bar — it simply
+    has no byte answer, and says so in a sentence naming the command that fills
+    one in.
+    """
+    monkeypatch.chdir(tmp_path)
+    src = tmp_path / "book.txt"
+    src.write_bytes((CORPUS / "big5-duplicate-spellings.txt").read_bytes())
+    do_extract(str(src), "zh-TW", CFG)
+
+    with sqlite3.connect(os.path.join(".lx", "state.db")) as conn:
+        conn.execute("UPDATE documents SET source = NULL")
+    with pytest.raises(SourceBytesMissing) as e:
+        do_bytes(str(src), "zh-TW", CFG)
+    assert "lx extract" in str(e.value)
+    assert "--reset" not in str(e.value).split("do not pass")[0]

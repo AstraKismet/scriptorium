@@ -37,7 +37,7 @@ STATE_VERSION = 3
 #: hatch: a whole-database refusal makes ``--reset`` unreachable, so a content
 #: bump would force every document in the project to be re-extracted at once,
 #: and the message that promises otherwise would become false.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 #: Seconds a writer waits for another process's write lock before giving up.
 #: `lx web` and `lx run` in one directory is the case this exists for; WAL keeps
@@ -292,7 +292,22 @@ CREATE INDEX segments_carry ON segments (doc_id, lang, content_hash);
 #: creation of a fresh database, which is why a new file (``user_version`` 0)
 #: and an upgrade run through the same loop rather than through two code paths
 #: that would have to be kept agreeing.
-_MIGRATIONS = [lambda conn: conn.executescript(_SCHEMA)]
+#:
+#: The consequence, once there is more than one step: ``_SCHEMA`` above is the
+#: shape of a version **1** database and is never edited again. A new column is
+#: a new entry here, and a fresh file gets it by running the same ALTER an
+#: existing one does. Editing ``_SCHEMA`` instead makes the fresh path and the
+#: upgrade path disagree — measured 2026-09-10, a new database then fails with
+#: ``duplicate column name`` on its own creation.
+_MIGRATIONS = [
+    lambda conn: conn.executescript(_SCHEMA),
+    # 1 -> 2: the document's own bytes, beside the encoding that reads them.
+    # Additive and nullable on purpose. An existing row keeps every field it
+    # had and simply has no byte answer until the next `lx extract` fills one
+    # in, so this costs no re-extract and no `STATE_VERSION` bump: nothing
+    # about an older row is *wrong*, which is that constant's own bar.
+    lambda conn: conn.execute("ALTER TABLE documents ADD COLUMN source BLOB"),
+]
 
 
 def _migrate(conn):
@@ -930,6 +945,44 @@ def prior_targets(src, lang):
         conn.close()
 
 
+class SourceBytesMissing(LookupError):
+    """This document's state predates the column that keeps its bytes."""
+
+
+def source_bytes(src, lang):
+    """The document's own bytes as ``lx extract`` read them.
+
+    Raises :class:`SourceBytesMissing` for a row written before this column
+    existed — never returns ``None`` for it, because ``b""`` is a real answer
+    (an empty file) and a caller that has to tell those apart will one day
+    forget. The distinction is also why this is a column rather than a key in
+    ``meta``: ``meta`` is JSON text, and a JSON file cannot hold a byte that is
+    invalid in UTF-8, which is the whole argument the BLOB column beside it was
+    bought with.
+
+    Read on its own rather than inside :func:`load_doc`, because all
+    twenty-four ``load_doc`` call sites ask questions about characters and none
+    of them wants a megabyte it will not look at.
+    """
+    conn = _connect(create=False)
+    if conn is None:
+        _no_state(src, lang)
+    try:
+        row = conn.execute("SELECT source FROM documents WHERE doc_id=? AND lang=?",
+                           (doc_id(src), lang)).fetchone()
+        if row is None:
+            _no_state(src, lang)
+        if row[0] is None:
+            raise SourceBytesMissing(
+                f"state for {src} [{lang}] was written before it kept the document's "
+                f"own bytes, so there is nothing to answer from — run `lx extract "
+                f"{src} --lang {lang}` to fill them in. Translations already in the "
+                f"state are carried over by content hash, so do not pass --reset.")
+        return row[0]
+    finally:
+        conn.close()
+
+
 def save_doc(src, lang, doc):
     """Replace a document's stored state entirely: meta, skeleton and segments.
 
@@ -941,16 +994,18 @@ def save_doc(src, lang, doc):
     # leave state that reads as pre-record.
     doc["state_version"] = STATE_VERSION
     did = doc_id(src)
-    meta = {k: v for k, v in doc.items() if k not in ("nodes", "segments", "state_version")}
+    meta = {k: v for k, v in doc.items()
+            if k not in ("nodes", "segments", "state_version", "source_bytes")}
     conn = _connect()
     try:
         with conn:
             conn.execute("DELETE FROM nodes WHERE doc_id=? AND lang=?", (did, lang))
             conn.execute("DELETE FROM segments WHERE doc_id=? AND lang=?", (did, lang))
             conn.execute(
-                "INSERT OR REPLACE INTO documents (doc_id, lang, state_version, meta) "
-                "VALUES (?,?,?,?)",
-                (did, lang, STATE_VERSION, json.dumps(meta, ensure_ascii=False)))
+                "INSERT OR REPLACE INTO documents (doc_id, lang, state_version, meta, "
+                "source) VALUES (?,?,?,?,?)",
+                (did, lang, STATE_VERSION, json.dumps(meta, ensure_ascii=False),
+                 doc.get("source_bytes")))
             conn.executemany(
                 "INSERT INTO nodes (doc_id, lang, pos, raw, body) VALUES (?,?,?,?,?)",
                 [(did, lang, *_node_row(i, n)) for i, n in enumerate(doc.get("nodes", []))])

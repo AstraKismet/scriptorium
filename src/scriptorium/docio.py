@@ -16,6 +16,7 @@ own reasoning. The one exception is the translation memory, which is an append
 log whose terminator ``.gitattributes`` already pins to LF.
 """
 
+import codecs
 import os
 import re
 import sys
@@ -218,7 +219,14 @@ def decode_document(data, encodings=("utf-8",), name="the document"):
 
 
 def read_document(path, encodings=("utf-8",)):
-    """``(text, encoding)`` for a source document, every terminator preserved.
+    """``(text, encoding, data)`` for a source document, every terminator preserved.
+
+    The bytes come back as well as the text because ``lx extract`` keeps them:
+    byte fidelity is a property of the *document*, so the document's own bytes
+    are what the state holds, once, beside the encoding it already records, and
+    a node's bytes are a query over that pair rather than data of its own. This
+    is the only place they are read, so returning them here is what keeps the
+    file read once.
 
     Returns the encoding as well as the text because the document's own state
     file records it, the same way it records ``eol``: both are facts about the
@@ -230,7 +238,9 @@ def read_document(path, encodings=("utf-8",)):
     passes them; :func:`formats.encodings` is where they come from.
     """
     with open(path, "rb") as f:
-        return decode_document(f.read(), encodings, name=str(path))
+        data = f.read()
+    text, encoding = decode_document(data, encodings, name=str(path))
+    return text, encoding, data
 
 
 def split_terminator(text):
@@ -373,3 +383,86 @@ def write_document_to_stdout(text):
     sys.stdout.flush()
     buf.write(text.encode("utf-8"))
     buf.flush()
+
+
+class ByteSpanMismatch(ValueError):
+    """A document's stored bytes and its stored text do not agree.
+
+    Raised by :func:`byte_spans` and never caught inside this module. It is the
+    whole of what makes the byte query safe: the walk consumes the state's own
+    characters against the state's own bytes, so the only two outcomes are the
+    exact span or this — never a plausible-looking wrong slice.
+    """
+
+
+def byte_spans(data, encoding, parts, eol="\n"):
+    """Byte ranges in ``data`` for the consecutive ``parts`` of its decoded text.
+
+    ``parts`` is the exact ordered partition of the text ``fmt.parse`` was
+    handed: one string per skeleton node, a raw node's own value or the source
+    of the segment it stands for. ``skeleton.source_parts`` is what builds it.
+    Yields nothing; returns a list of ``(start, stop)`` with one entry per part,
+    ``data[start:stop]`` being the bytes that position was read from —
+    non-canonical spelling, byte-order mark, CR and all.
+
+    **The boundaries are driven by the characters, never by arithmetic.** The
+    bytes are re-decoded one at a time with the codec the state recorded, and
+    each part consumes exactly as many characters as it has. There is no index
+    to be off by one: a boundary is wherever the previous part's last character
+    ended. Getting the CRLF question wrong is not available either, because the
+    part's expected *source* spelling is ``inverse-split(part)`` — a part that
+    opens with the ``\n`` claims the ``\r`` that ``split_terminator`` removed,
+    and a part that closes with one claims its own. The alternative, a
+    char->byte start table indexed with a running offset, was measured on
+    2026-09-10: placing a boundary one character late leaves every join exact,
+    the block map equal to the render and the full suite green, while four of
+    four raw nodes on a CRLF novel hold the wrong bytes.
+
+    Everything else raises. A codec that emits several characters from one atom
+    and is asked for a boundary inside it (``utf-7``), a codec whose decoder
+    cannot be driven a byte at a time (``iso2022_kr`` and ``hz`` were measured
+    inexact), a recorded encoding that is not the one the file was read with, a
+    blob that is not this document's, a parser that stopped partitioning its
+    input — every one of them is a :class:`ByteSpanMismatch` naming the part.
+    """
+    dec = codecs.getincrementaldecoder(encoding)()
+    fed = 0          # bytes handed to the decoder
+    start = 0        # byte offset the current part begins at
+    buf = ""         # characters decoded and not yet attributed
+    buf_end = 0      # byte offset just past the last byte that produced `buf`
+    spans = []
+    for i, part in enumerate(parts):
+        want = part.replace("\n", "\r\n") if eol == "\r\n" else part
+        while len(buf) < len(want):
+            if fed >= len(data):
+                raise ByteSpanMismatch(
+                    f"the document's bytes ran out {len(want) - len(buf)} characters "
+                    f"into part {i}: the stored text is longer than the stored source")
+            try:
+                out = dec.decode(data[fed:fed + 1])
+            except UnicodeDecodeError as e:
+                raise ByteSpanMismatch(
+                    f"part {i} does not decode as {encoding}: {e}") from None
+            fed += 1
+            if out:
+                buf += out
+                buf_end = fed
+        if not buf.startswith(want):
+            raise ByteSpanMismatch(
+                f"part {i} is not what the bytes at offset {start} decode to: the "
+                f"state says {want[:24]!r} and {encoding} says {buf[:24]!r}")
+        if len(buf) > len(want):
+            raise ByteSpanMismatch(
+                f"part {i} ends inside one {encoding} decoding step, which has no "
+                f"byte boundary — this codec cannot answer a per-node byte question")
+        spans.append((start, buf_end))
+        start, buf = buf_end, ""
+    try:
+        tail = dec.decode(data[fed:], True)
+    except UnicodeDecodeError as e:
+        raise ByteSpanMismatch(f"the document's bytes do not end cleanly: {e}") from None
+    if tail:
+        raise ByteSpanMismatch(
+            f"{len(data) - fed} bytes are left over after the last part, decoding to "
+            f"{tail[:24]!r}: the stored source is longer than the stored text")
+    return spans

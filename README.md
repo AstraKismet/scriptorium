@@ -115,7 +115,7 @@ any error, so a build can gate on it.
 **4. Render by substitution.** Translations are refilled into the original
 skeleton, never re-serialized from a parse tree. This is why front matter, fenced
 code, table alignment, indentation and line endings survive byte for byte — a CI
-corpus of 55 deliberately awkward inputs, 35 Markdown and 20 plain text, asserts
+corpus of 56 deliberately awkward inputs, 35 Markdown and 21 plain text, asserts
 it on Linux and Windows, from the bytes on disk to the bytes written back.
 
 Per-segment errors compound, which is why steps 1 and 4 are code rather than
