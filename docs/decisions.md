@@ -3,6 +3,145 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-09-10 · Byte fidelity is a property of the document, and the skeleton queries it
+
+HANDOFF-208, narrowed to its first half. Invariant 2a claims every byte the
+pipeline did not deliberately change is reproduced as-is, and for a non-injective
+codec that was false: the round trip was bytes → text → bytes, and cp950 has ten
+sequences whose character re-encodes to *different* bytes. `lx extract` now keeps
+the source file verbatim in a new `documents.source` BLOB beside the `encoding`
+the state already recorded, and a position's bytes are a slice of it —
+`skeleton.source_map`, with `lx bytes` in front. Suite 2187 → 2234.
+
+**Nothing re-encodes, and that is the whole mechanism.** `docio.byte_spans`
+re-decodes the stored bytes one at a time with the stored codec and gives each
+part exactly as many characters as it has, so a boundary is wherever the previous
+part's last character ended. There is no index to be off by one and no
+arithmetic to get wrong; the two outcomes are the exact span and
+`ByteSpanMismatch`. The CRLF question — `split_terminator` deletes one CR per
+line *before* `fmt.parse` sees the text, so the parser's characters are fewer
+than the file's bytes — is answered by one line that is the exact inverse of what
+was done: the part that opens with the LF claims the CR.
+
+**The measurement that decided the design, and it arrived late.** Three of the
+four designs in the first round put the bytes on raw nodes, and an adversarial
+lane then established that a document carrying `F9F9` and `A2CC` really can be
+byte-exact that way — which is true, and true only of a fixture chosen for it. On
+a *realistic* BBS-era chapter it is false in both formats: 十 (`A2CC`) and 卅
+(`A2CE`) are ordinary translatable prose, so they are always segments and never
+skeleton, and in Markdown the whole chapter merges into **one segment and one raw
+node**, putting none of the ten on the skeleton side at all. A raw-node
+representation delivers 8 of 10 on plain text and 0 of 10 on Markdown. Keying on
+the document reaches all ten in both, because it never asks which side of the
+parse a character fell on.
+
+That is also the shape this log warned about on 2026-08-02, one layer up: the
+fixture that satisfies the acceptance criterion is not the corpus the project
+exists for, and a criterion satisfiable by choosing the input is a green suite
+standing behind a claim it does not test.
+
+*What was chosen over what.* **Bytes on the raw node** (a char→byte start table
+built at decode, sliced by a running offset) loses on the measurement above, and
+separately turns `apply_terminator_parts`' first load-bearing fact — "no skeleton
+node can supply a CR" — into the fifth writer its own docstring warns about.
+**A `str` carrying in-band lone surrogates**, with the BLOB column holding the
+surrogatepass transport, keeps every downstream `str` consumer but makes
+`nodes.raw` mean a third thing and puts a value that raises in SQLite, in
+`json.dumps(ensure_ascii=False)` and in `.encode("utf-8")` into general
+circulation with nothing marking it. **A spelling ledger** — record only which
+characters were spelled non-canonically, as a compressed key in `documents.meta`
+— costs no schema change and no storage at all, and was the closest call: it
+loses because it is *reconstructive* rather than a slice, so it has a degree of
+freedom per exception, and because what it stores is a derivative of the file
+where this stores the file. Its own measurement is the sharpest argument against
+it: 0 of the 55 tracked fixtures produce a non-empty ledger, so the mechanism
+would ship with no coverage at all.
+
+**"By construction" is a property of what you keep, not of when you compute.**
+The objection to a query is that 2a says structure is preserved by construction
+and never by checking. What is kept here is the file itself, verbatim,
+un-re-serialized — the strongest instance of that sentence available. What is
+computed is only *where* each position's characters sit in it, against data that
+is still exact, and it is refused rather than guessed when it cannot be answered.
+The alternative computes the same thing once, at extract, and then discards the
+ground truth: its slices are unverifiable forever after. A wrong recorded
+`encoding` is loud here — measured, 6 of 6 wrong codecs raise — and silent there.
+
+*Costs, measured.* `.lx/state.db` grows by the size of the source, about 12–14%
+of the database. It is `.gitignore`d, so none of it enters history.
+`SCHEMA_VERSION` moves 1 → 2 for the additive column, which an older build
+refuses at the connection with no per-document escape — that is what that
+constant is for. **`STATE_VERSION` does not move**: an older row is not *wrong*,
+it simply has no byte answer, and `store.SourceBytesMissing` says so in a
+sentence naming the command that fills one in. So no project re-extracts its
+library, which the alternatives all required, and `lx extract --reset` — the door
+an older build would otherwise walk through — is not reached by this work at all.
+A stored answer is only as exact as the newest build that wrote the row; that is
+the residual, and it is recorded rather than guarded.
+
+**Markdown is in scope and the sentence that said otherwise was wrong.** The
+package scoped it out as "UTF-8 and injective". `formats.py`'s `encodings` is a
+*default* and `formats.options()` merges a project's block over it, so one line
+of `lx.config.json` puts a `.md` on cp950 — measured end to end: `lx extract`
+exits 0 and a fenced code block loses both `F9F9` and `A2CC`. The mechanism lives
+in `docio.py` and `skeleton.py`, above the registry, so both formats get one
+answer by construction rather than by a second implementation. Neither parser,
+`mask.py` nor `textparse.py` is touched.
+
+**Two acceptance criteria were corrected rather than met.** Criterion 4 — a file
+containing a byte undecodable in every candidate encoding becomes readable — is
+**HANDOFF-061** now. Its wall is not the node type: measured, the package's own
+`truncated-big5.txt` merges its stray byte into a paragraph under the shipped
+default `paragraph_mode` and dies in `store.seg_hash` before any node exists, so
+it is a question about segment text and the memory key, not about the skeleton.
+`docio.decode_document` still refuses such a file and its message still names the
+work. Criterion 5 — extract then render a Markdown fixture reproduces it byte for
+byte, "proving Markdown is unaffected" — carried none of its claim: measured
+literally, `lx render` exits 0 on all 35 fixtures while only **3** are
+byte-identical, because an untranslated segment renders the marker. With
+`--fallback` it is 35 of 35, which is what `tests/test_docio.py` has always
+asserted. An exit code that is 0 before and after any regression this package
+could introduce is prose wearing a number.
+
+**What the tests had to become, and one of them was the point.** The plain-text
+corpus assertion was `_substituted(text).encode(encoding) == data` — a re-encode,
+i.e. the lossy step itself, which is why it could only ever pass on files
+avoiding the ten sequences. It is now two assertions with nothing re-encoded: the
+nodes partition the text, and their byte spans reassemble the file.
+`tests/corpus-text/big5-duplicate-spellings.txt` carries all ten, deliberately
+split across both sides of the parse, and it fails the old form. Two tests the
+package's red lines permitted deleting — `test_source_encoding_write_would_break_invariant_2a`
+and the injectivity pin — **stay and stay green**: what they guard is that output
+is always UTF-8, which this work did not reopen, and their docstrings predicting
+their own deletion were the thing that was wrong.
+
+**Three guards were verified by planting the defect, not by reading the code.**
+A writer that stores `text.encode(encoding)` instead of the file is caught only
+by a document carrying a non-canonical spelling — 0 of 55 fixtures caught it
+before the new one, 6 tests after. A CRLF reconciliation that gives the CR to the
+position before its LF still produces a *contiguous cover of the whole file*, so
+the join-level assertion passes and only the two byte-level twins of "no node
+carries a CR" fire. And the `ast` guard against a second walk was blind to a loop
+over a bare local, which is exactly how the rejected designs attach their
+per-node pass; widened, it also finally sees `store.save_doc`'s `.get("nodes")`,
+a read its own docstring had claimed all along.
+
+**For HANDOFF-205 (EPUB), answering the question 205 asks this package to
+answer.** Do not sequence 208 first. EPUB's inner layer is XML, restricted to
+UTF-8 or UTF-16, and both are injective over the whole scalar range, so the
+residue this package exists for cannot arise in a conforming entry. What 205
+inherits is the *shape* rather than a dependency: a container repeats
+`(bytes, encoding)` per entry, which is also the only form that works when
+entries declare different encodings — a per-document `encoding` cannot serve
+them. And 205 owes the rest itself whatever 208 chose: entry order and
+`mimetype`-first-and-STORED are `ZipInfo` fields, not node values, and no
+representation of `doc["nodes"]` reaches them. Measured: a per-entry
+`writestr(name, data)` copy never reproduces the archive, and it drops
+`mimetype` out of STORED as well whenever the destination was opened with a
+compression default — so the failure that ends in a rejected book appears only
+once someone turns compression on. Carrying the `ZipInfo` across is
+byte-identical either way.
+
 ## 2026-09-09 · The workbench is rebuilt, and what the frozen contract was frozen for
 
 HANDOFF-204. The 374-line inline page it replaces had grown to 69KB, rebuilt its

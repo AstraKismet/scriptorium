@@ -62,6 +62,7 @@ from .normalize import normalize, polish_rendered, reseat_outer_blanks
 # 41 ms to 77 ms, which `lx --help` on a bare interpreter should not pay. The
 # rest of `providers` stays behind a function-local import, with `translate`.
 from .providers.errors import ProviderError
+from .skeleton import source_map
 from .store import (
     HUMAN,
     StateVersionError,
@@ -83,6 +84,7 @@ from .store import (
     save_targets,
     save_waived,
     segment_key,
+    source_bytes,
     target_token,
     tm_lookup,
     tm_records,
@@ -581,7 +583,7 @@ def do_extract(src, lang, cfg, tone=None, reset=False, carry_from=None):
     # so every later command reads the skeleton with the parser that wrote it.
     fmt = formats.for_path(src, cfg)
     opts = formats.options(fmt, cfg)
-    text, encoding = read_document(src, formats.encodings(fmt, cfg))
+    text, encoding, data = read_document(src, formats.encodings(fmt, cfg))
     text, eol = split_terminator(text)
     facts = fmt.describe(text, opts)
     dnt = load_dnt(cfg)
@@ -823,6 +825,12 @@ def do_extract(src, lang, cfg, tone=None, reset=False, carry_from=None):
         # for one: text-mode reads had already deleted every CR.
         "eol": eol,
         "nodes": nodes, "segments": segments,
+        # The document's own bytes, kept once beside the encoding that reads
+        # them. Not a node field and not a segment field: byte fidelity is a
+        # property of the document, and a node's bytes are a query over this
+        # and the partition the skeleton already is. `store.save_doc` lifts it
+        # into its own column, and `store._meta` never sees it.
+        "source_bytes": data,
     }
     # Whatever the parser resolved by heuristic rather than by rule — for plain
     # text, the paragraph shape. Merged rather than nested so `lx extract` and a
@@ -959,6 +967,30 @@ def cmd_extract(args, cfg):
     if guessed:
         _out(f"  read as {doc.get('format', 'markdown')} · " + " · ".join(guessed)
              + " — set `formats` in lx.config.json if that is wrong")
+
+
+def do_bytes(src, lang, cfg):
+    """Where in the source file each skeleton position came from. Rows.
+
+    ``[{"pos", "id", "kind", "start", "stop", "bytes"}]`` in document order,
+    one per node — :func:`skeleton.source_map` describes the record and owns
+    the walk. ``bytes`` is the exact source spelling of that position, and the
+    concatenation of the column is the file.
+
+    **A report and never a gate**, the rule ``lx audit`` and ``lx renderings``
+    already follow: it exits 0 whenever it ran. Unlike those two it needs no
+    threshold and no network, so it is not advisory in their sense — what it
+    cannot answer it refuses rather than guessing, and there are exactly two
+    such refusals: state written before the bytes were kept
+    (:class:`store.SourceBytesMissing`), and a document whose stored text and
+    stored bytes disagree (:class:`docio.ByteSpanMismatch`).
+    """
+    doc = load_doc(src, lang)
+    data = source_bytes(src, lang)
+    rows = source_map(doc, data)
+    for row in rows:
+        row["bytes"] = data[row["start"]:row["stop"]]
+    return rows
 
 
 # ── todo ───────────────────────────────────────────────────────────────────
@@ -1110,6 +1142,27 @@ def pending_segments(doc, include_all=False, limit=0):
     out = [s for s in workable(doc["segments"])
            if include_all or s["status"] == "pending"]
     return bounded(out, limit)
+
+
+def cmd_bytes(args, cfg):
+    """`lx bytes` — where in the source file each skeleton position came from."""
+    rows = do_bytes(args.src, args.lang, cfg)
+    if args.json:
+        _out(json.dumps(
+            [{**{k: r[k] for k in ("pos", "id", "kind", "start", "stop")},
+              "hex": r["bytes"].hex()} for r in rows], ensure_ascii=False, indent=2))
+        return 0
+    for r in rows:
+        # `.hex()` and never the bytes themselves: this is the one command whose
+        # answer is a spelling, and a terminal that decoded it would be showing
+        # the character rather than the bytes the question was about.
+        head = r["bytes"][:16].hex(" ")
+        tail = "" if len(r["bytes"]) <= 16 else f" … ({len(r['bytes'])} bytes)"
+        _out(f"  {r['pos']:5}  {r['id'] or '-':>6}  "
+             f"{r['start']:>8}..{r['stop']:<8}  {head}{tail}")
+    _out(f"{args.src} [{args.lang}]  {len(rows)} positions  "
+         f"{rows[-1]['stop'] if rows else 0} bytes")
+    return 0
 
 
 def cmd_todo(args, cfg):
@@ -5911,6 +5964,16 @@ def build_parser():
                     help="segments with no usable target fall back to source")
     bl.add_argument("--json", action="store_true")
     bl.set_defaults(fn=cmd_blocks)
+
+    # Beside `blocks` for the same reason `segments` is: one document, two
+    # questions. `blocks` says what the rebuilt file will contain, `bytes` says
+    # what the original file contained at that same position.
+    by = sub.add_parser("bytes",
+                        help="where in the source file each position came from")
+    by.add_argument("src")
+    by.add_argument("--lang", required=True)
+    by.add_argument("--json", action="store_true")
+    by.set_defaults(fn=cmd_bytes)
 
     # Next to `blocks` because they are twins over one document: that one
     # projects what the rebuilt file says, this one what the state holds. The

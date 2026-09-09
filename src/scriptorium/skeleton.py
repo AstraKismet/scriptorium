@@ -16,6 +16,7 @@ it. The registry has a slot for that; both formats that exist today point it
 here.
 """
 
+from .docio import byte_spans
 from .mask import target_map, unmask, unrenderable
 
 __all__ = ["MARKDOWN_MARKER", "render", "render_blocks"]
@@ -26,6 +27,84 @@ __all__ = ["MARKDOWN_MARKER", "render", "render_blocks"]
 #: cannot be the default for every format: in a plain-text novel the same string
 #: is four words of visible junk. A format that needs another one passes it.
 MARKDOWN_MARKER = "<!-- untranslated {id} -->"
+
+
+def walk(doc):
+    """The one iteration of ``doc["nodes"]`` in this project. ``(node, seg)`` per node.
+
+    ``seg`` is the segment a segment node stands for and ``None`` for a raw
+    node — the question every consumer of the skeleton starts by asking,
+    answered once so that asking it is not a second walk.
+
+    It exists because there are two consumers now rather than one.
+    :func:`render_blocks` answers *what does this document say at this
+    position*; :func:`source_map` answers *what bytes did this position come
+    from*. Those are different questions and both are legitimate. The reason
+    the record says there is one walk was never that only one question may be
+    asked — it is that two walks are two orders, and an order that drifts is a
+    block map and a byte map that disagree about which node is the fourth. One
+    generator makes that unreachable rather than checked.
+    """
+    by_id = {s["id"]: s for s in doc["segments"]}
+    for node in doc["nodes"]:
+        yield (node, None) if node["t"] == "raw" else (node, by_id[node["id"]])
+
+
+def source_parts(doc):
+    """The exact ordered partition of the text ``fmt.parse`` was handed.
+
+    One string per node, concatenating to that text exactly — the property
+    ``tests/test_pipeline.py::identity_roundtrip`` and
+    ``tests/test_textformat.py::_substituted`` have always asserted at the
+    parser, read here off the stored document instead.
+
+    Deliberately ``seg["source"]`` rather than ``unmask(seg["masked"],
+    seg["slots"])``: the partition is a fact about the parse, and routing it
+    through the mask would let a masking change move a byte boundary.
+
+    It is separate from :func:`source_map` rather than inlined into it because
+    it is the half a test can check with **no codec involved at all** — the
+    parser's promise, stated on its own, so a failure says which of the two
+    halves broke. It is also, for the same reason, the one that must not become
+    the join of the other: written that way it would be dead code and every
+    test comparing the two would compare a value to itself, which is exactly
+    what ``Format.render`` was found doing.
+    """
+    return [node["v"] if seg is None else seg["source"] for node, seg in walk(doc)]
+
+
+def source_map(doc, data):
+    """Where in ``data`` each skeleton position came from. One row per node.
+
+    ``[{"pos", "id", "kind", "start", "stop"}]`` in document order, with
+    ``data[start:stop]`` the exact source bytes of that position — the
+    non-canonical cp950 spelling, the byte-order mark, the ``\r`` that
+    ``docio.split_terminator`` removed before the parser ever saw the text.
+    Their concatenation is the file.
+
+    **This is the whole of invariant 2a's byte guarantee, and it is a query.**
+    The bytes are not rebuilt from anything: they are the file, kept once by
+    ``lx extract`` and handed back by slicing. What is computed is only *where*
+    each node's characters sit in them, and that is computed by consuming those
+    characters against a fresh decode of those bytes — so the two outcomes are
+    the exact span and :class:`docio.ByteSpanMismatch`, never a plausible
+    wrong slice. Segments are covered as well as raw nodes, which is not a
+    bonus: 十 and 卅 are the two cp950 residues that are *always* translatable
+    text and therefore never reach the skeleton, so a raw-node-only
+    representation cannot reach them at all.
+
+    Costs a byte-at-a-time decode of the whole document and is therefore not on
+    any pipeline path. ``lx extract`` does not call it, ``lx render`` does not
+    call it, and the workbench cannot reach it.
+    """
+    rows = [{"pos": i, "id": None if seg is None else seg["id"],
+             "kind": None if seg is None else seg.get("kind")}
+            for i, (_node, seg) in enumerate(walk(doc))]
+    spans = byte_spans(data, doc.get("encoding") or "utf-8",
+                       source_parts(doc), doc.get("eol", "\n"))
+    for row, (start, stop) in zip(rows, spans):
+        row["start"], row["stop"] = start, stop
+    return rows
 
 
 def render_blocks(doc, cfg, polish=None, fallback=False, marker=MARKDOWN_MARKER):
@@ -77,13 +156,11 @@ def render_blocks(doc, cfg, polish=None, fallback=False, marker=MARKDOWN_MARKER)
     is handed no document-level facts — ``cli.do_blocks`` re-imposes it, once, the
     way ``cli.do_render`` always has.
     """
-    by_id = {s["id"]: s for s in doc["segments"]}
     blocks, missing = [], 0
-    for node in doc["nodes"]:
-        if node["t"] == "raw":
+    for node, seg in walk(doc):
+        if seg is None:
             blocks.append({"id": None, "kind": None, "from": None, "text": node["v"]})
             continue
-        seg = by_id[node["id"]]
         if seg.get("target") and not unrenderable(seg):
             # **The map this wording's ids actually mean, which is not always the
             # segment's own.** `save_doc` rewrites `slots` from the fresh parse on

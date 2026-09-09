@@ -17,6 +17,7 @@ under `tests/` contained a character outside the BMP before this one.
 import ast
 import json
 import os
+import pathlib
 import random
 import re
 import subprocess
@@ -254,9 +255,25 @@ def _node_list_uses(path):
         tree = ast.parse(f.read(), filename=path)
 
     def is_the_node_list(node):
-        return (isinstance(node, ast.Subscript)
-                and isinstance(node.slice, ast.Constant)
-                and node.slice.value == "nodes")
+        # Three spellings, and the second two were added on 2026-09-10 because
+        # the first was blind to a read that had been in `store.py` all along:
+        # `doc.get("nodes", [])` is the list, and a subscript check cannot see
+        # it. The third is the shape a *bare local* takes — `nodes, segs =
+        # fmt.parse(...)` and then a loop over `nodes` — which is how a
+        # post-parse attachment pass would have walked the list a second time
+        # without this guard ever reporting it. Measured: the shipped predicate
+        # found 0 on a counterfactual written that way.
+        if (isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant)
+                and node.slice.value == "nodes"):
+            return isinstance(node.ctx, ast.Load)
+        return (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get" and bool(node.args)
+                and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == "nodes")
+
+    def is_a_bare_node_local(node):
+        return (isinstance(node, ast.Name) and node.id == "nodes"
+                and isinstance(node.ctx, ast.Load))
 
     loops, reads = [], []
     for node in ast.walk(tree):
@@ -269,10 +286,23 @@ def _node_list_uses(path):
         elif isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp,
                                ast.GeneratorExp)):
             iters = [gen.iter for gen in node.generators]
-        loops += [node.lineno for it in iters if is_the_node_list(it)]
-        if is_the_node_list(node) and isinstance(node.ctx, ast.Load):
+        loops += [node.lineno for it in iters
+                  if is_the_node_list(it) or is_a_bare_node_local(it)]
+        if is_the_node_list(node):
             reads.append(node.lineno)
     return loops, reads
+
+
+def _functions_containing(path, lines):
+    """The names of the `def`s the given line numbers fall inside."""
+    tree = ast.parse(pathlib.Path(path).read_text(encoding="utf-8"), filename=path)
+    out = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            body = [n.lineno for n in ast.walk(node) if hasattr(n, "lineno")]
+            if body and any(min(body) <= ln <= max(body) for ln in lines):
+                out.add(node.name)
+    return out
 
 
 def test_only_one_walk_of_the_document_nodes_exists_in_the_source():
@@ -292,8 +322,19 @@ def test_only_one_walk_of_the_document_nodes_exists_in_the_source():
     # ask why it moved.
     assert sorted(walked) == ["skeleton.py"] and len(walked["skeleton.py"]) == 1, (
         f"the walk of doc['nodes'] is at {walked}. There is one, in "
-        f"`skeleton.render_blocks`, and `render` is written in terms of it — a "
+        f"`skeleton.walk`, and every other per-node function iterates that — a "
         f"second walk is a second answer to what the document says at a position.")
+    # **And it is inside `walk`.** Since 2026-09-10 there are two consumers of
+    # the skeleton — `render_blocks` asks what the document says at a position,
+    # `source_map` asks which bytes it came from — so "one walk" stopped being
+    # a property anyone could read off the file and became a property of where
+    # the loop lives. Naming the function is what keeps the second consumer from
+    # quietly becoming a second order.
+    assert _functions_containing(os.path.join(SRC, "skeleton.py"),
+                                 walked["skeleton.py"]) == {"walk"}, (
+        "the one loop over doc['nodes'] has moved out of `skeleton.walk`. Every "
+        "per-node function iterates `walk(doc)` so that they cannot come to "
+        "disagree about which node is the fourth.")
 
 
 def test_nothing_outside_the_walk_reads_the_node_list_at_all():
@@ -302,18 +343,25 @@ def test_nothing_outside_the_walk_reads_the_node_list_at_all():
     `nodes = doc["nodes"]` and then a loop over `nodes` is a walk no syntactic
     check of the loop itself will find. Naming every *read* of the key does find
     it, and the answer is short enough to be an allowlist: `skeleton.py` walks
-    it, `store.py` builds it, and a read anywhere else is the thing this file
-    exists to notice.
+    it, `store.py` reads it to write it out, and a read anywhere else is the
+    thing this file exists to notice.
+
+    **`store.py` joined that list on 2026-09-10 without moving a line of it.**
+    `save_doc` has read `doc.get("nodes", [])` since the database landed, and
+    the predicate above could not see a `.get` — so the sentence this test
+    asserts and the sentence its own docstring stated had disagreed all along,
+    silently, in the safe direction. Widening the predicate is what made the
+    allowlist say what the tree does.
     """
     reads = {}
     for path in _source_files():
         _loops, found = _node_list_uses(path)
         if found:
             reads[os.path.relpath(path, SRC)] = found
-    assert sorted(reads) == ["skeleton.py"], (
-        f"doc['nodes'] is read at {reads}. `skeleton.render_blocks` is the one "
-        f"reader; `store.py` assembles the list and never reads it back. If a "
-        f"new reader is genuinely right, it belongs in this sentence first.")
+    assert sorted(reads) == ["skeleton.py", "store.py"], (
+        f"doc['nodes'] is read at {reads}. `skeleton.walk` is the one reader "
+        f"that iterates it and `store.save_doc` the one that writes it out. If "
+        f"a new reader is genuinely right, it belongs in this sentence first.")
 
 
 # ── the block record ───────────────────────────────────────────────────────

@@ -62,9 +62,30 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    entry is first and STORED. Byte-identity of the container itself is not
    claimed, because modified entries must be recompressed.
 
-   Skeleton raw nodes are stored as **BLOB, never as JSON text.** A source file
-   containing invalid UTF-8 — routine for older Big5, GBK and Shift-JIS text —
-   cannot be written to a JSON state file at all.
+   **The bytes are the file's own, kept once and sliced — never re-encoded.**
+   `lx extract` stores the source document verbatim in `documents.source`,
+   beside the `encoding` the state already records, and a position's bytes are
+   `skeleton.source_map`'s query over that pair: the characters the state holds
+   are consumed against a fresh decode of the bytes it holds, so the two
+   outcomes are the exact span and `docio.ByteSpanMismatch`. `lx bytes` is the
+   command in front of it. Nothing re-encodes, which is what makes the claim
+   above true for a codec that is not injective — and cp950 is not: ten
+   sequences decode to a character that re-encodes to *different* bytes, so
+   `text.encode(encoding)` was never the file and the round trip that used it
+   was measuring the injective cases only. `docs/decisions.md`, 2026-09-10.
+
+   **It is a property of the document, not of a node**, and that is a
+   measurement rather than a preference. 十 (`A2CC`) and 卅 (`A2CE`) are
+   ordinary translatable prose, so they are always segments and never skeleton;
+   in Markdown a whole BBS-era chapter merges into one segment and *none* of the
+   ten reaches the skeleton at all. A representation that kept bytes on raw
+   nodes would deliver nothing on either.
+
+   Skeleton raw nodes are still stored as **BLOB, never as JSON text**, and that
+   column stays unspent by this: a source file containing invalid UTF-8 —
+   routine for older Big5, GBK and Shift-JIS text — cannot be written to a JSON
+   state file at all, which is the *other* half, scheduled as HANDOFF-061 and
+   not built. Reading such a file is still refused.
 
    The file boundary is part of this. Documents are read and written as bytes
    through `docio.py`, never through Python's text mode, because universal
@@ -428,13 +449,16 @@ Current:
 ```
 src/scriptorium/
   docio.py       document read/write as bytes; encoding detection; text mode never
-                 touches a user document
+                 touches a user document; `byte_spans`, which answers where a
+                 run of characters came from in the file
   formats.py     the format registry: extension -> parser, and each format's knobs
   mask.py        markup protection: ⟦n⟧ slot records, tag pairing, DNT terms, bracket repair
   mdparse.py     markdown -> (skeleton nodes, segments)
   textparse.py   plain text -> the same pair; encoding, paragraph and chapter heuristics
-  skeleton.py    render_blocks(): the one walk of doc["nodes"], as an ordered
-                 block map; render() is its join, for every format at once
+  skeleton.py    walk(): the one iteration of doc["nodes"]. render_blocks() is
+                 its block map and render() that map's join, for every format at
+                 once; source_map() is the second consumer — which bytes of the
+                 file each position came from
   sentences.py   where one sentence ends and the next begins — text, never
                  offsets; the rule the reading view is given rather than computes
   normalize.py   deterministic repair: punctuation width, CJK/Latin spacing
@@ -482,7 +506,7 @@ Node — see the invariant below.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 2187 collected, no network. Four are
+python -m pytest -q                 # 2234 collected, no network. Four are
                                     #   conditional on three different things, so
                                     #   which two skip is a property of the machine
                                     #   AND the account: one is POSIX-only, one
@@ -513,6 +537,7 @@ lx audit --lang zh-TW               # stored wordings that look filed under anot
 lx audit book/ch1.md --lang zh-TW   # the same question of one document's segments
 lx segments book/ch1.md --lang zh-TW          # every stored segment, source beside target
 lx blocks docs/guide.md --lang zh-TW --json   # the rendered document, block by block
+lx bytes book/ch1.md --lang zh-TW   # where in the source file each position came from
 lx sentences docs/guide.md --lang zh-TW       # where its sentences begin and end
 lx web                              # review workbench on 127.0.0.1:8787
 lx status --json                    # the frozen project-status contract
@@ -724,12 +749,26 @@ own.
   cost an afternoon on 2026-09-09: `document.visibilityState` is the tell, and a
   forced screenshot is what makes an automated browser paint.
 
-- **The rendered document has one walk, and it is `skeleton.render_blocks`.**
-  `render` is its join, `formats.Format` carries a `render_blocks` slot beside
-  `render`, and a test reads every module in `src/` with `ast` to assert the node
-  list is looped over exactly once and read nowhere outside `skeleton.py` — by
+- **The document's nodes have one walk, and since 2026-09-10 it is
+  `skeleton.walk`.** `render_blocks` is its block map and `render` that map's
+  join; `formats.Format` carries a `render_blocks` slot beside `render`, and a
+  test reads every module in `src/` with `ast` to assert the node list is looped
+  over exactly once and read nowhere outside `skeleton.py` and `store.py` — by
   syntax rather than by text, because the first spelling of that guard matched a
-  literal string and a rename defeated it. **`cli.do_render` goes through
+  literal string and a rename defeated it.
+
+  **The rule was never "one question", it is "one order".** There are two
+  consumers now — `render_blocks` answers what the document says at a position,
+  `source_map` which bytes of the file it came from — and both are legitimate;
+  what must not happen is two iterations that come to disagree about which node
+  is the fourth. A generator makes that unreachable rather than checked, which
+  is why the guard now also pins the loop to *inside* `walk` by function name.
+  Two of the guard's own blind spots closed in the same edit and both had been
+  open since it was written: `doc.get("nodes", [])` is a read a subscript check
+  cannot see — `store.save_doc` had been doing it all along, so the allowlist
+  and the test's own docstring had silently disagreed — and a loop over a bare
+  local named `nodes` is how a post-parse pass would have walked the list a
+  second time invisibly. **`cli.do_render` goes through
   `fmt.render` and `cli.do_blocks` through `fmt.render_blocks`, on purpose**:
   written as the join of the other, `Format.render` was dead code and every test
   comparing them compared a value to itself.
@@ -1333,6 +1372,15 @@ own.
   skeleton is only readable by the parser that wrote it. An unknown extension is
   refused rather than guessed. The registry serves formats whose document is one
   decoded string; a container format — EPUB — widens it rather than squeezing in.
+
+  **A format's `encodings` is a default and not a constraint**, which is worth
+  saying because a sentence claiming otherwise was in this file until
+  2026-09-10. `formats.options()` merges a project's `formats.<name>` block over
+  the registry's defaults, so one line of `lx.config.json` puts Markdown on
+  cp950 — measured, `lx extract` exits 0 and reads it. "Markdown is UTF-8" is
+  therefore a fact about the shipped default, and anything that has to hold for
+  every document belongs above the registry, in `docio.py`, where it cannot be
+  true of one parser and false of the other.
 - A slot is a record — `original` / `role` / `pair_id` / `can_reorder` — and each
   document row carries `state_version`, which `store.py` refuses to read when it
   is older than the build. That is the *content* version, and it is separate from
