@@ -2491,6 +2491,26 @@ Appended 2026-09-01 by the package that added `GET /api/models`. Both open.
     request in the project does is its own package with its own tests. Found by
     the security-tier pass over this endpoint's design, 2026-09-01.
 
+34. **`POST /api/extract` now refuses a `src` that collides by identity with
+    another tracked document — a `400` the request/response tables above do not
+    name.** `store.doc_id` flattens every separator and everything outside
+    `A-Za-z0-9._-` to `_`, so `docs/guide.md` and a root-level `docs_guide.md`
+    fold onto one state row; `save_doc` was `INSERT OR REPLACE`, so extracting
+    the second silently deleted the first document's translations, holds and
+    waivers at `200`. HANDOFF-067 closed the data-loss half by raising
+    `store.CollidingIdentity` — a `ValueError` subclass, so this endpoint answers
+    `400` with one sentence naming the stored spelling, like every other
+    `cli.do_extract` refusal already on the wire.
+
+    **Not leaked logic**: the check lives in `store.save_doc`, `cli.do_extract`'s
+    one writer, so both surfaces gained the refusal from the one commit. What is
+    undocumented is only the request/response tables' silence about it — a
+    previously-`200` request now answers `400`, which is the shape that bumped
+    `contract_version` for divergence (28). That bump is a version decision for
+    its own work package, per this contract's own gate, not a side effect of the
+    fix that closes the data loss. Until it lands, a client relying on the tables
+    above learns of this refusal only by reading `error`.
+
 ## What is not frozen
 
 Freezing the contract does not freeze the implementation. Free to change without

@@ -62,6 +62,25 @@ class StateVersionError(RuntimeError):
     """A state file this build cannot read. The message names the way out."""
 
 
+class CollidingIdentity(ValueError):
+    """`lx extract`'s save would replace a row that is not this document's. Nothing was written.
+
+    `doc_id` flattens every separator and everything outside `A-Za-z0-9._-` to
+    `_`, so `docs/guide.md` and a root-level `docs_guide.md` fold to one row, and
+    so does a Chinese-titled library where every title folds to `_` throughout.
+    `save_doc` is `INSERT OR REPLACE`, so without this the second `lx extract`
+    deleted the first document's translations, holds and waivers — at exit 0,
+    with nothing printed. Mirrors the refusal `forget_doc` already makes for the
+    same collision, on the write side rather than the delete side.
+
+    Two refusals share it, as `cli.ForgetRefused`'s three do: the row belongs
+    to another document, which nothing gets past — `--reset` discards *this*
+    document's prior state, and that row is not this document's — or the row
+    cannot say whose it is, which `--reset` does get past, because discarding an
+    unreadable row is what that flag is for. See `docs/decisions.md`, 2026-09-11.
+    """
+
+
 def seg_hash(text):
     return hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
 
@@ -1039,22 +1058,91 @@ def source_bytes(src, lang):
         conn.close()
 
 
-def save_doc(src, lang, doc):
+def _stored_source(conn, did, lang):
+    """Whether a row is there, and which document it says it is. ``(exists, source)``.
+
+    ``source`` is the stored spelling through :func:`doc_label`, or ``None`` where
+    the row cannot say: no `source`, not a string, or a `meta` that is not a JSON
+    object. Read defensively rather than through :func:`_read_meta`, which
+    raises on the last of those — and `lx extract --reset` reads no prior row by
+    design, so a guard that raised here would have turned a damaged row into a
+    traceback on the one flag that exists to get past one. The first spelling of
+    this guard did exactly that; the Opus re-derivation of 2026-09-11 found it.
+    """
+    row = conn.execute("SELECT meta FROM documents WHERE doc_id=? AND lang=?",
+                       (did, lang)).fetchone()
+    if row is None:
+        return False, None
+    try:
+        meta = json.loads(row[0])
+    except (TypeError, ValueError):
+        return True, None
+    source = meta.get("source") if isinstance(meta, dict) else None
+    if not isinstance(source, str) or not source.strip():
+        return True, None
+    try:
+        return True, doc_label(source)
+    except ValueError:  # `os.path.relpath` across volumes on Windows
+        return True, None
+
+
+def save_doc(src, lang, doc, reset=False):
     """Replace a document's stored state entirely: meta, skeleton and segments.
 
-    What `lx extract` does, and the only writer that touches the skeleton. Every
-    other write is :func:`save_segments`, which is the reason a long translation
-    no longer rewrites a whole book to record one batch.
+    What `lx extract` does, and the only writer of the `documents` table — a
+    test asserts that with `ast`. Every other write is :func:`save_segments`,
+    which is the reason a long translation no longer rewrites a whole book to
+    record one batch.
+
+    **It replaces only a row this document can be shown to own.** `doc_id` is
+    lossy — see :class:`CollidingIdentity` — so a row already under this
+    identity is this document's when its stored `source` is ``doc_label(src)``,
+    another document's when it is any other spelling, and nobody's knowable
+    when it says nothing. The second is refused whatever ``reset`` says; the
+    third is refused unless ``reset``, which is the `forget_doc(discard=...)`
+    shape — one flag, answering one refusal and no other. The comparison uses
+    ``doc_label(src)`` and never ``doc["source"]``, so the identity and the claim
+    come from one value and a caller cannot hand in a `doc` that disagrees with
+    its own `src`.
+
+    **Read-then-write, so the lock comes first**: the existing row is read inside
+    :func:`_begin_write`'s transaction, which is what makes the check hold
+    against a concurrent colliding extract and not only a sequential one — the
+    window a check made in `cli.do_extract` would leave is the whole parse of a
+    book. :func:`forget_doc`'s docstring gives the same reasoning for the mirror.
     """
     # Stamped here rather than by each caller, so a writer cannot forget it and
     # leave state that reads as pre-record.
     doc["state_version"] = STATE_VERSION
     did = doc_id(src)
+    label = doc_label(src)
     meta = {k: v for k, v in doc.items()
             if k not in ("nodes", "segments", "state_version", "source_bytes")}
     conn = _connect()
     try:
         with conn:
+            _begin_write(conn)
+            exists, stored = _stored_source(conn, did, lang)
+            if exists and stored is not None and stored != label:
+                raise CollidingIdentity(
+                    f"{label} is not the document stored under that identity — {stored} "
+                    f"[{lang}] is. This project keys both spellings to one state row, so "
+                    f"extracting {label} would replace {stored}'s translations, holds and "
+                    f"waivers. Nothing was written. Rename one of the two files if both are "
+                    f"meant to be translated — `lx untracked` lists every set of paths this "
+                    f"project folds onto one identity. If {label} is meant to take its place, "
+                    f"`lx forget {stored} --lang {lang}` first; that refuses while {stored} "
+                    f"holds wording no other document does. --reset does not get past this: "
+                    f"it discards this document's own prior state, and that row is not this "
+                    f"document's.")
+            if exists and stored is None and not reset:
+                raise CollidingIdentity(
+                    f"the state row {label} [{lang}] resolves to carries no readable source "
+                    f"path, so this cannot confirm it is {label}'s to replace. Nothing was "
+                    f"written. The row was written by hand or damaged, since every `lx "
+                    f"extract` records one. `lx extract {label} --lang {lang} --reset --tone "
+                    f"<technical|literary>` discards it and starts over — with whatever "
+                    f"translations it holds.")
             conn.execute("DELETE FROM nodes WHERE doc_id=? AND lang=?", (did, lang))
             conn.execute("DELETE FROM segments WHERE doc_id=? AND lang=?", (did, lang))
             conn.execute(

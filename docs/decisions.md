@@ -3,6 +3,121 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-09-11 · An empty stored register reads as the default it is, not as none
+
+Closing HANDOFF-074. `cli.do_extract` resolves the register as `tone or
+stored.get("tone") or frozen or ... or cfg.get("tone", DEFAULT_TONE)`, and the
+register-change line fired on `was = stored.get("tone")` read raw. But
+`config.canonical_tone` folds `""` and a missing key onto `DEFAULT_TONE`, and so
+does the translation-memory key every stored row was built under — so a
+document banked with `tone: ""` (`lx config set tone ""`, accepted, exit 0), or
+with no `tone` key at all (every row written before the register existed), is
+*in* the default register while `was` read as falsy. Once the configured
+register later differed from the default, an ordinary re-extract with no
+`--tone` moved such a document into it — every one of its own translation-memory
+keys missed, `was` never triggered the report, and both the register line and
+`store.prior_targets`' own carryover it depends on stayed silent: exit 0,
+`reused 0`, translations gone. `lx run` begins with this extract, so the same
+shape reached it too.
+
+**HANDOFF-066 had already closed the identical defect on the `--from` half** —
+`frozen = canonical_tone(stored.get("tone")) if carry_from and stored else
+None`, entry above, 2026-09-10 — and named the ordinary path out of scope on
+purpose. The fix here is the same read applied to the path that package left
+alone: `was = frozen if carry_from else (canonical_tone(stored.get("tone")) if
+stored else None)`. `stored` itself, not its `tone` field, decides whether there
+is a prior register to compare against at all — empty only when there is no row
+yet (a first extract) or under `--reset` (which reads no prior row by design),
+and in both those cases there is nothing to have silently moved out of.
+
+**The decision the scope asked for: loud, not refused.** A document whose
+stored register already reads as an *explicit* value has never been moved by an
+ordinary re-extract at all — `stored.get("tone")` sits ahead of
+`cfg.get("tone", ...)` in the `or` chain that resolves `tone`, so it already won
+every time regardless of what the config said; only a falsy stored value ever
+let the config default show through. That existing case is not silent — it
+prints the register line and proceeds — so the empty-register case is brought
+in line with it rather than given a new, stricter rule: once `was` is read
+correctly, the same truthiness test and the same report already in
+`report_extract` fire for it, with no new branch. Refusing an unnamed register
+change outright, the way `--reset` already does, was considered and rejected:
+it would be a second answer to a question the existing explicit-tone case has
+already answered, for no reason tied to what made the empty case wrong — which
+was the read, not the policy.
+
+**`lx config set tone ""` stays accepted.** It is not a hole this package
+reopens: it is now indistinguishable, everywhere a register is read, from never
+having set one — `canonical_tone` and the translation-memory key already fold
+it onto the default, and this fix is what makes `do_extract`'s own register-line
+read agree. Refusing it would forbid a spelling that means exactly what leaving
+the key unset means.
+
+**The wire is unaffected.** `POST /api/extract` calls the same `do_extract` and
+already does not carry `register` — deliberately, since a register change has to
+be asked *before* the row is written and the reply arrives after — so this fix
+changes what the row ends up holding and does not add or remove a wire field.
+A client that already sends `tone` explicitly on every re-extract, which the
+contract has recommended since version 3, never took this path.
+
+## 2026-09-11 · A colliding extract refuses rather than replaces another document's row
+
+Closing HANDOFF-067. `store.doc_id` flattens every separator and everything
+outside `A-Za-z0-9._-` to `_`, so `docs/guide.md` and a root-level
+`docs_guide.md` fold onto one state row, and so does a Chinese-titled library
+where every title folds to `_`. `save_doc` — `cli.do_extract`'s one writer —
+was `INSERT OR REPLACE`, so extracting the second spelling deleted the first
+document's translations, holds and waivers, at exit 0 with nothing printed.
+Reachable from `POST /api/extract` too, and from `--from`'s own read of the
+target's row, added by HANDOFF-066 (its critique's scenario C01).
+
+The guard is the mirror of the one `store.forget_doc` already makes for the
+same collision, and lives the same way: **inside the write**, read-then-compare
+under `_begin_write`'s lock, so a concurrent colliding extract cannot slip
+between the check and the write — the class of race `_begin_write`'s own
+docstring measured the cost of getting wrong on 2026-08-15. A row already stored
+under this document's own spelling, or one with no comparable `source` at all,
+is unaffected; only a row whose stored spelling differs is refused, raised as
+`store.CollidingIdentity`.
+
+**Considered and rejected: an early check in `cli.do_extract`, before any read
+of the source**, the shape most of that function's own refusals already take.
+It fails faster on the ordinary path, but it is not race-safe on its own — a
+second `lx extract` can still create the collision after such a check runs and
+before the write — and it would be a second check to keep in step with the
+authoritative one, one more place for the two to drift apart. `forget_doc`
+already answers the identical question with one check inside the lock and no
+earlier one; this keeps one rule, one home.
+
+**The `--from` path needed no separate guard.** `save_doc` is the one writer
+every path through `do_extract` reaches, so a check living there catches
+`--from` by construction — it does not have to sit in front of
+`prior_targets(src, lang)`'s read of the colliding row, because that read never
+persists anything on its own; only `save_doc`'s write does, and that is now the
+gate. The read still happens and still offers the colliding document's own
+wording as a candidate, which is harmless: the whole extract is aborted before
+anything is written, so nothing built from a document read under the wrong
+identity ever reaches a row.
+
+**The remedy the message offers is not `--from`.** `docs/guide.md` and
+`docs_guide.md` share a `doc_id`, and `cli.do_extract` already refuses `--from`
+when the named document and the one being extracted resolve to the same
+identity — the check exists to refuse extracting a document from itself, and a
+collision satisfies it by construction. Carrying translations across a
+collision through `--from` is therefore not a command that works, and the
+refusal does not name it. What works, and is what the message names instead:
+rename one of the two files so they no longer collide, or `lx forget` the row
+currently holding the identity first if it is the one meant to be replaced.
+
+**Out of scope, on purpose.** Two documents that collide by identity still
+cannot both be tracked — this closes the silent replacement, not the identity
+model. Widening `doc_id` so it stops flattening is a storage change, scheduled
+in `docs/contracts/workbench-http.md`'s *Reserved* section.
+
+`POST /api/extract` narrows: a request that answered `200` on a colliding `src`
+now answers `400`. No `contract_version` moves for it here — that is a version
+decision for its own work package under the contract's gate, not a side effect
+of closing a data-loss bug — and it is recorded as divergence (34) instead.
+
 ## 2026-09-10 · `--from` keeps what the target holds, and a machine draft is the one thing that gives way
 
 Closing HANDOFF-066. `lx extract NEW --lang L --from OLD` reads `NEW`'s own

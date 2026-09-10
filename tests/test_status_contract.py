@@ -757,11 +757,23 @@ def test_a_report_written_for_another_document_is_not_this_ones_check(project, c
     documents can share one report file. `check` is `null` when nobody has
     checked *this* document — measured 2026-09-10, a document that had never
     been checked reported `errors`, `stale: false`, out of a report whose own
-    `source` named the other one."""
+    `source` named the other one.
+
+    The row is removed by hand rather than through a second `lx extract`: since
+    HANDOFF-067 (2026-09-11) `docs/guide.md` and `docs_guide.md` collide by
+    identity, and `lx extract docs_guide.md` now refuses to replace the row
+    rather than doing it silently — the very shape this test used to reach the
+    scenario with. `lx forget` would reach it safely, but it deletes the report
+    with the row, which is the one thing this test needs to survive. A report
+    outliving the row it was written for is still reachable — a build before
+    this fix, or a disk edit — so the scenario is still worth this test; only
+    the way there changed.
+    """
     cli.main(["init"])
     cli.main(["extract", "docs/guide.md", "--lang", "zh-TW"])
     with pytest.raises(SystemExit):  # untranslated, so the check fails — and writes
         cli.main(["check", "docs/guide.md", "--lang", "zh-TW"])
+    statedb._write(project, "DELETE FROM documents WHERE doc_id='docs_guide.md'")
     (project / "docs_guide.md").write_text(DOC, encoding="utf-8")
     cli.main(["extract", "docs_guide.md", "--lang", "zh-TW"])
     capsys.readouterr()
