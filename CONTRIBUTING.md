@@ -30,7 +30,7 @@ npm run dev        # a dev server on :5173, proxied to a running `lx web`
 ## Before you propose a change as finished
 
 ```bash
-python -m pytest -q             # 2234 collected; no network, no model
+python -m pytest -q             # 2447 collected; no network, no model
 python -m ruff check src tests
 ```
 

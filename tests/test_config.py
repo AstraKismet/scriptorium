@@ -1157,6 +1157,8 @@ def test_a_key_off_the_http_allowlist_is_refused_before_its_value_is_looked_at(k
     the `PATH_VALUED_KEYS` test does not reach it. Nothing but this line stops
     the one-line change that would let a cross-site-reachable endpoint repoint
     the host every source and every translation in the project is POSTed to.
+    `tone` joined it on 2026-09-11: it got a rule of its own, which satisfies the
+    structural test by the same arithmetic, and it is on the list for that reason.
     """
     with pytest.raises(cli.UnwritableKey):
         cli.writable_key(key)

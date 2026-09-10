@@ -65,6 +65,7 @@ from .providers.errors import ProviderError
 from .skeleton import source_map
 from .store import (
     HUMAN,
+    CollidingIdentity,
     StateVersionError,
     append_tm,
     as_written,
@@ -646,15 +647,19 @@ def do_extract(src, lang, cfg, tone=None, reset=False, carry_from=None):
     # is the ordinary case, not a corner: without this line the whole point of
     # the flag fails on it and says nothing.
     #
-    # **Under `--from` a document with state is frozen even where its stored
-    # register is empty.** `canonical_tone` folds `""` and a missing value onto
-    # the default, and so did the memory key its rows were built under, so the
-    # default is the register it is in. Read as "no register", an empty value let
-    # the named document's register walk over it: nothing refused, no register
-    # line, every one of its own keys missed, and the report said what it held
-    # stayed. Measured by the review of HANDOFF-066, reachable through `lx config
-    # set tone ""` and every row written before the register existed. The
-    # ordinary extract resolves as it always did.
+    # **A document with state is frozen even where its stored register is
+    # empty.** `canonical_tone` folds `""` and a missing value onto the default,
+    # and so did the memory key its rows were built under, so the default is the
+    # register it is in. Read as "no register", an empty value let whatever came
+    # next in this chain walk over it: under `--from` the named document's
+    # (HANDOFF-066's review), and on an ordinary extract the configured one
+    # (HANDOFF-074) — every one of its keys missed, `reused 0`, no register line,
+    # its translations gone at exit 0. Reachable through every row written before
+    # the register existed, which no configuration check can reach. So the rule
+    # is one rule on both paths: the configuration decides a document's register
+    # at its first extract, and afterwards only `--tone` moves it — what an
+    # explicit stored value already got, and what the workbench contract's
+    # `tone` default, "the document's frozen register", already promised.
     #
     # The named document's register is read the same way and for the same
     # reason: its rows' keys were built in the default where its stored value is
@@ -666,7 +671,7 @@ def do_extract(src, lang, cfg, tone=None, reset=False, carry_from=None):
     # wherever there is one — `canonical_tone` decides sameness only, and the
     # user's own string is what reaches the model's `Tone:` line — so `frozen`
     # only fills in where the stored value is empty.
-    frozen = canonical_tone(stored.get("tone")) if carry_from and stored else None
+    frozen = canonical_tone(stored.get("tone")) if stored else None
     from_tone = canonical_tone(from_meta.get("tone")) if carry_from else None
     tone = (tone or stored.get("tone") or frozen or (from_meta or {}).get("tone")
             or from_tone or cfg.get("tone", DEFAULT_TONE))
@@ -762,10 +767,15 @@ def do_extract(src, lang, cfg, tone=None, reset=False, carry_from=None):
         theirs_of, mine_of = prior.answers(segments, tone), own.answers(segments, tone)
     else:
         inherited = prior.align(segments, tone)
-    # Under `--from`, against the register the document is frozen in even where
-    # its stored value is empty — see `frozen` above; the ordinary extract keeps
-    # the test it always had.
-    was = frozen if carry_from else stored.get("tone")
+    # Against the register the document is frozen in even where its stored value
+    # is empty — see `frozen` above. Since that rule stopped an ordinary extract
+    # moving such a document at all, what is left for this line is the move a
+    # person asks for: `--tone literary` on a document frozen in `""` read `was`
+    # as falsy, so even the deliberate move was silent and uncounted. The stored
+    # spelling where there is one, because it is what the person wrote and what
+    # this line always printed; the default it folds to where there is not.
+    stored_tone = stored.get("tone")
+    was = stored_tone if str(stored_tone or "").strip() else frozen
     if was and canonical_tone(was) != canonical_tone(tone) and len(own):
         # Said out loud because it is a silent destructive act otherwise, and the
         # contract tells a client to send `tone` on a re-extract button. Nothing
@@ -1003,7 +1013,9 @@ def do_extract(src, lang, cfg, tone=None, reset=False, carry_from=None):
     # future `lx status` can read one flat document; a format that adds a key
     # colliding with one above is the format's bug, and there are two formats.
     doc.update(facts)
-    save_doc(src, lang, doc)
+    # `bool`, because the endpoint hands `reset` through unvalidated — divergence
+    # (28) — and the store answers one refusal on it, not on truthiness.
+    save_doc(src, lang, doc, reset=bool(reset))
     if carry_from:
         # After the save, so this document's own rows count as "elsewhere". The
         # same question `lx forget` asks under its lock, asked here without one
@@ -4793,8 +4805,8 @@ def _report_collisions(collisions):
                    else "none offered; a tracked document holds this identity")
         _out(f"  {' = '.join(c['paths'])} — {offered}")
     _out("  rename one of each set if both are meant to be translated — `.lx/state.db` "
-         "keys a document on that identity, so extracting the second would overwrite "
-         "the first's state")
+         "keys a document on that identity, so extracting the second is refused rather "
+         "than silently overwriting the first's state")
 
 
 def cmd_untracked(args, cfg):
@@ -5162,11 +5174,34 @@ def _field_embedding_provider(cfg, path, value):
     return name.strip()
 
 
+def _field_tone(cfg, path, value):
+    """The register a document takes at its first extract. Text, and not blank.
+
+    It had no rule at all until 2026-09-11, so `lx config set tone ""` was
+    accepted and so was a number or a block — `lx status --json` has typed this
+    key on the way *out* since 2026-08-19 because nothing typed it on the way in.
+    Blank is refused because it spells the default register in a way that reads
+    as "none" to a truthiness test, which is how HANDOFF-074's documents lost
+    their translations; `lx config unset` spells the same wish unambiguously.
+
+    **No whitelist.** An unrecognized register is still accepted and still
+    selects the default brief — a recorded defect of its own, and deciding here
+    what a register may be would make this rule the definition of one, which
+    nothing is today. The value is echoed: it is nowhere near a credential.
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(
+            f"{path} is a register name, as text — got {value!r}. To go back to the "
+            f"default register, `lx config unset {path}`.")
+    return value.strip()
+
+
 #: A field this command decides for itself rather than inferring from what is
 #: already there. A pattern is a dotted key with `*` standing for exactly one
 #: segment; each rule takes the value as typed *or* as decoded out of a JSON
 #: block, and returns what will be written.
 _CONFIG_FIELDS = {
+    "tone": _field_tone,
     "embedding.provider": _field_embedding_provider,
     "providers.*.kind": _field_kind,
     "providers.*.base_url": _field_base_url,
@@ -5346,8 +5381,8 @@ def config_value(cfg, key, raw):
 #: come to disagree about what is writable.
 #:
 #: **A literal, not `set(_CONFIG_FIELDS) - _WHOLE_BLOCK`** — which is what it
-#: happens to equal today, and a test asserts the subset so it can never exceed
-#: it. The two spellings differ in which way they fail. Derived, the day somebody
+#: equalled until 2026-09-11, when `tone` got a rule of its own and was not
+#: admitted here, and a test asserts the subset so it can never exceed it. The two spellings differ in which way they fail. Derived, the day somebody
 #: adds a field to `_CONFIG_FIELDS` for an unrelated reason — a `cert_path`, say
 #: — that field is writable over HTTP the same afternoon, with nobody deciding
 #: it. That is exactly the failure `config.PATH_VALUED_KEYS`' own comment
@@ -5362,9 +5397,13 @@ def config_value(cfg, key, raw):
 #: from it with confinement deliberately skipped, so a writable `output_pattern`
 #: turns a cross-site-reachable endpoint into a file write outside the project.
 #: `providers.*.headers` is absent because a header value reaches the backend
-#: verbatim. And a long tail with no rule at all — `targets`, `tone`,
-#: `source_lang`, `formats.map`, `lexicon_extra`, `checks_disabled`, the `roots`
-#: key `docs/decisions.md` reserves — is absent because of the property below.
+#: verbatim. And a long tail with no rule at all — `targets`, `source_lang`,
+#: `formats.map`, `lexicon_extra`, `checks_disabled`, the `roots` key
+#: `docs/decisions.md` reserves — is absent because of the property below.
+#: `tone` has had a rule since 2026-09-11 and is absent anyway: the rule exists
+#: to stop a blank register reaching a document from the terminal, and making
+#: the register writable from a browser is a decision for this surface of its
+#: own, not a side effect of validating the key.
 #:
 #: **Every entry has its own single-value rule in `_CONFIG_FIELDS`, and that is
 #: load-bearing rather than a coincidence.** `config_value` short-circuits on a
@@ -6842,7 +6881,8 @@ def main(argv=None):
     except (FileNotFoundError, StateVersionError, UnsupportedSource,
             GlossaryWriteError, UnknownFormat, UndecodableDocument,
             StyleSheetError, ConfigError, UnusableTarget, UnnamedRegister,
-            UnusableCarryover, ForgetRefused, ProviderError) as e:
+            UnusableCarryover, ForgetRefused, ProviderError,
+            CollidingIdentity) as e:
         print(f"lx: {e}", file=sys.stderr)
         sys.exit(2)
     except BrokenPipeError:

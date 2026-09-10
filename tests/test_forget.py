@@ -238,6 +238,46 @@ def test_the_three_deletes_sit_in_one_with_block_behind_the_write_lock():
         "the write lock is taken before the first read the delete depends on")
 
 
+_DOCUMENT_WRITES = ("INSERT INTO documents", "INSERT OR REPLACE INTO documents",
+                    "REPLACE INTO documents", "UPDATE documents")
+
+
+def test_the_one_write_of_a_document_row_asks_whose_it_is_behind_the_write_lock():
+    """HANDOFF-067, by syntax, and the mirror of the test above. `save_doc` is
+    the only statement in the source tree that writes a `documents` row, so the
+    guard there covers every path to one — `lx extract`, `--from`, `lx run`,
+    `POST /api/extract` — and a second writer would walk around it. The owner is
+    read *after* the write lock is taken, or two colliding extracts both pass
+    the check and the later one wins: the defect with a check standing in front
+    of it. No behaviour test sees that ordering; this does."""
+    sources = sorted(pathlib.Path(SRC).rglob("*.py"))
+    trees = {p: ast.parse(p.read_text(encoding="utf-8"), filename=str(p)) for p in sources}
+    found = [(p, n) for p, t in trees.items() for n in ast.walk(t)
+             if isinstance(n, ast.Constant) and isinstance(n.value, str)
+             and n.value.startswith(_DOCUMENT_WRITES)]
+    assert len(found) == 1, f"one write of a documents row in the source tree, found {found}"
+    for path, tree in trees.items():
+        for node in ast.walk(tree):
+            if isinstance(node, ast.JoinedStr) and node.values and isinstance(
+                    node.values[0], ast.Constant) and str(node.values[0].value).startswith(
+                    _DOCUMENT_WRITES):
+                pytest.fail(f"{path}:{node.lineno} builds a documents write with an f-string")
+    path, write = found[0]
+    tree = trees[path]
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    block = write
+    while not isinstance(block, ast.With):
+        block = parents[block]
+    first = block.body[0]
+    assert (isinstance(first, ast.Expr) and isinstance(first.value, ast.Call)
+            and getattr(first.value.func, "id", None) == "_begin_write"), (
+        "the write lock is taken before the read the write depends on")
+    reads = [n for n in ast.walk(block) if isinstance(n, ast.Call)
+             and getattr(n.func, "id", None) == "_stored_source"]
+    assert len(reads) == 1 and reads[0].lineno < write.lineno, (
+        "whose row it is is asked inside the transaction, before the row is written")
+
+
 def test_a_failing_third_delete_rolls_the_first_two_back(project, capsys):
     """Acceptance criterion 4, by behaviour. A trigger fails the `documents`
     DELETE from inside SQLite, so nothing about the code under test is patched."""

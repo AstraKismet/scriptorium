@@ -585,6 +585,23 @@ def test_a_paragraph_moved_and_repeated_keeps_its_wording_once(project, capsys):
     assert (held["s0007"]["target"], held["s0007"]["origin"]) == ("卡乙。", "agent"), held
 
 
+def _unfreeze(project, did, stored):
+    """Put an empty register on a row the way it really arrives: `""` from a
+    configuration written by hand — `lx config set tone ""` is refused since
+    2026-09-11 — or no `tone` at all, as every row written before the register
+    existed. Doctored rather than typed for the reason `statedb` gives: the
+    command that would have produced it now refuses, and that is not what is
+    under test here."""
+    [(meta,)] = statedb._query(project, "SELECT meta FROM documents WHERE doc_id=?", (did,))
+    found = json.loads(meta)
+    if stored == "absent":
+        found.pop("tone", None)
+    else:
+        found["tone"] = ""
+    statedb._write(project, "UPDATE documents SET meta=? WHERE doc_id=?",
+                   (json.dumps(found, ensure_ascii=False), did))
+
+
 @pytest.mark.parametrize("stored", ["empty", "absent"])
 def test_a_named_document_with_an_empty_register_is_read_as_the_default(
         project, capsys, stored):
@@ -595,16 +612,10 @@ def test_a_named_document_with_an_empty_register_is_read_as_the_default(
     nothing after it, or `--tone None`, which was refused again. Its rows' keys
     are in the default register, so the carry runs in it."""
     _init(capsys)
-    _ok(capsys, "config", "set", "tone", "")
     _write(project, "novel.md", ["# Chapter One", "Alpha sentence."])
     _ok(capsys, "extract", "novel.md", "--lang", "zh-TW")
     _apply(project, capsys, "novel.md", {"s0001": "第一章", "s0002": "阿爾法句。"}, "agent")
-    if stored == "absent":
-        [(meta,)] = statedb._query(project, "SELECT meta FROM documents WHERE doc_id='novel.md'")
-        found = json.loads(meta)
-        found.pop("tone", None)
-        statedb._write(project, "UPDATE documents SET meta=? WHERE doc_id='novel.md'",
-                       (json.dumps(found, ensure_ascii=False),))
+    _unfreeze(project, "novel.md", stored)
     _ok(capsys, "config", "set", "tone", "literary")
     _write(project, "ch1.md", ["# Chapter One", "Alpha sentence."])
     code, out, err = _lx(capsys, "extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md")
@@ -703,19 +714,20 @@ def test_a_broken_body_in_the_target_is_read_not_raised_on(project, capsys, raw)
 
 def test_a_chapter_frozen_with_an_empty_register_is_refused_rather_than_moved(
         project, capsys):
-    """`lx config set tone ""` is accepted, and an extract then freezes `""` —
-    the default register to `canonical_tone` and to the memory key, but "no
-    register" to a truthiness test. `--from` resolved past it to the novel's,
-    so nothing was refused, the chapter's own keys missed, and a person's held
-    wording was replaced under a line saying it stayed. Found by the mutation
-    pass: a mutant that dropped the truthiness test was the correct code."""
+    """A chapter frozen in `""` — the default register to `canonical_tone` and
+    to the memory key, but "no register" to a truthiness test. `--from` resolved
+    past it to the novel's, so nothing was refused, the chapter's own keys
+    missed, and a person's held wording was replaced under a line saying it
+    stayed. Found by the mutation pass: a mutant that dropped the truthiness
+    test was the correct code. The `""` used to arrive through `lx config set
+    tone ""`, refused since 2026-09-11, so it is put on the row directly."""
     _init(capsys)
-    _ok(capsys, "config", "set", "tone", "")
     _write(project, "novel.md", ["# Chapter One", "Alpha sentence."])
     _ok(capsys, "extract", "novel.md", "--lang", "zh-TW", "--tone", "literary")
     _apply(project, capsys, "novel.md", {"s0001": "第一章", "s0002": "阿爾法句。"}, "agent")
     _write(project, "ch1.md", ["# Chapter One", "Alpha sentence."])
     _ok(capsys, "extract", "ch1.md", "--lang", "zh-TW")
+    _unfreeze(project, "ch1.md", "empty")
     _apply(project, capsys, "ch1.md", {"s0002": "我改寫的阿爾法句。"}, "human")
     _ok(capsys, "hold", "ch1.md", "--lang", "zh-TW", "--ids", "s0002")
     code, _out, err = _lx(capsys, "extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md")

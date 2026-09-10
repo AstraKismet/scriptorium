@@ -368,6 +368,139 @@ def test_extract_names_a_non_default_register_and_stays_quiet_about_the_default(
     assert "tone" not in r.stdout.decode("utf-8")
 
 
+def _translated_with_an_empty_register(tmp_path, stored):
+    """`a.md`, two `human` translations, and a stored register that reads as
+    empty: `""`, or no `tone` at all as on every row written before the
+    register existed. Put on the row directly — `lx config set tone ""` was how
+    the first reproduction reached it and is refused since 2026-09-11, and the
+    absent spelling was never reachable by a command at all."""
+    env = {**os.environ, "PYTHONPATH": SRC}
+    (tmp_path / "a.md").write_bytes(b"First sentence.\n\nSecond sentence.\n")
+    assert _lx(["init"], tmp_path, env).returncode == 0
+    assert _lx(["extract", "a.md", "--lang", "zh-TW"], tmp_path, env).returncode == 0
+    ids = [s["id"] for s in statedb.segments(tmp_path)]
+    (tmp_path / "t.json").write_bytes(json.dumps(
+        {ids[0]: "第一句。", ids[1]: "第二句。"}, ensure_ascii=False).encode())
+    assert _lx(["apply", "a.md", "--lang", "zh-TW", "--file", "t.json",
+                "--origin", "human"], tmp_path, env).returncode == 0
+    [(meta,)] = statedb._query(tmp_path, "SELECT meta FROM documents")
+    found = json.loads(meta)
+    if stored == "absent":
+        found.pop("tone")
+    else:
+        found["tone"] = ""
+    statedb._write(tmp_path, "UPDATE documents SET meta=?",
+                   (json.dumps(found, ensure_ascii=False),))
+    return env
+
+
+@pytest.mark.parametrize("stored", ["empty", "absent"])
+def test_a_document_stored_with_an_empty_register_stays_in_it(tmp_path, stored):
+    """HANDOFF-074's own reproduction, and it fails on 7a76b53 — the commit
+    HANDOFF-066 merged as (#26). `canonical_tone` folds `""` and a missing key
+    onto the default the way the translation-memory key does, so such a
+    document is *in* the default register; the resolution read it as having
+    none and fell through to the configuration. An ordinary re-extract under a
+    later, different configured register then moved it with no `--tone`, no
+    line, and both translations gone at exit 0.
+
+    Decided 2026-09-11 by the Opus re-derivation, reversing this package's
+    first answer, which made the move loud and let it happen: the workbench
+    contract's `tone` default is "the document's frozen register", and a
+    document with an explicit stored value was already never moved this way.
+    So the configuration decides a register at a document's first extract and
+    never again, and this asserts the move does not happen at all."""
+    env = _translated_with_an_empty_register(tmp_path, stored)
+    assert _lx(["config", "set", "tone", "literary"], tmp_path, env).returncode == 0
+
+    r = _lx(["extract", "a.md", "--lang", "zh-TW"], tmp_path, env)
+    out = r.stdout.decode("utf-8")
+    assert r.returncode == 0, r.stderr.decode("utf-8", "replace")
+    assert "reused 2" in out and "tone literary" not in out, out
+    assert "register moved" not in out, out
+    assert [s["target"] for s in statedb.segments(tmp_path)] == ["第一句。", "第二句。"]
+    # The empty spelling is filled in with the register it already was, which is
+    # what `frozen` has done under `--from` since HANDOFF-066.
+    assert statedb.documents(tmp_path)[0]["tone"] == "technical"
+
+
+@pytest.mark.parametrize("stored", ["empty", "absent"])
+def test_a_deliberate_move_out_of_an_empty_register_says_what_it_drops(tmp_path, stored):
+    """The half the Opus re-derivation found that the package did not name. The
+    register line compared against the raw stored value, which was falsy, so a
+    move a person *asked for* with `--tone` was as silent as the one nobody
+    asked for — no line, no count. Fails on 7a76b53."""
+    env = _translated_with_an_empty_register(tmp_path, stored)
+    r = _lx(["extract", "a.md", "--lang", "zh-TW", "--tone", "literary"], tmp_path, env)
+    out = r.stdout.decode("utf-8")
+    assert r.returncode == 0, r.stderr.decode("utf-8", "replace")
+    assert "the register moved from technical to literary" in out, out
+    assert "the 2 this document held are not in it any more" in out, out
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_config_set_refuses_a_blank_register_and_names_unset(tmp_path, value):
+    """Decision 2 of HANDOFF-074. A blank register spells the default in a way
+    that read as "none"; `lx config unset tone` spells the same wish without
+    the ambiguity, so the refusal names it — and the named remedy is run here
+    as printed, because a refusal's remedy is a code path. The file is left
+    byte for byte, as every `lx config set` refusal leaves it."""
+    env = {**os.environ, "PYTHONPATH": SRC}
+    assert _lx(["init"], tmp_path, env).returncode == 0
+    before = (tmp_path / "lx.config.json").read_bytes()
+    r = _lx(["config", "set", "tone", value], tmp_path, env)
+    err = r.stderr.decode("utf-8")
+    assert r.returncode == 2, err
+    assert "Traceback" not in err
+    assert "`lx config unset tone`" in err, err
+    assert (tmp_path / "lx.config.json").read_bytes() == before
+    assert _lx(["config", "unset", "tone"], tmp_path, env).returncode == 0
+    assert "tone" not in json.loads((tmp_path / "lx.config.json").read_bytes())
+
+
+def test_an_explicit_stored_register_keeps_todays_behaviour_on_a_re_extract(
+        tmp_path):
+    """Acceptance criterion 4. HANDOFF-074 touches only a document whose stored
+    register reads as empty — the `stored.get("tone")` an explicit value already
+    won the `or` chain that resolves `tone`, ahead of `cfg.get("tone", ...)`, so
+    an ordinary re-extract with no `--tone` was already sticky to it and a later
+    config change alone could never move it. `canonical_tone` is idempotent on
+    an already-canonical value, so wrapping `was` in it changes nothing here —
+    this pins that the sticky case, and the register line it never has reason to
+    print, resolve exactly as they did before this package."""
+    (tmp_path / "d.md").write_bytes(b"First sentence.\n\nSecond sentence.\n")
+    env = {**os.environ, "PYTHONPATH": SRC}
+    assert _lx(["init"], tmp_path, env).returncode == 0
+    assert _lx(["extract", "d.md", "--lang", "zh-TW", "--tone", "literary"],
+               tmp_path, env).returncode == 0
+    ids = [s["id"] for s in statedb.segments(tmp_path)]
+    (tmp_path / "t.json").write_bytes(json.dumps(
+        {ids[0]: "第一句。", ids[1]: "第二句。"}, ensure_ascii=False).encode())
+    assert _lx(["apply", "d.md", "--lang", "zh-TW", "--file", "t.json",
+                "--origin", "human"], tmp_path, env).returncode == 0
+
+    # No `--tone`, and the project config now says something else entirely: the
+    # document stays sticky to the register it was extracted in — exactly as
+    # `test_extract_names_a_non_default_register_and_stays_quiet_about_the_default`
+    # already pins — and untranslated by nothing.
+    assert _lx(["config", "set", "tone", "technical"], tmp_path, env).returncode == 0
+    r = _lx(["extract", "d.md", "--lang", "zh-TW"], tmp_path, env)
+    assert r.returncode == 0, r.stderr.decode("utf-8", "replace")
+    assert "tone literary" in r.stdout.decode("utf-8")
+    assert "register moved" not in r.stdout.decode("utf-8")
+    assert [s["target"] for s in statedb.segments(tmp_path)] == ["第一句。", "第二句。"]
+
+    # It still moves, loudly, on an explicit `--tone` — the case this package
+    # leaves alone — and this is `test_run_says_what_extract_says_about_the_wording_it_stopped_holding`'s
+    # own claim, asserted again here beside the sticky case it is the mirror of.
+    r = _lx(["extract", "d.md", "--lang", "zh-TW", "--tone", "technical"], tmp_path, env)
+    assert r.returncode == 0, r.stderr.decode("utf-8", "replace")
+    out = r.stdout.decode("utf-8")
+    assert "the register moved from literary to technical" in out, out
+    assert "the 2 this document held are not in it any more" in out, out
+    assert not any(s["target"] for s in statedb.segments(tmp_path))
+
+
 def test_run_says_what_extract_says_about_the_wording_it_stopped_holding(tmp_path):
     """`lx run` begins with `do_extract` and carries the same `--tone`.
 
@@ -1029,3 +1162,161 @@ def test_a_missing_source_is_reported_before_its_extension_is_judged(tmp_path):
     assert r.returncode == 2, err
     assert "is not there" in err
     assert "no format" not in err, "the absent file is named first"
+
+
+# --- a colliding extract refuses rather than replacing another row (HANDOFF-067) --
+
+
+def test_a_colliding_extract_is_refused_and_the_first_documents_row_is_untouched(
+        tmp_path):
+    """Acceptance criterion 3. `store.doc_id` flattens both spellings onto one
+    row, and `save_doc` was `INSERT OR REPLACE` — so extracting the second
+    spelling deleted the first document's translations, holds and waivers at
+    exit 0 and nothing printed. The refusal names the stored spelling."""
+    env = {**os.environ, "PYTHONPATH": SRC}
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "guide.md").write_bytes(b"A guide.\n")
+    assert _lx(["init"], tmp_path, env).returncode == 0
+    assert _lx(["extract", "docs/guide.md", "--lang", "zh-TW"],
+               tmp_path, env).returncode == 0
+    _apply_by_source_text(tmp_path, env, "docs/guide.md", {"A guide.": "一份指南。"})
+    before = _doc_segments(tmp_path, "docs_guide.md")
+
+    (tmp_path / "docs_guide.md").write_bytes(b"Something else.\n")
+    r = _lx(["extract", "docs_guide.md", "--lang", "zh-TW"], tmp_path, env)
+    err = r.stderr.decode("utf-8")
+    assert r.returncode == 2, err
+    assert "Traceback" not in err
+    assert "docs/guide.md" in err, err
+    assert _doc_segments(tmp_path, "docs_guide.md") == before
+
+
+def test_a_colliding_extract_is_refused_under_from_too(tmp_path):
+    """HANDOFF-066's own critique, scenario C01. `--from` reads the target's own
+    row through `doc_id`, like every other read, so the plain-extract defect
+    reached this path too — the guard has to be the one `save_doc` makes rather
+    than one placed only in front of the ordinary path."""
+    env = {**os.environ, "PYTHONPATH": SRC}
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "ch.md").write_bytes(b"A line.\n")
+    (tmp_path / "novel.md").write_bytes(b"A different line.\n")
+    assert _lx(["init"], tmp_path, env).returncode == 0
+    assert _lx(["extract", "docs/ch.md", "--lang", "zh-TW"], tmp_path, env).returncode == 0
+    _apply_by_source_text(tmp_path, env, "docs/ch.md", {"A line.": "一行。"})
+    assert _lx(["extract", "novel.md", "--lang", "zh-TW"], tmp_path, env).returncode == 0
+    before = _doc_segments(tmp_path, "docs_ch.md")
+
+    (tmp_path / "docs_ch.md").write_bytes(b"A third line.\n")
+    r = _lx(["extract", "docs_ch.md", "--lang", "zh-TW", "--from", "novel.md"],
+            tmp_path, env)
+    err = r.stderr.decode("utf-8")
+    assert r.returncode == 2, err
+    assert "Traceback" not in err
+    assert "docs/ch.md" in err, err
+    assert _doc_segments(tmp_path, "docs_ch.md") == before
+
+
+def test_reextracting_under_its_own_stored_spelling_is_unaffected(tmp_path):
+    """Acceptance criterion 4. The guard compares the stored spelling against
+    the document's own, never against itself — `docs/guide.md` is a real
+    subdirectory, so both the extract that writes the row and the one that
+    compares against it go through `os.path.relpath`'s `os.sep` on every
+    platform, not only the one whose separator happens to match a literal."""
+    env = {**os.environ, "PYTHONPATH": SRC}
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "guide.md").write_bytes(b"A guide.\n")
+    assert _lx(["init"], tmp_path, env).returncode == 0
+    assert _lx(["extract", "docs/guide.md", "--lang", "zh-TW"],
+               tmp_path, env).returncode == 0
+    _apply_by_source_text(tmp_path, env, "docs/guide.md", {"A guide.": "一份指南。"})
+    r = _lx(["extract", "docs/guide.md", "--lang", "zh-TW"], tmp_path, env)
+    assert r.returncode == 0, r.stderr.decode("utf-8", "replace")
+    assert _doc_segments(tmp_path, "docs_guide.md")["s0001"]["target"] == "一份指南。"
+
+
+def _guide_and_its_twin(tmp_path, translated=True):
+    """`docs/guide.md` tracked, and `docs_guide.md` on disk: one identity."""
+    env = {**os.environ, "PYTHONPATH": SRC}
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "guide.md").write_bytes(b"A guide.\n")
+    assert _lx(["init"], tmp_path, env).returncode == 0
+    assert _lx(["extract", "docs/guide.md", "--lang", "zh-TW"],
+               tmp_path, env).returncode == 0
+    if translated:
+        _apply_by_source_text(tmp_path, env, "docs/guide.md", {"A guide.": "一份指南。"})
+    (tmp_path / "docs_guide.md").write_bytes(b"Something else.\n")
+    return env
+
+
+def test_a_colliding_extract_is_refused_under_reset_too(tmp_path):
+    """The cell the Opus re-derivation called the easiest to get wrong. `--reset`
+    means "read no prior state of *this* document", not "destroy whatever row
+    sits on this identity" — without this, `lx extract docs_guide.md --reset
+    --tone literary` was the silent version of the defect with a flag on it."""
+    env = _guide_and_its_twin(tmp_path)
+    before = _doc_segments(tmp_path, "docs_guide.md")
+    r = _lx(["extract", "docs_guide.md", "--lang", "zh-TW", "--reset", "--tone", "technical"],
+            tmp_path, env)
+    err = r.stderr.decode("utf-8")
+    assert r.returncode == 2, err
+    assert "docs/guide.md" in err and "--reset does not get past this" in err, err
+    assert _doc_segments(tmp_path, "docs_guide.md") == before
+
+
+def test_the_remedy_a_collision_names_runs_as_printed(tmp_path):
+    """A refusal's remedy is a code path, run in the state it was printed in. On
+    a document with nothing only it holds, `lx forget` as named succeeds, and
+    the extract it was blocking then runs."""
+    env = _guide_and_its_twin(tmp_path, translated=False)
+    r = _lx(["extract", "docs_guide.md", "--lang", "zh-TW"], tmp_path, env)
+    err = r.stderr.decode("utf-8")
+    assert r.returncode == 2, err
+    assert "`lx forget docs/guide.md --lang zh-TW`" in err, err
+    assert _lx(["forget", "docs/guide.md", "--lang", "zh-TW"], tmp_path, env).returncode == 0
+    r = _lx(["extract", "docs_guide.md", "--lang", "zh-TW"], tmp_path, env)
+    assert r.returncode == 0, r.stderr.decode("utf-8", "replace")
+    assert statedb.documents(tmp_path)[0]["source"] == "docs_guide.md"
+
+
+def _doctor_meta(tmp_path, meta):
+    statedb._write(tmp_path, "UPDATE documents SET meta=?", (meta,))
+
+
+def test_a_row_that_cannot_say_whose_it_is_is_refused_until_reset(tmp_path):
+    """Every `lx extract` since the baseline commit records `source`, so a row
+    without one was written by hand or damaged, and it cannot be shown to be
+    this document's — `forget_doc` refuses the same row for the same reason.
+    `--reset` is the way past it, because discarding an unreadable row is what
+    that flag exists for; the command the refusal names is run as printed."""
+    env = {**os.environ, "PYTHONPATH": SRC}
+    (tmp_path / "a.md").write_bytes(b"One.\n")
+    assert _lx(["init"], tmp_path, env).returncode == 0
+    assert _lx(["extract", "a.md", "--lang", "zh-TW"], tmp_path, env).returncode == 0
+    _doctor_meta(tmp_path, json.dumps({"lang": "zh-TW", "tone": "technical"}))
+    r = _lx(["extract", "a.md", "--lang", "zh-TW"], tmp_path, env)
+    err = r.stderr.decode("utf-8")
+    assert r.returncode == 2, err
+    assert "carries no readable source path" in err and "Traceback" not in err, err
+    r = _lx(["extract", "a.md", "--lang", "zh-TW", "--reset", "--tone", "technical"],
+            tmp_path, env)
+    assert r.returncode == 0, r.stderr.decode("utf-8", "replace")
+    assert statedb.documents(tmp_path)[0]["source"] == "a.md"
+
+
+@pytest.mark.parametrize("meta", ["not json", "[1]", "null"])
+def test_reset_still_gets_past_a_row_whose_meta_is_not_an_object(tmp_path, meta):
+    """A regression the first version of HANDOFF-067 introduced and the Opus
+    re-derivation found: the guard read the row through `store._read_meta`,
+    which raises on a `meta` that is not a JSON object, and `--reset` — the
+    flag that reads no prior row precisely so it can get past one — died in a
+    traceback on it. Passes on 7a76b53, which had no read here at all."""
+    env = {**os.environ, "PYTHONPATH": SRC}
+    (tmp_path / "a.md").write_bytes(b"One.\n")
+    assert _lx(["init"], tmp_path, env).returncode == 0
+    assert _lx(["extract", "a.md", "--lang", "zh-TW"], tmp_path, env).returncode == 0
+    _doctor_meta(tmp_path, meta)
+    r = _lx(["extract", "a.md", "--lang", "zh-TW", "--reset", "--tone", "technical"],
+            tmp_path, env)
+    err = r.stderr.decode("utf-8", "replace")
+    assert r.returncode == 0 and "Traceback" not in err, err
+    assert statedb.documents(tmp_path)[0]["source"] == "a.md"

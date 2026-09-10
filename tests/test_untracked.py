@@ -139,9 +139,11 @@ def test_two_distinct_files_sharing_one_identity_are_proposed_once(
     `doc_id` replaces every character outside `A-Za-z0-9._-`, not only the
     separator, so `docs/a/b.md` and `docs/a_b.md` are one identity — and
     `.lx/state.db` keys a document row on it, so they really are one document:
-    extracting both in sequence leaves one row and the second has overwritten the
-    first. Proposing both would be offering that overwrite as new work, which is
-    what the code this replaced did.
+    extracting both in sequence leaves one row, and since HANDOFF-067
+    (2026-09-11) the second is refused rather than silently overwriting the
+    first (`store.CollidingIdentity`, `tests/test_cli.py`). Proposing both would
+    be offering that collision as new work, which is what the code this replaced
+    did.
 
     The suppression is unconditional — the first spelling reached wins, whether
     or not anything is tracked — and it stays. What changed at
