@@ -490,7 +490,8 @@ src/scriptorium/
   suggest.py     near matches from the memory, for the sentence an exact key
                  lookup misses by one word; pure stdlib, shows and never applies
   store.py       .lx/state.db (document state, SQLite), the translation-memory
-                 key, the memory itself (.lx/tm.*.jsonl, still JSONL and tracked)
+                 key, the memory itself (.lx/tm.*.jsonl, still JSONL and tracked),
+                 and the one delete of a document row, `forget_doc`
   config.py      layered config, glossary, do-not-translate list, style sheet;
                  dotted-key addressing, the atomic config writer, and
                  `resolve_route` — the one answer to "which backend, which model"
@@ -523,7 +524,7 @@ Node — see the invariant below.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 2308 collected, no network. Four are
+python -m pytest -q                 # 2368 collected, no network. Four are
                                     #   conditional on three different things, so
                                     #   which two skip is a property of the machine
                                     #   AND the account: one is POSIX-only, one
@@ -542,6 +543,7 @@ npm run build                       # writes src/scriptorium/web/static/ — com
 lx run docs/guide.md --lang zh-TW   # extract -> translate -> check -> repair -> render
 lx run book/ch1.md --lang zh-TW --limit 50    # at most 50 segments per pass; run it again to continue
 lx extract book/ch1.md --lang zh-TW --from book/whole.md   # carry a split or renamed file's translations across
+lx forget book/whole.md --lang zh-TW  # then drop its row; refuses while it holds wording no other document does
 lx glossary get                     # the terminology rows this project enforces
 lx glossary set Ashcombe 灰岸       # decide a rendering, or change one
 lx renderings --lang zh-TW          # which names this book renders inconsistently
@@ -1197,6 +1199,44 @@ own.
   belongs to the host syntax rather than to whichever of the three sources wrote
   the target — closing that half on 2026-08-03 was what stopped one document
   rendering differently depending on who translated it.
+- **A document row is forgotten by name, one at a time, and never while it
+  holds the last copy of anything.** `lx forget SRC --lang L` is
+  `store.forget_doc`, the only delete of a document row, and the mirror of
+  `save_doc`: three `DELETE`s in one `with` block, `documents` last, behind
+  `store._begin_write` — every read before them decides whether they run, and a
+  test asserts the shape with `ast`. What it asks is the harm, not the
+  population: every *translated* segment must also be held by another row in the
+  same language as a multiset of `content_hash` plus **what the render writes** —
+  the target unmasked through `mask.target_map` and polished, never the stored
+  string, whose `⟦n⟧` can name different terms in two documents (measured: one
+  comparison refused a faithful carry, the other deleted the only row rendering
+  the right name) — and a `human` wording by another `human` copy, because origin
+  precedence guards nothing else. `content_hash` coverage alone was the scheduled
+  predicate and was measured allowing exactly the split-without-carry case where
+  the old row is the only copy. `--discard-wording` overrides that refusal and
+  nothing else.
+
+  Three things it will never do. It never deletes a row it was not named for:
+  `doc_id` maps `docs/guide.md` and `docs_guide.md` to one row, so the typed
+  spelling must *be* the stored `source`, compared inside the lock. It never
+  opens, stats or confines the path — the key is `(doc_id, lang)`, which cannot
+  reach outside `.lx/state.db`, and `confined_path` would refuse
+  `../shelf/book.md`, which `lx extract` supports. And it never builds a file
+  name out of a `--lang` that is not a language tag: the check report it removes
+  is `<doc_id>.<lang>.json`, and an unvalidated tag was measured normalizing to
+  the project's own `lx.config.json`. No sweep, no dump, no endpoint.
+
+  **A refusal offers `--from` only into a document it is safe to carry into and
+  only where it would help**: one holding nothing the old row lacks — no wording,
+  and no hold, waiver or `human` mark the old row's copy does not also carry —
+  and holding a blocked paragraph untranslated or unmarked. `--from` reads the
+  named document's state instead of the target's own, and offering it on the
+  wording alone reverted a re-worded chapter and dropped a held one's hold,
+  measured. It never tells a person to copy a wording across with `lx apply`.
+  Existence of the source is shown to a person — `(no file at this path)` in
+  human `lx status` and `lx stats` — and decides nothing anywhere. See
+  `docs/decisions.md`, 2026-09-10.
+
 - **What `lx commit` may bank is what `lx check` does not call an error**, per
   segment, and the gate is `checks.check_segment` itself rather than a rule of
   the commit path's own. `.lx/tm.*.jsonl` is a source of truth, it is tracked in

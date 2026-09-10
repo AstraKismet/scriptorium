@@ -714,6 +714,62 @@ def test_a_document_row_with_no_source_fails_one_project_and_not_the_command(
                                 "waived": 0, "errors": 0, "warnings": 0}
 
 
+def test_a_forgotten_pair_leaves_the_report_and_the_contract_does_not_move(
+        tmp_path, monkeypatch, capsys):
+    """Acceptance criterion 6 of the package that added `lx forget`.
+
+    **The recorded decision: `lx status --json` does not change meaning.**
+    `documents` is "every tracked (document, language) pair", and a forgotten
+    pair is not tracked — it has no row, which is what tracked has always meant
+    here. Nothing is removed, renamed, retyped or given a new meaning, so the
+    version stays where it is; and the split book's old row, which counted every
+    segment a second time, is simply absent rather than filtered.
+    """
+    root = tmp_path / "nest" / "book"
+    root.mkdir(parents=True)
+    monkeypatch.chdir(root)
+    cli.main(["init"])
+    (root / "novel.md").write_text("One.\n\nTwo.\n", encoding="utf-8")
+    cli.main(["extract", "novel.md", "--lang", "zh-TW"])
+    (root / "in.json").write_text(json.dumps({"s0001": "一。", "s0002": "二。"},
+                                             ensure_ascii=False), encoding="utf-8")
+    cli.main(["apply", "novel.md", "--lang", "zh-TW", "--file", "in.json"])
+    (root / "ch1.md").write_text("One.\n", encoding="utf-8")
+    (root / "ch2.md").write_text("Two.\n", encoding="utf-8")
+    (root / "novel.md").unlink()
+    for chapter in ("ch1.md", "ch2.md"):
+        cli.main(["extract", chapter, "--lang", "zh-TW", "--from", "novel.md"])
+    capsys.readouterr()
+    before = _status(capsys)["projects"][0]
+    assert before["totals"]["segments"] == 4, "the harm: a two-segment book counted twice"
+    cli.main(["forget", "novel.md", "--lang", "zh-TW"])
+    capsys.readouterr()
+    status = _status(capsys)
+    assert status["contract_version"] == cli.STATUS_CONTRACT_VERSION == 1
+    project = status["projects"][0]
+    assert [d["source"] for d in project["documents"]] == ["ch1.md", "ch2.md"]
+    assert project["totals"]["segments"] == 2 and project["totals"]["documents"] == 2
+    assert [r["documents"] for r in project["languages"]] == [2]
+
+
+def test_a_report_written_for_another_document_is_not_this_ones_check(project, capsys):
+    """`report_path` is named by `doc_id`, which flattens every separator, so two
+    documents can share one report file. `check` is `null` when nobody has
+    checked *this* document — measured 2026-09-10, a document that had never
+    been checked reported `errors`, `stale: false`, out of a report whose own
+    `source` named the other one."""
+    cli.main(["init"])
+    cli.main(["extract", "docs/guide.md", "--lang", "zh-TW"])
+    with pytest.raises(SystemExit):  # untranslated, so the check fails — and writes
+        cli.main(["check", "docs/guide.md", "--lang", "zh-TW"])
+    (project / "docs_guide.md").write_text(DOC, encoding="utf-8")
+    cli.main(["extract", "docs_guide.md", "--lang", "zh-TW"])
+    capsys.readouterr()
+    document = _status(capsys)["projects"][0]["documents"][0]
+    assert document["source"] == "docs_guide.md"
+    assert document["check"] is None, document
+
+
 @pytest.mark.parametrize("key,value,expected", [
     ("source_lang", {"a": 1}, None),
     ("source_lang", 7, None),

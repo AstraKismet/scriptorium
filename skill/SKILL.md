@@ -29,6 +29,8 @@ Run `check` until it exits 0 before rendering. `check` writes `.lx/reports/<doc>
 
 A green exit code carries one qualifier: it covers every segment except any a **person** has waived with `lx waive`, where the rules judgement can overrule are reported at `warn` instead. **Never run `lx waive` yourself.** It is a reviewer saying they read a finding and stand by the wording, and you are not in a position to say that on their behalf — report the finding and let them decide. The rules that report the substituted *bytes* are malformed cannot be waived by anyone, so a `containment`, `escaping`, `eol`, placeholder-pair or extra-placeholder error is yours to fix whatever the report says.
 
+When a file was split or renamed, the order is `lx extract <new-file> --from <old>` for every new file, then `lx forget <old>`. **Never pass `--discard-wording` to `lx forget` yourself.** It exists to drop translations that no other document holds, and whether that wording is wanted is the person's call — show them the refusal, which names each segment and where it is.
+
 ## Translating
 
 `todo` returns segments that look like this:

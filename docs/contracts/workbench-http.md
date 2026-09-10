@@ -1627,6 +1627,17 @@ absence closes.
   the first thing a reviewer asks for on a surface like this, and building one
   means adding an endpoint and a check inside the worker — it is not a frontend
   concern, and HANDOFF-204 cannot deliver it alone.
+- **No way to remove a document row.** `lx forget` is a command with no endpoint,
+  deliberately. `_post` confines `src` by presence, so a wire version could never
+  reach `../shelf/book.md` — the kind of row most likely to have moved, and one
+  `lx extract` supports from a terminal — and a destructive gesture in a browser
+  is a trust surface nobody has reviewed. Invariant 8 lets the CLI have what the
+  server lacks. What this surface does see is the result: `docs` loses the row,
+  and `collisions[].offered` can turn non-null once the identity is free, which
+  is what `offered` already documents. A running `/api/translate` job whose
+  document is forgotten under it writes nowhere: `store.save_targets` skips a
+  segment that no longer exists, and does not report the skip among `refused`.
+  See `docs/decisions.md`, 2026-09-10.
 - **No credential ever appears on this surface, and that includes free text.** An
   API key is read from the environment and sent only to its own provider; it is
   never stored, never logged and never in a response. A `base_url` is shown in

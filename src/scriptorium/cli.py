@@ -70,6 +70,8 @@ from .store import (
     db_path,
     doc_id,
     doc_label,
+    forget_blockers,
+    forget_doc,
     is_regenerable_origin,
     load_doc,
     load_tm,
@@ -240,6 +242,23 @@ class UnusableCarryover(ValueError):
     `ValueError` subclass outside it answers a traceback and exit 1, which is the
     failure shape `main`'s own comment and `docs/contracts/status-json.md`
     divergence (5) both record.
+    """
+
+
+class ForgetRefused(ValueError):
+    """A `lx forget` this build will not carry out, and why. Nothing was deleted.
+
+    Three refusals share it, because they share what the caller does about them:
+    read the sentence and name something else. The spelling typed is not the one
+    the row under that identity was stored with; the row carries no source path
+    to compare; or it holds translations that no other tracked document holds the
+    same way. Its own class rather than a new meaning for `UnusableCarryover`,
+    whose four refusals are all about *reading* another document's state — this
+    one is about deleting a document's own.
+
+    In `main`'s catch tuple, so each is one sentence and exit 2. A `ValueError`
+    subclass outside it answers a traceback and exit 1, which is how `UnsafePath`
+    behaves on a CLI path and why this command never raises it.
     """
 
 
@@ -568,13 +587,19 @@ def do_extract(src, lang, cfg, tone=None, reset=False, carry_from=None):
     if not os.path.exists(src):
         stored = prior_doc(src, lang)
         if stored:
+            # `lx forget` is named *after* the carry and never instead of it: it is
+            # the step that stops the old row being counted beside the new files,
+            # and it refuses while that row still holds anything no other
+            # document does, so naming it here cannot lose a sentence.
             raise FileNotFoundError(
                 f"{src} is not there, and `lx extract` is the only command that reads the "
                 f"source file — this document's translations are still in {db_path()}, so "
                 f"`lx render {src} --lang {lang}` and `lx check {src} --lang {lang}` both "
                 f"still work. If you renamed or split it, extract the new file and carry "
-                f"them across: `lx extract <new-file> --lang {lang} --from {src}`. Nothing "
-                f"was written.")
+                f"them across: `lx extract <new-file> --lang {lang} --from {src}`, then "
+                f"`lx forget {src} --lang {lang}` so it stops being counted beside the new "
+                f"files — that refuses while any translation in it is held by no other "
+                f"document. Nothing was written.")
         raise FileNotFoundError(
             f"{src} is not there. `lx extract` reads the source document, so the path has "
             f"to exist — check the spelling, or run `lx untracked` to see which files "
@@ -650,7 +675,12 @@ def do_extract(src, lang, cfg, tone=None, reset=False, carry_from=None):
              # because `lx run` takes the same argument and prints the same
              # block: a reader who sees `reused 12` needs to know the twelve came
              # from somewhere other than the file named on the line above it.
-             "carried_from": doc_label(carry_from) if carry_from else None}
+             "carried_from": doc_label(carry_from) if carry_from else None,
+             # How many translations the document carried from still holds that
+             # no other tracked document does, counted after this one is saved,
+             # and the spelling it is stored under. `None` when nothing was
+             # carried. See `report_extract`.
+             "carried_from_left": None, "carried_from_stored": None}
     # Which stored entry each segment inherits, decided for the document at once:
     # two positions holding the same sentence can only be told apart by looking
     # at both, which is what a map of one entry per key could not do.
@@ -838,6 +868,20 @@ def do_extract(src, lang, cfg, tone=None, reset=False, carry_from=None):
     # colliding with one above is the format's bug, and there are two formats.
     doc.update(facts)
     save_doc(src, lang, doc)
+    if carry_from:
+        # After the save, so this document's own rows count as "elsewhere". The
+        # same question `lx forget` asks under its lock, asked here without one
+        # because nothing is written on the answer: it is the moment a person is
+        # looking at both files, and before the new one has been worked on — a
+        # chapter re-worded after its carry is what turns a later forget into a
+        # refusal only `--discard-wording` gets past.
+        left = forget_blockers(carry_from, lang,
+                               render=lambda t: polish_rendered(t, lang, cfg))
+        if left is not None:
+            # The stored spelling, not the typed one: `--from` resolves through
+            # `doc_id`, and a forget named the typed way is refused by its aim rule.
+            notes["carried_from_left"] = len(left["blocked"])
+            notes["carried_from_stored"] = left["source"]
     return doc, reused, rejected, notes
 
 
@@ -869,6 +913,27 @@ def report_extract(src, lang, notes):
              f"identical paragraphs translated differently both survived. "
              f"{notes['carried_from']} still holds its own state; nothing was taken from "
              f"it.")
+        # **Conditional, never a bare "then forget it".** Measured 2026-09-10:
+        # the double count is usually noticed after the new files have been
+        # worked on, and every wording re-worded since the carry is then one the
+        # old row alone holds. Saying which state it is in now, while the two
+        # files are still identical, is what moves the forget into the window
+        # where it costs nothing.
+        left = notes.get("carried_from_left")
+        stored = notes.get("carried_from_stored") or notes["carried_from"]
+        if left == 0:
+            _out(f"  every translation {stored} holds is now held by another tracked "
+                 f"document as well, so `lx forget {stored} --lang {lang}` removes it without "
+                 f"losing any of them — until it is, `lx status` counts its segments a "
+                 f"second time.")
+        elif left:
+            # Neither "extract the other files" nor anything else as a remedy:
+            # the reason may be a file not extracted yet, a wording changed since,
+            # or a person's mark that only the old row holds, and the refusal
+            # `lx forget` prints is the one place that can tell them apart.
+            _out(f"  {left} translated segment(s) of {stored} are not yet held the same way "
+                 f"by any other tracked document, so `lx forget {stored} --lang {lang}` "
+                 f"refuses for now — run it to see which, and where each one is.")
     if notes["kept"]:
         # Its own line rather than a field in the counts, because this one is not
         # a memory problem: these segments held a stored target that no longer
@@ -3471,8 +3536,17 @@ def cmd_stats(args, cfg):
     if not project["documents"]:
         _out("nothing tracked yet — run `lx extract`")
         return
+    absent = 0
     for row in project["documents"]:
-        _out(f"{_bar(row['translated'], row['segments'])}  {row['source']} [{row['lang']}]")
+        line = f"{_bar(row['translated'], row['segments'])}  {row['source']} [{row['lang']}]"
+        # The same hint `lx status` prints, for the same reader: this is the
+        # listing where a split book's old row shows up as a third bar.
+        if _no_file_at(project["path"], row["source"]):
+            line += "  (no file at this path)"
+            absent += 1
+        _out(line)
+    if absent:
+        _out(_no_file_footer(absent))
 
 
 # ── status ─────────────────────────────────────────────────────────────────
@@ -3692,6 +3766,23 @@ def _check(src, lang, counts, as_report):
         return None
     if not isinstance(report, dict) or not report:
         return None
+    # **Only a report written for this document.** The file is named by
+    # `doc_id`, which flattens every separator, so `docs/guide.md` and
+    # `docs_guide.md` share one — and on a case-folding filesystem `Book.md` and
+    # `book.md` share one as well. Measured 2026-09-10: `docs_guide.md`, just
+    # extracted and never checked, reported `errors: 2, stale: false` out of a
+    # report whose own `source` said `docs/guide.md`. Every report `do_check`
+    # writes carries the source it was written for, so the comparison costs one
+    # string and no contract change: the `check` cell already says `null` means
+    # nobody has checked *this* document. A report carrying no `source`, or one
+    # this build cannot read as a path, keeps the old behaviour.
+    written_for = report.get("source")
+    if isinstance(written_for, str) and written_for:
+        try:
+            if doc_label(written_for) != src:
+                return None
+        except ValueError:
+            pass
     return {
         "errors": _int(report.get("errors")),
         "warnings": _int(report.get("warnings")),
@@ -3764,10 +3855,20 @@ def _document(doc, cfg, detail=True):
     # reached `os.path.relpath(None)` and ended the whole command in a
     # `TypeError` that `main` does not catch, with no report produced at all.
     # Found by the security-tier pass on 2026-08-19.
+    #
+    # The remedy said "the state is rebuildable: delete it and re-run
+    # `lx extract`" until 2026-09-10, and it is not: the database is the only
+    # copy of every translation `lx commit` has not banked, and of every hold,
+    # waiver and `origin` — the 2026-09-04 entry measured the memory route losing
+    # both halves of a repeated paragraph and every held segment. The sentence
+    # now says what not to do, because the one thing it used to recommend is the
+    # lossy route.
     if not isinstance(doc.get("source"), str):
         raise ValueError(
             f"a stored document row carries no source path, so this build cannot name "
-            f"it. The state is rebuildable: delete {db_path()} and re-run `lx extract`.")
+            f"it. Do not delete {db_path()} to get past this: it is not rebuildable — it "
+            f"holds every document's translations, and only what `lx commit` banked is "
+            f"also in the translation memory.")
     counts = _counts(doc["segments"])
     return {
         "source": doc.get("source"),
@@ -3941,7 +4042,41 @@ def _bar(done, total):
     return f"{pct:3d}% [{'#' * (pct // 5):<20}] {done}/{total}"
 
 
+def _no_file_at(root, source):
+    """Whether nothing answers to a tracked document's path. **Display only.**
+
+    Never part of what any command decides, and never in `--json`: existence is
+    the wrong question in both directions — an unmounted share or an unplugged
+    drive reads as gone, and a file swapped for another book reads as present —
+    and `os.path.exists` answers differently on the two CI platforms for a name
+    that differs only in case. It is here as a hint to the one reader who knows
+    which files they split: the person at the terminal.
+
+    Not confined, which is invariant 11 applied rather than skipped. The stored
+    path is stat'd and never opened, the same way `_extractable` stats a glob
+    result out of a hand-edited `sources` — the mirror of this question, shipped
+    and reviewed — and `lx extract ../shelf/book.md` is supported and stores
+    that path verbatim, so confining it would mark every such document missing.
+    The stronger bound is upstream: every `source` here came through
+    `store._meta`, whose `os.path.relpath` raises for a UNC share, the device
+    namespace, `\\\\?\\` and a bare reserved name — measured by the security pass
+    of 2026-09-10 — so what reaches this stat is a path on the project's own
+    volume, and a stat of one is a stat.
+    """
+    return not os.path.exists(os.path.join(root, source))
+
+
+def _no_file_footer(count):
+    return (f"{count} tracked document(s) have no file at their path. That is not evidence "
+            f"a file was removed — an unplugged drive reads the same — and a file that is "
+            f"there is not evidence it is still the document that was extracted. If one was "
+            f"split or renamed: `lx extract <new-file> --lang <lang> --from <old>`, then "
+            f"`lx forget <old> --lang <lang>`.")
+
+
 def _print_project(project, indent=""):
+    """Print one project's document rows. Returns how many have no file at their path."""
+    absent = 0
     for row in project["documents"]:
         line = f"{indent}{_bar(row['translated'], row['segments'])}  {row['source']} [{row['lang']}]"
         check = row["check"]
@@ -3960,7 +4095,11 @@ def _print_project(project, indent=""):
         # the status contract's own `checked` counter exists to stop.
         if row["waived"]:
             line += f", {row['waived']} waived"
+        if _no_file_at(project["path"], row["source"]):
+            line += "  (no file at this path)"
+            absent += 1
         _out(line)
+    return absent
 
 
 def cmd_status(args, cfg):
@@ -3975,7 +4114,7 @@ def cmd_status(args, cfg):
             _out(f"{head}  — cannot be read: {project['error']}")
             continue
         _out(head)
-        _print_project(project, indent="  ")
+        absent = _print_project(project, indent="  ")
         if not project["documents"]:
             # Which of the two nothings this is, because they need different
             # answers: a directory nobody has set up, and a project set up and
@@ -3988,6 +4127,8 @@ def cmd_status(args, cfg):
              f"{totals['waived']} waived — "
              f"{totals['errors']} error(s), {totals['warnings']} warning(s) "
              f"across {totals['checked']} of {totals['documents']} checked")
+        if absent:
+            _out("  " + _no_file_footer(absent))
     if status["scanned"] is not None and not status["projects"]:
         _out(f"no project under {status['scanned']} — a project is a directory holding "
              f"{' or '.join(PROJECT_MARKERS)}")
@@ -3996,6 +4137,255 @@ def cmd_status(args, cfg):
 def cmd_init(args, cfg):
     created = write_templates()
     _out("initialized" + (f": {', '.join(created)}" if created else " (already set up)"))
+
+
+# ── forget ─────────────────────────────────────────────────────────────────
+
+#: How many segment ids, and how many documents, one line of a refusal names
+#: before it counts the rest. A refusal is a sentence per category rather than
+#: a listing — `lx segments` is the listing, and the refusal names it.
+_FORGET_IDS = 8
+_FORGET_DOCS = 3
+
+#: One clause per reason `store._forget_analysis` gives. Each says where the
+#: wording is, because that decides what the person does next: carry it, read
+#: it, or accept losing it.
+_FORGET_WHY = {
+    "untranslated": "translated here, untranslated in {docs}",
+    "different": "{docs} {has} a different wording",
+    "fewer": "the same wording is held elsewhere fewer times than here ({docs})",
+    "provenance": "a person wrote it here, and no other copy of the wording says a "
+                  "person did ({docs})",
+    "nowhere": "translated here and in no other tracked document: a file it was cut "
+               "into is not extracted yet, or the cut dropped it",
+}
+
+
+def _capped(items, cap):
+    shown = ", ".join(items[:cap])
+    return shown + (f" and {len(items) - cap} more" if len(items) > cap else "")
+
+
+def _forget_refusal(label, lang, result):
+    """What a refused forget says: what would be lost, where it is, what to do next.
+
+    **A carry is offered only into a document it is safe to carry into, and
+    only where it would help.** Two of the three designs this was chosen from
+    printed `lx extract <new-file> --from` on every refusal, and measured
+    2026-09-10 that sentence reverted a chapter a person had re-worded after its
+    first carry — `--from` reads the named document's state instead of the
+    target's own. It is the 2026-09-04 lesson in a new place: the escape a
+    refusal names has to be one that loses nothing. `store._forget_analysis`
+    decides both halves; this words them.
+
+    **And it never tells a person to copy a wording across by hand.** It did:
+    "copy what you want across with `lx apply`". A stored wording's `⟦n⟧` mean
+    the terms of the document it was written in, so pasting one into another
+    document can make the same string name a different term — measured, it
+    rendered one character's name twice and the forget then found the strings
+    equal. The rendered text is what a person can read and re-type safely, so
+    that is what it points at.
+    """
+    blocked = result["blocked"]
+    lines = [f"{label} [{lang}] holds {len(blocked)} translated segment(s) that no other "
+             f"tracked document in {lang} holds the same way, so forgetting it would lose "
+             f"them. Nothing was deleted."]
+    groups = {}
+    for b in blocked:
+        groups.setdefault((b["why"], tuple(b["docs"])), []).append(b["id"])
+    for (why, docs), ids in groups.items():
+        lines.append(f"  {_capped(ids, _FORGET_IDS)} — " + _FORGET_WHY[why].format(
+            docs=_capped(list(docs), _FORGET_DOCS), has="holds" if len(docs) == 1 else "hold"))
+    for c in result["carry"]:
+        if c["offer"]:
+            # `--tone` only where it is needed, and said out loud when it is: it
+            # refreezes that document in the register this one was translated in,
+            # which is what `--from` refuses to do silently.
+            tone = "" if c["same_register"] else f" --tone {canonical_tone(result['tone'])}"
+            why = ("" if c["same_register"] else
+                   f", and refreezes it in the {canonical_tone(result['tone'])} register "
+                   f"{label} was translated in")
+            lines.append(f"  carry them into {c['doc']}, which holds nothing of its own a "
+                         f"carry would replace: `lx extract {c['doc']} --lang {lang} --from "
+                         f"{label}{tone}`{why}")
+        elif not c["safe"]:
+            lines.append(f"  do not carry into {c['doc']}: a carry from {label} would replace "
+                         f"what it holds of its own ({_capped(c['own'], _FORGET_IDS)}) — "
+                         f"re-type there whatever you want to keep, reading it in "
+                         f"`lx render {label} --lang {lang} -o -`")
+    ids = [b["id"] for b in blocked]
+    only = f" --ids {','.join(ids)}" if len(ids) <= 20 else ""
+    lines.append(f"  read them: `lx segments {label} --lang {lang}{only}`; a readable copy of "
+                 f"the whole translation, which forget never touches: `lx render {label} "
+                 f"--lang {lang}`")
+    lines.append(f"  forget it anyway, discarding exactly these: `lx forget {label} --lang "
+                 f"{lang} --discard-wording`")
+    return "\n".join(lines)
+
+
+def _nothing_to_forget(label, lang):
+    """"No state", plus the two near misses a person most likely meant.
+
+    Read only on the failure path, and never folded into what the command
+    decides: a document is matched exactly, by the identity `.lx/state.db` keys
+    it on, on every platform. `str.casefold` is string work, so the hint answers
+    the same on both CI legs where `os.path.exists` would not — NTFS finds
+    `Book.md` when asked for `book.md` and a case-sensitive filesystem does not.
+    """
+    message = f"nothing to forget — {label} has no state in {lang}."
+    try:
+        docs = tracked()
+    except (TypeError, ValueError, KeyError):
+        # A hint must not replace the answer it is attached to. What reaches here
+        # is a row the funnel cannot read — `store._meta` on a hand-edited source
+        # that is not a string — since `forget_doc` has already opened the
+        # database this reads.
+        return message
+    elsewhere = sorted({d.get("lang") for d in docs
+                        if d.get("source") == label and d.get("lang") != lang}, key=str)
+    if elsewhere:
+        message += (f" It is tracked in {', '.join(map(str, elsewhere))} — name that with "
+                    f"--lang.")
+    near = sorted({d["source"] for d in docs
+                   if d.get("lang") == lang and isinstance(d.get("source"), str)
+                   and d["source"] != label and d["source"].casefold() == label.casefold()})
+    if near:
+        message += (f" A tracked document differs from it only in case: {', '.join(near)} — "
+                    f"names are matched exactly, on every platform: `lx forget {near[0]} "
+                    f"--lang {lang}`.")
+    return message
+
+
+def _forget_report(src, lang):
+    """Remove the forgotten row's check report. ``(path, outcome)``; never raises.
+
+    It goes because it describes a row that no longer exists, and a later
+    document extracted under the same identity would otherwise be handed it as
+    its own `check` — `_check` now refuses a report written for another source,
+    which closes that half whatever happens here, so this is housekeeping rather
+    than the guard.
+
+    **Only under a language tag.** The name is `<doc_id>.<lang>.json`, `doc_id`
+    flattens every separator, and `--lang` on the CLI is not validated anywhere
+    — measured 2026-09-10, `report_path("x.md", "../../../../lx.config")`
+    normalizes to the project's `lx.config.json`, and removing it would delete
+    the configuration. Under `cli.language_tag`'s whitelist the name is one path
+    component and cannot leave `.lx/reports/`. The row itself is removed whatever
+    the tag, because its key is an SQL parameter and every row `lx extract` can
+    create has to be one this command can remove.
+    """
+    path = report_path(src, lang)
+    if not isinstance(lang, str) or not _LANG_RE.match(lang):
+        return path, "not-a-tag"
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        return path, None
+    except OSError as e:
+        return path, str(e)
+    return path, "removed"
+
+
+def do_forget(src, lang, cfg, discard=False):
+    """Remove one document's state row. The seam behind `lx forget`. ``dict``.
+
+    `store.forget_doc` decides and this words it: every refusal is a
+    `ForgetRefused` naming what to do next, and "no such row" is the
+    `FileNotFoundError` every other command raises for it. What comes back on
+    success is the store's answer — the counts, and under ``discard`` the ids it
+    discarded — plus what became of the check report.
+
+    No endpoint stands in front of this, deliberately. `_post` confines a `src`
+    by presence, so a wire version could never reach `../shelf/book.md`, the
+    kind of row most likely to have moved; and a destructive browser gesture is a
+    trust surface of its own. Invariant 8 permits the CLI to have what the server
+    lacks, and not the reverse. See `docs/contracts/workbench-http.md`,
+    *Deliberately not in the contract*.
+    """
+    if not str(src).strip():
+        raise FileNotFoundError("nothing to forget — no document was named.")
+    try:
+        label = doc_label(src)
+    except ValueError:
+        # `os.path.relpath` across volumes on Windows. Every document here is
+        # named relative to the project directory, so a path on another volume
+        # cannot be one this project tracks.
+        raise FileNotFoundError(
+            f"nothing to forget — {src} is not on the same volume as the project directory, "
+            f"and every document this project tracks is named relative to it.") from None
+    # The same polish the render gives a restored target, so two rows are
+    # compared on what they would write — `store._as_written`.
+    result = forget_doc(src, lang, discard=discard,
+                        render=lambda t: polish_rendered(t, lang, cfg))
+    if result is None:
+        raise FileNotFoundError(_nothing_to_forget(label, lang))
+    stored = result["source"]
+    if result["refused"] == "source":
+        raise ForgetRefused(
+            f"the state row {label} [{lang}] resolves to carries no source path, so this "
+            f"command cannot confirm it is {label}. Nothing was deleted. The row was written "
+            f"by hand or by something other than `lx extract`; do not delete {db_path()} to "
+            f"get past it — that file holds every document's translations, and only what "
+            f"`lx commit` banked is also in `.lx/tm.{lang}.jsonl`.")
+    if result["refused"] == "aim":
+        raise ForgetRefused(
+            f"{label} is not the document stored under that name — {stored} [{lang}] is. "
+            f"This project keys both spellings to one state row, so forgetting {label} would "
+            f"delete {stored}'s translations. If {stored} is the one you mean, name it the way "
+            f"it is stored: `lx forget {stored} --lang {lang}`. Nothing was deleted.")
+    if result["refused"] == "wording":
+        raise ForgetRefused(_forget_refusal(stored, lang, result))
+    path, outcome = _forget_report(src, lang)
+    return dict(result, report=path, report_outcome=outcome)
+
+
+def cmd_forget(args, cfg):
+    r = do_forget(args.src, args.lang, cfg, discard=args.discard_wording)
+    label, lang = r["source"], args.lang
+    line = f"forgot {label} [{lang}] — {r['segments']} segment(s), {r['translated']} translated"
+    # Two kinds of loss, counted apart: a wording no other document holds, and a
+    # wording that survives elsewhere but whose last record as a person's this was.
+    # One count called both "held nowhere else", which was false of the second.
+    gone = [b["id"] for b in r["blocked"] if b["why"] != "provenance"]
+    unmarked = [b["id"] for b in r["blocked"] if b["why"] == "provenance"]
+    if gone:
+        line += (f"; discarded, as asked, the {len(gone)} held nowhere else: "
+                 f"{_capped(gone, _FORGET_IDS)}")
+    if unmarked:
+        line += (f"; and, as asked, the last record that a person wrote "
+                 f"{len(unmarked)} wording(s) that other documents still hold: "
+                 f"{_capped(unmarked, _FORGET_IDS)}")
+    if not r["blocked"] and r["translated"]:
+        line += f", every one of them also held by another tracked document in {lang}"
+    _out(line)
+    # Said, because each is the thing a person would otherwise worry went too —
+    # and only under a language tag, the one value this command builds a file name
+    # from. Under anything else it names nothing it would have had to derive.
+    if r["report_outcome"] == "not-a-tag":
+        _out("  left as it was: the translation memory")
+    else:
+        output = _output(label, lang, cfg)
+        if output and os.path.isfile(output):
+            _out(f"  left as they were: the translation memory (`.lx/tm.{lang}.jsonl`), "
+                 f"and {output} from an earlier render — delete that yourself if the files "
+                 f"cut from it replace it")
+        else:
+            _out(f"  left as it was: the translation memory (`.lx/tm.{lang}.jsonl`)")
+    if r["report_outcome"] == "not-a-tag":
+        _out(f"  kept {r['report']}: --lang {lang!r} is not a language tag, so this command "
+             f"builds no file name from it — delete that report yourself if you want it gone")
+    elif r["report_outcome"] not in (None, "removed"):
+        _out(f"  could not remove its check report {r['report']} ({r['report_outcome']}); it "
+             f"is rebuildable, and `lx status` never reads it as another document's")
+    # The file is still on disk and a glob still matches it, so the list that
+    # offers work offers it again — which is right, and surprising if unsaid.
+    try:
+        offered, _collisions = do_untracked(cfg)
+    except (ConfigError, OSError, ValueError, TypeError, KeyError):
+        offered = []
+    if any(o["lang"] == lang and doc_id(o["source"]) == doc_id(label) for o in offered):
+        _out(f"  {label} is still on disk and matches `sources`, so `lx untracked` offers it "
+             f"again — take it out of `sources` if nobody is meant to translate it")
 
 
 # ── untracked ──────────────────────────────────────────────────────────────
@@ -5832,8 +6222,24 @@ def build_parser():
                    help="carry translations across from another tracked document instead "
                         "of only from this one — what a file that was split or renamed "
                         "needs. Holds, waivers and `origin` travel with the wording, which "
-                        "is what `lx commit` plus the translation memory cannot do")
+                        "is what `lx commit` plus the translation memory cannot do. Once "
+                        "every file cut from it is extracted, `lx forget` the old one")
     e.set_defaults(fn=cmd_extract)
+
+    fg = sub.add_parser(
+        "forget", help="remove one document's state row, once nothing in it is held nowhere else",
+        description="Remove one (document, language) row from the project's state — what a "
+                    "file that was split or renamed leaves behind once `lx extract --from` "
+                    "has carried its translations to the new files. It refuses while any "
+                    "translation in the row is held by no other tracked document, and names "
+                    "each one. It removes a state row, not a memory entry: the translation "
+                    "memory, the rendered output and the source file are never touched.")
+    fg.add_argument("src", help="the document, spelled the way `lx status` shows it")
+    fg.add_argument("--lang", required=True)
+    fg.add_argument("--discard-wording", action="store_true",
+                    help="forget it even though some of its translations are held nowhere "
+                         "else, discarding exactly the ones the refusal named")
+    fg.set_defaults(fn=cmd_forget)
 
     t = sub.add_parser("todo", help="emit pending segments as JSON")
     t.add_argument("src")
@@ -6221,7 +6627,7 @@ def main(argv=None):
     except (FileNotFoundError, StateVersionError, UnsupportedSource,
             GlossaryWriteError, UnknownFormat, UndecodableDocument,
             StyleSheetError, ConfigError, UnusableTarget, UnnamedRegister,
-            UnusableCarryover, ProviderError) as e:
+            UnusableCarryover, ForgetRefused, ProviderError) as e:
         print(f"lx: {e}", file=sys.stderr)
         sys.exit(2)
     except BrokenPipeError:

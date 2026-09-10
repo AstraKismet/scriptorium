@@ -199,7 +199,7 @@ depend on it.
 | `source_lang` | string \| null | The **effective** source language: `lx.config.json` layered over this build's defaults. A project with no configuration file reports the default rather than nothing, so this is not evidence that anybody chose it. `null` when `error` is set, and when the configured value is not a string. |
 | `targets` | array of string | The **effective** target language tags — what the project is *for*, which is not what it currently holds, and which falls back to this build's default the way `source_lang` does. Only strings, and only out of an actual list. `[]` when `error` is set. |
 | `tone` | string \| null | The project's **effective** default register, defaulted like the two above, and type-checked but not validated — an unknown register name is reported as it stands. A document carries its own; see below. |
-| `documents` | array of *document* | Every tracked (document, language) pair. **Not capped.** Ordered by the storage identity and then by language — `store.tracked`'s order, which is **not** the source path's order and is not alphabetical by `source`. Sort it yourself if the order matters. `[]` when `error` is set. |
+| `documents` | array of *document* | Every tracked (document, language) pair. A pair leaves the array when `lx forget` removes its row — a file `lx render` already wrote for it stays on disk, so an `output` seen in an earlier report can outlive its entry. **Not capped.** Ordered by the storage identity and then by language — `store.tracked`'s order, which is **not** the source path's order and is not alphabetical by `source`. Sort it yourself if the order matters. `[]` when `error` is set. |
 | `untracked` | array of object | `{source, lang}` — one entry per configured target language for each document matching the project's `sources` globs that is **not already tracked in that language**. A book on the shelf that nobody has started. `cli.do_untracked` decides it, so this key, `lx untracked` and the workbench's `untracked` spell one word and mean one thing. **Not capped.** Filtered by `--lang` the way `documents` is. `[]` when `error` is set. |
 | `languages` | array of *rollup* | One entry per distinct `lang` among `documents`, sorted by tag, each carrying `lang` first and then the *rollup* counters. |
 | `totals` | *rollup* | The same counters over every document **in this report**, which under `--lang` is the filtered set and not the whole project — a consumer that shows it as the book's completion while filtering shows one language's progress as the whole.
@@ -271,6 +271,16 @@ makes it current is a new `lx check` and its exit code.
 
 A corrupt or unreadable report reads as a missing one. The alternative is a
 library that will not list on account of a file that one command regenerates.
+
+**So does a report written for another document.** The file is named by the
+storage identity, which flattens every separator — `docs/guide.md` and
+`docs_guide.md` share one report file, and on a case-folding filesystem so do
+`Book.md` and `book.md`. Every report records the source it was written for, and
+one whose source is not this document's is not this document's check. Until
+2026-09-10 a document nobody had checked reported the other one's `errors` with
+`stale: false`. That was a defect against what `null` already meant — nobody has
+checked *this* document — and repairing it changes no meaning, so the version
+does not move. A report that records no source at all keeps the old reading.
 
 ### rollup
 
@@ -408,6 +418,16 @@ something its absence closes.
   extracted. There is no content hash of the source here and `stale` is about the
   check report, not about the document. `lx untracked` answers a neighbouring
   question and is not part of this contract.
+
+  **Nor whether it is on disk at all**, and that one is decided rather than
+  owed. Existence is the wrong question in both directions — an unplugged drive
+  or an unmounted share reads as gone, and a file swapped for another book reads
+  as present — and it answers differently on the two platforms CI runs for a
+  name that differs only in case. `lx status` *without* `--json` marks a document
+  that has no file at its path, as a hint to the one reader who knows which files
+  they split, and that output is not frozen. `path` and `source` are both here,
+  so a consumer that wants the hint can compute it the same way; it must read a
+  missing file as "not at this path" and a present one as nothing at all.
 
 - **No reading order.** `documents` arrives in `store.tracked`'s order, which is
   by storage identity — `doc_id`, every non-alphanumeric character flattened —
