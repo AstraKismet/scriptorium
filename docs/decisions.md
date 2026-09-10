@@ -3,6 +3,248 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-09-10 · A document row is forgotten by name, and never while it holds the last copy of anything
+
+Closing HANDOFF-047. `lx forget SRC --lang L` removes one `(document, language)`
+row — `store.forget_doc`, the first delete of a document row this project has
+had. It refuses while any translation in the row is held by no other tracked
+document, and names each one and where it is; `--discard-wording` drops exactly
+those. Beside it: `_check` stops reading a report written for another document,
+`cli._document` stops recommending the lossy route, and human `lx status` and
+`lx stats` mark a row with no file at its path. Nothing moves: not
+`SCHEMA_VERSION`, not `STATE_VERSION`, and neither `contract_version`.
+
+The harm is the one 2026-09-04 left behind. A four-segment book split into two
+chapters with `--from` shows three bars in `lx stats` and `totals.segments = 8`
+in `lx status --json`. Reproduced exactly, and it is worse than a count: the old
+row gives `lx renderings` a second supporting segment for every name in the book,
+collects `lx check` errors from every later `lx glossary set`, and sits in the
+workbench's document list where `lx translate` would pay to work on it.
+
+### What is refused is the harm, not the population
+
+A row may go when every translated segment's wording — `content_hash` plus the
+target, stripped — is also held by some other row in the same language. Four
+alternatives lost, each on a measurement:
+
+| predicate | split carried (S1) | split not carried (S2) | chapter re-worded after the carry (S4) |
+|---|---|---|---|
+| `content_hash` coverage — the scheduled one | allow | **allow — loses the book** | allow |
+| exact target bytes | **refuse** | refuse | refuse |
+| the translation memory holds it | refuse | refuse | refuse |
+| the source file is gone | allow | allow | allow |
+| **stripped wording, as a multiset (chosen)** | allow | refuse | refuse, that one id |
+
+`content_hash` alone was the package's proposal, and it allows exactly the case
+the package called its flagship: two new rows extracted without `--from`, both
+empty, holding every paragraph and none of the wording. Exact bytes refused the
+ordinary split, because `lx apply` keeps the U+3000 pair zh-TW paragraphs open
+with and `translate.accept`, which every carry goes through, strips it — three of
+sixteen hand-typed zh-TW wordings differed after a faithful carry, none once both
+sides were stripped. The memory is filled only with what `lx commit` may bank,
+never a held segment and one line per key, so "banked" is a condition a book with
+one paragraph twice can never meet. And existence answers wrong both ways — an
+unplugged drive reads as gone, a swapped file as present — and differently on the
+two CI platforms for a name that differs only in case.
+
+Three refinements, each for a case the others miss:
+
+- **A multiset.** Three copies here and two elsewhere loses a position — a cut
+  that dropped one of several identical translated paragraphs, which 2026-09-04
+  calls mechanically invisible. It costs a `Counter` instead of a set.
+- **Translated segments only.** An untranslated paragraph loses no wording, and
+  refusing it would refuse a row extracted under a mistyped `--lang` or from the
+  wrong file — the rows most worth forgetting.
+- **A person's wording is not covered by a machine's copy.** The memory route
+  turns `human` into `tm`, measured; where every other copy of a `human` wording
+  is regenerable (`store.is_regenerable_origin`), forgetting the row removes the
+  last record that a person wrote it and with it origin precedence. It reads the
+  write guard's own taxonomy and adds none.
+
+**Refused, never judged, from a newer build; judged from an older one.** A newer
+row's `body` may mean something this build does not know. An older row's
+judgement reads only schema columns and `origin`, and requiring a re-extract
+first would require a source file that is usually gone.
+
+The judgement is one scan of the language in Python, under the write lock. The
+correlated `EXISTS` form was measured at 457 ms over 10,000 rows and 2,778 ms over
+30,000, growing faster than the table while holding the lock `BUSY_TIMEOUT`
+bounds for every other writer; the scan was 9.9 ms and 27.9 ms. `segments_carry`
+cannot serve it — it leads with `doc_id` and this looks up the other direction —
+which refutes the package's "which has the `segments_carry` index already".
+
+### A refusal offers a carry only where a carry loses nothing
+
+Two of the three designs this was chosen from printed `lx extract <new-file>
+--from <old>` on every refusal. Followed after a chapter had been re-worded since
+its first carry, it exited 0, printed `reused 3 | pending 0`, and put the old
+wording back, because `--from` reads the named document's state instead of the
+target's own. That is the 2026-09-04 lesson in a new place — the escape a
+refusal names has to lose nothing — and it was found by the completeness pass,
+not by any design. So a document is offered a carry only when every wording it
+holds is also held by the old row; otherwise the refusal says not to carry into
+it, and names the ids a carry would replace. A register that differs does not
+make a carry unsafe — whatever such a document holds comes back from the old row
+— it makes the command need `--tone`, and the refusal spells it. Chapters
+extracted without `--tone` in a project configured `technical` are the ordinary
+case, and "do not carry" was the wrong answer for every one of them.
+
+And the moment to forget is right after the carry, before the chapters diverge,
+so `lx extract --from` now asks the same question after its save and says which
+state the old row is in: "held by no other tracked document yet", naming the
+count, or "removes it without losing any of them".
+
+### Aimed by the stored spelling, inside the lock
+
+`doc_id` maps `docs/guide.md` and `docs_guide.md` to one row, so `lx forget
+docs_guide.md` would have deleted a document the person cannot see. The row goes
+only when `doc_label(src)` *is* its stored `source`, compared after
+`store._begin_write` takes the lock — a colliding `lx extract` can replace the
+row between a check made outside it and the delete. Refused rather than
+proceeded-with-a-warning: a headline naming the other document is read after the
+delete has happened. `--discard-wording` does not reach this refusal. A row whose
+`source` is not a string cannot be confirmed and is refused the same way.
+
+The package claimed forgetting "frees the identity, the only remedy
+`_report_collisions` has none of". It frees it, and it is not a remedy: `lx
+extract` already takes an identity over, silently and destructively, and freeing
+one cannot resolve two files that both exist. HANDOFF-067.
+
+The package also said a delete by known key needs only `with conn:`. That stopped
+being true the moment any guard existed: the aim, the version and the wording are
+all reads that decide whether the deletes run, so the whole of it is a
+read-then-write and runs behind `_begin_write`. A test extends
+`test_the_guard_reads_inside_the_write_transaction` to it, and another asserts
+with `ast` that the three `DELETE`s share one `with` block that opens with
+`_begin_write` and ends with `documents` — plus a trigger that fails the third
+statement and finds the first two rolled back.
+
+### Invariant 11: nothing here is confined, because nothing is opened
+
+`lx forget` never opens, stats or confines the path it is given. It compares the
+spelling as a string and deletes on `(doc_id, lang)`, and `doc_id` flattens every
+separator, so no spelling can reach outside `.lx/state.db`. Confining it would
+have been worse than unnecessary. `lx extract ../shelf/book.md` is supported and
+stores that source verbatim, and `confined_path` refuses it, so the documents
+most likely to have moved would have become impossible to forget. It would have
+imported six Windows-shape rules into a question whose hazard is cross-platform
+divergence. And `UnsafePath` is not in `main`'s catch tuple, so a CLI path that
+raised it would answer a traceback and exit 1.
+
+The one thing that does stat the stored path is the human note, and it follows
+the rule `_extractable` already does for the mirror question: a stat, never an
+open, of a value this project wrote itself. It is display only and decides
+nothing.
+
+**The one file this command removes is named from `--lang`, and `--lang` is not
+validated on the CLI.** `.lx/reports/<doc_id>.<lang>.json` with `lang =
+../../../../lx.config` normalizes to the project's own `lx.config.json`, measured
+on Windows, and removing it would have deleted the configuration. So the report
+is removed only under a tag `cli.language_tag`'s whitelist accepts, which makes
+the name one path component inside `.lx/reports/`; the row itself goes under any
+tag, because its key is an SQL parameter and every row `lx extract` can create
+has to be one this command can remove. Validating `--lang` across the CLI —
+`lx check` can already *overwrite* that file — is HANDOFF-068.
+
+### The check report, and the leak it already had
+
+The report has to go with the row, or a later document extracted under the same
+identity would be handed it as its own `check`. Measured before any forget
+existed: `docs_guide.md`, just extracted and never checked, reported `errors: 2,
+stale: false` from a report whose own `source` was `docs/guide.md`. So `_check`
+returns `null` for a report written for another document — every report records
+its source — which closes that leak whatever the unlink does. On a case-folding
+filesystem `Book.md` and `book.md` share a report file too, and this closes that
+as well. No bump: `null` already meant nobody has checked *this* document.
+
+### Everything else that lost
+
+- **A retire flag in `meta`, honoured by `store.tracked()`.** The attack on the
+  brief proposed it and it is genuinely attractive: nothing is ever lost, and the
+  re-worded chapter needs no override. It lost on what it adds — a row state all
+  four `tracked()` callers must honour, a listing to find retired rows, an
+  identity that stays occupied, whole-novel source bytes kept forever, and an
+  older build that lists the row again. The maintainer decided for the delete.
+  Its argument that a versioning rule is not a reason to be destructive was right
+  and is recorded: a person-decided retire would have bumped neither contract.
+- **A dump to `.lx/forgotten/`.** `nodes.raw` and `documents.source` are BLOB
+  columns JSON cannot carry; `lx init` writes no `.gitignore`, so a versioned
+  project would commit an unpublished book's whole text into history; two sources
+  sharing a `doc_id` overwrite each other's dump; and nothing reads it back, so it
+  is a write-only file rather than a backup.
+- **A sweep.** Scan-then-delete is the read-then-write shape and drags the
+  case-folding divergence into a destructive path. And two rows that copy each
+  other would each pass a verdict computed against the other, and a sweep would
+  delete both; one row per call checks the second against what survived the first.
+- **A noun command reporting the population.** Every name is taken or lies:
+  `orphan` is an unpaired tag, `stranded` a flag in `lx segments`, `missing` the
+  render's count, `untracked` the mirror question, and `gone` or `absent` names
+  the existence predicate. The refusal is the report, and the human note is the
+  population.
+- **An endpoint.** `_post` confines `src` by presence, so it could never reach
+  the out-of-root rows most likely to have moved, and a destructive browser
+  gesture is a trust surface nobody has reviewed.
+- **`--force`**, which on `lx run` already means "render despite errors". The
+  maintainer chose `--discard-wording`, which names what is given up, the way
+  `--overwrite-human` does.
+
+The maintainer also asked whether `--overwrite-human` should become
+`--overwrite-manual`. It stays. The flag is named for the stored `origin` value it
+overrides, and that value is `human` in every segment body, in `lx apply
+--origin`, in `POST /api/save` and in `lx segments --origin`; "manual" names a
+method rather than a source and would equally describe an `agent`'s `lx apply`,
+which the guard deliberately does not protect; and `overwrite_human` is a frozen
+field of workbench-http version 4, so renaming it is a bump and a package of its
+own. Chinese documentation renders it 人工, which is the natural word.
+
+### What the other surfaces say
+
+`cli._document` told a person whose row carries no source path that "the state is
+rebuildable: delete .lx/state.db and re-run `lx extract`". It is not rebuildable
+— it is the only copy of every wording `lx commit` has not banked and of every
+hold, waiver and `origin` — and deleting it is the lossy route 2026-09-04
+measured. The sentence now says not to. `lx extract`'s missing-source message
+names `lx forget` after `--from`, never instead of it. `lx status` and `lx stats`
+print `(no file at this path)` beside a row whose file is gone and a footer that
+says neither answer is evidence; `--json` carries nothing new.
+
+`lx forget` is not an erasure. SQLite's `secure_delete` is off, so a deleted
+page keeps its text until the space is reused — said in the README, where a
+person deciding what a command does will read it. And since `documents.source`
+holds the file's bytes (2026-09-10), the old row is also the last copy of a
+source file somebody deleted; `lx bytes SRC --json` gives it back before the
+forget, and the package's storage section, written before that column existed,
+never saw it. A running job whose document is forgotten under it writes nowhere,
+because `store.save_targets` skips a segment that no longer exists — and does not
+report the skip among `refused`.
+
+### How this was reached
+
+Three design lanes from three angles, a lane that attacked the package's
+premises, a lane that measured its factual claims, and a completeness critic over
+all five. The designs converged on almost everything and all three wrongly
+assumed a forget follows the carry closely; the critic found that assumption,
+the lossy `--from` advice, the U+3000 difference and the scan cost. The attack
+found the retire option and that the old row holds the source bytes. What was
+found and belongs elsewhere is scheduled, not listed here to be forgotten:
+
+- **HANDOFF-066** — `--from` replaces what the target already holds, silently,
+  and its register-change line reports the source document's count as the
+  target's.
+- **HANDOFF-067** — `lx extract` under a colliding identity replaces the other
+  document's row with nothing said.
+- **HANDOFF-068** — the CLI never validates `--lang`, and `lx check` can write a
+  report over `lx.config.json`.
+- **HANDOFF-069** — every re-extract strips a reviewer's leading U+3000 indent,
+  not only a carry.
+- **HANDOFF-070** — `lx extract` on a chapter whose paragraphs another row holds
+  translated never mentions `--from`, so the next reasonable command pays a model
+  to translate a translated chapter.
+- **HANDOFF-071** — a document row whose `source` is not a string crashes
+  `lx untracked` and `/api/state` with a traceback — `TypeError` or `KeyError`
+  depending on whether the key is null or absent — and when the value is a
+  truthy non-string, `lx renderings` and `lx forget` as well.
+
 ## 2026-09-10 · The pipeline's own token belongs to the pipeline, and a source that spells it is content
 
 Closing HANDOFF-045. `mask.mask` masks a literal `⟦n⟧` before it masks anything

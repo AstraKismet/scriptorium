@@ -24,6 +24,8 @@ the second, third, and seventh translation of a document nearly free.
 | `lx init` | write config templates and state dirs |
 | `lx extract SRC --lang L` | parse to segments, mask markup, fill from prior state then TM |
 | `lx extract SRC --lang L --reset --tone T` | discard prior targets for this document. `--tone` is required with `--reset`: the reset reads no prior state, so it cannot recover the register |
+| `lx extract SRC --lang L --from OLD` | carry another tracked document's translations across — what a split or renamed file needs. Holds, waivers and `origin` travel with the wording. It replaces whatever SRC already holds, so never point it at a file that has been worked on since |
+| `lx forget SRC --lang L` | remove one document's state row once every translation in it is held, the same way, by another tracked document in L. Refuses otherwise and names each segment and where it is; SRC must be spelled the way `lx status` shows it. Touches no memory, no rendered output and no source file. **Never pass `--discard-wording` yourself** — show the person the refusal |
 | `lx todo SRC --lang L` | emit pending segments as JSON |
 | `lx todo SRC --lang L --all` | emit every segment, with `fix` notes on failing ones |
 | `lx todo SRC --lang L --limit N` | first N pending segments, for batching |

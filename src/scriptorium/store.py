@@ -1533,6 +1533,287 @@ def tracked(lang=None):
         conn.close()
 
 
+# ── forgetting a document row ──────────────────────────────────────────────
+#
+# The one delete of a document row in this module, and the mirror of `save_doc`:
+# three tables, one transaction, `documents` last. Not one transaction per
+# table — a crash between them would leave segment rows with no parent, and
+# `tracked` iterates `documents` only, so a visible leftover would become
+# permanently invisible garbage. See `docs/decisions.md`, 2026-09-10.
+
+def _wording(target):
+    """A stored target as the wording it is, for comparing across documents.
+
+    Stripped, and only stripped. `lx apply` keeps a leading pair of U+3000 — the
+    paragraph indent zh-TW prose is set in — and `translate.accept`, which every
+    carry goes through, removes it, so comparing bytes refused the very split
+    this exists to finish: measured 2026-09-10, three of sixteen hand-typed zh-TW
+    wordings differed after a faithful `--from` carry, and none once both sides
+    were stripped. Python's `str.strip` removes U+3000 where SQLite's `trim()`
+    removes only U+0020, which is why the comparison is made here and never in a
+    query.
+    """
+    return (target or "").strip()
+
+
+def _other_labels(conn, lang, skip):
+    """``{doc_id: (label, tone)}`` for every row in ``lang`` except ``skip``.
+
+    Through :func:`_meta`, the one funnel from a stored row to a dict, so a label
+    here is spelled the way every other surface spells it. A row that funnel
+    cannot read — hand-edited meta whose `source` is not a string — is named by
+    its identity instead of taking the command down: whether one document can be
+    forgotten must not depend on another one being well formed.
+    """
+    out = {}
+    for did, version, meta in conn.execute(
+            "SELECT doc_id, state_version, meta FROM documents WHERE lang=? AND doc_id<>?",
+            (lang, skip)):
+        try:
+            doc = _meta(meta, version)
+        except (TypeError, ValueError):
+            out[did] = (did, None)
+            continue
+        label = doc.get("source")
+        out[did] = (label if isinstance(label, str) and label else did, doc.get("tone"))
+    return out
+
+
+def _forget_analysis(conn, did, lang, tone):
+    """What forgetting ``(did, lang)`` would lose. ``dict``; read on ``conn``.
+
+    **The question is the harm, not the population.** A row may go when every
+    translation it holds is also held by some other row in the same language —
+    the same paragraph (``content_hash``) carrying the same wording
+    (:func:`_wording`). That is what makes a split finished with ``--from``
+    free to clean up and a split finished without it impossible to lose, which
+    is the case the package that scheduled this called its flagship: two new
+    rows, both empty, and the old row the only thing holding the book.
+
+    *Lost:* ``content_hash`` coverage alone, the predicate that package proposed.
+    Measured 2026-09-10, it **allows** exactly that flagship case, because the
+    empty new rows hold every paragraph and none of the wording. *Lost:* asking
+    the translation memory, which `lx commit` fills only with what it may bank —
+    a held segment never, and one line per key, the last — so "banked" is a
+    condition a reviewer can be unable to reach and a book with one paragraph
+    twice can never satisfy. *Lost:* the source file's existence, which is the
+    wrong answer in both directions and differs between the two CI platforms.
+
+    Four things refine it, each measured:
+
+    * **A multiset, not a set.** A book holding one wording at three positions,
+      cut so that two survive, loses a position — the shape the 2026-09-04 entry
+      calls mechanically invisible. Each copy here must be matched by a copy
+      somewhere else, so the third one is named.
+    * **Translated segments only.** An untranslated paragraph loses no wording,
+      and refusing it would refuse every row extracted under a mistyped `--lang`
+      and every document extracted by mistake — the cases most worth forgetting.
+    * **A person's word is not covered by a machine's.** Where this row says
+      ``origin: human`` and every other copy of the wording is regenerable
+      (:func:`is_regenerable_origin` — the memory route turns `human` into `tm`,
+      measured), forgetting it removes the last record that a person wrote it and
+      with it the protection *Origin precedence* gives. ``agent`` is not
+      regenerable, so it covers; the rule reads the same taxonomy the write guard
+      does and adds none of its own.
+    * **Where it can be carried.** For each other document holding one of these
+      paragraphs, whether ``lx extract <it> --from <this>`` would be *safe*:
+      `--from` reads the named document's state instead of the target's own, so
+      it replaces every wording the target holds that this row does not —
+      measured 2026-09-10, a chapter re-worded after its carry was quietly
+      reverted by the carry a refusal had just recommended. Only a document whose
+      every translated wording this row also holds is offered one. A register
+      that differs does not make it unsafe, since whatever such a document holds
+      comes back from this row; it makes the command need `--tone`, which
+      ``same_register`` says. Measured the same day: chapters extracted without
+      one sit in the configured default while the novel they came from is
+      `literary`, and "do not carry" was the wrong answer for all of them.
+
+    Every read here decides whether the caller writes, so it has to run inside
+    the caller's :func:`_begin_write` — :func:`forget_doc` is the guard and
+    :func:`forget_blockers` the advice, and the advice needs no lock.
+    """
+    victim = []
+    for seg_id, content_hash, target, body in conn.execute(
+            "SELECT seg_id, content_hash, target, body FROM segments "
+            "WHERE doc_id=? AND lang=? ORDER BY pos", (did, lang)):
+        victim.append((seg_id, content_hash, _wording(target), json.loads(body).get("origin")))
+    mine = Counter((h, w) for _id, h, w, _o in victim if w)
+    # Which keys a person wrote here, so that only those rows elsewhere need
+    # their `body` parsed: the scan below is the whole language, and decoding
+    # every body in a large project to answer a question about a few segments
+    # is the read `tracked` was restructured to stop.
+    human_keys = {(h, w) for _id, h, w, o in victim if w and o == HUMAN}
+    hashes = {h for _id, h, _w, _o in victim}
+    # **One scan, in Python.** The correlated `EXISTS` form was measured at 457 ms
+    # over 10,000 rows and 2,778 ms over 30,000, growing faster than the table
+    # and held under the write lock `BUSY_TIMEOUT` bounds for every other writer.
+    # `segments_carry` cannot serve it: it leads with `doc_id`, and this looks up
+    # the other direction.
+    others, elsewhere, to_read = [], Counter(), []
+    for rowid, other, seg_id, content_hash, target in conn.execute(
+            "SELECT rowid, doc_id, seg_id, content_hash, target FROM segments "
+            "WHERE lang=? AND doc_id<>? ORDER BY doc_id, pos", (lang, did)):
+        wording = _wording(target)
+        others.append((other, seg_id, content_hash, wording))
+        if wording:
+            elsewhere[(content_hash, wording)] += 1
+            if (content_hash, wording) in human_keys:
+                to_read.append(rowid)
+    # The bodies, by rowid and in chunks rather than one statement per row: a
+    # carried novel matches every one of its human segments here, and a
+    # statement each was measured at 28% of a write in `_written_by_hand`.
+    protected = Counter()
+    for start in range(0, len(to_read), 500):
+        chunk = to_read[start:start + 500]
+        for content_hash, target, body in conn.execute(
+                "SELECT content_hash, target, body FROM segments WHERE rowid IN "
+                f"({','.join('?' * len(chunk))})", chunk):
+            if not is_regenerable_origin(json.loads(body).get("origin")):
+                protected[(content_hash, _wording(target))] += 1
+    labels = _other_labels(conn, lang, did)
+    holding = {}
+    for other, _id, content_hash, wording in others:
+        if content_hash in hashes:
+            holding.setdefault(content_hash, []).append((other, wording))
+
+    blocked, seen, human_seen, hash_of = [], Counter(), Counter(), {}
+    for seg_id, content_hash, wording, origin in victim:
+        hash_of[seg_id] = content_hash
+        if not wording:
+            continue
+        key = (content_hash, wording)
+        seen[key] += 1
+        held_by = holding.get(content_hash, [])
+        if seen[key] > elsewhere[key]:
+            if elsewhere[key]:
+                why, docs = "fewer", {o for o, w in held_by if w == wording}
+            elif any(w for _o, w in held_by):
+                why, docs = "different", {o for o, w in held_by if w}
+            elif held_by:
+                why, docs = "untranslated", {o for o, _w in held_by}
+            else:
+                why, docs = "nowhere", set()
+            blocked.append({"id": seg_id, "why": why,
+                            "docs": sorted(labels.get(d, (d, None))[0] for d in docs)})
+            continue
+        if origin == HUMAN:
+            human_seen[key] += 1
+            if human_seen[key] > protected[key]:
+                blocked.append({"id": seg_id, "why": "provenance", "docs": sorted(
+                    labels.get(o, (o, None))[0] for o, w in held_by if w == wording)})
+
+    # Which documents a carry could go into, and whether it would be safe to.
+    involved = {o for c in blocked for o, _w in holding.get(hash_of[c["id"]], [])}
+    carry = []
+    for other in sorted(involved, key=lambda d: labels.get(d, (d, None))[0]):
+        label, other_tone = labels.get(other, (other, None))
+        budget, own = Counter(mine), []
+        for owner, seg_id, content_hash, wording in others:
+            if owner != other or not wording:
+                continue
+            if budget[(content_hash, wording)]:
+                budget[(content_hash, wording)] -= 1
+            else:
+                own.append(seg_id)
+        carry.append({"doc": label, "own": own, "safe": not own,
+                      "same_register": canonical_tone(other_tone) == canonical_tone(tone)})
+    return {"segments": len(victim), "translated": sum(mine.values()),
+            "blocked": blocked, "carry": carry}
+
+
+def forget_doc(src, lang, discard=False):
+    """Delete one ``(document, language)`` row. ``None`` when there is no such row.
+
+    Otherwise a ``dict`` carrying the stored ``source`` and ``tone`` beside
+    :func:`_forget_analysis`'s answer, and ``refused``: ``None`` when the row is
+    gone, or why nothing was deleted — ``"aim"``, ``"source"`` or ``"wording"``.
+    ``discard`` overrides ``"wording"`` and nothing else. The sentences are
+    `cli.do_forget`'s; this decides.
+
+    **Aimed by the stored spelling, inside the lock.** `doc_id` flattens every
+    separator, so `docs_guide.md` and `docs/guide.md` are one row here — and a
+    person forgetting a file they can see would otherwise destroy the state of a
+    document they cannot. The row goes only when ``doc_label(src)`` *is* its
+    stored `source`, and that is compared after the write lock is taken, because
+    a concurrent colliding `lx extract` can replace the row between a check made
+    outside it and the delete. A row whose `source` is not a string cannot be
+    confirmed and is refused the same way.
+
+    **Nothing here opens, stats or confines a path** (invariant 11). The spelling
+    is compared as a string and the delete is keyed on ``(doc_id, lang)``, and
+    because `doc_id` flattens every separator no spelling can reach anything
+    outside this database. Confining it would have been worse than unnecessary:
+    `lx extract ../shelf/book.md` is supported and stores that source verbatim,
+    `cli.confined_path` refuses it, and the documents most likely to have moved
+    would have become impossible to forget.
+
+    **Read-then-write, so the lock comes first.** Every read below decides
+    whether the deletes run, and Python's `sqlite3` would otherwise run them in
+    autocommit — :func:`_begin_write`'s docstring has the measured cost. A row
+    from a *newer* build is refused rather than judged, since this build cannot
+    know what its body means; an *older* one is judged, because the columns the
+    judgement reads are the schema's and have not moved, and requiring a
+    re-extract first would be requiring a source file that may be gone.
+
+    Touches nothing outside `.lx/state.db`: not `.lx/tm.*.jsonl`, not the
+    rendered output, not the source file. The check report is `cli.do_forget`'s.
+    """
+    conn = _connect(create=False)
+    if conn is None:
+        return None
+    did = doc_id(src)
+    try:
+        with conn:
+            _begin_write(conn)
+            doc = _read_meta(conn, src, lang)
+            if doc is None:
+                return None
+            stored, tone = doc.get("source"), doc.get("tone")
+            out = {"source": stored, "tone": tone, "refused": None}
+            if not isinstance(stored, str) or not stored:
+                out["refused"] = "source"
+                return out
+            if stored != doc_label(src):
+                out["refused"] = "aim"
+                return out
+            if doc["state_version"] > STATE_VERSION:
+                raise StateVersionError(
+                    f"state for {stored} [{lang}] is version {doc['state_version']}, newer "
+                    f"than the {STATE_VERSION} this build reads, so this build cannot tell "
+                    f"what forgetting it would lose — upgrade scriptorium to forget it. "
+                    f"Nothing was deleted.")
+            out.update(_forget_analysis(conn, did, lang, tone))
+            if out["blocked"] and not discard:
+                out["refused"] = "wording"
+                return out
+            conn.execute("DELETE FROM segments WHERE doc_id=? AND lang=?", (did, lang))
+            conn.execute("DELETE FROM nodes WHERE doc_id=? AND lang=?", (did, lang))
+            conn.execute("DELETE FROM documents WHERE doc_id=? AND lang=?", (did, lang))
+            return out
+    finally:
+        conn.close()
+
+
+def forget_blockers(src, lang):
+    """:func:`_forget_analysis` for a stored row, read-only. ``None`` if there is none.
+
+    Advice rather than a guard: `lx extract --from` prints whether the document
+    it carried from could now be forgotten without loss, which is the moment a
+    person is looking at both. It takes no lock because nothing is written on
+    its answer — :func:`forget_doc` asks the same question again under one.
+    """
+    conn = _connect(create=False)
+    if conn is None:
+        return None
+    try:
+        doc = _read_meta(conn, src, lang)
+        if doc is None:
+            return None
+        return _forget_analysis(conn, doc_id(src), lang, doc.get("tone"))
+    finally:
+        conn.close()
+
+
 def tm_lines(lang):
     """``[(lineno, record)]`` for every readable line, in file order.
 

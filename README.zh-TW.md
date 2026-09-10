@@ -122,6 +122,7 @@ CI 上有一組語料庫在把關，裡面收了 58 份刻意刁難的輸入（M
 | `lx init` | 建立設定與狀態骨架 |
 | `lx extract SRC --lang L` | 解析成 segment、遮罩標記、重用翻譯記憶（小說加 `--tone literary`） |
 | `lx extract SRC --lang L --from OLD` | 把另一份已追蹤文件的譯文帶過來，連 hold 和 waiver 一起——拆書或改名時要用的 |
+| `lx forget SRC --lang L` | 移除一份文件的狀態列——拆書或改名後留下的那一列。只要裡面還有任何一句譯文是別的已追蹤文件沒有的，就拒絕並逐一點名（加 `--discard-wording` 就只丟掉那幾句）。翻譯記憶、輸出檔和原文檔都不會碰 |
 | `lx todo SRC --lang L` | 以 JSON 吐出待譯 segment，供 agent 翻譯 |
 | `lx terms SRC --lang L` | 從原文挑出候選術語、開成詞彙表的列（加 `--append` 直接寫進去） |
 | `lx glossary get\|set\|unset TERM [RENDERING]` | 讀寫這個專案在管的術語列 |
@@ -437,11 +438,40 @@ lx: novel.md is not there, and `lx extract` is the only command that reads the
     source file — this document's translations are still in .lx/state.db, so
     `lx render novel.md --lang zh-TW` and `lx check novel.md --lang zh-TW` both
     still work. If you renamed or split it, extract the new file and carry them
-    across: `lx extract <new-file> --lang zh-TW --from novel.md`.
+    across: `lx extract <new-file> --lang zh-TW --from novel.md`, then
+    `lx forget novel.md --lang zh-TW` so it stops being counted beside the new
+    files — that refuses while any translation in it is held by no other
+    document.
 ```
 
-拆完之後，舊文件那一列還留在 `.lx/state.db` 裡，所以 `lx stats` 和
-`lx status --json` 會繼續把它算進去，直到你把它移掉為止。目前還沒有這個指令。
+拆完之後，舊文件那一列還留在 `.lx/state.db` 裡，所以 `lx stats` 和 `lx status`
+會把它的段落再算一次，並在那一列後面標上 `(no file at this path)`，直到你把它移
+掉為止。等拆出來的每個檔案都 extract 過了，`--from` 會告訴你，這時用 `lx forget`
+把它拿掉：
+
+```bash
+lx forget novel.md --lang zh-TW
+# forgot novel.md [zh-TW] — 412 segment(s), 412 translated, every one of them
+#   also held by another tracked document in zh-TW
+```
+
+只有在什麼都不會少的時候，它才會真的刪：那一列裡的每一句譯文，都得在同一個語言
+的另一份已追蹤文件裡、以同樣的譯法存在。只要有一句找不到，它就拒絕，並告訴你每
+一句在哪裡——在 `ch2.md` 裡還沒翻，因為那一章 extract 時沒加 `--from`；在
+`ch1.md` 裡搬過去之後又改過；或者哪份文件裡都沒有，因為還有一章沒 extract。它只
+會建議你把 `lx extract <章節> --from novel.md` 用在自己沒有另外寫過譯文的章節上，
+因為 `--from` 讀的是舊文件的狀態，不是那一章自己的；對已經改過的章節這麼做，會把
+你的改寫蓋回去。真的要刪就加 `--discard-wording`，丟掉的正好是拒絕訊息點名的那幾
+段。
+
+文件名稱要照 `lx status` 顯示的寫法打。兩個路徑可能共用同一列狀態——
+`docs/guide.md` 和 `docs_guide.md` 就是——你要刪的是畫面上看得到的那一個，不能
+因此刪到另一個的譯文；所以打的寫法跟存的不一樣，它就拒絕，並告訴你存的是哪一個。
+
+`lx forget` 刪的是一列狀態。翻譯記憶、`lx render` 已經寫出來的檔案、原文檔，都
+原封不動。它也不等於抹除：SQLite 會重複利用那塊空間，但不會先把舊內容蓋掉，所以
+在別的資料寫進去之前，文字還留在 `.lx/state.db` 裡。想留一份原始檔的話，刪之前先
+跑 `lx bytes novel.md --lang zh-TW --json`，原檔的每一個 byte 都在裡面。
 
 ## 審校工作台
 
@@ -602,7 +632,7 @@ Markdown 與純文字目前都可以端到端跑完：抽取、翻譯、驗證�
 ## 開發
 
 ```bash
-python -m pytest -q                # 2162 tests，不碰網路
+python -m pytest -q                # 2344 collected，不碰網路
 python -m ruff check src tests
 ```
 

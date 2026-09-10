@@ -36,6 +36,7 @@ from scriptorium.store import (  # noqa: E402
     StateVersionError,
     db_path,
     doc_id,
+    forget_doc,
     load_doc,
     prior_doc,
     prior_targets,
@@ -963,7 +964,12 @@ def test_the_guard_reads_inside_the_write_transaction(tmp_path, monkeypatch):
              lambda: save_targets("d.md", "zh-TW", {ids[0]: "模型。"}, "llm:draft")),
             ("save_segments", lambda: save_segments("d.md", "zh-TW", [seg])),
             ("save_review", lambda: save_review("d.md", "zh-TW", {ids[0]: "held"})),
-            ("save_issues", lambda: save_issues("d.md", "zh-TW", {ids[0]: ["x: y"]}))):
+            ("save_issues", lambda: save_issues("d.md", "zh-TW", {ids[0]: ["x: y"]})),
+            # Last, because it removes the row the others write to. Its reads
+            # decide whether three DELETEs run at all — the aim, the version and
+            # the wording nobody else holds — so they are guard reads exactly like
+            # the four above, and `discard` is what lets the deletes be reached.
+            ("forget_doc", lambda: forget_doc("d.md", "zh-TW", discard=True))):
         seen.clear()
         call()
         reads = [(verb, in_tx) for verb, in_tx in seen if verb == "SELECT"]
