@@ -2500,7 +2500,17 @@ Appended 2026-09-01 by the package that added `GET /api/models`. Both open.
     waivers at `200`. HANDOFF-067 closed the data-loss half by raising
     `store.CollidingIdentity` — a `ValueError` subclass, so this endpoint answers
     `400` with one sentence naming the stored spelling, like every other
-    `cli.do_extract` refusal already on the wire.
+    `cli.do_extract` refusal already on the wire. **`reset` does not get past
+    it**: `reset` discards *this* document's prior state, and the row it would
+    replace is another document's.
+
+    The same class answers a second `400` the tables do not name: a row under
+    this identity whose `source` cannot be read — absent, `null`, not a string,
+    or a `meta` that is not a JSON object — cannot be shown to be this
+    document's, so it is refused unless the request carries `reset`, which is
+    the one way past it. No `lx extract` has ever written such a row; it comes
+    from a hand edit or a damaged file. Given divergence (28), note that any
+    truthy `reset` counts.
 
     **Not leaked logic**: the check lives in `store.save_doc`, `cli.do_extract`'s
     one writer, so both surfaces gained the refusal from the one commit. What is

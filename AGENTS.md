@@ -524,7 +524,7 @@ Node — see the invariant below.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 2430 collected, no network. Four are
+python -m pytest -q                 # 2447 collected, no network. Four are
                                     #   conditional on three different things, so
                                     #   which two skip is a property of the machine
                                     #   AND the account: one is POSIX-only, one
@@ -1075,6 +1075,14 @@ own.
   construction the way `variant`'s does, so it lives inside `tm_key` where no
   caller can skip it. A document in a non-default register is not offered the
   `tm:legacy` tier at all. See `docs/decisions.md`, 2026-07-29.
+
+  **The same collapse decides whether a document's register can move.** A
+  document with a state row is frozen in its register whatever the stored value
+  is — `""` and an absent key are the default it already is, not "none" — so the
+  configuration decides a register at a document's first extract, and after
+  that only `--tone` moves it. Read as "none", an empty value let the configured
+  register walk over it on a plain re-extract, and every translation it held
+  missed its key at exit 0. `docs/decisions.md`, 2026-09-11.
 - Translation memory hits go through the same acceptance path as model output.
   Writing a target directly is how a stale mask configuration renders a bare
   `⟦2⟧`. The key is deliberately blind to the mask configuration — that is what
@@ -1250,7 +1258,9 @@ own.
 
   Three things it will never do. It never deletes a row it was not named for:
   `doc_id` maps `docs/guide.md` and `docs_guide.md` to one row, so the typed
-  spelling must *be* the stored `source`, compared inside the lock. It never
+  spelling must *be* the stored `source`, compared inside the lock — and since
+  2026-09-11 `store.save_doc`, the one write of a document row, never replaces
+  one it was not named for either, `--reset` included. It never
   opens, stats or confines the path — the key is `(doc_id, lang)`, which cannot
   reach outside `.lx/state.db`, and `confined_path` would refuse
   `../shelf/book.md`, which `lx extract` supports. And it never builds a file
