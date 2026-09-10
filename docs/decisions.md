@@ -23,9 +23,11 @@ workbench's document list where `lx translate` would pay to work on it.
 
 ### What is refused is the harm, not the population
 
-A row may go when every translated segment's wording — `content_hash` plus the
-target, stripped — is also held by some other row in the same language. Four
-alternatives lost, each on a measurement:
+A row may go when every translated segment's wording is also held by some other
+row in the same language: the same paragraph (`content_hash`) writing the same
+words into its document — the stored target unmasked against the map its `⟦n⟧`
+mean, polished the way `lx render` polishes it, and stripped. Four alternatives
+lost, each on a measurement:
 
 | predicate | split carried (S1) | split not carried (S2) | chapter re-worded after the carry (S4) |
 |---|---|---|---|
@@ -33,19 +35,32 @@ alternatives lost, each on a measurement:
 | exact target bytes | **refuse** | refuse | refuse |
 | the translation memory holds it | refuse | refuse | refuse |
 | the source file is gone | allow | allow | allow |
-| **stripped wording, as a multiset (chosen)** | allow | refuse | refuse, that one id |
+| **the rendered wording, as a multiset (chosen)** | allow | refuse | refuse, that one id |
 
 `content_hash` alone was the package's proposal, and it allows exactly the case
 the package called its flagship: two new rows extracted without `--from`, both
 empty, holding every paragraph and none of the wording. Exact bytes refused the
 ordinary split, because `lx apply` keeps the U+3000 pair zh-TW paragraphs open
-with and `translate.accept`, which every carry goes through, strips it — three of
-sixteen hand-typed zh-TW wordings differed after a faithful carry, none once both
-sides were stripped. The memory is filled only with what `lx commit` may bank,
-never a held segment and one line per key, so "banked" is a condition a book with
-one paragraph twice can never meet. And existence answers wrong both ways — an
-unplugged drive reads as gone, a swapped file as present — and differently on the
-two CI platforms for a name that differs only in case.
+with and `translate.accept`, which every carry goes through, strips it — a
+wording typed with the indent comes back from a faithful carry without it, which
+`tests/test_forget.py` pins. The memory is filled only with what `lx commit` may
+bank, never a held segment and one line per key, so "banked" is a condition a
+book with one paragraph twice can never meet. And existence answers wrong both
+ways — an unplugged drive reads as gone, a swapped file as present — and
+differently on the two CI platforms for a name that differs only in case.
+
+**Why the rendered text and not the stored string**, which is what the first
+version compared and what the adversarial review of it refuted in both
+directions. A `config/dnt.txt` edit between the translation and the carry
+renumbers the placeholders, so a faithful carry stored a different string for
+the same rendered line and the forget was refused for nothing. The other
+direction lost a sentence with no flag passed: the old row's string pasted into
+the chapter — which the first refusal message recommended — read `⟦1⟧` as the
+*other* term there, the chapter rendered one character's name twice, and the
+forget found the two strings equal and deleted the only row that rendered the
+right name. `mask.target_map` is the map every other reader of a stored target
+uses; the polish is `cli`'s `polish_rendered`, handed to `store` because that
+module reads no configuration.
 
 Three refinements, each for a case the others miss:
 
@@ -55,22 +70,32 @@ Three refinements, each for a case the others miss:
 - **Translated segments only.** An untranslated paragraph loses no wording, and
   refusing it would refuse a row extracted under a mistyped `--lang` or from the
   wrong file — the rows most worth forgetting.
-- **A person's wording is not covered by a machine's copy.** The memory route
-  turns `human` into `tm`, measured; where every other copy of a `human` wording
-  is regenerable (`store.is_regenerable_origin`), forgetting the row removes the
-  last record that a person wrote it and with it origin precedence. It reads the
-  write guard's own taxonomy and adds none.
+- **A person's wording is covered only by a person's.** Where this row says
+  `human`, another copy has to say so too. The memory route turns `human` into
+  `tm`, measured, and origin precedence guards `human` and nothing else: the
+  first version let an `agent` copy cover it, and review measured that copy
+  overwritten by an `llm:polish` write the moment the human row was gone.
+  `is_regenerable_origin` was the wrong question — it answers what a memory hit
+  may replace, not what the write guard protects.
+
+A body that is not a JSON object — hand-edited — is read as carrying no origin,
+no hold and no waiver and as its masked string, which refuses more, never less;
+it used to end `lx forget` in a traceback. A segment whose `documents` row is
+gone is read by no command and is not counted as a copy.
 
 **Refused, never judged, from a newer build; judged from an older one.** A newer
 row's `body` may mean something this build does not know. An older row's
 judgement reads only schema columns and `origin`, and requiring a re-extract
 first would require a source file that is usually gone.
 
-The judgement is one scan of the language in Python, under the write lock. The
-correlated `EXISTS` form was measured at 457 ms over 10,000 rows and 2,778 ms over
-30,000, growing faster than the table while holding the lock `BUSY_TIMEOUT`
-bounds for every other writer; the scan was 9.9 ms and 27.9 ms. `segments_carry`
-cannot serve it — it leads with `doc_id` and this looks up the other direction —
+The judgement is one scan of the language in Python, under the write lock, with
+bodies parsed only for rows sharing a paragraph with the one being forgotten.
+Measured here on a 500-segment document sharing half its paragraphs with every
+other one, under `BEGIN IMMEDIATE`: the correlated `EXISTS` form it replaced took
+280 ms over 10,000 rows and 2,025 ms over 30,000 — seven times the time for three
+times the rows, while holding the lock `BUSY_TIMEOUT` bounds for every other
+writer — and the shipped function 38 ms and 125 ms. `segments_carry` cannot
+serve the lookup — it leads with `doc_id` and this goes the other direction —
 which refutes the package's "which has the `segments_carry` index already".
 
 ### A refusal offers a carry only where a carry loses nothing
@@ -81,18 +106,40 @@ its first carry, it exited 0, printed `reused 3 | pending 0`, and put the old
 wording back, because `--from` reads the named document's state instead of the
 target's own. That is the 2026-09-04 lesson in a new place — the escape a
 refusal names has to lose nothing — and it was found by the completeness pass,
-not by any design. So a document is offered a carry only when every wording it
-holds is also held by the old row; otherwise the refusal says not to carry into
-it, and names the ids a carry would replace. A register that differs does not
-make a carry unsafe — whatever such a document holds comes back from the old row
-— it makes the command need `--tone`, and the refusal spells it. Chapters
-extracted without `--tone` in a project configured `technical` are the ordinary
-case, and "do not carry" was the wrong answer for every one of them.
+not by any design. So a document is *safe* to carry into only when every
+translated segment it holds is matched in the old row by a copy with the same
+wording **and at least its marks** — a person's `origin`, a hold, a waiver. The
+wording alone was the first version's test, and review measured the carry it
+then recommended replacing a chapter's held, human wording with the old row's
+draft of the same words: the hold and the `human` were gone, and the forget that
+followed passed. And a document is *offered* a carry only where one would reach
+a segment the old row alone holds — the paragraph untranslated there, or held
+without a person's mark — never where it already holds a different wording,
+which a carry would not change; offering it there cost a round trip and taught
+the flag. Where a document is unsafe the refusal says not to carry into it and
+names what a carry would replace.
+
+It never tells a person to copy a wording across by hand any more. The first
+version said "copy what you want across with `lx apply`", and a stored wording's
+`⟦n⟧` mean the terms of the document it was written in — that sentence is how
+the lost name above was lost. It points at `lx render <old> -o -` instead, the
+text a person can read and re-type.
+
+A register that differs does not make a carry unsafe — whatever such a document
+holds comes back from the old row — it makes the command need `--tone`, and the
+refusal spells it. Chapters extracted without `--tone` in a project configured
+`technical` are the ordinary case, and "do not carry" was the wrong answer for
+every one of them.
 
 And the moment to forget is right after the carry, before the chapters diverge,
 so `lx extract --from` now asks the same question after its save and says which
-state the old row is in: "held by no other tracked document yet", naming the
-count, or "removes it without losing any of them".
+state the old row is in: how many of its translations no other document holds
+the same way yet, or that `lx forget` removes it without losing any of them. It
+names the old row by its stored spelling, since `--from` resolves through
+`doc_id` and a forget named the typed way would be refused by the aim rule. It
+names no remedy: the reason may be a file not extracted yet, a wording changed
+since, or a person's mark only the old row holds, and the refusal is the one
+place that can tell them apart.
 
 ### Aimed by the stored spelling, inside the lock
 
@@ -103,7 +150,11 @@ only when `doc_label(src)` *is* its stored `source`, compared after
 row between a check made outside it and the delete. Refused rather than
 proceeded-with-a-warning: a headline naming the other document is read after the
 delete has happened. `--discard-wording` does not reach this refusal. A row whose
-`source` is not a string cannot be confirmed and is refused the same way.
+`source` is not a string cannot be confirmed and is refused the same way. The
+comparison is made after the operating system's own normalization, because
+`doc_label` is `os.path.relpath`: on Windows `lx forget novel.md.` forgets
+`novel.md`, which is the file Windows would open for that name and the identity
+`lx extract` gives it. Case is never folded.
 
 The package claimed forgetting "frees the identity, the only remedy
 `_report_collisions` has none of". It frees it, and it is not a remedy: `lx
@@ -225,8 +276,36 @@ premises, a lane that measured its factual claims, and a completeness critic ove
 all five. The designs converged on almost everything and all three wrongly
 assumed a forget follows the carry closely; the critic found that assumption,
 the lossy `--from` advice, the U+3000 difference and the scan cost. The attack
-found the retire option and that the old row holds the source bytes. What was
-found and belongs elsewhere is scheduled, not listed here to be forgotten:
+found the retire option and that the old row holds the source bytes.
+
+Then the first implementation was reviewed by four lanes — adversarial
+correctness, the security tier on the delete path, every claim in the documents,
+and mutation — and the correctness lane found three major defects every design
+had missed: the stored-string comparison in both directions, and the "safe" carry
+that dropped a hold. All three rules above are its. Each finding is a test in
+`tests/test_forget.py` that fails on the first version. The mutation lane ran 43
+mutants on that version and 10 survived — among them a `DELETE` missing its
+`lang` on two of the three tables, whose test's own docstring claimed to pin it
+while forgetting a document tracked in one language only — and each survivor is a
+test now; it also found the provenance rule counting per position where this
+entry says at least one, which is why the rule reads "another copy". On the
+revised code 31 mutants over the old guards and the new were run and all 31
+caught, one of them only after its fixture was corrected: a malformed body
+spelled `[]` is falsy, and passed for "no body" by accident. The security lane found
+every control holding; what it added is the robustness to a malformed body, the
+no-derived-path rule under a non-tag `--lang`, and the stronger reason the human
+note's stat is bounded — `store._meta`'s `relpath` refuses UNC, device and `\\?\`
+paths before any caller sees them.
+
+Two things the review found are the whole CLI's and are recorded rather than
+fixed here:
+a writer that waits past `BUSY_TIMEOUT` for the lock answers `database is
+locked` with a traceback and exit 1, having deleted nothing; and a command
+recommended in any message is printed with its paths unquoted, so a name with a
+space in it has to be quoted by the person running it.
+
+What was found and belongs elsewhere is scheduled, not listed here to be
+forgotten:
 
 - **HANDOFF-066** — `--from` replaces what the target already holds, silently,
   and its register-change line reports the source document's count as the

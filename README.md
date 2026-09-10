@@ -516,14 +516,17 @@ lx forget novel.md --lang zh-TW
 ```
 
 It removes the row only when nothing would be lost: every translation in it has
-to be held, the same way, by another tracked document in that language. Where
-one is not, it refuses and says where each one is — untranslated in `ch2.md`
-because that chapter was extracted without `--from`, re-worded in `ch1.md` since
-the carry, or in no other document because a chapter has not been extracted
-yet. It offers `lx extract <chapter> --from novel.md` only into a chapter that
-holds no wording of its own a carry would replace, because `--from` reads the old
-document's state instead of the chapter's. `--discard-wording` forgets it anyway
-and drops exactly the segments the refusal named.
+to be written, word for word, by another tracked document in that language — as
+`lx render` would write it, so a placeholder renumbered since does not count as a
+difference — and a sentence you wrote yourself has to be marked as yours
+somewhere else too. Where one is not, it refuses and says where each one is —
+untranslated in `ch2.md` because that chapter was extracted without `--from`,
+re-worded in `ch1.md` since the carry, or in no other document because a chapter
+has not been extracted yet. It offers `lx extract <chapter> --from novel.md` only
+into a chapter that holds nothing of its own a carry would replace — no wording,
+and no hold or mark of yours — because `--from` reads the old document's state
+instead of the chapter's. `--discard-wording` forgets it anyway and drops exactly
+the segments the refusal named.
 
 It asks for the document spelled the way `lx status` shows it. Two paths can
 share one state row — `docs/guide.md` and `docs_guide.md` do — and forgetting
@@ -742,7 +745,7 @@ that lost.
 ## Development
 
 ```bash
-python -m pytest -q                # 2344 collected, no network
+python -m pytest -q                # 2368 collected, no network
 python -m ruff check src tests
 ```
 

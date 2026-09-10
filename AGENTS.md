@@ -524,7 +524,7 @@ Node — see the invariant below.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 2344 collected, no network. Four are
+python -m pytest -q                 # 2368 collected, no network. Four are
                                     #   conditional on three different things, so
                                     #   which two skip is a property of the machine
                                     #   AND the account: one is POSIX-only, one
@@ -1205,12 +1205,16 @@ own.
   `save_doc`: three `DELETE`s in one `with` block, `documents` last, behind
   `store._begin_write` — every read before them decides whether they run, and a
   test asserts the shape with `ast`. What it asks is the harm, not the
-  population: every *translated* segment's wording (`content_hash` plus the
-  stripped target, as a multiset) must also be held by another row in the same
-  language, and a `human` wording by at least one copy that is not regenerable.
-  `content_hash` coverage alone was the scheduled predicate and was measured
-  allowing exactly the split-without-carry case where the old row is the only
-  copy. `--discard-wording` overrides that refusal and nothing else.
+  population: every *translated* segment must also be held by another row in the
+  same language as a multiset of `content_hash` plus **what the render writes** —
+  the target unmasked through `mask.target_map` and polished, never the stored
+  string, whose `⟦n⟧` can name different terms in two documents (measured: one
+  comparison refused a faithful carry, the other deleted the only row rendering
+  the right name) — and a `human` wording by another `human` copy, because origin
+  precedence guards nothing else. `content_hash` coverage alone was the scheduled
+  predicate and was measured allowing exactly the split-without-carry case where
+  the old row is the only copy. `--discard-wording` overrides that refusal and
+  nothing else.
 
   Three things it will never do. It never deletes a row it was not named for:
   `doc_id` maps `docs/guide.md` and `docs_guide.md` to one row, so the typed
@@ -1222,12 +1226,16 @@ own.
   is `<doc_id>.<lang>.json`, and an unvalidated tag was measured normalizing to
   the project's own `lx.config.json`. No sweep, no dump, no endpoint.
 
-  **A refusal offers `--from` only into a document it is safe to carry into**,
-  one holding no wording the old row lacks: `--from` reads the named document's
-  state instead of the target's own, and offering it unconditionally reverted a
-  chapter a person had re-worded, measured. Existence of the source is shown to
-  a person — `(no file at this path)` in human `lx status` and `lx stats` — and
-  decides nothing anywhere. See `docs/decisions.md`, 2026-09-10.
+  **A refusal offers `--from` only into a document it is safe to carry into and
+  only where it would help**: one holding nothing the old row lacks — no wording,
+  and no hold, waiver or `human` mark the old row's copy does not also carry —
+  and holding a blocked paragraph untranslated or unmarked. `--from` reads the
+  named document's state instead of the target's own, and offering it on the
+  wording alone reverted a re-worded chapter and dropped a held one's hold,
+  measured. It never tells a person to copy a wording across with `lx apply`.
+  Existence of the source is shown to a person — `(no file at this path)` in
+  human `lx status` and `lx stats` — and decides nothing anywhere. See
+  `docs/decisions.md`, 2026-09-10.
 
 - **What `lx commit` may bank is what `lx check` does not call an error**, per
   segment, and the gate is `checks.check_segment` itself rather than a rule of

@@ -9,7 +9,7 @@ import sqlite3
 from collections import Counter
 
 from .config import DEFAULT_TONE, STATE, canonical_tone
-from .mask import placeholder_ids
+from .mask import placeholder_ids, target_map, unmask
 
 #: Shape of a document state file. Bumped when a reader of an older file would be
 #: wrong rather than merely incomplete. `__version__` cannot serve here: it moves
@@ -1541,19 +1541,67 @@ def tracked(lang=None):
 # `tracked` iterates `documents` only, so a visible leftover would become
 # permanently invisible garbage. See `docs/decisions.md`, 2026-09-10.
 
-def _wording(target):
-    """A stored target as the wording it is, for comparing across documents.
+def _wording(text):
+    """Text with the blanks it opens and closes with removed. ``""`` for none.
 
-    Stripped, and only stripped. `lx apply` keeps a leading pair of U+3000 — the
-    paragraph indent zh-TW prose is set in — and `translate.accept`, which every
-    carry goes through, removes it, so comparing bytes refused the very split
-    this exists to finish: measured 2026-09-10, three of sixteen hand-typed zh-TW
-    wordings differed after a faithful `--from` carry, and none once both sides
-    were stripped. Python's `str.strip` removes U+3000 where SQLite's `trim()`
+    Stripped because `lx apply` keeps a leading pair of U+3000 — the paragraph
+    indent zh-TW prose is set in — and `translate.accept`, which every carry goes
+    through, removes it: a wording typed with the indent comes back from a
+    faithful `--from` carry without it, measured 2026-09-10 and pinned by
+    `tests/test_forget.py`, so a byte comparison refused the very split this
+    exists to finish. Python's `str.strip` removes U+3000 where SQLite's `trim()`
     removes only U+0020, which is why the comparison is made here and never in a
     query.
     """
-    return (target or "").strip()
+    return (text or "").strip()
+
+
+def _body(raw):
+    """A segment `body` as a dict, or ``None`` where it is not one.
+
+    Forgetting one document must not depend on another one's rows being well
+    formed, and a body is hand-editable JSON: a list or a truncated string used
+    to end `lx forget` in a traceback. ``None`` is then read as the least
+    protective answer for the row it belongs to — no origin, no hold, no waiver,
+    the masked wording — which is conservative on both sides: a victim's
+    unreadable body claims no provenance it cannot show, and another row's cannot
+    count as the person's copy that covers one.
+    """
+    try:
+        found = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return found if isinstance(found, dict) else None
+
+
+def _as_written(target, body, render):
+    """What a stored target writes into its document, as the wording compared here.
+
+    **Unmasked against the map its `⟦n⟧` mean, then polished the way the render
+    polishes it.** Comparing the stored strings was measured wrong in both
+    directions on 2026-09-10. A `config/dnt.txt` edit between the translation and
+    the carry renumbers the placeholders, so a faithful carry reads as a
+    *different* wording and the forget is refused for nothing. And the other way
+    round, which lost a sentence: the same masked string in two documents whose
+    `⟦1⟧` name different terms reads as the *same* wording, and following the
+    refusal's own advice to copy the wording across made the forget delete the
+    only row that rendered the right name. What a row *is*, to a reader, is what
+    `lx render` writes; `mask.target_map` is the map every other reader of a
+    stored target uses, and ``render`` is `cli`'s `polish_rendered` for this
+    language, handed in because this module reads no configuration.
+
+    A body that cannot be read, or a slot map from before slots were records,
+    falls back to the masked string — refusing more, never less.
+    """
+    if not _wording(target):
+        return ""
+    text = target
+    if body is not None:
+        try:
+            text = unmask(target, target_map(body))
+        except (TypeError, KeyError, AttributeError, ValueError):
+            text = target
+    return _wording(render(text) if render else text)
 
 
 def _other_labels(conn, lang, skip):
@@ -1579,13 +1627,13 @@ def _other_labels(conn, lang, skip):
     return out
 
 
-def _forget_analysis(conn, did, lang, tone):
+def _forget_analysis(conn, did, lang, tone, render=None):
     """What forgetting ``(did, lang)`` would lose. ``dict``; read on ``conn``.
 
     **The question is the harm, not the population.** A row may go when every
     translation it holds is also held by some other row in the same language —
-    the same paragraph (``content_hash``) carrying the same wording
-    (:func:`_wording`). That is what makes a split finished with ``--from``
+    the same paragraph (``content_hash``) writing the same words into its
+    document (:func:`_as_written`). That is what makes a split finished with ``--from``
     free to clean up and a split finished without it impossible to lose, which
     is the case the package that scheduled this called its flagship: two new
     rows, both empty, and the old row the only thing holding the book.
@@ -1608,77 +1656,97 @@ def _forget_analysis(conn, did, lang, tone):
     * **Translated segments only.** An untranslated paragraph loses no wording,
       and refusing it would refuse every row extracted under a mistyped `--lang`
       and every document extracted by mistake — the cases most worth forgetting.
-    * **A person's word is not covered by a machine's.** Where this row says
-      ``origin: human`` and every other copy of the wording is regenerable
-      (:func:`is_regenerable_origin` — the memory route turns `human` into `tm`,
-      measured), forgetting it removes the last record that a person wrote it and
-      with it the protection *Origin precedence* gives. ``agent`` is not
-      regenerable, so it covers; the rule reads the same taxonomy the write guard
-      does and adds none of its own.
+    * **A person's word is covered only by a person's.** Where this row says
+      ``origin: human``, some other copy of the wording has to say so too.
+      Forgetting the last one removes the only record that a person wrote it, and
+      with it *Origin precedence*, which guards `human` and nothing else — an
+      `agent` copy was measured being overwritten by an `llm:polish` write the
+      moment the human row was gone. The memory route turns `human` into `tm`,
+      measured, which is how a book reaches this case.
     * **Where it can be carried.** For each other document holding one of these
       paragraphs, whether ``lx extract <it> --from <this>`` would be *safe*:
       `--from` reads the named document's state instead of the target's own, so
-      it replaces every wording the target holds that this row does not —
-      measured 2026-09-10, a chapter re-worded after its carry was quietly
-      reverted by the carry a refusal had just recommended. Only a document whose
-      every translated wording this row also holds is offered one. A register
-      that differs does not make it unsafe, since whatever such a document holds
-      comes back from this row; it makes the command need `--tone`, which
-      ``same_register`` says. Measured the same day: chapters extracted without
-      one sit in the configured default while the novel they came from is
-      `literary`, and "do not carry" was the wrong answer for all of them.
+      it replaces whatever the target holds with this row's — measured
+      2026-09-10, a chapter re-worded after its carry was quietly reverted by the
+      carry a refusal had just recommended, and a chapter holding a person's held
+      wording lost the hold and the `human` when the carry put this row's draft
+      back. So a document is *safe* only when every translated segment it holds
+      is matched here by a copy with the same wording and at least its marks —
+      `human`, a hold, a waiver — and it is *offered* the carry only when a carry
+      would actually reach a segment this row alone holds: where that paragraph
+      sits untranslated there, or held without a person's mark. A document that
+      already holds a different wording is never offered one, since the carry
+      would not change what the refusal is about. A register that differs does
+      not make a carry unsafe, since whatever such a document holds comes back
+      from this row; it makes the command need `--tone`, which
+      ``same_register`` says — chapters extracted without one sit in the
+      configured default while the novel they came from is `literary`.
+    * **Only rows a document owns.** A segment whose `documents` row is gone —
+      reachable only by hand, but reachable — is read by no command, and counting
+      it as a copy made a forget report "held by another tracked document" about
+      text nothing could show.
 
     Every read here decides whether the caller writes, so it has to run inside
     the caller's :func:`_begin_write` — :func:`forget_doc` is the guard and
     :func:`forget_blockers` the advice, and the advice needs no lock.
     """
-    victim = []
-    for seg_id, content_hash, target, body in conn.execute(
-            "SELECT seg_id, content_hash, target, body FROM segments "
-            "WHERE doc_id=? AND lang=? ORDER BY pos", (did, lang)):
-        victim.append((seg_id, content_hash, _wording(target), json.loads(body).get("origin")))
-    mine = Counter((h, w) for _id, h, w, _o in victim if w)
-    # Which keys a person wrote here, so that only those rows elsewhere need
-    # their `body` parsed: the scan below is the whole language, and decoding
-    # every body in a large project to answer a question about a few segments
-    # is the read `tracked` was restructured to stop.
-    human_keys = {(h, w) for _id, h, w, o in victim if w and o == HUMAN}
-    hashes = {h for _id, h, _w, _o in victim}
-    # **One scan, in Python.** The correlated `EXISTS` form was measured at 457 ms
-    # over 10,000 rows and 2,778 ms over 30,000, growing faster than the table
-    # and held under the write lock `BUSY_TIMEOUT` bounds for every other writer.
-    # `segments_carry` cannot serve it: it leads with `doc_id`, and this looks up
-    # the other direction.
-    others, elsewhere, to_read = [], Counter(), []
+    # Each segment as ``(id, hash, wording, human, held, waived)``. `review` holds
+    # one closed vocabulary — `held` — so any value is a hold; the waiver is the
+    # token of the target it was granted on, the rule `_segment` reads it by.
+    def marks(seg_id, content_hash, target, body):
+        written = _as_written(target, body, render)
+        body = body or {}
+        return (seg_id, content_hash, written, body.get("origin") == HUMAN,
+                bool(body.get("review")), body.get("waived") == target_token(target))
+
+    victim = [marks(seg_id, h, target, _body(raw)) for seg_id, h, target, raw in conn.execute(
+        "SELECT seg_id, content_hash, target, body FROM segments "
+        "WHERE doc_id=? AND lang=? ORDER BY pos", (did, lang))]
+    mine = Counter((h, w) for _id, h, w, *_m in victim if w)
+    hashes = {h for _id, h, *_rest in victim}
+    labels = _other_labels(conn, lang, did)
+    # **One scan, in Python**, over the cheap columns only. The correlated
+    # `EXISTS` form it replaced was measured at 280 ms over 10,000 rows and 2,025
+    # ms over 30,000 — seven times the time for three times the rows — against
+    # 38 ms and 125 ms for this function as it ships, on a 500-segment document
+    # sharing half its paragraphs with every other one, under `BEGIN IMMEDIATE`:
+    # the lock `BUSY_TIMEOUT` bounds for every other writer. `segments_carry`
+    # cannot serve the lookup — it leads with `doc_id`, and this goes the other way.
+    others, to_read = [], []
     for rowid, other, seg_id, content_hash, target in conn.execute(
             "SELECT rowid, doc_id, seg_id, content_hash, target FROM segments "
             "WHERE lang=? AND doc_id<>? ORDER BY doc_id, pos", (lang, did)):
-        wording = _wording(target)
-        others.append((other, seg_id, content_hash, wording))
-        if wording:
-            elsewhere[(content_hash, wording)] += 1
-            if (content_hash, wording) in human_keys:
-                to_read.append(rowid)
-    # The bodies, by rowid and in chunks rather than one statement per row: a
-    # carried novel matches every one of its human segments here, and a
-    # statement each was measured at 28% of a write in `_written_by_hand`.
-    protected = Counter()
+        if other not in labels:
+            continue
+        translated = bool(_wording(target))
+        others.append([other, seg_id, content_hash, translated])
+        if translated and content_hash in hashes:
+            to_read.append((rowid, len(others) - 1))
+    # Bodies only where a paragraph is shared, by rowid and in chunks rather than
+    # a statement per row: decoding every body in the language to answer a
+    # question about one document's paragraphs is the read `tracked` was
+    # restructured to stop, and a statement each was measured at 28% of a write
+    # in `_written_by_hand`.
+    where = dict(to_read)
     for start in range(0, len(to_read), 500):
-        chunk = to_read[start:start + 500]
-        for content_hash, target, body in conn.execute(
-                "SELECT content_hash, target, body FROM segments WHERE rowid IN "
+        chunk = [rowid for rowid, _i in to_read[start:start + 500]]
+        for rowid, content_hash, target, raw in conn.execute(
+                "SELECT rowid, content_hash, target, body FROM segments WHERE rowid IN "
                 f"({','.join('?' * len(chunk))})", chunk):
-            if not is_regenerable_origin(json.loads(body).get("origin")):
-                protected[(content_hash, _wording(target))] += 1
-    labels = _other_labels(conn, lang, did)
-    holding = {}
-    for other, _id, content_hash, wording in others:
-        if content_hash in hashes:
-            holding.setdefault(content_hash, []).append((other, wording))
+            row = others[where[rowid]]
+            row[3] = marks(row[1], content_hash, target, _body(raw))
+    elsewhere, persons, holding = Counter(), Counter(), {}
+    for other, _id, content_hash, found in others:
+        if content_hash not in hashes:
+            continue
+        written = found[2] if isinstance(found, tuple) else ""
+        holding.setdefault(content_hash, []).append((other, written))
+        if written:
+            elsewhere[(content_hash, written)] += 1
+            persons[(content_hash, written)] += found[3]
 
-    blocked, seen, human_seen, hash_of = [], Counter(), Counter(), {}
-    for seg_id, content_hash, wording, origin in victim:
-        hash_of[seg_id] = content_hash
+    blocked, seen, offer = [], Counter(), set()
+    for seg_id, content_hash, wording, human, _held, _waived in victim:
         if not wording:
             continue
         key = (content_hash, wording)
@@ -1691,44 +1759,66 @@ def _forget_analysis(conn, did, lang, tone):
                 why, docs = "different", {o for o, w in held_by if w}
             elif held_by:
                 why, docs = "untranslated", {o for o, _w in held_by}
+                offer |= docs
             else:
                 why, docs = "nowhere", set()
-            blocked.append({"id": seg_id, "why": why,
-                            "docs": sorted(labels.get(d, (d, None))[0] for d in docs)})
+        elif human:
+            # **At least one**, not one per position. What is protected is the
+            # record that a person wrote this wording; one surviving copy keeps
+            # it. Counting per position refused a book whose two human copies of
+            # a line were matched by one human and one memory copy, and named the
+            # human one "a machine's" — measured by the mutation pass.
+            if persons[key]:
+                continue
+            why, docs = "provenance", {o for o, w in held_by if w == wording}
+            offer |= docs
+        else:
             continue
-        if origin == HUMAN:
-            human_seen[key] += 1
-            if human_seen[key] > protected[key]:
-                blocked.append({"id": seg_id, "why": "provenance", "docs": sorted(
-                    labels.get(o, (o, None))[0] for o, w in held_by if w == wording)})
+        blocked.append({"id": seg_id, "why": why,
+                        "docs": sorted(labels.get(d, (d, None))[0] for d in docs)})
 
     # Which documents a carry could go into, and whether it would be safe to.
+    pool = Counter((h, w, human, held, waived)
+                   for _id, h, w, human, held, waived in victim if w)
+    hash_of = {seg_id: h for seg_id, h, *_rest in victim}
     involved = {o for c in blocked for o, _w in holding.get(hash_of[c["id"]], [])}
     carry = []
     for other in sorted(involved, key=lambda d: labels.get(d, (d, None))[0]):
-        label, other_tone = labels.get(other, (other, None))
-        budget, own = Counter(mine), []
-        for owner, seg_id, content_hash, wording in others:
-            if owner != other or not wording:
+        label, other_tone = labels[other]
+        budget, own = Counter(pool), []
+        for owner, seg_id, _hash, found in others:
+            if owner != other or not found:
                 continue
-            if budget[(content_hash, wording)]:
-                budget[(content_hash, wording)] -= 1
+            if found is True:  # translated, and a paragraph this row does not have
+                own.append(seg_id)
+                continue
+            _i, h, w, human, held, waived = found
+            # A copy here with the same wording and at least these marks, the
+            # exact marks first so a stronger copy stays for a segment that needs it.
+            for option in sorted(((h, w, a, b, c) for a in {human, True}
+                                  for b in {held, True} for c in {waived, True}),
+                                 key=lambda k: k[2:] != (human, held, waived)):
+                if budget[option]:
+                    budget[option] -= 1
+                    break
             else:
                 own.append(seg_id)
         carry.append({"doc": label, "own": own, "safe": not own,
+                      "offer": not own and other in offer,
                       "same_register": canonical_tone(other_tone) == canonical_tone(tone)})
     return {"segments": len(victim), "translated": sum(mine.values()),
             "blocked": blocked, "carry": carry}
 
 
-def forget_doc(src, lang, discard=False):
+def forget_doc(src, lang, discard=False, render=None):
     """Delete one ``(document, language)`` row. ``None`` when there is no such row.
 
     Otherwise a ``dict`` carrying the stored ``source`` and ``tone`` beside
     :func:`_forget_analysis`'s answer, and ``refused``: ``None`` when the row is
     gone, or why nothing was deleted — ``"aim"``, ``"source"`` or ``"wording"``.
-    ``discard`` overrides ``"wording"`` and nothing else. The sentences are
-    `cli.do_forget`'s; this decides.
+    ``discard`` overrides ``"wording"`` and nothing else. ``render`` is how the
+    render polishes a restored target for this language — :func:`_as_written`.
+    The sentences are `cli.do_forget`'s; this decides.
 
     **Aimed by the stored spelling, inside the lock.** `doc_id` flattens every
     separator, so `docs_guide.md` and `docs/guide.md` are one row here — and a
@@ -1751,9 +1841,12 @@ def forget_doc(src, lang, discard=False):
     whether the deletes run, and Python's `sqlite3` would otherwise run them in
     autocommit — :func:`_begin_write`'s docstring has the measured cost. A row
     from a *newer* build is refused rather than judged, since this build cannot
-    know what its body means; an *older* one is judged, because the columns the
-    judgement reads are the schema's and have not moved, and requiring a
-    re-extract first would be requiring a source file that may be gone.
+    know what its body means; an *older* one is judged, because what the
+    judgement reads either means today what it meant then — the target and hash
+    columns, `origin`, the hold, the waiver — or falls back to the masked string
+    where a slot map predates the records (:func:`_as_written`), which refuses
+    more and never less. Requiring a re-extract first would be requiring a source
+    file that is usually gone.
 
     Touches nothing outside `.lx/state.db`: not `.lx/tm.*.jsonl`, not the
     rendered output, not the source file. The check report is `cli.do_forget`'s.
@@ -1782,7 +1875,7 @@ def forget_doc(src, lang, discard=False):
                     f"than the {STATE_VERSION} this build reads, so this build cannot tell "
                     f"what forgetting it would lose — upgrade scriptorium to forget it. "
                     f"Nothing was deleted.")
-            out.update(_forget_analysis(conn, did, lang, tone))
+            out.update(_forget_analysis(conn, did, lang, tone, render))
             if out["blocked"] and not discard:
                 out["refused"] = "wording"
                 return out
@@ -1794,13 +1887,18 @@ def forget_doc(src, lang, discard=False):
         conn.close()
 
 
-def forget_blockers(src, lang):
+def forget_blockers(src, lang, render=None):
     """:func:`_forget_analysis` for a stored row, read-only. ``None`` if there is none.
 
     Advice rather than a guard: `lx extract --from` prints whether the document
     it carried from could now be forgotten without loss, which is the moment a
     person is looking at both. It takes no lock because nothing is written on
     its answer — :func:`forget_doc` asks the same question again under one.
+
+    Carries the stored ``source`` beside the answer, because the command the
+    advice names has to be spelled the way the row is stored: `--from` resolves
+    through `doc_id`, so `--from docs_guide.md` reads `docs/guide.md`'s row, and
+    advice naming the typed spelling named a forget the aim rule then refused.
     """
     conn = _connect(create=False)
     if conn is None:
@@ -1809,7 +1907,8 @@ def forget_blockers(src, lang):
         doc = _read_meta(conn, src, lang)
         if doc is None:
             return None
-        return _forget_analysis(conn, doc_id(src), lang, doc.get("tone"))
+        found = _forget_analysis(conn, doc_id(src), lang, doc.get("tone"), render)
+        return dict(found, source=doc.get("source"))
     finally:
         conn.close()
 

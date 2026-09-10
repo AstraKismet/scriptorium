@@ -441,7 +441,7 @@ def test_a_persons_wording_is_not_covered_by_a_machine_copy(project, capsys):
         _ok(capsys, "extract", chapter, "--lang", "zh-TW", "--tone", "literary")
     code, _out, err = _lx(capsys, "forget", "novel.md", "--lang", "zh-TW")
     assert code == 2, err
-    assert "a person wrote it here, and every other copy of the wording is a machine's" in err
+    assert "a person wrote it here, and no other copy of the wording says a person did" in err
     assert "lx extract ch1.md --lang zh-TW --from novel.md" in err, err
     _carry(capsys, "ch1.md", "ch2.md")
     _ok(capsys, "forget", "novel.md", "--lang", "zh-TW")
@@ -513,6 +513,349 @@ def test_the_discard_flag_names_exactly_what_it_discarded(project, capsys):
     assert "discarded, as asked, the 2 held nowhere else: s0003, s0004" in out, out
 
 
+# ── what the review of the first version found ──────────────────────────────
+#
+# Each of these failed against the commit the adversarial passes read, and each
+# names the finding it pins. Two of them lost a sentence without the flag.
+
+def _one_paragraph(project, capsys, paragraph, wording, origin="human", dnt=None):
+    """A translated one-paragraph `novel.md`, cut on disk to a `ch1.md` that is
+    the same paragraph, the original gone. ``dnt`` is written first when given."""
+    _ok(capsys, "init")
+    if dnt is not None:
+        (project / "config" / "dnt.txt").write_text(dnt, encoding="utf-8")
+    _write(project, "novel.md", [paragraph])
+    _ok(capsys, "extract", "novel.md", "--lang", "zh-TW")
+    _apply(project, capsys, "novel.md", {"s0001": wording}, origin)
+    _write(project, "ch1.md", [paragraph])
+    (project / "novel.md").unlink()
+
+
+def test_a_carry_that_would_drop_a_hold_and_a_persons_mark_is_never_offered(
+        project, capsys):
+    """The carry a refusal called safe replaced a held, human wording with the
+    old row's draft of the same words, and the forget that followed then passed:
+    the hold and the `human` were gone and nothing had said so. A document is
+    safe only where every segment it holds is matched here with at least its
+    marks, not merely its words."""
+    _ok(capsys, "init")
+    _write(project, "novel.md", ["First.", "Second."])
+    _ok(capsys, "extract", "novel.md", "--lang", "zh-TW")
+    _apply(project, capsys, "novel.md", {"s0001": "第一。", "s0002": "第二。"},
+           origin="llm:draft")
+    _write(project, "ch1.md", ["First.", "Second."])
+    (project / "novel.md").unlink()
+    _ok(capsys, "extract", "ch1.md", "--lang", "zh-TW")
+    _apply(project, capsys, "ch1.md", {"s0001": "第一。"}, origin="human")
+    _ok(capsys, "hold", "ch1.md", "--lang", "zh-TW", "--ids", "s0001")
+    code, _out, err = _lx(capsys, "forget", "novel.md", "--lang", "zh-TW")
+    assert code == 2, err
+    assert "s0002 — translated here, untranslated in ch1.md" in err, err
+    assert "lx extract ch1.md" not in err, "the carry would drop the hold and the human"
+    assert "do not carry into ch1.md" in err and "(s0001)" in err, err
+
+
+def test_a_renumbered_placeholder_is_still_the_same_wording(project, capsys):
+    """A do-not-translate term added between the translation and the carry
+    renumbers the `⟦n⟧`, so the stored strings differ while both rows render
+    the same line. Comparing the strings refused a faithful carry."""
+    _one_paragraph(project, capsys, "Bob met Alice.", "Bob遇見了⟦1⟧。", dnt="Alice\n")
+    (project / "config" / "dnt.txt").write_text("Alice\nBob\n", encoding="utf-8")
+    _carry(capsys, "ch1.md")
+    stored = [s["target"] for s in statedb.segments(project)]
+    assert len(set(stored)) == 2, f"the fixture needs two spellings of one line: {stored}"
+    _ok(capsys, "forget", "novel.md", "--lang", "zh-TW")
+
+
+def test_the_same_string_naming_another_term_is_not_the_same_wording(project, capsys):
+    """The loss, and it needed no flag. After the renumbering, the old row's
+    string pasted into the chapter reads `⟦1⟧` as the other term: the chapter
+    renders one name twice, and a forget comparing strings found them equal and
+    deleted the only row that still rendered the right name."""
+    _one_paragraph(project, capsys, "Bob met Al.", "Bob遇見了⟦1⟧。", dnt="Al\n")
+    (project / "config" / "dnt.txt").write_text("Al\nBob\n", encoding="utf-8")
+    _carry(capsys, "ch1.md")
+    novel = next(s for s in statedb.segments(project) if "⟦2⟧" not in s["target"]
+                 and s["target"].endswith("⟦1⟧。"))
+    _apply(project, capsys, "ch1.md", {"s0001": novel["target"]})
+    code, _out, err = _lx(capsys, "forget", "novel.md", "--lang", "zh-TW")
+    assert code == 2, err
+    assert "s0001" in err, err
+
+
+def test_an_agent_copy_does_not_cover_a_persons_wording(project, capsys):
+    """Origin precedence guards `human` and nothing else — an `agent` copy was
+    measured being overwritten by a model write once the human row was gone."""
+    _one_paragraph(project, capsys, "One line.", "一行。")
+    _ok(capsys, "extract", "ch1.md", "--lang", "zh-TW")
+    _apply(project, capsys, "ch1.md", {"s0001": "一行。"}, origin="agent")
+    code, _out, err = _lx(capsys, "forget", "novel.md", "--lang", "zh-TW")
+    assert code == 2, err
+    assert "no other copy of the wording says a person did (ch1.md)" in err, err
+
+
+def test_a_carry_is_not_offered_where_it_cannot_reach_the_segment(project, capsys):
+    """Only the second chapter was carried, and it holds the second translation
+    of the repeated line; the first belongs to the chapter not extracted yet.
+    Offering a carry into the second changed nothing and taught the flag."""
+    _book(project, capsys, SPLIT, SPLIT_WORDING, cut=3)
+    _carry(capsys, "ch2.md")
+    code, _out, err = _lx(capsys, "forget", "novel.md", "--lang", "zh-TW")
+    assert code == 2, err
+    assert "s0003 — ch2.md holds a different wording" in err, err
+    assert "carry them into" not in err, err
+
+
+def test_discarding_a_persons_mark_is_not_called_wording_held_nowhere(project, capsys):
+    _one_paragraph(project, capsys, "One line.", "一行。")
+    _ok(capsys, "extract", "ch1.md", "--lang", "zh-TW")
+    _apply(project, capsys, "ch1.md", {"s0001": "一行。"}, origin="llm:draft")
+    out = _ok(capsys, "forget", "novel.md", "--lang", "zh-TW", "--discard-wording")
+    assert "held nowhere else" not in out, out
+    assert "the last record that a person wrote 1 wording(s)" in out and "s0001" in out, out
+
+
+def test_a_segment_with_no_document_row_is_not_a_copy(project, capsys):
+    """Only reachable by hand, and read by no command. It used to make a forget
+    report "held by another tracked document" about text nothing could show."""
+    _one_paragraph(project, capsys, "One line.", "一行。")
+    _carry(capsys, "ch1.md")
+    statedb._write(project, "DELETE FROM documents WHERE doc_id='ch1.md'")
+    code, _out, err = _lx(capsys, "forget", "novel.md", "--lang", "zh-TW")
+    assert code == 2, err
+    assert "in no other tracked document" in err, err
+
+
+def test_the_carry_advice_names_the_row_by_its_stored_spelling(project, capsys):
+    """`--from` resolves through `doc_id`, so `--from docs_guide.md` reads
+    `docs/guide.md`'s row; advice naming the typed spelling named a forget the
+    aim rule then refused."""
+    _collision(project, capsys)
+    _write(project, "ch1.md", ["A guide."])
+    out = _carry(capsys, "ch1.md", source="docs_guide.md")
+    assert "lx forget docs/guide.md --lang zh-TW" in out, out
+    assert "lx forget docs_guide.md" not in out, out
+
+
+def test_an_empty_name_is_told_so(project, capsys):
+    code, _out, err = _lx(capsys, "forget", "", "--lang", "zh-TW")
+    assert code == 2, err
+    assert "no document was named" in err, err
+
+
+def test_a_malformed_body_elsewhere_is_an_answer_not_a_traceback(project, capsys):
+    """Forgetting one document must not depend on another one's rows being well
+    formed. An unreadable body claims no person's mark, so it cannot cover one."""
+    _one_paragraph(project, capsys, "One line.", "一行。")
+    _carry(capsys, "ch1.md")
+    # A list that is not empty: `[]` is falsy and would pass for "no body" by
+    # accident, which is how the first spelling of this test let the guard go.
+    statedb._write(project, "UPDATE segments SET body='[1]' WHERE doc_id='ch1.md'")
+    code, _out, err = _lx(capsys, "forget", "novel.md", "--lang", "zh-TW")
+    assert code == 2 and "Traceback" not in err, err
+    assert "no other copy of the wording says a person did" in err, err
+    assert _rows(project, "novel.md")["documents"] == 1
+
+
+def test_a_changed_normalization_is_not_a_different_wording(project, capsys):
+    """The polish half of what the render writes. Translated under a profile
+    without `pangu`, carried under one with it: the stored strings differ by the
+    spaces the carry added, and the two rows render the same line."""
+    _ok(capsys, "init")
+    _ok(capsys, "config", "set", "normalize.zh-TW", '["punct"]')
+    _write(project, "novel.md", ["He wrote it in Python."])
+    _ok(capsys, "extract", "novel.md", "--lang", "zh-TW")
+    _apply(project, capsys, "novel.md", {"s0001": "他用Python寫了它。"})
+    _ok(capsys, "config", "set", "normalize.zh-TW", '["punct", "pangu", "collapse_space"]')
+    _write(project, "ch1.md", ["He wrote it in Python."])
+    (project / "novel.md").unlink()
+    _carry(capsys, "ch1.md")
+    stored = [s["target"] for s in statedb.segments(project)]
+    assert len(set(stored)) == 2, f"the fixture needs two spellings of one line: {stored}"
+    _ok(capsys, "forget", "novel.md", "--lang", "zh-TW")
+
+
+def _one_mark(project, capsys, victim_origin, mark):
+    """`novel.md` with two translated paragraphs; `ch1.md` the same text, holding
+    the first wording with one mark the old row's copy lacks, the second not at all."""
+    _ok(capsys, "init")
+    _write(project, "novel.md", ["First.", "Second."])
+    _ok(capsys, "extract", "novel.md", "--lang", "zh-TW")
+    _apply(project, capsys, "novel.md", {"s0001": "第一。", "s0002": "第二。"},
+           origin=victim_origin)
+    _write(project, "ch1.md", ["First.", "Second."])
+    (project / "novel.md").unlink()
+    _ok(capsys, "extract", "ch1.md", "--lang", "zh-TW")
+    _apply(project, capsys, "ch1.md", {"s0001": "第一。"}, origin="human")
+    if mark == "held":
+        _ok(capsys, "hold", "ch1.md", "--lang", "zh-TW", "--ids", "s0001")
+    elif mark == "waived":
+        # Doctored: `lx waive` needs an error to answer, and the mark is what is
+        # under test here, not the finding. The token is `_segment`'s own rule.
+        [(body, target)] = statedb._query(
+            project, "SELECT body, target FROM segments WHERE doc_id='ch1.md' "
+                     "AND seg_id='s0001'")
+        found = json.loads(body)
+        found["waived"] = store.target_token(target)
+        statedb._write(project, "UPDATE segments SET body=? WHERE doc_id='ch1.md' AND "
+                                "seg_id='s0001'", (json.dumps(found, ensure_ascii=False),))
+
+
+@pytest.mark.parametrize("victim_origin,mark", [
+    ("llm:draft", None),   # only the `human` mark differs
+    ("human", "held"),     # only the hold differs
+    ("human", "waived"),   # only the waiver differs
+])
+def test_each_mark_alone_makes_a_carry_unsafe(project, capsys, victim_origin, mark):
+    """One mark at a time, so no guard is covered only by another one firing."""
+    _one_mark(project, capsys, victim_origin, mark)
+    code, _out, err = _lx(capsys, "forget", "novel.md", "--lang", "zh-TW")
+    assert code == 2, err
+    assert "s0002 — translated here, untranslated in ch1.md" in err, err
+    assert "do not carry into ch1.md" in err and "(s0001)" in err, err
+    assert "lx extract ch1.md" not in err, err
+
+
+def test_one_persons_copy_elsewhere_keeps_the_record(project, capsys):
+    """At least one, not one per position: two human copies here, matched by one
+    human copy and one from the memory, lose no record that a person wrote it."""
+    _ok(capsys, "init")
+    _write(project, "novel.md", ["A line.", "A line."])
+    _ok(capsys, "extract", "novel.md", "--lang", "zh-TW")
+    _apply(project, capsys, "novel.md", {"s0001": "一行。", "s0002": "一行。"})
+    _ok(capsys, "commit", "novel.md", "--lang", "zh-TW")
+    _write(project, "c.md", ["A line."])
+    assert "reused 1" in _ok(capsys, "extract", "c.md", "--lang", "zh-TW")
+    _write(project, "b.md", ["A line."])
+    _carry(capsys, "b.md")
+    _ok(capsys, "forget", "novel.md", "--lang", "zh-TW")
+
+
+def test_forgetting_one_language_leaves_all_three_tables_of_another(project, capsys):
+    """Every DELETE keyed on both halves of the key: the document forgotten here
+    is tracked in a second language, and that row is compared table by table."""
+    _ok(capsys, "init")
+    _write(project, "a.md", ["One.", "Two."])
+    for lang in ("zh-TW", "ja-JP"):
+        _ok(capsys, "extract", "a.md", "--lang", lang)
+    kept = _rows(project, "a.md", "ja-JP")
+    assert all(kept.values()), kept
+    _ok(capsys, "forget", "a.md", "--lang", "zh-TW")
+    assert _rows(project, "a.md") == {"documents": 0, "nodes": 0, "segments": 0}
+    assert _rows(project, "a.md", "ja-JP") == kept
+
+
+def test_a_carry_is_not_offered_where_a_wording_is_held_more_often_than_here(
+        project, capsys):
+    """Each copy in the old row can answer for one segment of the target, not
+    for every segment that shares its wording: ch1 made a repeated line
+    consistent after its carry, and a carry would put the other wording back."""
+    _ok(capsys, "init")
+    _write(project, "novel.md", ["A line.", "Middle.", "A line.", "Tail."])
+    _ok(capsys, "extract", "novel.md", "--lang", "zh-TW", "--tone", "literary")
+    _apply(project, capsys, "novel.md", {"s0001": "一行甲。", "s0002": "中間。",
+                                         "s0003": "一行乙。", "s0004": "尾。"})
+    _write(project, "ch1.md", ["A line.", "Middle.", "A line."])
+    _carry(capsys, "ch1.md")
+    _apply(project, capsys, "ch1.md", {"s0003": "一行甲。"})
+    code, _out, err = _lx(capsys, "forget", "novel.md", "--lang", "zh-TW")
+    assert code == 2, err
+    assert "do not carry into ch1.md" in err and "(s0003)" in err, err
+    assert "lx extract ch1.md" not in err, err
+
+
+def test_a_carried_book_longer_than_one_chunk_is_forgotten(project, capsys):
+    """Bodies are read 500 rowids at a time; a human copy past the edge counts."""
+    paragraphs = [f"Paragraph {i}." for i in range(501)]
+    _ok(capsys, "init")
+    _write(project, "novel.md", paragraphs)
+    _ok(capsys, "extract", "novel.md", "--lang", "zh-TW")
+    _apply(project, capsys, "novel.md", {f"s{i + 1:04d}": f"第{i}段。" for i in range(501)})
+    _write(project, "whole.md", paragraphs)
+    _carry(capsys, "whole.md")
+    _ok(capsys, "forget", "novel.md", "--lang", "zh-TW")
+
+
+def test_a_document_outside_the_project_directory_can_be_forgotten(project, capsys):
+    """Nothing confines the typed path: `lx extract ../shelf/book.md` is
+    supported, and `confined_path` would refuse the rows most likely to move."""
+    _ok(capsys, "init")
+    shelf = project.parent / "shelf"
+    _write(shelf, "book.md", ["One."])
+    _ok(capsys, "extract", "../shelf/book.md", "--lang", "zh-TW")
+    (shelf / "book.md").unlink()
+    did = store.doc_id("../shelf/book.md")
+    _ok(capsys, "forget", "../shelf/book.md", "--lang", "zh-TW")
+    assert _rows(project, did) == {"documents": 0, "nodes": 0, "segments": 0}
+
+
+def test_the_register_offered_is_read_from_this_languages_row(project, capsys):
+    """`ch1.md` is `technical` in zh-TW and `literary` in another language that
+    sorts and is written after it, so a lookup ignoring the language reads the
+    wrong register and offers a carry with no `--tone`."""
+    _ok(capsys, "init")
+    _write(project, "novel.md", ["One.", "Two."])
+    _ok(capsys, "extract", "novel.md", "--lang", "zh-TW", "--tone", "literary")
+    _apply(project, capsys, "novel.md", {"s0001": "一。", "s0002": "二。"})
+    _write(project, "ch1.md", ["One."])
+    _ok(capsys, "extract", "ch1.md", "--lang", "zh-TW")
+    _ok(capsys, "extract", "ch1.md", "--lang", "zu", "--tone", "literary")
+    _code, _out, err = _lx(capsys, "forget", "novel.md", "--lang", "zh-TW")
+    assert "lx extract ch1.md --lang zh-TW --from novel.md --tone literary`" in err, err
+
+
+def test_no_tone_is_offered_when_the_registers_already_agree(project, capsys):
+    _ok(capsys, "init")
+    _write(project, "novel.md", ["One.", "Two."])
+    _ok(capsys, "extract", "novel.md", "--lang", "zh-TW", "--tone", "literary")
+    _apply(project, capsys, "novel.md", {"s0001": "一。", "s0002": "二。"})
+    _write(project, "ch1.md", ["One."])
+    _ok(capsys, "extract", "ch1.md", "--lang", "zh-TW", "--tone", "literary")
+    _code, _out, err = _lx(capsys, "forget", "novel.md", "--lang", "zh-TW")
+    assert "`lx extract ch1.md --lang zh-TW --from novel.md`" in err, err
+    assert "refreezes" not in err, err
+
+
+def test_a_slot_map_from_before_records_refuses_rather_than_raises(project, capsys):
+    """A row written before slots were records holds `{id: "original"}`, which
+    `mask.unmask` does not read. That row is compared as its masked string —
+    which differs from the chapter's rendered line, so the forget refuses: more
+    than it needs to, and never less, and never a traceback."""
+    _one_paragraph(project, capsys, "Run `make` now.", "現在執行⟦1⟧。")
+    _carry(capsys, "ch1.md")
+    [(body,)] = statedb._query(
+        project, "SELECT body FROM segments WHERE doc_id='novel.md' AND seg_id='s0001'")
+    found = json.loads(body)
+    found["slots"] = {"1": "`make`"}
+    statedb._write(project, "UPDATE segments SET body=? WHERE doc_id='novel.md'",
+                   (json.dumps(found, ensure_ascii=False),))
+    code, _out, err = _lx(capsys, "forget", "novel.md", "--lang", "zh-TW")
+    assert code == 2 and "Traceback" not in err, err
+    assert "s0001 — ch1.md holds a different wording" in err, err
+
+
+def _unreadable_other_row(project, capsys):
+    _ok(capsys, "init")
+    for name in ("a.md", "b.md"):
+        _write(project, name, ["One."])
+        _ok(capsys, "extract", name, "--lang", "zh-TW")
+    statedb._write(project, "UPDATE documents SET meta=? WHERE doc_id=?",
+                   (json.dumps({"lang": "zh-TW", "source": 5}), "b.md"))
+
+
+def test_another_rows_unreadable_source_does_not_take_forget_down(project, capsys):
+    _unreadable_other_row(project, capsys)
+    code, _out, err = _lx(capsys, "forget", "a.md", "--lang", "zh-TW")
+    assert code == 0 and "Traceback" not in err, err
+
+
+def test_another_rows_unreadable_source_does_not_replace_the_no_state_answer(
+        project, capsys):
+    _unreadable_other_row(project, capsys)
+    code, _out, err = _lx(capsys, "forget", "c.md", "--lang", "zh-TW")
+    assert code == 2 and "nothing to forget" in err, err
+
+
 # ── the check report ────────────────────────────────────────────────────────
 
 def test_the_check_report_goes_with_the_row_and_stays_with_a_refusal(project, capsys):
@@ -543,6 +886,9 @@ def test_no_file_name_is_built_from_a_lang_that_is_not_a_tag(project, capsys):
     assert "is not a language tag" in out, out
     assert (project / "lx.config.json").read_bytes() == config
     assert _rows(project, "x.md", lang)["documents"] == 0
+    # Nor is any other path derived from it, even to look: the line that names
+    # what was left alone names no file under such a tag.
+    assert "i18n" not in out and ".lx/tm." not in out, out
 
 
 # ── what the other commands say ─────────────────────────────────────────────
@@ -560,8 +906,8 @@ def test_the_carry_says_whether_the_old_row_can_now_be_forgotten(project, capsys
     """Asked after each save, so the second chapter's own rows count."""
     _book(project, capsys)
     first = _carry(capsys, "ch1.md")
-    assert "2 translated segment(s) of novel.md are held by no other tracked document yet" \
-        in first, first
+    assert ("2 translated segment(s) of novel.md are not yet held the same way by any "
+            "other tracked document") in first, first
     second = _carry(capsys, "ch2.md")
     assert "lx forget novel.md --lang zh-TW` removes it without losing any of them" \
         in second, second
