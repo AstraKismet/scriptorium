@@ -774,11 +774,56 @@ class Carryover:
         had, a lone paragraph that moved, or a member of a run nothing could tell
         apart. `lx extract` names them.
         """
+        return {sid: (entry, ambiguous)
+                for sid, (entry, ambiguous, _g) in self.answers(segments, tone).items()}
+
+    def answers(self, segments, tone):
+        """:meth:`align`, and for each answer whether it is only a *guess*.
+
+        ``{seg_id: (entry, ambiguous, guessed)}``.
+
+        ``guessed`` is true where the key fallback answered — the diff paired the
+        fresh segment with nothing, or with a prior row holding no translation at
+        a position it could not establish — **and the wording it handed back is
+        also another fresh position's**: the prior row it came from was paired
+        with a different segment, or an earlier fresh segment already took it by
+        the same fallback. That is a new member of a run, or a second copy of a
+        paragraph, answered with a copy of a wording some other position has.
+        The first fresh segment to take an unpaired row is not guessing: the
+        paragraph moved, and the wording is its own. The first spelling of this
+        flag called every fallback a guess, and measured on 2026-09-10 that let
+        `lx extract --from` put the named document's wording over a person's
+        re-wording of a paragraph the author had merely moved — and over *every*
+        paragraph of a target past `ALIGN_BUDGET`, where no pair is made at all.
+        The second counted only rows the diff had paired, so a paragraph moved
+        *and* repeated answered both copies with its own wording and the second
+        put a person's `origin` where no person wrote. A pair the diff made and
+        could not establish is ``ambiguous`` without being ``guessed``, because
+        the wording there was held by a member of this run.
+
+        Split out for `lx extract --from`, which holds two documents' answers for
+        one position. :meth:`align` is the projection every other caller reads,
+        so none of them changed.
+
+        *Lost:* reporting whether the row an unplaced answer came from carried a
+        hold or a waiver, so that `--from` could protect a draft the alignment
+        had unheld. Built, and the next review measured it firing once: the entry
+        is written back without the mark — the rule below, which a plain extract
+        follows too — so the next carry saw a draft nobody held. Keeping it would
+        have meant carrying the hold into a position this rule refuses to place
+        it in.
+        """
         fresh = [(seg["id"], segment_key(seg, tone)) for seg in segments]
         keys = [key for _, key in fresh]
         prior_runs, fresh_runs = _run_positions(self.keys), _run_positions(keys)
+        # Where the key fallback reads from: the last translated prior position
+        # under each key, which is what `by_key[key][-1]` holds.
+        last = {}
+        for i, (key, entry) in enumerate(zip(self.keys, self.entries)):
+            if entry is not None:
+                last[key] = i
 
-        placed, paired = {}, {}
+        placed, paired, claimed = {}, {}, set()
         for i, j, size in self._blocks(keys):
             # Asked of every pair the diff made rather than of the block it
             # arrived in: a block that spans an anchor is not homogeneous, so a
@@ -793,18 +838,23 @@ class Carryover:
                 # has to treat as "the diff paired this with nothing" for the
                 # segments no block reached.
                 paired[sid] = entry
+                claimed.add(i + d)
                 if prior_runs[i + d] == fresh_runs[j + d]:
                     placed[sid] = entry
 
-        out = {}
+        out, handed = {}, set()
         for sid, key in fresh:
             if sid in placed:
-                out[sid] = (placed[sid], False)
+                out[sid] = (placed[sid], False, False)
                 continue
-            row = paired.get(sid)
+            row, guessed = paired.get(sid), False
             if row is None:
                 rows = self.by_key.get(key)
                 row = rows[-1] if rows else None
+                at = last.get(key)
+                guessed = row is not None and (at in claimed or at in handed)
+                if row is not None:
+                    handed.add(at)
             # Neither `review` nor the waiver survives either branch, and for
             # one reason: both are a reviewer's statement about a *position*, and
             # neither branch could establish one. Carrying a hold in took a
@@ -816,7 +866,7 @@ class Carryover:
             # deleting them to avoid mislabelling them is the trade 2026-08-17
             # refused everywhere else.
             entry = (row[0], row[1], None, False, row[4]) if row else None
-            out[sid] = (entry, entry is not None)
+            out[sid] = (entry, entry is not None, guessed)
         return out
 
     def _blocks(self, keys):
@@ -918,7 +968,13 @@ def prior_targets(src, lang):
                    if content_hash else None)
             entry = None
             if key is not None and target:
-                held = json.loads(body)
+                # Read the way `_forget_analysis` reads a body: one that is not a
+                # JSON object claims no origin, no hold and no waiver, rather than
+                # ending the command in a traceback. It became reachable from a
+                # carry `lx forget` itself recommends once `--from` read the
+                # target's own rows (HANDOFF-066): the advice judged the body
+                # leniently and offered the carry, and the carry crashed on it.
+                held = _body(body) or {}
                 # The last field is the map this *target* was written against,
                 # which is not the segment's own `slots` whenever a re-parse has
                 # moved under it: `save_doc` rewrites `slots` from the fresh
@@ -1059,6 +1115,106 @@ def is_regenerable_origin(origin):
     nothing printed.
     """
     return is_model_origin(origin) or origin in _REGENERABLE
+
+
+def _origin_rank(origin):
+    """How strongly an `origin` records who wrote a wording: 2, 1 or 0.
+
+    A person's word over anybody else's, and anybody's over a machine's —
+    `human`, then every origin :func:`is_regenerable_origin` does not enumerate
+    (`agent`, `carryover`, and whatever a later build invents), then `llm:*`,
+    `tm` and `tm:legacy`. The middle rank is the default for the reason that
+    function gives: an origin nobody here knows is kept, never replaced.
+    """
+    if origin == HUMAN:
+        return 2
+    return 0 if is_regenerable_origin(origin) else 1
+
+
+def carry_candidates(mine, theirs, same, guessed=False):
+    """What `lx extract NEW --from OLD` offers one segment of NEW. ``(candidates, how, keep)``.
+
+    ``mine`` is NEW's own entry at this position and ``theirs`` OLD's, each a
+    :class:`Carryover` entry or ``None``; ``same`` is whether the two write the
+    same words into the document (:func:`as_written`), and ``guessed`` whether
+    ``mine`` is only a guess where ``theirs`` is not (:meth:`Carryover.answers`).
+    ``candidates`` is ``[(entry, kind)]`` in the order they are tried, ``kind``
+    being ``"from"`` for OLD's entry and ``"own"`` for NEW's; the first one the
+    acceptance path takes wins. ``keep`` is the ``(entry, kind)`` kept when none
+    is taken, or ``None``. ``how`` is what a person has to be told: ``None``,
+    ``"origin"``, ``"took"`` or ``"differs"``.
+
+    **Until HANDOFF-066 NEW's own state was never read**, so a carry into a
+    chapter that already held work replaced all of it with OLD's and printed
+    nothing: a sentence a person re-typed after the first carry came back as
+    OLD's, one OLD never translated was emptied, a hold a reviewer had lifted was
+    put back. The rule is a precedence over the two, and it is one rule because
+    `store._forget_analysis` has to predict what the carry does before it
+    recommends one — a second copy of it there is how the advice and the carry
+    would come to disagree.
+
+    * **Where only one of them holds wording, that one answers.** Into an empty
+      segment this is the carry it always was; a paragraph OLD never translated
+      keeps NEW's.
+    * **The same words: NEW's, with NEW's hold and waiver**, and the stronger
+      `origin` of the two (:func:`_origin_rank`). A hold or a waiver is one
+      reviewer's statement about *this* position, and a hold lifted in NEW is
+      that reviewer's act too — OLD's copy must not put it back. The `origin` is
+      about the words, and a person having written them in OLD is not undone by
+      a model having arrived at them in NEW; carrying it is what lets `lx forget`
+      stop refusing on the provenance it was protecting.
+    * **Different words: NEW's, unless NEW's is a machine draft nobody has held
+      or waived and OLD's is not a machine's.** Invariant 9's line, the one a
+      memory hit already obeys: a draft is regenerable, and the person named OLD.
+      Two drafts are a tie, and a tie stays with NEW — the newer machine work,
+      a polish pass paid for in the chapter, is not reverted to OLD's older one.
+      A hold or a waiver protects a draft where NEW's alignment can place it;
+      where it cannot, :meth:`Carryover.align` drops the mark, as it does on
+      every re-extract, and the draft is then one nobody held.
+    * **A guess is not what NEW holds.** Where NEW's own alignment could only
+      hand back a copy of another position's wording — a new member of a run —
+      OLD's answer is tried first whatever either `origin` says, and the guess
+      stands only where OLD's does not fit. Measured 2026-09-10 by the critique
+      of the first version, which protected a person's or an agent's guess: a
+      chapter whose run of identical lines grew by one had the new member
+      answered with the chapter's own last copy, a duplicate, over the named
+      document's placed wording for that exact position — which the carry this
+      replaced had got right. What is *not* a guess is decided by
+      :meth:`Carryover.answers`, and the review of the first version is why it
+      is narrow: a paragraph that moved answers with its own and only wording,
+      and calling that a guess put OLD's wording over a person's.
+    * **When nothing fits, what NEW held stays** — divergence (24)'s rule: a
+      refusal does not delete what the segment already held. So ``keep`` is
+      NEW's own entry wherever NEW held one, even where OLD's was tried first,
+      and OLD's only where NEW held nothing or only a guess. The first version
+      kept whichever candidate was tried first, which wrote OLD's stale wording
+      over NEW's own draft and called it kept.
+
+    *Lost:* OLD over everything, which is what this replaced. *Lost:* NEW over
+    everything, which cannot take a reviewed chapter out of a model's first
+    draft of it — the case `--from` exists to finish. *Lost:* refusing, which
+    answers the one question with an exit code and leaves the person to work out
+    which of twelve segments to re-type. What no rule here can tell apart is the
+    chapter that was re-worded from the novel that was revised: both are NEW
+    holding a person's words and OLD holding different ones, and the words are
+    NEW's in both — reported by id, so the revision is one render away.
+    """
+    if mine is None:
+        found = [(theirs, "from")] if theirs is not None else []
+        return found, None, (found[0] if found else None)
+    if theirs is None:
+        return [(mine, "own")], None, (mine, "own")
+    if guessed:
+        return [(theirs, "from"), (mine, "own")], None, (theirs, "from")
+    if same:
+        if _origin_rank(theirs[1]) > _origin_rank(mine[1]):
+            lifted = (mine[0], theirs[1], mine[2], mine[3], mine[4])
+            return [(lifted, "own")], "origin", (lifted, "own")
+        return [(mine, "own")], None, (mine, "own")
+    if (not mine[2] and not mine[3]
+            and _origin_rank(mine[1]) == 0 and _origin_rank(theirs[1]) > 0):
+        return [(theirs, "from"), (mine, "own")], "took", (mine, "own")
+    return [(mine, "own")], "differs", (mine, "own")
 
 
 def _begin_write(conn):
@@ -1604,6 +1760,17 @@ def _as_written(target, body, render):
     return _wording(render(text) if render else text)
 
 
+def as_written(target, slots, render=None):
+    """:func:`_as_written` for a :class:`Carryover` entry, whose map is its fifth field.
+
+    The one notion of "the same wording" `lx forget` and `lx extract --from`
+    share: what the render writes, not the stored string, for the two reasons
+    :func:`_as_written` gives — a renumbered `⟦n⟧` and a stripped U+3000 indent
+    are the same words, and one string naming two different terms is not.
+    """
+    return _as_written(target, {"slots": slots} if slots else None, render)
+
+
 def _other_labels(conn, lang, skip):
     """``{doc_id: (label, tone)}`` for every row in ``lang`` except ``skip``.
 
@@ -1627,8 +1794,16 @@ def _other_labels(conn, lang, skip):
     return out
 
 
-def _forget_analysis(conn, did, lang, tone, render=None):
+def _forget_analysis(conn, did, lang, tone, render=None, advise=True):
     """What forgetting ``(did, lang)`` would lose. ``dict``; read on ``conn``.
+
+    ``advise`` asks for the ``carry`` list as well — where a carry could go and
+    whether it is safe to — which is the expensive half: it runs the carry's own
+    rule over every document sharing a paragraph with a blocked one. The review
+    of HANDOFF-066 measured it at four times the old cost with a hundred such
+    chapters, so the delete asks without it under the write lock and the advice
+    is read after the lock is released; `lx extract --from`'s note needs only the
+    count and never asks.
 
     **The question is the harm, not the population.** A row may go when every
     translation it holds is also held by some other row in the same language —
@@ -1664,31 +1839,33 @@ def _forget_analysis(conn, did, lang, tone, render=None):
       moment the human row was gone. The memory route turns `human` into `tm`,
       measured, which is how a book reaches this case.
     * **Where it can be carried.** For each other document holding one of these
-      paragraphs, whether ``lx extract <it> --from <this>`` would be *safe*:
-      `--from` reads the named document's state instead of the target's own, so
-      it replaces whatever the target holds with this row's — measured
-      2026-09-10, a chapter re-worded after its carry was quietly reverted by the
-      carry a refusal had just recommended, and a chapter holding a person's held
-      wording lost the hold and the `human` when the carry put this row's draft
-      back. So a document is *safe* only when every translated segment it holds
-      is matched here by a copy with the same wording and at least its marks —
-      `human`, a hold, a waiver — and it is *offered* the carry only when a carry
-      would actually reach a segment this row alone holds: where that paragraph
-      sits untranslated there, or held without a person's mark. A document that
-      already holds a different wording is never offered one, since the carry
-      would not change what the refusal is about. A register that differs does
-      not make a carry unsafe, since whatever such a document holds comes back
-      from this row; it makes the command need `--tone`, which
-      ``same_register`` says — chapters extracted without one sit in the
-      configured default while the novel they came from is `literary`.
+      paragraphs, whether ``lx extract <it> --from <this>`` would be *safe* and
+      whether it would help, answered by running :func:`carry_candidates` — the
+      rule the carry runs — over that document's positions aligned against this
+      row. Measured 2026-09-10, before HANDOFF-066, a carry replaced whatever the
+      target held, so a chapter re-worded after its carry was quietly reverted
+      by the carry a refusal had just recommended; the carry now keeps what a
+      person or an agent wrote, and this now asks it rather than a multiset,
+      which a chapter re-wording one repeated line to the wording held at the
+      other copy passed while the carry reverted it. *Safe* is that nothing the
+      document holds but a machine draft nobody held or waived is replaced or
+      loses a mark — the drafts it would replace are listed, and named in the
+      offer; *offered* is safe and leaving this row blocking on fewer segments.
+      A register that differs does not
+      make a carry unsafe by itself — it makes the command need `--tone`, which
+      ``same_register`` says, and under it the document's own wording does not
+      align, so it is safe only where what comes back from this row is what it
+      held.
     * **Only rows a document owns.** A segment whose `documents` row is gone —
       reachable only by hand, but reachable — is read by no command, and counting
       it as a copy made a forget report "held by another tracked document" about
       text nothing could show.
 
-    Every read here decides whether the caller writes, so it has to run inside
-    the caller's :func:`_begin_write` — :func:`forget_doc` is the guard and
-    :func:`forget_blockers` the advice, and the advice needs no lock.
+    Asked with ``advise=False``, every read here decides whether the caller
+    writes, so it runs inside the caller's :func:`_begin_write` —
+    :func:`forget_doc` is the guard. Asked with ``advise=True`` it is advice,
+    which decides nothing and needs no lock: :func:`forget_blockers`, and
+    :func:`forget_doc` again after a refusal has released its lock.
     """
     # Each segment as ``(id, hash, wording, human, held, waived)``. `review` holds
     # one closed vocabulary — `held` — so any value is a hold; the waiver is the
@@ -1699,9 +1876,29 @@ def _forget_analysis(conn, did, lang, tone, render=None):
         return (seg_id, content_hash, written, body.get("origin") == HUMAN,
                 bool(body.get("review")), body.get("waived") == target_token(target))
 
-    victim = [marks(seg_id, h, target, _body(raw)) for seg_id, h, target, raw in conn.execute(
-        "SELECT seg_id, content_hash, target, body FROM segments "
-        "WHERE doc_id=? AND lang=? ORDER BY pos", (did, lang))]
+    # Each segment also as a `Carryover` entry whose first field is the wording
+    # as written, so the carry advice below can ask `carry_candidates` — the
+    # rule `lx extract --from` runs — what a carry out of this row would do.
+    def entry(target, body):
+        written = _as_written(target, body, render)
+        if not written:
+            return None
+        body = body or {}
+        return (written, body.get("origin") or "carryover", body.get("review"),
+                body.get("waived") == target_token(target), None)
+
+    victim, old_keys, old_entries, old_by_key = [], [], [], {}
+    for seg_id, h, context, variant, target, raw in conn.execute(
+            "SELECT seg_id, content_hash, context, variant, target, body FROM segments "
+            "WHERE doc_id=? AND lang=? ORDER BY pos", (did, lang)):
+        body = _body(raw)
+        victim.append(marks(seg_id, h, target, body))
+        key = tm_key(h, context, SEGMENTATION_VERSION, variant, tone) if h else None
+        found = entry(target, body) if key is not None else None
+        if found is not None:
+            old_by_key.setdefault(key, []).append(found)
+        old_keys.append(key)
+        old_entries.append(found)
     mine = Counter((h, w) for _id, h, w, *_m in victim if w)
     hashes = {h for _id, h, *_rest in victim}
     labels = _other_labels(conn, lang, did)
@@ -1735,77 +1932,136 @@ def _forget_analysis(conn, did, lang, tone, render=None):
                 f"({','.join('?' * len(chunk))})", chunk):
             row = others[where[rowid]]
             row[3] = marks(row[1], content_hash, target, _body(raw))
-    elsewhere, persons, holding = Counter(), Counter(), {}
-    for other, _id, content_hash, found in others:
-        if content_hash not in hashes:
-            continue
-        written = found[2] if isinstance(found, tuple) else ""
-        holding.setdefault(content_hash, []).append((other, written))
-        if written:
-            elsewhere[(content_hash, written)] += 1
-            persons[(content_hash, written)] += found[3]
 
-    blocked, seen, offer = [], Counter(), set()
-    for seg_id, content_hash, wording, human, _held, _waived in victim:
-        if not wording:
-            continue
-        key = (content_hash, wording)
-        seen[key] += 1
-        held_by = holding.get(content_hash, [])
-        if seen[key] > elsewhere[key]:
-            if elsewhere[key]:
-                why, docs = "fewer", {o for o, w in held_by if w == wording}
-            elif any(w for _o, w in held_by):
-                why, docs = "different", {o for o, w in held_by if w}
-            elif held_by:
-                why, docs = "untranslated", {o for o, _w in held_by}
-                offer |= docs
-            else:
-                why, docs = "nowhere", set()
-        elif human:
-            # **At least one**, not one per position. What is protected is the
-            # record that a person wrote this wording; one surviving copy keeps
-            # it. Counting per position refused a book whose two human copies of
-            # a line were matched by one human and one memory copy, and named the
-            # human one "a machine's" — measured by the mutation pass.
-            if persons[key]:
+    def refused(rows):
+        """``(blocked, holding)`` over ``rows``, each ``(doc, hash, wording, human)``.
+
+        A function because the carry advice asks it twice: of the rows as they
+        are, and of the rows as a carry into one document would leave them.
+        """
+        elsewhere, persons, holding = Counter(), Counter(), {}
+        for other, content_hash, written, human in rows:
+            if content_hash not in hashes:
                 continue
-            why, docs = "provenance", {o for o, w in held_by if w == wording}
-            offer |= docs
-        else:
-            continue
-        blocked.append({"id": seg_id, "why": why,
-                        "docs": sorted(labels.get(d, (d, None))[0] for d in docs)})
+            holding.setdefault(content_hash, []).append((other, written))
+            if written:
+                elsewhere[(content_hash, written)] += 1
+                persons[(content_hash, written)] += human
+        blocked, seen = [], Counter()
+        for seg_id, content_hash, wording, human, _held, _waived in victim:
+            if not wording:
+                continue
+            key = (content_hash, wording)
+            seen[key] += 1
+            held_by = holding.get(content_hash, [])
+            if seen[key] > elsewhere[key]:
+                if elsewhere[key]:
+                    why, docs = "fewer", {o for o, w in held_by if w == wording}
+                elif any(w for _o, w in held_by):
+                    why, docs = "different", {o for o, w in held_by if w}
+                elif held_by:
+                    why, docs = "untranslated", {o for o, _w in held_by}
+                else:
+                    why, docs = "nowhere", set()
+            elif human:
+                # **At least one**, not one per position. What is protected is
+                # the record that a person wrote this wording; one surviving copy
+                # keeps it. Counting per position refused a book whose two human
+                # copies of a line were matched by one human and one memory copy,
+                # and named the human one "a machine's" — measured by the
+                # mutation pass.
+                if persons[key]:
+                    continue
+                why, docs = "provenance", {o for o, w in held_by if w == wording}
+            else:
+                continue
+            blocked.append({"id": seg_id, "why": why,
+                            "docs": sorted(labels.get(d, (d, None))[0] for d in docs)})
+        return blocked, holding
 
-    # Which documents a carry could go into, and whether it would be safe to.
-    pool = Counter((h, w, human, held, waived)
-                   for _id, h, w, human, held, waived in victim if w)
+    current = [(other, content_hash,
+                found[2] if isinstance(found, tuple) else "",
+                found[3] if isinstance(found, tuple) else False)
+               for other, _id, content_hash, found in others]
+    blocked, holding = refused(current)
+
+    # **Which documents a carry could go into, decided by running the carry.**
+    # Until HANDOFF-066 this was a multiset test — the target's translations
+    # matched here by a copy with the same wording and at least its marks — and
+    # `--from` is positional: a chapter that re-worded one repeated line to the
+    # wording this row holds at the *other* copy passed the multiset and had the
+    # line reverted by the carry. It is also the wrong question now that a carry
+    # keeps what a person or an agent wrote: a chapter holding a different
+    # wording of its own is no longer one a carry would damage. So each document
+    # is aligned against this row with `Carryover.align` — its stored segments
+    # standing in for the fresh parse, which they are unless the file changed
+    # since — and every position answered by `carry_candidates`, the rule the
+    # carry itself runs. *Safe* is that the carry changes nothing the document
+    # holds but its machine drafts: no wording a person or an agent wrote, or
+    # somebody held or waived, replaced; no mark dropped; no `origin` a
+    # machine's that was not. The drafts it would replace are listed apart, as
+    # ``drafts``, because replacing them is what the carry is for and the offer
+    # has to name them — counting them as unsafe refused the carry that puts a
+    # person's `origin` back over the memory route's `tm` copies, which is the
+    # one this advice exists to give. *Offered* is that it is safe and would
+    # leave this row blocking on fewer segments than it does now.
+    #
+    # The offered command carries `--tone` whenever the registers differ, so the
+    # carry runs in this row's register — and then the document's own entries do
+    # not align at all, every position answers from here, and whatever it held
+    # is compared against what comes back. What it does not model: a memory hit,
+    # which can only fill, and a wording the acceptance path would refuse. The
+    # second is not always the cautious direction: where this row's wording would
+    # replace a machine draft and a do-not-translate term added since makes the
+    # acceptance path refuse it, the carry keeps the draft, the offer said it
+    # would not, and running it leaves the refusal — and the offer — as they were.
+    # Nothing is lost, and the offer names the drafts it would replace; the loop
+    # is recorded rather than modelled, because modelling it means the
+    # acceptance path, which lives above this module.
+    if not advise:
+        return {"segments": len(victim), "translated": sum(mine.values()),
+                "blocked": blocked, "carry": []}
     hash_of = {seg_id: h for seg_id, h, *_rest in victim}
     involved = {o for c in blocked for o, _w in holding.get(hash_of[c["id"]], [])}
-    carry = []
+    carry, old = [], Carryover(old_keys, old_entries, old_by_key)
     for other in sorted(involved, key=lambda d: labels.get(d, (d, None))[0]):
         label, other_tone = labels[other]
-        budget, own = Counter(pool), []
-        for owner, seg_id, _hash, found in others:
-            if owner != other or not found:
-                continue
-            if found is True:  # translated, and a paragraph this row does not have
+        same_register = canonical_tone(other_tone) == canonical_tone(tone)
+        rows = conn.execute(
+            "SELECT seg_id, content_hash, context, variant, target, body FROM segments "
+            "WHERE doc_id=? AND lang=? ORDER BY pos", (other, lang)).fetchall()
+        theirs_of = old.align([{"id": seg_id, "hash": h, "context": context,
+                                "variant": variant}
+                               for seg_id, h, context, variant, _t, _b in rows], tone)
+        own, drafts, after = [], [], []
+        for seg_id, h, _context, _variant, target, raw in rows:
+            here = entry(target, _body(raw))
+            theirs, _ambiguous = theirs_of[seg_id]
+            ours = here if same_register else None
+            same = ours is not None and theirs is not None and ours[0] == theirs[0]
+            # `ours` is this document's stored row by identity, never a guess, so
+            # `guessed` stays false; and the first candidate stands in for what
+            # lands, because the acceptance path is not modelled here.
+            candidates, _how, _keep = carry_candidates(ours, theirs, same)
+            post = candidates[0][0] if candidates else None
+            if here is not None and post is not None and post[0] != here[0] \
+                    and not _origin_rank(here[1]) and not here[2] and not here[3]:
+                # A machine draft nobody held or waived, answered by this row's
+                # wording: what the carry is for, and not a loss — invariant 9 —
+                # but the offer has to say it, because it is not "nothing".
+                drafts.append(seg_id)
+            elif here is not None and (
+                    post is None or post[0] != here[0]
+                    or (here[1] == HUMAN and post[1] != HUMAN)
+                    or (here[2] and not post[2]) or (here[3] and not post[3])
+                    or (_origin_rank(here[1]) and not _origin_rank(post[1]))):
                 own.append(seg_id)
-                continue
-            _i, h, w, human, held, waived = found
-            # A copy here with the same wording and at least these marks, the
-            # exact marks first so a stronger copy stays for a segment that needs it.
-            for option in sorted(((h, w, a, b, c) for a in {human, True}
-                                  for b in {held, True} for c in {waived, True}),
-                                 key=lambda k: k[2:] != (human, held, waived)):
-                if budget[option]:
-                    budget[option] -= 1
-                    break
-            else:
-                own.append(seg_id)
-        carry.append({"doc": label, "own": own, "safe": not own,
-                      "offer": not own and other in offer,
-                      "same_register": canonical_tone(other_tone) == canonical_tone(tone)})
+            after.append((other, h, post[0] if post else "",
+                          post is not None and post[1] == HUMAN))
+        still, _holding = refused([r for r in current if r[0] != other] + after)
+        carry.append({"doc": label, "own": own, "drafts": drafts, "safe": not own,
+                      "offer": not own and len(still) < len(blocked),
+                      "same_register": same_register})
     return {"segments": len(victim), "translated": sum(mine.values()),
             "blocked": blocked, "carry": carry}
 
@@ -1837,8 +2093,9 @@ def forget_doc(src, lang, discard=False, render=None):
     `cli.confined_path` refuses it, and the documents most likely to have moved
     would have become impossible to forget.
 
-    **Read-then-write, so the lock comes first.** Every read below decides
-    whether the deletes run, and Python's `sqlite3` would otherwise run them in
+    **Read-then-write, so the lock comes first.** Every read inside the lock
+    decides whether the deletes run — the one after it, for a refusal's carry
+    advice, decides nothing — and Python's `sqlite3` would otherwise run them in
     autocommit — :func:`_begin_write`'s docstring has the measured cost. A row
     from a *newer* build is refused rather than judged, since this build cannot
     know what its body means; an *older* one is judged, because what the
@@ -1875,20 +2132,30 @@ def forget_doc(src, lang, discard=False, render=None):
                     f"than the {STATE_VERSION} this build reads, so this build cannot tell "
                     f"what forgetting it would lose — upgrade scriptorium to forget it. "
                     f"Nothing was deleted.")
-            out.update(_forget_analysis(conn, did, lang, tone, render))
-            if out["blocked"] and not discard:
-                out["refused"] = "wording"
+            # Under the lock, only what decides whether the rows go.
+            out.update(_forget_analysis(conn, did, lang, tone, render, advise=False))
+            if not out["blocked"] or discard:
+                conn.execute("DELETE FROM segments WHERE doc_id=? AND lang=?", (did, lang))
+                conn.execute("DELETE FROM nodes WHERE doc_id=? AND lang=?", (did, lang))
+                conn.execute("DELETE FROM documents WHERE doc_id=? AND lang=?", (did, lang))
                 return out
-            conn.execute("DELETE FROM segments WHERE doc_id=? AND lang=?", (did, lang))
-            conn.execute("DELETE FROM nodes WHERE doc_id=? AND lang=?", (did, lang))
-            conn.execute("DELETE FROM documents WHERE doc_id=? AND lang=?", (did, lang))
-            return out
+            out["refused"] = "wording"
+        # Refused, and nothing was written. Where a carry would help is advice —
+        # the same read `forget_blockers` makes without a lock — and it is the
+        # half that grows with every document sharing a paragraph, so it is taken
+        # after the lock is released rather than while every other writer waits
+        # on `BUSY_TIMEOUT`.
+        out["carry"] = _forget_analysis(conn, did, lang, tone, render)["carry"]
+        return out
     finally:
         conn.close()
 
 
-def forget_blockers(src, lang, render=None):
+def forget_blockers(src, lang, render=None, advise=True):
     """:func:`_forget_analysis` for a stored row, read-only. ``None`` if there is none.
+
+    ``advise=False`` skips the carry list, which `lx extract --from`'s note never
+    reads and which is the expensive half.
 
     Advice rather than a guard: `lx extract --from` prints whether the document
     it carried from could now be forgotten without loss, which is the moment a
@@ -1907,7 +2174,8 @@ def forget_blockers(src, lang, render=None):
         doc = _read_meta(conn, src, lang)
         if doc is None:
             return None
-        found = _forget_analysis(conn, doc_id(src), lang, doc.get("tone"), render)
+        found = _forget_analysis(conn, doc_id(src), lang, doc.get("tone"), render,
+                                 advise=advise)
         return dict(found, source=doc.get("source"))
     finally:
         conn.close()

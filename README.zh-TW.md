@@ -121,7 +121,7 @@ CI 上有一組語料庫在把關，裡面收了 58 份刻意刁難的輸入（M
 |---|---|
 | `lx init` | 建立設定與狀態骨架 |
 | `lx extract SRC --lang L` | 解析成 segment、遮罩標記、重用翻譯記憶（小說加 `--tone literary`） |
-| `lx extract SRC --lang L --from OLD` | 把另一份已追蹤文件的譯文帶過來，連 hold 和 waiver 一起——拆書或改名時要用的 |
+| `lx extract SRC --lang L --from OLD` | 把另一份已追蹤文件的譯文帶過來，連 hold 和 waiver 一起——拆書或改名時要用的。SRC 原本有的照樣留著，只有沒人 hold、也沒人 waive 過的機器草稿會讓位 |
 | `lx forget SRC --lang L` | 移除一份文件的狀態列——拆書或改名後留下的那一列。只要裡面還有任何一句譯文是別的已追蹤文件沒有的，就拒絕並逐一點名（加 `--discard-wording` 就只丟掉那幾句）。翻譯記憶、輸出檔和原文檔都不會碰 |
 | `lx todo SRC --lang L` | 以 JSON 吐出待譯 segment，供 agent 翻譯 |
 | `lx terms SRC --lang L` | 從原文挑出候選術語、開成詞彙表的列（加 `--append` 直接寫進去） |
@@ -418,6 +418,15 @@ lx extract ch2.md --lang zh-TW --from novel.md
 是照哪一份 placeholder 對照表寫的，全部跟著過去，因為這些本來就跟 segment 存在
 一起。
 
+章節動過之後再跑一次 `--from` 也沒關係，章節裡原本有的都會留著：你改寫過的句子，
+還有 `novel.md` 沒翻、你在章節裡翻了的段落。章節留下來的譯文上，你解除過的 hold 或
+waiver 也不會又被掛回去。只有兩種情況，`novel.md` 的譯文才會填進去：章節
+那一段還空著，或者那一段只有一份機器草稿（模型翻的，或翻譯記憶補上的），而且沒人
+hold、也沒人 waive 過。兩邊還有出入的段落，指令都會一一點名，被換掉的草稿也是。
+如果你拆完書之後又回頭改過 `novel.md`，反而是它那邊寫得比較好，就用
+`lx render novel.md --lang zh-TW -o -` 看它怎麼寫，再到章節裡重打一次。狀態裡分不
+出是章節後來改過，還是 `novel.md` 後來改過，所以指令不替你猜。
+
 **用 `--from`，不要先 commit。** 先 `lx commit` 再普通 `lx extract` 多數時候看起
 來也對，但它會安靜地少掉兩樣東西。翻譯記憶是用原文當鍵的，所以一本書裡同一句話出
 現兩次、你給了兩種譯法，兩行都存得進去，讀回來卻只剩一行——兩章於是拿到同一個譯
@@ -460,10 +469,13 @@ lx forget novel.md --lang zh-TW
 placeholder 重新編號並不算不同——而你親手寫的句子，別處也得有一份標著是你寫的。
 只要有一句找不到，它就拒絕，並告訴你每一句在哪裡——在 `ch2.md` 裡還沒翻，因為那一
 章 extract 時沒加 `--from`；在 `ch1.md` 裡搬過去之後又改過；或者哪份文件裡都沒有，
-因為還有一章沒 extract。它只會建議你把 `lx extract <章節> --from novel.md` 用在自己
-沒有另外留下東西的章節上——沒有另外寫過的譯文，也沒有你的 hold 或標記——因為
-`--from` 讀的是舊文件的狀態，不是那一章自己的；對已經改過的章節這麼做，會把你的改
-寫蓋回去。真的要刪就加 `--discard-wording`，丟掉的正好是拒絕訊息點名的那幾段。
+因為還有一章沒 extract。只要 `lx extract <章節> --from novel.md` 能補救其中幾句，
+又不會少掉任何東西，它就會建議你這樣做。跟 `novel.md` 同一個語域的章節一律可以，
+因為 `--from` 會留下章節原本有的東西；建議裡也會點名哪幾份機器草稿會被換掉。語域
+不同的章節，要用 `--from` 就得加 `--tone`，而一加 `--tone`，章節自己存的譯文就都
+對不上了。所以這種章節要等它翻過的每一段，要嘛拿回一字不差、標記也不少的譯文，要嘛
+只是機器草稿被 `novel.md` 的譯文換掉，它才會建議，而且指令裡會帶上 `--tone`；否則
+它就反過來叫你別用 `--from`。真的要刪就加 `--discard-wording`，丟掉的正好是拒絕訊息點名的那幾段。
 
 文件名稱要照 `lx status` 顯示的寫法打。兩個路徑可能共用同一列狀態——
 `docs/guide.md` 和 `docs_guide.md` 就是——你要刪的是畫面上看得到的那一個，不能
@@ -633,7 +645,7 @@ Markdown 與純文字目前都可以端到端跑完：抽取、翻譯、驗證�
 ## 開發
 
 ```bash
-python -m pytest -q                # 2368 collected，不碰網路
+python -m pytest -q                # 2430 collected，不碰網路
 python -m ruff check src tests
 ```
 

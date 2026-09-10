@@ -67,6 +67,8 @@ from .store import (
     HUMAN,
     StateVersionError,
     append_tm,
+    as_written,
+    carry_candidates,
     db_path,
     doc_id,
     doc_label,
@@ -529,9 +531,11 @@ def do_extract(src, lang, cfg, tone=None, reset=False, carry_from=None):
             f"wire. Nothing was written. The register is part of the "
             f"translation-memory key, so a book refrozen into the wrong one stops "
             f"finding every wording banked in the right one.")
-    # `--from` is decided here, above every read, for the reason the guard above
-    # is: all four refusals are answerable from arguments and one state read, and
-    # a refused command must not have parsed the user's file first.
+    # Three of `--from`'s four refusals are decided here, above every read, for
+    # the reason the guard above is: they are answerable from arguments and one
+    # state read, and a refused command must not have parsed the user's file
+    # first. The fourth, the register, needs this document's stored register and
+    # is decided below the parse — still before anything is written.
     #
     # **Refused with `--reset` rather than composed with it.** `--reset`'s whole
     # meaning is that it reads no prior state — that is what its own refusal
@@ -641,25 +645,75 @@ def do_extract(src, lang, cfg, tone=None, reset=False, carry_from=None):
     # novel split into chapters in a project whose config still says `technical`
     # is the ordinary case, not a corner: without this line the whole point of
     # the flag fails on it and says nothing.
-    tone = (tone or stored.get("tone")
-            or (from_meta or {}).get("tone") or cfg.get("tone", DEFAULT_TONE))
-    if carry_from and canonical_tone(from_meta.get("tone")) != canonical_tone(tone):
+    #
+    # **Under `--from` a document with state is frozen even where its stored
+    # register is empty.** `canonical_tone` folds `""` and a missing value onto
+    # the default, and so did the memory key its rows were built under, so the
+    # default is the register it is in. Read as "no register", an empty value let
+    # the named document's register walk over it: nothing refused, no register
+    # line, every one of its own keys missed, and the report said what it held
+    # stayed. Measured by the review of HANDOFF-066, reachable through `lx config
+    # set tone ""` and every row written before the register existed. The
+    # ordinary extract resolves as it always did.
+    #
+    # The named document's register is read the same way and for the same
+    # reason: its rows' keys were built in the default where its stored value is
+    # empty, and the refusal below, printing that value raw, named `--tone ` with
+    # nothing after it, or `--tone None`, which was refused again. Measured by the
+    # third review of HANDOFF-066; it predates the package.
+    #
+    # Both are for comparing. The stored spelling is what the document keeps
+    # wherever there is one — `canonical_tone` decides sameness only, and the
+    # user's own string is what reaches the model's `Tone:` line — so `frozen`
+    # only fills in where the stored value is empty.
+    frozen = canonical_tone(stored.get("tone")) if carry_from and stored else None
+    from_tone = canonical_tone(from_meta.get("tone")) if carry_from else None
+    tone = (tone or stored.get("tone") or frozen or (from_meta or {}).get("tone")
+            or from_tone or cfg.get("tone", DEFAULT_TONE))
+    if carry_from and from_tone != canonical_tone(tone):
         # Refused rather than run, because the run would be indistinguishable
         # from success: every key would miss, `reused` would be 0, and the person
         # would read "this document had nothing to carry" about a book that has
         # every sentence of it. The register is a field of the memory key and
         # `prior_targets` freezes the stored one into its keys, so this is not
         # recoverable inside the call — it is decidable in front of it.
+        #
+        # **The command it names drops what this document holds in its own
+        # register, so it says how much, before and not after.** A register change
+        # carries nothing across — deliberately, see `store.prior_targets` — and
+        # until HANDOFF-066 the only sentence about it came from the run the
+        # refusal had just recommended, counting the wrong document's
+        # translations. A refusal's remedy is a code path, run in the state the
+        # refusal was printed in.
+        held = len(prior_targets(src, lang)) if frozen and frozen != from_tone else 0
+        # "None of them would carry over", not "they would not be in it": where
+        # the named document or the memory holds the same words, the words come
+        # back — as its copy, with its marks, which is not what this document
+        # held. And not "only the named document's": the memory answers too.
+        drops = (f" That moves {src} out of the {frozen} register, and translations do not "
+                 f"cross registers: none of the {held} it holds would carry over — whatever "
+                 f"those positions get would come from {carry_from} or the translation "
+                 f"memory, if from anywhere. They are in the last render, and in "
+                 f"`.lx/tm.{lang}.jsonl` if they were committed." if held else "")
         raise UnusableCarryover(
-            f"{carry_from} is frozen in the {from_meta.get('tone')} register and this "
-            f"extract is in {tone}, so nothing would carry across — the register is part "
+            f"{carry_from} is frozen in the {from_tone} register and this extract is in "
+            f"{canonical_tone(tone)}, so nothing would carry across — the register is part "
             f"of the key the carryover matches on. Extract {src} in the same register: "
             f"`lx extract {src} --lang {lang} --from {carry_from} --tone "
-            f"{from_meta.get('tone')}`. Nothing was written.")
+            f"{from_tone}`.{drops} Nothing was written.")
     if reset:
-        prior = no_carryover()
+        prior = own = no_carryover()
     else:
         prior = prior_targets(carry_from or src, lang)
+        # **Under `--from`, this document's own state is read as well.** Until
+        # HANDOFF-066 it was not: a chapter that already held work had all of it
+        # replaced by the named document's — a person's re-wording reverted, a
+        # paragraph the other document never translated emptied, a hold a
+        # reviewer lifted put back — with exit 0 and nothing printed. The read is
+        # the missing line; what answers each position when both hold wording is
+        # `store.carry_candidates`, which `lx forget`'s carry advice runs too, and
+        # the memory gate and the keep path below are asked of what would stay.
+        own = prior_targets(src, lang) if carry_from else prior
 
     tm = load_tm(lang)
     reused, rejected = 0, 0
@@ -671,41 +725,100 @@ def do_extract(src, lang, cfg, tone=None, reset=False, carry_from=None):
     notes = {"kept": [], "ambiguous": [], "replaced": [], "waived_source": [],
              "register": None,
              # Which document the carryover was read out of, when it was not this
-             # one. Reported rather than left to the flag the person typed,
-             # because `lx run` takes the same argument and prints the same
-             # block: a reader who sees `reused 12` needs to know the twelve came
-             # from somewhere other than the file named on the line above it.
+             # one. Reported rather than left to the flag the person typed: a
+             # reader who sees `reused 12` needs to know the twelve came from
+             # somewhere other than the file named on the line above it. (`lx run`
+             # prints this same block for its own extract, but takes no `--from`
+             # — 2026-09-04 refused giving it one — so under it this is `None`.)
              "carried_from": doc_label(carry_from) if carry_from else None,
              # How many translations the document carried from still holds that
              # no other tracked document does, counted after this one is saved,
              # and the spelling it is stored under. `None` when nothing was
              # carried. See `report_extract`.
-             "carried_from_left": None, "carried_from_stored": None}
+             "carried_from_left": None, "carried_from_stored": None,
+             # How many segments ended up holding this document's own wording
+             # under `--from` — counted where it landed, so a paragraph cut from
+             # the file or a register change that keeps none of them is not
+             # reported as staying. `None` without `--from`.
+             "own_kept": 0 if carry_from else None,
+             # Only under `--from`, where this document's own wording meets the
+             # named one's at a position — `store.carry_candidates`. `differs`:
+             # kept this document's own where the other holds different words.
+             # `took`: this document's machine draft gave way to the other's
+             # wording. `origin`: the same words, and the other's stronger
+             # record of who wrote them came across. The endpoint takes no
+             # `--from`, so none of these four keys is on the wire.
+             "differs": [], "took": [], "origin": []}
     # Which stored entry each segment inherits, decided for the document at once:
     # two positions holding the same sentence can only be told apart by looking
     # at both, which is what a map of one entry per key could not do.
     # Divergence (25).
-    inherited = prior.align(segments, tone)
-    if stored.get("tone") and canonical_tone(stored["tone"]) != canonical_tone(tone) \
-            and len(prior):
+    #
+    # Under `--from` there are two answers for every position, the named
+    # document's and this one's own, and each says whether it is only a guess —
+    # `store.Carryover.answers`. `align` is their projection, so the ordinary
+    # extract reads exactly what it always read.
+    if carry_from:
+        theirs_of, mine_of = prior.answers(segments, tone), own.answers(segments, tone)
+    else:
+        inherited = prior.align(segments, tone)
+    # Under `--from`, against the register the document is frozen in even where
+    # its stored value is empty — see `frozen` above; the ordinary extract keeps
+    # the test it always had.
+    was = frozen if carry_from else stored.get("tone")
+    if was and canonical_tone(was) != canonical_tone(tone) and len(own):
         # Said out loud because it is a silent destructive act otherwise, and the
         # contract tells a client to send `tone` on a re-extract button. Nothing
         # carries across a register change — deliberately, see
         # `store.prior_targets` — so this is the count of translations the
-        # document is about to stop holding.
-        notes["register"] = (stored["tone"], tone, len(prior))
+        # document is about to stop holding. **This document's own**, which under
+        # `--from` is not `prior`: counting the named document's there told a
+        # chapter holding nothing that it had just stopped holding the novel's six.
+        notes["register"] = (was, tone, len(own))
+    polish = (lambda t: polish_rendered(t, lang, cfg)) if carry_from else None
     for seg in segments:
         # This document's own state first, then the memory. Both are proposals,
         # not results: reuse goes through `accept` for the same reason model
         # output does — the placeholder set is the one thing neither the pipeline
         # nor a reviewer can reconstruct, and a stale entry that keeps its key
         # while the mask configuration moves under it is the measured case.
-        candidates = []
-        carried, ambiguous = inherited[seg["id"]]
-        if carried is not None:
-            candidates.append(carried)
-            if ambiguous:
+        #
+        # Each candidate is `(entry, kind)`: "own" for this document's stored
+        # entry, "from" for the named document's, "memory" for a banked line.
+        # `keep` is the one kept when every proposal is refused, and it is also
+        # what the memory would be answering over — the wording this segment
+        # ends up holding if nothing else fits.
+        how = None
+        if carry_from:
+            theirs, theirs_ambiguous, theirs_guessed = theirs_of[seg["id"]]
+            mine, mine_ambiguous, mine_guessed = mine_of[seg["id"]]
+            # What the render writes, the comparison `lx forget` makes — a
+            # renumbered `⟦n⟧` or a stripped indent is the same wording. The
+            # byte-equal pair first, which is every segment of a re-carry nobody
+            # touched and costs no polish.
+            same = mine is not None and theirs is not None and (
+                (theirs[0], theirs[4]) == (mine[0], mine[4])
+                or as_written(theirs[0], theirs[4], polish)
+                == as_written(mine[0], mine[4], polish))
+            candidates, how, keep = carry_candidates(
+                mine, theirs, same, guessed=mine_guessed and not theirs_guessed)
+            if mine is None:
+                # Into a segment this document held nothing for, the carry is the
+                # one it always was, and so is what it names: the named entry's
+                # own ambiguity, whatever then lands. The package that read this
+                # document's state left that case alone on purpose.
+                flagged = {}
+                if theirs is not None and theirs_ambiguous:
+                    notes["ambiguous"].append(seg["id"])
+            else:
+                flagged = {"from": theirs_ambiguous, "own": mine_ambiguous}
+        else:
+            carried, ambiguous = inherited[seg["id"]]
+            keep = (carried, "own") if carried is not None else None
+            candidates = [keep] if keep is not None else []
+            if carried is not None and ambiguous:
                 notes["ambiguous"].append(seg["id"])
+        carried = keep[0] if keep is not None else None
         # **A memory hit competes only with wording a machine can make again.**
         # Divergence (27), closed 2026-09-01. The two proposals used to be tried
         # in order with no regard for who wrote the first, so a stored target
@@ -741,8 +854,8 @@ def do_extract(src, lang, cfg, tone=None, reset=False, carry_from=None):
             #
             # A line banked before the memory carried its own slot map is offered
             # only where a renumbering could not have moved it — see `_protected`.
-            candidates.append((hit, hit_origin, None, False, hit_slots))
-        for rank, (proposal, origin, review, waived, written_against) in enumerate(candidates):
+            candidates.append(((hit, hit_origin, None, False, hit_slots), "memory"))
+        for (proposal, origin, review, waived, written_against), kind in candidates:
             # The memory is tried even when this document's own target was
             # refused: the two can differ, and a good banked wording should not be
             # lost to a stale one sitting in front of it.
@@ -763,16 +876,16 @@ def do_extract(src, lang, cfg, tone=None, reset=False, carry_from=None):
                 # brings `False`, set where the candidate is built.
                 if waived:
                     seg["waived"] = True
-                if hit is not None and proposal is hit and hit_waived:
+                if kind == "memory" and hit_waived:
                     # The wording came out of the memory and the line says a
                     # reviewer had to waive it where it was banked. It arrives
                     # here unwaived on purpose, so `lx check` reports it and this
                     # reader decides for themselves — but arriving silently is
                     # what would make that a surprise instead of a handover.
                     notes["waived_source"].append(seg["id"])
-                if carried is not None and rank:
-                    # The carried entry is always the first candidate, so a later
-                    # one winning means the memory answered over wording this
+                if carried is not None and kind == "memory":
+                    # The carried entry is always the first candidate, so the
+                    # memory winning means it answered over wording this
                     # document was already holding. Since 2026-09-01 that wording
                     # is always a machine's — the gate above is what makes it so
                     # — and the memory still holds what it replaced, so nothing
@@ -781,6 +894,19 @@ def do_extract(src, lang, cfg, tone=None, reset=False, carry_from=None):
                     # because this is the array a client watches to see the run
                     # narrow. Divergence (27), closed.
                     notes["replaced"].append(seg["id"])
+                elif how == "took":
+                    # The named document's wording was tried first because this
+                    # document's was a draft nobody held or waived. It won, or it
+                    # did not fit and this document's own draft stayed.
+                    notes["took" if kind == "from" else "differs"].append(seg["id"])
+                elif how:
+                    notes[how].append(seg["id"])
+                # Under `--from`, the answer that landed says whether its
+                # position was established — the one that lost does not.
+                if carry_from and flagged.get(kind):
+                    notes["ambiguous"].append(seg["id"])
+                if carry_from and kind == "own":
+                    notes["own_kept"] += 1
                 reused += 1
                 break
         else:
@@ -834,6 +960,16 @@ def do_extract(src, lang, cfg, tone=None, reset=False, carry_from=None):
                     if written_against and written_against != seg.get("slots"):
                         seg["target_slots"] = written_against
                     notes["kept"].append(seg["id"])
+                    # Under `--from` the kept entry is this document's own
+                    # wherever it held one (`store.carry_candidates`): a draft
+                    # the named document's wording could not replace, because
+                    # that did not fit either, is a difference and not a take.
+                    if how:
+                        notes["differs" if how == "took" else how].append(seg["id"])
+                    if carry_from and flagged.get(keep[1]):
+                        notes["ambiguous"].append(seg["id"])
+                    if carry_from and keep[1] == "own":
+                        notes["own_kept"] += 1
 
     doc = {
         # `doc_label`, not `os.path.relpath`: one spelling of one identity, on
@@ -875,8 +1011,10 @@ def do_extract(src, lang, cfg, tone=None, reset=False, carry_from=None):
         # looking at both files, and before the new one has been worked on — a
         # chapter re-worded after its carry is what turns a later forget into a
         # refusal only `--discard-wording` gets past.
+        # `advise=False`: the note needs the count and never the carry list,
+        # which is the half that grows with every document sharing a paragraph.
         left = forget_blockers(carry_from, lang,
-                               render=lambda t: polish_rendered(t, lang, cfg))
+                               render=lambda t: polish_rendered(t, lang, cfg), advise=False)
         if left is not None:
             # The stored spelling, not the typed one: `--from` resolves through
             # `doc_id`, and a forget named the typed way is refused by its aim rule.
@@ -907,10 +1045,21 @@ def report_extract(src, lang, notes):
         # only the last record per key — so a book with two byte-identical
         # paragraphs translated differently loses one of them through the memory
         # and neither through this.
+        #
+        # And, since HANDOFF-066, what it did to wording this document already
+        # held — which until then it replaced, all of it, without a word. Counted
+        # where it landed rather than read off what the document held before:
+        # the review of the first version measured "3 translation(s) stays" over
+        # a chapter whose file had lost a paragraph, and over one whose register
+        # the carry had just moved, which keeps none of them.
+        held = notes.get("own_kept") or 0
+        kept = (f" {src} kept its own wording at {held} segment(s); {notes['carried_from']}'s "
+                f"went only where it held nothing, or a machine draft nobody held or waived, "
+                f"and every place the two differ is named below." if held else "")
         _out(f"  translations carried from {notes['carried_from']}, not from "
              f"`.lx/tm.{lang}.jsonl` — so holds, waivers, `origin` and the map each "
              f"wording's placeholders were written against came with them, and two "
-             f"identical paragraphs translated differently both survived. "
+             f"identical paragraphs translated differently both survived.{kept} "
              f"{notes['carried_from']} still holds its own state; nothing was taken from "
              f"it.")
         # **Conditional, never a bare "then forget it".** Measured 2026-09-10:
@@ -934,6 +1083,47 @@ def report_extract(src, lang, notes):
             _out(f"  {left} translated segment(s) of {stored} are not yet held the same way "
                  f"by any other tracked document, so `lx forget {stored} --lang {lang}` "
                  f"refuses for now — run it to see which, and where each one is.")
+    # The three things a carry into a document that already held work can do to
+    # it, one line each, all by id — `store.carry_candidates` decides them. The
+    # first is the one a person most needs: it is the only place the chapter
+    # re-worded after its carry and the novel revised after it are told apart,
+    # and the rule cannot do it for them.
+    #
+    # Every id, uncapped, the way `kept`, `replaced` and `ambiguous` below are:
+    # these lines are the record of what a carry did to wording somebody may
+    # have written, and a capped list names eight of them and counts the rest,
+    # which is not naming them. The `lx segments --ids` listing is offered only
+    # while it stays short enough to paste.
+    frm = notes.get("carried_from")
+    if notes.get("differs"):
+        ids = notes["differs"]
+        only = f" --ids {','.join(ids)}" if len(ids) <= 20 else ""
+        # The remedy is re-typing, never copying a stored string across: a
+        # wording's `⟦n⟧` mean the terms of the document it was written in, which
+        # is how a copy once rendered one character's name twice (2026-09-10).
+        _out(f"  {len(ids)} segment(s) kept the wording this document already held, where "
+             f"{frm} holds a different one: {', '.join(ids)}. A carry puts {frm}'s wording "
+             f"over this document's only where this document's is a machine draft nobody "
+             f"held or waived, {frm}'s is not a machine's, and {frm}'s fits this document's "
+             f"placeholders — so a person's or an agent's words are never replaced by one. "
+             f"Compare them — `lx segments {src} --lang {lang}{only}` for these, "
+             f"`lx render {frm} --lang {lang} -o -` for {frm}'s — and where {frm}'s is the "
+             f"one you want, re-type it here.")
+    if notes.get("took"):
+        ids = notes["took"]
+        _out(f"  {len(ids)} segment(s) held a machine draft of this document's own, and "
+             f"{frm}'s wording replaced it: {', '.join(ids)}. A machine draft — a model's, "
+             f"or a translation-memory hit's — can be had again, and {frm}'s wording was "
+             f"not one, so it took the segment with its `origin` and any hold or waiver it "
+             f"carries there. A draft held or waived where this document's own state can "
+             f"place the mark is never replaced this way; where a changed file leaves the "
+             f"position unplaced, the mark is dropped first, as every re-extract drops it.")
+    if notes.get("origin"):
+        ids = notes["origin"]
+        _out(f"  {len(ids)} segment(s) already held {frm}'s wording, and {frm} records who "
+             f"wrote it more strongly — a person over an agent, either over a machine: "
+             f"{', '.join(ids)}. That `origin` came across; the words, and any hold or "
+             f"waiver, are this document's own.")
     if notes["kept"]:
         # Its own line rather than a field in the counts, because this one is not
         # a memory problem: these segments held a stored target that no longer
@@ -992,9 +1182,20 @@ def report_extract(src, lang, notes):
         was, now, held = notes["register"]
         # A register change carries nothing over, deliberately — and until
         # 2026-08-17 it said nothing at all while emptying a reviewed book.
-        _out(f"  the register moved from {was} to {now}, and translations do not cross "
-             f"registers: the {held} this document held are not in it any more. They are in "
-             f"the last render, and in `.lx/tm.{lang}.jsonl` if it was committed.")
+        if notes.get("carried_from"):
+            # Under `--from` the named document answers every position in the
+            # new register, and where it holds the same words they come back —
+            # as its copy, not this document's — so "not in it any more" would
+            # be false of them. The third review of HANDOFF-066 measured that.
+            _out(f"  the register moved from {was} to {now}, and translations do not cross "
+                 f"registers: none of the {held} this document held carried over, and what "
+                 f"it holds now came from {notes['carried_from']} or the translation memory. "
+                 f"Its own are in the last render, and in `.lx/tm.{lang}.jsonl` if they were "
+                 f"committed.")
+        else:
+            _out(f"  the register moved from {was} to {now}, and translations do not cross "
+                 f"registers: the {held} this document held are not in it any more. They are "
+                 f"in the last render, and in `.lx/tm.{lang}.jsonl` if it was committed.")
 
 
 def cmd_extract(args, cfg):
@@ -4173,10 +4374,12 @@ def _forget_refusal(label, lang, result):
     only where it would help.** Two of the three designs this was chosen from
     printed `lx extract <new-file> --from` on every refusal, and measured
     2026-09-10 that sentence reverted a chapter a person had re-worded after its
-    first carry — `--from` reads the named document's state instead of the
+    first carry — `--from` then read the named document's state instead of the
     target's own. It is the 2026-09-04 lesson in a new place: the escape a
-    refusal names has to be one that loses nothing. `store._forget_analysis`
-    decides both halves; this words them.
+    refusal names has to be one that loses nothing. Since HANDOFF-066 the carry
+    keeps what the target holds and `store._forget_analysis` asks the carry's
+    own rule, `store.carry_candidates`, what it would do; this words the answer,
+    including the machine drafts a safe carry would still replace.
 
     **And it never tells a person to copy a wording across by hand.** It did:
     "copy what you want across with `lx apply`". A stored wording's `⟦n⟧` mean
@@ -4205,9 +4408,19 @@ def _forget_refusal(label, lang, result):
             why = ("" if c["same_register"] else
                    f", and refreezes it in the {canonical_tone(result['tone'])} register "
                    f"{label} was translated in")
-            lines.append(f"  carry them into {c['doc']}, which holds nothing of its own a "
-                         f"carry would replace: `lx extract {c['doc']} --lang {lang} --from "
-                         f"{label}{tone}`{why}")
+            # What the carry would change there, said before the command: nothing
+            # but untranslated paragraphs, or those and the machine drafts
+            # `store.carry_candidates` lets this row's wording answer over. "Where
+            # it fits", because the advice does not run the acceptance path: a
+            # wording of this row's that predates a do-not-translate term is
+            # refused there, and the draft then stays.
+            holds = ("which holds nothing of its own a carry would replace" if not c["drafts"]
+                     else f"where a carry keeps everything a person or an agent wrote and "
+                          f"replaces only the machine draft(s) "
+                          f"{_capped(c['drafts'], _FORGET_IDS)} "
+                          f"with {label}'s wording where it fits")
+            lines.append(f"  carry them into {c['doc']}, {holds}: `lx extract {c['doc']} "
+                         f"--lang {lang} --from {label}{tone}`{why}")
         elif not c["safe"]:
             lines.append(f"  do not carry into {c['doc']}: a carry from {label} would replace "
                          f"what it holds of its own ({_capped(c['own'], _FORGET_IDS)}) — "
@@ -6219,11 +6432,13 @@ def build_parser():
     # `dest` spelled out because `from` is a Python keyword and argparse would
     # otherwise produce an attribute nothing can read.
     e.add_argument("--from", dest="carry_from", metavar="SRC",
-                   help="carry translations across from another tracked document instead "
-                        "of only from this one — what a file that was split or renamed "
-                        "needs. Holds, waivers and `origin` travel with the wording, which "
-                        "is what `lx commit` plus the translation memory cannot do. Once "
-                        "every file cut from it is extracted, `lx forget` the old one")
+                   help="carry translations across from another tracked document as well "
+                        "as from this one — what a file that was split or renamed needs. "
+                        "Holds, waivers and `origin` travel with the wording, which is what "
+                        "`lx commit` plus the translation memory cannot do. What this "
+                        "document already holds stays, except a machine draft nobody held "
+                        "or waived, and every place the two differ is named. Once every "
+                        "file cut from it is extracted, `lx forget` the old one")
     e.set_defaults(fn=cmd_extract)
 
     fg = sub.add_parser(

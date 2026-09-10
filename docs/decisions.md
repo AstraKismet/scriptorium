@@ -3,6 +3,269 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-09-10 · `--from` keeps what the target holds, and a machine draft is the one thing that gives way
+
+Closing HANDOFF-066. `lx extract NEW --lang L --from OLD` reads `NEW`'s own
+state beside `OLD`'s, and `store.carry_candidates` decides each position; `lx
+forget`'s carry advice runs the same function; the register line counts the
+target's own translations; and the register refusal says what its own remedy
+drops. Nothing moves: not `SCHEMA_VERSION`, not `STATE_VERSION`, and neither
+`contract_version` — `POST /api/extract` takes no `--from` and projects a fixed
+set of `notes` keys, so the four new ones never reach the wire — and the
+ordinary extract reads what it read before, except that a segment body which is
+not a JSON object no longer ends it in a traceback.
+
+### What was wrong, measured
+
+`cli.do_extract` built its carryover from `prior_targets(carry_from or src)`, so
+under `--from` the target's own segments were never read. An oracle of twenty
+scenarios, driving the CLI and scoring every segment the target held before the
+carry, gave sixteen defect verdicts on the parent commit: a person's re-wording
+reverted; human wording for a paragraph `OLD` never translated emptied; a hold
+and a waiver the chapter had lifted put back — a waiver moves `lx check`'s exit
+code; a held draft and an agent's wording replaced, and a waiver taken off the
+same words. Two more the oracle does not count as defects were beside them:
+machine drafts replaced with nothing said, and the register line telling a
+chapter that held nothing that it had stopped holding the novel's six.
+
+The attack on the package's brief found two more the package did not name. The
+memory answered over the target's human wording wherever `OLD` held nothing at
+that position, because the target's own entry was not a candidate — divergence
+(27), closed 2026-09-01, walked around by one flag. And divergence (24)'s keep
+path kept `OLD`'s refused wording *over* the target's own wording that fitted, and
+printed "Nothing was deleted" about it. A third is in `lx forget`, on the parent
+commit, found by one design's own scenarios and confirmed by the critique on every
+build: across a register line the multiset safety test offered a `--tone` carry
+which, run exactly as printed, overwrote a person's wording of a repeated line
+with the novel's wording of the other copy — and the forget that followed passed.
+
+### The rule
+
+| `NEW` holds | `OLD` holds | what the segment gets |
+|---|---|---|
+| nothing | wording | `OLD`'s — the carry into an empty segment, unchanged |
+| wording | nothing | `NEW`'s |
+| only a guess | an answer that is not itself a guess | `OLD`'s, the guess behind it |
+| the same rendered words | the same | `NEW`'s words, hold and waiver; the stronger `origin` of the two, named |
+| a machine draft nobody held or waived | wording not a machine's | `OLD`'s, named |
+| anything else | different words | `NEW`'s, named |
+
+"The same" is what the render writes — `store.as_written`, the comparison `lx
+forget` already made — so a renumbered `⟦n⟧` or a stripped U+3000 indent is the
+same wording and one string naming two different terms is not. A *guess* is
+where `NEW`'s own alignment could only hand back a copy of a wording another
+fresh position also receives — a new member of a run of identical lines, or the
+second copy of a paragraph that moved and now comes twice. A paragraph that
+merely moved is not one: its key fallback hands back its own wording, to the
+first copy that asks. `Carryover.answers` says which answers are guesses, and
+`align` became its projection, so no other caller changed. A hold or a waiver
+protects a draft where `NEW`'s alignment can place it; where a changed file
+leaves the position unplaced the mark is dropped, as every re-extract drops it. When every candidate is
+refused, what `NEW` held stays — `OLD`'s only where `NEW` held nothing or a
+guess — and the memory competes only with what would otherwise stay, which is
+divergence (27)'s rule asked of the right entry.
+
+### Why this and not the other three
+
+Four designs were prototyped in separate trees and scored on the one oracle;
+the coordinating session re-ran each tree's output and matched it line for line.
+All four scored zero defects. They differ in what they do to work already done:
+
+| | 1 refuse | 2 `NEW` always wins | **3 a draft gives way** | 4 three-way merge |
+|---|---|---|---|---|
+| scenarios that exit 2 | 14 of 20 | 0 | 0 | 0 |
+| a chapter a model drafted, `OLD` reviewed | replaced, named | kept, named | replaced, named | kept, named |
+| `OLD` revised after the split | refused | named | named | the revision arrives |
+| what it adds | `--discard-own` | `--ids` and an `origin` lift | a precedence and an `origin` lift | a recorded base in every carried body |
+
+- **Refusing** costs a round trip every time a chapter was touched after its
+  carry — including translating one paragraph first and filling the rest, the
+  ordinary way to discover the flag — and its override, `--discard-own`, was
+  all-or-nothing, so the reflex it teaches loses the unrelated re-wordings in the
+  same refusal. Relieving that with a `--keep-own` flag is option 3 behind a flag.
+- **`NEW` always wins** never lets `OLD`'s reviewed wording into a chapter a model
+  drafted, never repairs a chapter that took the commit-first route this project
+  used to recommend, and breaks the shipped "carry puts a person's `origin` back"
+  that `lx forget` offers. Relieving any of the three gives option 3.
+- **A three-way merge** was the only design that brings `OLD`'s revision into a
+  copy nobody touched since the carry. It needs a base recorded at carry time,
+  and no carry made before it recorded one, so on every project that exists the
+  win it is for does not occur. It also carries *any* change in `OLD` into those
+  copies — a polish pass run on the novel out of habit, a waiver added — and it
+  was the most machinery of the four.
+- **What no rule here can do** is tell a chapter re-worded since from a novel
+  revised since: both are `NEW` holding one wording and `OLD` another at the same
+  position. So both are named, with `lx render OLD -o -` as where to read `OLD`'s,
+  and the remedy is re-typing — never copying a stored string across, which is
+  how a character's name was once rendered twice (2026-09-10, `lx forget`).
+
+The maintainer chose option 3, chose to lift the `origin` of identical rendered
+words — named, only upward, never the hold or the waiver — and chose to name the
+`OLD`-revised case without a command that takes `OLD`'s wording there. A
+take-by-id flag was prototyped and would have been a path that overwrites a
+person's wording by id with no `--overwrite-human`.
+
+### What the critique of the designs changed
+
+- **A guess does not stand in front of a placed answer.** Every merge design
+  protected `NEW`'s entry whatever its alignment said, so a chapter whose run of
+  identical lines grew by one answered the new member with its own last copy — a
+  duplicate — over `OLD`'s placed wording for that exact position, which the
+  carry this replaced had got right. The prototype had fixed this for drafts only.
+- **The keep path keeps `NEW`'s.** The prototype kept whichever candidate was
+  tried first, which in the draft-gives-way row is `OLD`'s: two refusals wrote
+  `OLD`'s stale wording over `NEW`'s own draft and called it kept.
+
+### What the review of the implementation changed
+
+Four lanes read the first shipped version — adversarial correctness, every
+claim, the Chinese, and mutation — and two of them found the same major defect
+in a rule the critique had just added:
+
+- **A paragraph that moved is not a guess.** The first spelling called every key
+  fallback a guess, and a paragraph the author moved inside the chapter comes
+  back through the fallback with its own and only wording. So a person's
+  re-wording of it was replaced by `OLD`'s, naming nothing, while a plain extract
+  kept it — and past `ALIGN_BUDGET`, where the diff makes no pair at all, every
+  position of the target went the same way. A guess is now only a wording another
+  fresh position also receives.
+- **A held draft the alignment could not place was replaced under a line saying
+  held drafts never are.** The second commit protected it by remembering the
+  dropped hold, and the third review measured that guard firing once: the draft
+  was written back unheld, as every re-extract writes it, so the next carry
+  replaced it anyway. Keeping the mark would have meant placing a hold where
+  2026-09-08 refuses to, so the guard is gone and the line now says what is
+  true — a hold protects only where the chapter's own state can place it.
+- **An empty stored register is the default, under `--from`.** Found by the
+  mutation lane, because a mutant that deleted a truthiness test was the correct
+  code: `lx config set tone ""` is accepted, `canonical_tone` folds `""` onto the
+  default, and `--from` resolved past it to the novel's register — no refusal, no
+  register line, every own key missed, a person's held wording replaced, and a
+  line saying it stayed. The ordinary extract has the same test and the same
+  hole; it is out of this package's scope and is HANDOFF-074.
+- **A body that is not a JSON object is read, not raised on**, the way `lx forget`
+  already read one; the carry it offered had crashed on it.
+- **What stayed is counted where it landed.** "3 translation(s) stays" was
+  printed over a chapter whose file had lost a paragraph.
+- **Every id is named.** The difference lines were capped at eight, which named
+  eight and counted the rest, so "every place the two differ is named" was false
+  past it — the lines now list every id, as `kept`, `replaced` and `ambiguous`
+  always have.
+- **Into an empty segment the report names what it always named**, which the
+  first version had stopped doing when the memory answered after an unplaced
+  carried entry was refused; the package kept that case out of scope.
+
+The mutation lane planted fifty-six further defects: the existing suite caught
+seventeen, its new tests — `tests/test_carry.py` — caught thirty-seven more, one
+was equivalent, and one was the empty-register defect above. Thirteen more went
+in around the second commit's changes, each asserted to have landed, and all
+thirteen were caught — two of them, the write lock held for the advice and
+`lx extract` asking for advice it never reads, change no output and are caught
+by a test that pins what the calls look like.
+
+A third review read the second commit and found, besides the guard above: the
+second copy of a moved paragraph answered with the first's wording, putting a
+person's `origin` where nobody wrote; the *named* document's empty register read
+raw, so a first carry out of a novel frozen `""` was refused naming `--tone `
+with nothing after it — older than this package; a carry that rewrote the
+document's stored register to its canonical spelling; and three sentences that
+said more than was true — the register refusal and the register line under
+`--from`, where the named document or the memory may bring the same words back,
+and the cross-register offer, which the two READMEs and this entry each stated
+differently from the code. All are fixed, each with a test that fails on the
+commit before; five mutants over the new guards were caught.
+
+### `lx forget`'s carry advice asks the carry's rule
+
+`_forget_analysis` aligns the old row against each other document's stored
+segments and runs `carry_candidates` position by position. *Safe* is that
+nothing the document holds is emptied, replaced or unmarked, except a machine
+draft nobody held or waived that the old row's wording replaces — the drafts
+are listed, and the offer names them, capped as every line of a refusal is;
+*offered* is safe and leaving the old row blocking on fewer segments. Across a
+register line none of the document's own entries align, so it is safe only
+where every paragraph it translated comes back as the same words with at least
+its marks, or is such a draft. The multiset it
+replaces passed a chapter that re-worded one repeated line to the wording held
+at the other copy, and it is what offered the register-crossing carry above.
+
+Four `lx forget` tests said "do not carry" within one register, which was true
+of the old `--from` and is false of this one: three now run the carry and check
+what it did, and the fourth, "each mark alone makes a carry unsafe", moved across
+a register line, where it still holds.
+
+**The delete decides under the lock and the advice is read after it.** The
+simulation is the half of the analysis that grows with every document sharing a
+paragraph, and a review lane measured `lx forget` at 4.0–4.5 s of wall time
+against 0.7–1.1 s with a hundred such chapters — its numbers, not re-measured
+here — all of it under `BEGIN IMMEDIATE`, where every
+other writer waits on a five-second `BUSY_TIMEOUT`. So `forget_doc` asks for the
+blocked list alone inside the transaction and, having refused and written
+nothing, reads the advice outside it; `lx extract --from`'s note needs only the
+count and never asks. What the advice cannot model is the acceptance path: a
+wording of the old row's that predates a do-not-translate term is refused there,
+so an offered carry can leave a draft in place and the same offer then comes
+back. Nothing is lost, the offer says "where it fits", and the loop is recorded
+rather than modelled, because modelling it means the acceptance path, which
+lives above `store`.
+
+### The register line, and the package's criterion
+
+The count is the target's own, and the line does not print when the target held
+none. The package asked for a test that the line "reports the number the target
+held (0 in the measured case)". The line has always been gated on a non-zero
+count, and printing "the 0 this document held are not in it any more" would be a
+false alarm, so the test asserts no line at 0 and `the 1` at 1. The register
+refusal now says how many translations its own `--tone` remedy would drop: a
+refusal's remedy is a code path, and that one had been run in the dark.
+
+### What the package had wrong
+
+- "The cause is one line." The read was one line; the fix is a precedence, a
+  keep path and a memory gate, because each of the three was writing through the
+  hole the missing read left.
+- "That predicate [`_forget_analysis`'s] is the natural guard … shared rather
+  than re-derived." It is a multiset and the carry is positional, so as a guard it
+  would have let a lossy carry through. What is shared now runs the other way:
+  the advice asks the carry's rule.
+- "A merge is a second alignment rule inside `do_extract`." It is the same
+  alignment called twice; what is new is a precedence over two answers, and a
+  refusal that is right needs exactly the same inputs.
+- A comment in `do_extract` said `lx run` takes `--from`; it does not, and
+  2026-09-04 refused giving it one. The `--help` text already described a merge
+  ("instead of only from this one") while the code did the opposite.
+
+### What this does not do
+
+- `--from` into an identity another document already occupies reads that row as
+  the target's own, exactly as a plain `lx extract` does — HANDOFF-067 owns the
+  collision and now names this path.
+- `do_extract` reads prior state and `save_doc` writes in separate transactions,
+  so a workbench save landing between them is overwritten by an ordinary extract
+  as much as by this one. It predates the package; HANDOFF-073.
+- An ordinary re-extract of a document stored with an empty register resolves
+  past it to the configured one, and drops its translations with no register
+  line — the `--from` half is fixed above; HANDOFF-074 has the rest.
+- The oracle scores a refusal as free and calls an id "named" if it appears in
+  the output at all, and none of its scenarios carries a placeholder; the ones
+  that needed placeholders are tests instead. Plain text is not exercised under
+  `--from` by any test, and CRLF only on the Windows leg, where
+  `tests/test_forget.py` writes its fixtures in text mode.
+
+### How it was reached
+
+The oracle came first, then the four prototypes, a lane attacking the package's
+premises and a completeness critic over all five; the critic re-ran every
+design's scenarios on every build. The attack found the memory and keep-path
+cases, the critique the guess and the register-crossing advice. The shipped code
+was then checked by planting eleven defects, one per rule, each asserted to have
+landed before the suite ran and each caught: a guess not recognised, the keep
+path keeping the first candidate, the register refusal silent about its remedy,
+"stays" said across a register change, a paragraph `OLD` never translated not
+kept, the `origin` never lifted, the same words taking `OLD`'s marks, a held
+draft treated as replaceable, two drafts not a tie, the register line counting
+`OLD`, and the forget advice ignoring the register.
+
 ## 2026-09-10 · A document row is forgotten by name, and never while it holds the last copy of anything
 
 Closing HANDOFF-047. `lx forget SRC --lang L` removes one `(document, language)`

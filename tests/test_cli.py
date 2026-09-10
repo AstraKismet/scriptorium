@@ -14,6 +14,8 @@ import shutil
 import subprocess
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import statedb  # noqa: E402
@@ -643,6 +645,342 @@ def test_extract_from_and_reset_are_refused_together(tmp_path):
     err = r.stderr.decode("utf-8")
     assert r.returncode == 2, err
     assert "opposite things" in err
+
+
+# --- `--from` into a document that already holds work (HANDOFF-066) ----------
+
+def _doc_segments(root, did):
+    """``{seg_id: body with target}`` for one document, read off the database."""
+    return {sid: {**json.loads(body), "target": target} for sid, target, body in statedb._query(
+        root, "SELECT seg_id, target, body FROM segments WHERE doc_id=? ORDER BY pos", (did,))}
+
+
+def _apply_to(root, env, doc, wording, origin):
+    (root / "w.json").write_bytes(json.dumps(wording, ensure_ascii=False).encode("utf-8"))
+    r = _lx(["apply", doc, "--lang", "zh-TW", "--file", "w.json", "--origin", origin,
+             "--overwrite-human"], root, env)
+    assert r.returncode == 0, r.stderr.decode("utf-8")
+
+
+def test_extract_from_keeps_a_rewording_the_chapter_made_after_its_carry(tmp_path):
+    """HANDOFF-066 acceptance (a). `--from` never read the target's own state, so
+    this carry put the novel's wording back over a person's and exited 0 with
+    nothing printed. The re-wording stays, and the id is named beside where the
+    novel's wording can be read."""
+    env = _split_project(tmp_path)
+    assert _lx(["extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md"],
+               tmp_path, env).returncode == 0
+    _apply_to(tmp_path, env, "ch1.md", {"s0002": "改寫的阿爾法句。"}, "human")
+    r = _lx(["extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md"], tmp_path, env)
+    out = r.stdout.decode("utf-8")
+    assert r.returncode == 0, r.stderr.decode("utf-8")
+    seg = _doc_segments(tmp_path, "ch1.md")["s0002"]
+    assert (seg["target"], seg["origin"]) == ("改寫的阿爾法句。", "human")
+    assert "kept the wording this document already held, where novel.md holds a " \
+           "different one: s0002." in out, out
+
+
+def test_extract_from_keeps_what_the_other_document_never_translated(tmp_path):
+    """A paragraph the novel holds no wording for keeps the chapter's. It was
+    emptied — status `pending`, the person's sentence gone from every row."""
+    env = _split_project(tmp_path)
+    _apply_to(tmp_path, env, "novel.md", {"s0005": "貝塔句。"}, "agent")
+    statedb._write(tmp_path, "UPDATE segments SET target='' WHERE doc_id='novel.md' "
+                             "AND seg_id='s0005'")
+    assert _lx(["extract", "ch2.md", "--lang", "zh-TW", "--tone", "literary"],
+               tmp_path, env).returncode == 0
+    _apply_to(tmp_path, env, "ch2.md", {"s0002": "我的貝塔句。"}, "human")
+    assert _lx(["extract", "ch2.md", "--lang", "zh-TW", "--from", "novel.md"],
+               tmp_path, env).returncode == 0
+    assert _doc_segments(tmp_path, "ch2.md")["s0002"]["target"] == "我的貝塔句。"
+
+
+def test_extract_from_does_not_put_back_a_hold_the_chapter_lifted(tmp_path):
+    """The same words at the same position are the chapter's, marks and all: a
+    hold lifted there is a reviewer's act, and the novel's copy of the hold is
+    not a reason to undo it."""
+    env = _split_project(tmp_path, hold="s0002")
+    assert _lx(["extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md"],
+               tmp_path, env).returncode == 0
+    assert _lx(["unhold", "ch1.md", "--lang", "zh-TW", "--ids", "s0002"],
+               tmp_path, env).returncode == 0
+    assert _lx(["extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md"],
+               tmp_path, env).returncode == 0
+    assert "review" not in _doc_segments(tmp_path, "ch1.md")["s0002"]
+
+
+def test_extract_from_answers_over_a_machine_draft_and_names_it(tmp_path):
+    """The one replacement the rule makes: a draft nobody held or waived, and a
+    wording in the named document that is not a machine's."""
+    env = _split_project(tmp_path)
+    assert _lx(["extract", "ch1.md", "--lang", "zh-TW", "--tone", "literary"],
+               tmp_path, env).returncode == 0
+    _apply_to(tmp_path, env, "ch1.md", {"s0002": "草稿二"}, "llm:draft")
+    r = _lx(["extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md"], tmp_path, env)
+    out = r.stdout.decode("utf-8")
+    assert r.returncode == 0, r.stderr.decode("utf-8")
+    seg = _doc_segments(tmp_path, "ch1.md")["s0002"]
+    assert (seg["target"], seg["origin"]) == ("阿爾法句。", "agent")
+    assert "held a machine draft of this document's own, and novel.md's wording replaced " \
+           "it: s0002." in out, out
+
+
+@pytest.mark.parametrize("mark", ["hold", "waive", "polish"])
+def test_extract_from_leaves_a_held_draft_and_a_newer_draft_alone(tmp_path, mark):
+    """A hold makes a draft somebody's to finish and a waiver says somebody read
+    it and stood by it, so no batch act takes either. And two drafts are a tie
+    that stays with the chapter: its polish pass is newer work than the novel's
+    first draft."""
+    env = _split_project(tmp_path)
+    if mark == "polish":
+        _apply_to(tmp_path, env, "novel.md", {"s0002": "阿爾法句草稿。"}, "llm:draft")
+    if mark == "waive":
+        # An error for the waiver to answer: the draft does not use the term.
+        assert _lx(["glossary", "set", "Alpha", "阿爾法", "--severity", "error"],
+                   tmp_path, env).returncode == 0
+    assert _lx(["extract", "ch1.md", "--lang", "zh-TW", "--tone", "literary"],
+               tmp_path, env).returncode == 0
+    _apply_to(tmp_path, env, "ch1.md", {"s0002": "草稿二"},
+              "llm:polish" if mark == "polish" else "llm:draft")
+    if mark in ("hold", "waive"):
+        r = _lx([mark, "ch1.md", "--lang", "zh-TW", "--ids", "s0002"], tmp_path, env)
+        assert r.returncode == 0, r.stderr.decode("utf-8")
+    r = _lx(["extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md"], tmp_path, env)
+    assert r.returncode == 0, r.stderr.decode("utf-8")
+    assert _doc_segments(tmp_path, "ch1.md")["s0002"]["target"] == "草稿二"
+    assert "s0002" in r.stdout.decode("utf-8")
+
+
+def test_extract_from_answers_over_a_draft_the_chapter_cannot_place(tmp_path):
+    """A run of identical lines grew in the chapter, so its own alignment
+    establishes none of them, and for the new one it hands back a guess — the
+    last draft under that key. The novel's answers are placed. A guess is not
+    what the chapter holds, and it does not stand in front of them."""
+    env = {**os.environ, "PYTHONPATH": SRC}
+    assert _lx(["init"], tmp_path, env).returncode == 0
+    (tmp_path / "novel.md").write_bytes(b"Head.\n\nA line.\n\nA line.\n\nA line.\n")
+    assert _lx(["extract", "novel.md", "--lang", "zh-TW", "--tone", "literary"],
+               tmp_path, env).returncode == 0
+    _apply_to(tmp_path, env, "novel.md",
+              {"s0001": "頭。", "s0002": "一甲。", "s0003": "一乙。", "s0004": "一丙。"}, "agent")
+    (tmp_path / "ch1.md").write_bytes(b"Head.\n\nA line.\n\nA line.\n")
+    assert _lx(["extract", "ch1.md", "--lang", "zh-TW", "--tone", "literary"],
+               tmp_path, env).returncode == 0
+    _apply_to(tmp_path, env, "ch1.md", {"s0002": "草一。", "s0003": "草二。"}, "llm:draft")
+    (tmp_path / "ch1.md").write_bytes(b"Head.\n\nA line.\n\nA line.\n\nA line.\n")
+    r = _lx(["extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md"], tmp_path, env)
+    assert r.returncode == 0, r.stderr.decode("utf-8")
+    held = _doc_segments(tmp_path, "ch1.md")
+    assert [held[s]["target"] for s in ("s0002", "s0003", "s0004")] == \
+        ["一甲。", "一乙。", "一丙。"], held
+
+
+def test_the_register_line_under_from_counts_the_documents_own_translations(tmp_path):
+    """HANDOFF-066 acceptance (b). It counted the named document's: a chapter
+    holding one translation was told it had stopped holding the novel's six."""
+    env = _split_project(tmp_path)
+    assert _lx(["extract", "ch1.md", "--lang", "zh-TW", "--tone", "technical"],
+               tmp_path, env).returncode == 0
+    _apply_to(tmp_path, env, "ch1.md", {"s0001": "技術第一章"}, "human")
+    r = _lx(["extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md", "--tone",
+             "literary"], tmp_path, env)
+    out = r.stdout.decode("utf-8")
+    assert r.returncode == 0, r.stderr.decode("utf-8")
+    assert "the register moved from technical to literary" in out, out
+    # Under `--from` the line does not say they are gone: the named document or
+    # the memory may bring the same words back, as their copy.
+    assert "none of the 1 this document held carried over" in out, out
+
+
+def test_the_register_line_is_not_printed_for_a_document_that_held_nothing(tmp_path):
+    env = _split_project(tmp_path)
+    assert _lx(["extract", "ch1.md", "--lang", "zh-TW", "--tone", "technical"],
+               tmp_path, env).returncode == 0
+    r = _lx(["extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md", "--tone",
+             "literary"], tmp_path, env)
+    assert r.returncode == 0, r.stderr.decode("utf-8")
+    assert "the register moved" not in r.stdout.decode("utf-8")
+
+
+def test_the_register_refusal_says_what_its_own_remedy_drops(tmp_path):
+    """The refusal names `--tone literary`, and that command empties a chapter
+    holding translations in another register. Said before, not after — and not
+    at all where there is nothing to drop."""
+    env = _split_project(tmp_path)
+    assert _lx(["extract", "ch1.md", "--lang", "zh-TW", "--tone", "technical"],
+               tmp_path, env).returncode == 0
+    r = _lx(["extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md"], tmp_path, env)
+    err = r.stderr.decode("utf-8")
+    assert r.returncode == 2, err
+    assert "would carry over" not in err, "it holds nothing to drop"
+    _apply_to(tmp_path, env, "ch1.md", {"s0001": "技術第一章"}, "human")
+    r = _lx(["extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md"], tmp_path, env)
+    err = r.stderr.decode("utf-8")
+    assert r.returncode == 2, err
+    assert "--tone literary" in err, err
+    assert "none of the 1 it holds would carry over" in err, err
+    assert _doc_segments(tmp_path, "ch1.md")["s0001"]["target"] == "技術第一章"
+
+
+def test_extract_from_says_what_the_document_already_held_stays(tmp_path):
+    """The carried-from line used to say only what came across. Into a chapter
+    that already held work it now says how many segments kept it — counted where
+    it landed, so never across a register change, where none of it did, and
+    never counting a paragraph the file lost."""
+    env = _split_project(tmp_path)
+    assert _lx(["extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md"],
+               tmp_path, env).returncode == 0
+    r = _lx(["extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md"], tmp_path, env)
+    out = r.stdout.decode("utf-8")
+    assert r.returncode == 0, r.stderr.decode("utf-8")
+    assert "ch1.md kept its own wording at 3 segment(s)" in out, out
+    # A paragraph cut from the file takes its wording with it, as a plain
+    # extract does, and is not counted as staying.
+    (tmp_path / "ch1.md").write_bytes(b"# Chapter One\n\nA repeated line.\n")
+    r = _lx(["extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md"], tmp_path, env)
+    out = r.stdout.decode("utf-8")
+    assert r.returncode == 0, r.stderr.decode("utf-8")
+    assert "ch1.md kept its own wording at 2 segment(s)" in out, out
+    assert _lx(["extract", "ch2.md", "--lang", "zh-TW", "--tone", "technical"],
+               tmp_path, env).returncode == 0
+    _apply_to(tmp_path, env, "ch2.md", {"s0001": "技術第二章"}, "human")
+    r = _lx(["extract", "ch2.md", "--lang", "zh-TW", "--from", "novel.md", "--tone",
+             "literary"], tmp_path, env)
+    out = r.stdout.decode("utf-8")
+    assert r.returncode == 0, r.stderr.decode("utf-8")
+    assert "kept its own wording" not in out and "the 1 this document held" in out, out
+
+
+def test_extract_from_answers_a_position_the_chapter_can_only_guess(tmp_path):
+    """The critique's case, with an agent's wording rather than a draft. The
+    chapter's run of identical lines grew by one after it was translated, so for
+    the new member its own alignment can only hand back its last copy — a
+    duplicate. The novel places that exact position. A guess is not what the
+    chapter holds, so the novel's placed wording answers it; the two members
+    the chapter did hold keep the agent's wording, and are named."""
+    env = {**os.environ, "PYTHONPATH": SRC}
+    assert _lx(["init"], tmp_path, env).returncode == 0
+    (tmp_path / "novel.md").write_bytes(b"Head.\n\nA line.\n\nA line.\n\nA line.\n")
+    assert _lx(["extract", "novel.md", "--lang", "zh-TW", "--tone", "literary"],
+               tmp_path, env).returncode == 0
+    _apply_to(tmp_path, env, "novel.md",
+              {"s0001": "頭。", "s0002": "一甲。", "s0003": "一乙。", "s0004": "一丙。"}, "agent")
+    (tmp_path / "ch1.md").write_bytes(b"Head.\n\nA line.\n\nA line.\n")
+    assert _lx(["extract", "ch1.md", "--lang", "zh-TW", "--tone", "literary"],
+               tmp_path, env).returncode == 0
+    _apply_to(tmp_path, env, "ch1.md", {"s0002": "代一。", "s0003": "代二。"}, "agent")
+    (tmp_path / "ch1.md").write_bytes(b"Head.\n\nA line.\n\nA line.\n\nA line.\n")
+    r = _lx(["extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md"], tmp_path, env)
+    out = r.stdout.decode("utf-8")
+    assert r.returncode == 0, r.stderr.decode("utf-8")
+    held = _doc_segments(tmp_path, "ch1.md")
+    assert [held[s]["target"] for s in ("s0002", "s0003", "s0004")] == \
+        ["代一。", "代二。", "一丙。"], held
+    assert "novel.md holds a different one: s0002, s0003." in out, out
+
+
+def _dnt(root, *terms):
+    (root / "config" / "dnt.txt").write_bytes(("\n".join(terms) + "\n").encode("utf-8"))
+
+
+def test_extract_from_keeps_the_chapters_own_wording_where_the_novels_no_longer_fits(tmp_path):
+    """Divergence (24) under `--from`. A do-not-translate term arrived after the
+    novel was translated, so its wording no longer carries the placeholder the
+    segment has; the chapter's own human wording does. The keep path used to
+    write the novel's stale wording over the chapter's and call it kept."""
+    env = _split_project(tmp_path)
+    _dnt(tmp_path, "Alpha")
+    assert _lx(["extract", "ch1.md", "--lang", "zh-TW", "--tone", "literary"],
+               tmp_path, env).returncode == 0
+    _apply_to(tmp_path, env, "ch1.md", {"s0002": "⟦1⟧句。"}, "human")
+    r = _lx(["extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md"], tmp_path, env)
+    assert r.returncode == 0, r.stderr.decode("utf-8")
+    seg = _doc_segments(tmp_path, "ch1.md")["s0002"]
+    assert (seg["target"], seg["origin"]) == ("⟦1⟧句。", "human"), seg
+
+
+def test_a_draft_the_novels_wording_could_not_replace_is_the_one_kept(tmp_path):
+    """Both refused: the novel's wording and the chapter's draft both predate a
+    do-not-translate term. What the segment already held stays — the draft, not
+    the novel's wording, which the rule had only tried first."""
+    env = _split_project(tmp_path)
+    assert _lx(["extract", "ch1.md", "--lang", "zh-TW", "--tone", "literary"],
+               tmp_path, env).returncode == 0
+    _apply_to(tmp_path, env, "ch1.md", {"s0002": "草稿二"}, "llm:draft")
+    _dnt(tmp_path, "Alpha")
+    r = _lx(["extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md"], tmp_path, env)
+    out = r.stdout.decode("utf-8")
+    assert r.returncode == 0, r.stderr.decode("utf-8")
+    seg = _doc_segments(tmp_path, "ch1.md")["s0002"]
+    assert (seg["target"], seg["origin"]) == ("草稿二", "llm:draft"), seg
+    assert "kept a stored target whose placeholders no longer match" in out, out
+    assert "novel.md holds a different one: s0002." in out, out
+
+
+def test_the_memory_never_answers_over_the_chapters_own_wording_under_from(tmp_path):
+    """Divergence (27) under `--from`. The novel never translated this paragraph
+    and the memory holds another wording of it. The chapter's own human wording
+    was never a candidate, so the memory hit was written over it as `tm`."""
+    env = {**os.environ, "PYTHONPATH": SRC}
+    assert _lx(["init"], tmp_path, env).returncode == 0
+    (tmp_path / "novel.md").write_bytes(_SPLIT_DOC)
+    assert _lx(["extract", "novel.md", "--lang", "zh-TW", "--tone", "literary"],
+               tmp_path, env).returncode == 0
+    _apply_to(tmp_path, env, "novel.md", {k: v for k, v in _SPLIT_TARGETS.items()
+                                          if k <= "s0003"}, "agent")
+    (tmp_path / "other.md").write_bytes(b"# Other\n\nBeta sentence.\n")
+    assert _lx(["extract", "other.md", "--lang", "zh-TW", "--tone", "literary"],
+               tmp_path, env).returncode == 0
+    _apply_to(tmp_path, env, "other.md", {"s0001": "別的", "s0002": "別的貝塔句。"}, "agent")
+    assert _lx(["commit", "other.md", "--lang", "zh-TW"], tmp_path, env).returncode == 0
+    (tmp_path / "ch2.md").write_bytes(_SPLIT_CH2)
+    assert _lx(["extract", "ch2.md", "--lang", "zh-TW", "--tone", "literary"],
+               tmp_path, env).returncode == 0
+    _apply_to(tmp_path, env, "ch2.md", {"s0002": "我的貝塔句。"}, "human")
+    assert _lx(["extract", "ch2.md", "--lang", "zh-TW", "--from", "novel.md"],
+               tmp_path, env).returncode == 0
+    seg = _doc_segments(tmp_path, "ch2.md")["s0002"]
+    assert (seg["target"], seg["origin"]) == ("我的貝塔句。", "human"), seg
+
+
+def test_extract_from_lifts_the_origin_of_the_same_words_and_names_it(tmp_path):
+    """The words are the chapter's and are the novel's too, and the novel says a
+    person wrote them. That `origin` comes across — named — and the chapter's own
+    hold stays where its reviewer put it."""
+    env = _split_project(tmp_path)
+    assert _lx(["extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md"],
+               tmp_path, env).returncode == 0
+    assert _lx(["hold", "ch1.md", "--lang", "zh-TW", "--ids", "s0002"],
+               tmp_path, env).returncode == 0
+    _apply_to(tmp_path, env, "novel.md", {"s0002": "阿爾法句。"}, "human")
+    r = _lx(["extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md"], tmp_path, env)
+    out = r.stdout.decode("utf-8")
+    assert r.returncode == 0, r.stderr.decode("utf-8")
+    seg = _doc_segments(tmp_path, "ch1.md")["s0002"]
+    assert (seg["target"], seg["origin"], seg.get("review")) == \
+        ("阿爾法句。", "human", "held"), seg
+    assert "records who wrote it more strongly" in out and "s0002" in out, out
+
+
+def test_extract_from_does_not_put_back_a_waiver_the_chapter_withdrew(tmp_path):
+    """The waiver's half of the lifted-hold case, and the worse one: a waiver
+    moves `lx check`'s exit code, so the novel's copy re-granting it would make
+    the chapter pass a check its reviewer had put back."""
+    env = _split_project(tmp_path)
+    _apply_to(tmp_path, env, "novel.md", {"s0002": "阿發句。"}, "agent")
+    assert _lx(["glossary", "set", "Alpha", "阿爾法", "--severity", "error"],
+               tmp_path, env).returncode == 0
+    assert _lx(["waive", "novel.md", "--lang", "zh-TW", "--ids", "s0002"],
+               tmp_path, env).returncode == 0
+    assert _lx(["extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md"],
+               tmp_path, env).returncode == 0
+    assert "waived" in _doc_segments(tmp_path, "ch1.md")["s0002"], "the carry brings it"
+    assert _lx(["unwaive", "ch1.md", "--lang", "zh-TW", "--ids", "s0002"],
+               tmp_path, env).returncode == 0
+    assert _lx(["extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md"],
+               tmp_path, env).returncode == 0
+    assert "waived" not in _doc_segments(tmp_path, "ch1.md")["s0002"]
+    assert _lx(["check", "ch1.md", "--lang", "zh-TW"], tmp_path, env).returncode == 1
 
 
 # --- the message a missing source gets --------------------------------------

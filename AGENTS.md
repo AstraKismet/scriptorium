@@ -524,7 +524,7 @@ Node — see the invariant below.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 2368 collected, no network. Four are
+python -m pytest -q                 # 2430 collected, no network. Four are
                                     #   conditional on three different things, so
                                     #   which two skip is a property of the machine
                                     #   AND the account: one is POSIX-only, one
@@ -1150,13 +1150,15 @@ own.
   draft is regenerable and a person's sentence is not, and the memory still holds
   what it replaced. Divergence (27), closed 2026-09-01; before it, a `human`
   segment came back as `tm` and stopped being covered by origin precedence, with
-  no collision and no race.
+  no collision and no race. It holds under `--from` too since HANDOFF-066, where
+  the target's own wording had not been a candidate at all and the memory walked
+  around the rule wherever the named document held nothing.
 
   **A carryover can be read out of another document, and that is what a split or
-  a rename needs.** `lx extract NEW --lang L --from OLD` points
-  `store.prior_targets` at `OLD`'s state instead of `NEW`'s; everything below
-  that line is unchanged, so the wording still goes through `translate.accept`
-  and the alignment is still `Carryover.align`'s diff. It exists because the
+  a rename needs.** `lx extract NEW --lang L --from OLD` reads `OLD`'s state
+  beside `NEW`'s own, aligns each against the fresh parse with
+  `Carryover.align`'s diff, and still sends every wording through
+  `translate.accept`. It exists because the
   route this project used to recommend — `lx commit`, then split, then extract —
   is **lossy in two independent ways**, measured 2026-09-04. The memory key
   carries no position and no `doc_id` and `store.load_tm` keeps the *last* record
@@ -1166,15 +1168,45 @@ own.
   reviewer was still working on is not banked at all and returns as `pending`
   with `lx check` at exit 1. The carryover loses neither: it is a diff over a
   position sequence, and `review`, `waived`, `origin` and `target_slots` all ride
-  in the segment `body`. Four refusals guard it, all decidable before anything is
-  read — it is not `--reset`'s companion, it may not name the document being
+  in the segment `body`. Four refusals guard it, all decided before anything is
+  written — it is not `--reset`'s companion, it may not name the document being
   extracted, the named document must have state in this language, and the two
   registers must agree, because `prior_targets` freezes the stored register into
   its keys and a mismatch carries nothing while printing `reused 0`. The register
   is therefore resolved from the source document when neither `--tone` nor the
   target's own state answers, which is what makes the ordinary case — a
-  `literary` novel in a project still configured `technical` — work at all.
-  `docs/decisions.md`, 2026-09-04.
+  `literary` novel in a project still configured `technical` — work at all; and
+  the register refusal says how many translations its own `--tone` remedy would
+  drop, since a register change keeps none of them. `docs/decisions.md`,
+  2026-09-04.
+
+  **What the target already holds stays, and a machine draft is the one thing
+  that gives way.** Until HANDOFF-066 `--from` read `OLD` *instead of* `NEW`: a
+  chapter re-worded after its first carry was reverted, a paragraph `OLD` never
+  translated was emptied, a hold its reviewer had lifted was put back, and the
+  memory answered over a person's wording `OLD` had nothing for — exit 0, nothing
+  printed. `store.carry_candidates` decides each position, and `lx forget`'s
+  carry advice runs the same function, so the advice and the carry cannot come to
+  disagree about the rule — only where the advice cannot see what the carry
+  will: a file edited since its last extract, or a wording the acceptance path
+  will refuse. Where only one side holds wording, it
+  answers. The same rendered words
+  keep `NEW`'s, with `NEW`'s hold and waiver and the stronger `origin` of the two,
+  named. Different words keep `NEW`'s unless `NEW`'s is a machine draft nobody
+  held or waived and `OLD`'s is not a machine's — invariant 9, the rule a memory
+  hit already obeys — and two drafts are a tie that stays with `NEW`; a hold or a
+  waiver protects a draft where `NEW`'s alignment can place it, and where it
+  cannot the mark is dropped, as every re-extract drops it. A position where
+  `NEW`'s own alignment can only hand back a copy of a wording another fresh
+  position also receives — a new member of a run, or the second copy of a moved
+  paragraph: a *guess* (`Carryover.answers`) — is answered by `OLD`'s where that
+  is not itself a guess; a paragraph that merely moved keeps its own. When
+  nothing fits, what `NEW` held is what stays.
+  Every difference is named, and the remedy is re-typing from
+  `lx render OLD -o -`: a chapter re-worded since and a novel revised since are
+  one shape in the state, so no rule can choose between them, and copying a
+  stored string across is how a name was once rendered twice.
+  `docs/decisions.md`, 2026-09-10, "`--from` keeps what the target holds".
 
   Two simpler spellings were built and both were wrong — by segment id, which a
   single insertion defeats and a deletion turns into laundering, and by ordinal
@@ -1226,13 +1258,24 @@ own.
   is `<doc_id>.<lang>.json`, and an unvalidated tag was measured normalizing to
   the project's own `lx.config.json`. No sweep, no dump, no endpoint.
 
-  **A refusal offers `--from` only into a document it is safe to carry into and
-  only where it would help**: one holding nothing the old row lacks — no wording,
-  and no hold, waiver or `human` mark the old row's copy does not also carry —
-  and holding a blocked paragraph untranslated or unmarked. `--from` reads the
-  named document's state instead of the target's own, and offering it on the
-  wording alone reverted a re-worded chapter and dropped a held one's hold,
-  measured. It never tells a person to copy a wording across with `lx apply`.
+  **A refusal offers `--from` only where a carry would reach what it names, and
+  never where it would drop anything**: `store._forget_analysis` runs the carry's
+  own rule, `store.carry_candidates`, position by position over each other
+  document aligned against the old row — never a multiset of copies, which passed
+  a chapter that re-worded one repeated line to the wording the old row holds at
+  the *other* copy. In one register a carry keeps what the target holds, so it is
+  offered wherever it would leave fewer segments blocked, naming the machine
+  drafts it would replace. Across a register line the target's own keys do not
+  align, so the carry — with the `--tone` it needs — is offered only where every
+  paragraph the document translated comes back as the same words with at least
+  its marks, or is a machine draft the old row's wording replaces, and the
+  document is told not to carry where anything else would be emptied, replaced
+  or unmarked — the multiset offered that `--tone` carry
+  over a person's wording too, and run verbatim it overwrote the wording and let
+  the forget pass, measured. The delete decides under the write lock on the
+  blocked list alone; the advice, the half that grows with every document
+  sharing a paragraph, is read after the lock is released.
+  It never tells a person to copy a wording across with `lx apply`.
   Existence of the source is shown to a person — `(no file at this path)` in
   human `lx status` and `lx stats` — and decides nothing anywhere. See
   `docs/decisions.md`, 2026-09-10.
