@@ -775,31 +775,49 @@ class Carryover:
         apart. `lx extract` names them.
         """
         return {sid: (entry, ambiguous)
-                for sid, (entry, ambiguous, _guessed) in self.answers(segments, tone).items()}
+                for sid, (entry, ambiguous, _g, _m) in self.answers(segments, tone).items()}
 
     def answers(self, segments, tone):
-        """:meth:`align`, and for each answer whether it is a *guess*.
+        """:meth:`align`, and two facts about each answer it does not establish.
 
-        ``{seg_id: (entry, ambiguous, guessed)}``. ``guessed`` is true where the
-        diff paired the fresh segment with nothing — or with a prior row holding
-        no translation, at a position it could not establish — so the entry is
-        the last translated one under that key: another position's wording,
-        handed back because it is the best a document alone has. A pair the diff
+        ``{seg_id: (entry, ambiguous, guessed, marked)}``.
+
+        ``guessed`` is true where the key fallback answered — the diff paired the
+        fresh segment with nothing, or with a prior row holding no translation at
+        a position it could not establish — **and the wording it handed back is
+        also another fresh position's**: the prior row it came from was paired
+        with a different segment. That is a new member of a run, answered with a
+        copy of its neighbour. Where that prior row was paired with nothing, the
+        fallback is not a guess at all: the paragraph moved, and the wording is
+        its own and only one. The first spelling of this flag called every
+        fallback a guess, and measured on 2026-09-10 that let `lx extract --from`
+        put the named document's wording over a person's re-wording of a
+        paragraph the author had merely moved — and over *every* paragraph of a
+        target past `ALIGN_BUDGET`, where no pair is made at all. A pair the diff
         made and could not establish is ``ambiguous`` without being ``guessed``,
-        because the wording there was held by *a* member of this run.
+        because the wording there was held by a member of this run.
+
+        ``marked`` is whether the prior row an unestablished answer came from
+        carried a hold or a waiver — which the entry itself no longer does, for
+        the reason given below. `lx extract --from` asks it before letting another
+        document's wording replace a draft: a hold the alignment could not place
+        is still one reviewer's statement that the draft is theirs to finish.
 
         Split out for `lx extract --from`, which holds two documents' answers for
-        one position and has to know which of them is only a guess: measured on
-        2026-09-10, a chapter whose run of identical lines grew answered the new
-        member with its own last copy, a duplicate, over the named document's
-        placed answer for that exact position. :meth:`align` is the projection
-        every other caller reads, so none of them changed.
+        one position. :meth:`align` is the projection every other caller reads,
+        so none of them changed.
         """
         fresh = [(seg["id"], segment_key(seg, tone)) for seg in segments]
         keys = [key for _, key in fresh]
         prior_runs, fresh_runs = _run_positions(self.keys), _run_positions(keys)
+        # Where the key fallback reads from: the last translated prior position
+        # under each key, which is what `by_key[key][-1]` holds.
+        last = {}
+        for i, (key, entry) in enumerate(zip(self.keys, self.entries)):
+            if entry is not None:
+                last[key] = i
 
-        placed, paired = {}, {}
+        placed, paired, claimed = {}, {}, set()
         for i, j, size in self._blocks(keys):
             # Asked of every pair the diff made rather than of the block it
             # arrived in: a block that spans an anchor is not homogeneous, so a
@@ -814,18 +832,21 @@ class Carryover:
                 # has to treat as "the diff paired this with nothing" for the
                 # segments no block reached.
                 paired[sid] = entry
+                claimed.add(i + d)
                 if prior_runs[i + d] == fresh_runs[j + d]:
                     placed[sid] = entry
 
         out = {}
         for sid, key in fresh:
             if sid in placed:
-                out[sid] = (placed[sid], False, False)
+                out[sid] = (placed[sid], False, False, False)
                 continue
             row, guessed = paired.get(sid), False
             if row is None:
                 rows = self.by_key.get(key)
-                row, guessed = (rows[-1], True) if rows else (None, False)
+                row = rows[-1] if rows else None
+                guessed = row is not None and last.get(key) in claimed
+            marked = bool(row and (row[2] or row[3]))
             # Neither `review` nor the waiver survives either branch, and for
             # one reason: both are a reviewer's statement about a *position*, and
             # neither branch could establish one. Carrying a hold in took a
@@ -837,7 +858,7 @@ class Carryover:
             # deleting them to avoid mislabelling them is the trade 2026-08-17
             # refused everywhere else.
             entry = (row[0], row[1], None, False, row[4]) if row else None
-            out[sid] = (entry, entry is not None, guessed)
+            out[sid] = (entry, entry is not None, guessed, marked)
         return out
 
     def _blocks(self, keys):
@@ -939,7 +960,13 @@ def prior_targets(src, lang):
                    if content_hash else None)
             entry = None
             if key is not None and target:
-                held = json.loads(body)
+                # Read the way `_forget_analysis` reads a body: one that is not a
+                # JSON object claims no origin, no hold and no waiver, rather than
+                # ending the command in a traceback. It became reachable from a
+                # carry `lx forget` itself recommends once `--from` read the
+                # target's own rows (HANDOFF-066): the advice judged the body
+                # leniently and offered the carry, and the carry crashed on it.
+                held = _body(body) or {}
                 # The last field is the map this *target* was written against,
                 # which is not the segment's own `slots` whenever a re-parse has
                 # moved under it: `save_doc` rewrites `slots` from the fresh
@@ -1096,13 +1123,15 @@ def _origin_rank(origin):
     return 0 if is_regenerable_origin(origin) else 1
 
 
-def carry_candidates(mine, theirs, same, guessed=False):
+def carry_candidates(mine, theirs, same, guessed=False, marked=False):
     """What `lx extract NEW --from OLD` offers one segment of NEW. ``(candidates, how, keep)``.
 
     ``mine`` is NEW's own entry at this position and ``theirs`` OLD's, each a
     :class:`Carryover` entry or ``None``; ``same`` is whether the two write the
-    same words into the document (:func:`as_written`), and ``guessed`` whether
-    ``mine`` is only a guess where ``theirs`` is not (:meth:`Carryover.answers`).
+    same words into the document (:func:`as_written`), ``guessed`` whether
+    ``mine`` is only a guess where ``theirs`` is not, and ``marked`` whether the
+    row ``mine`` came from carried a hold or a waiver its alignment could not
+    keep (both :meth:`Carryover.answers`).
     ``candidates`` is ``[(entry, kind)]`` in the order they are tried, ``kind``
     being ``"from"`` for OLD's entry and ``"own"`` for NEW's; the first one the
     acceptance path takes wins. ``keep`` is the ``(entry, kind)`` kept when none
@@ -1133,18 +1162,22 @@ def carry_candidates(mine, theirs, same, guessed=False):
       memory hit already obeys: a draft is regenerable, and the person named OLD.
       Two drafts are a tie, and a tie stays with NEW — the newer machine work,
       a polish pass paid for in the chapter, is not reverted to OLD's older one.
-    * **A guess is not what NEW holds.** Where NEW's own alignment paired this
-      position with nothing and handed back the last wording under its key —
-      another position's — OLD's answer is tried first whatever either `origin`
-      says, and the guess stands only where OLD's does not fit. Measured
-      2026-09-10 by the critique of the first version, which protected a
-      person's or an agent's guess: a chapter whose run of identical lines grew
-      by one had the new member answered with the chapter's own last copy, a
-      duplicate, over the named document's placed wording for that exact
-      position — which the carry this replaced had got right. A pair the
-      alignment made and could not establish is not a guess and is judged by
-      the rules above: the wording there was held by a member of this run, and
-      reverting it is the loss the whole rule exists to stop.
+      A draft whose row carried a hold or a waiver is not one nobody held, even
+      where NEW's own alignment could not place the mark and dropped it: the
+      review of the first version measured a held draft in a run that changed
+      size replaced under a line saying held drafts never are.
+    * **A guess is not what NEW holds.** Where NEW's own alignment could only
+      hand back a copy of another position's wording — a new member of a run —
+      OLD's answer is tried first whatever either `origin` says, and the guess
+      stands only where OLD's does not fit. Measured 2026-09-10 by the critique
+      of the first version, which protected a person's or an agent's guess: a
+      chapter whose run of identical lines grew by one had the new member
+      answered with the chapter's own last copy, a duplicate, over the named
+      document's placed wording for that exact position — which the carry this
+      replaced had got right. What is *not* a guess is decided by
+      :meth:`Carryover.answers`, and the review of the first version is why it
+      is narrow: a paragraph that moved answers with its own and only wording,
+      and calling that a guess put OLD's wording over a person's.
     * **When nothing fits, what NEW held stays** — divergence (24)'s rule: a
       refusal does not delete what the segment already held. So ``keep`` is
       NEW's own entry wherever NEW held one, even where OLD's was tried first,
@@ -1173,7 +1206,7 @@ def carry_candidates(mine, theirs, same, guessed=False):
             lifted = (mine[0], theirs[1], mine[2], mine[3], mine[4])
             return [(lifted, "own")], "origin", (lifted, "own")
         return [(mine, "own")], None, (mine, "own")
-    if (not mine[2] and not mine[3]
+    if (not mine[2] and not mine[3] and not marked
             and _origin_rank(mine[1]) == 0 and _origin_rank(theirs[1]) > 0):
         return [(theirs, "from"), (mine, "own")], "took", (mine, "own")
     return [(mine, "own")], "differs", (mine, "own")
@@ -1756,8 +1789,16 @@ def _other_labels(conn, lang, skip):
     return out
 
 
-def _forget_analysis(conn, did, lang, tone, render=None):
+def _forget_analysis(conn, did, lang, tone, render=None, advise=True):
     """What forgetting ``(did, lang)`` would lose. ``dict``; read on ``conn``.
+
+    ``advise`` asks for the ``carry`` list as well — where a carry could go and
+    whether it is safe to — which is the expensive half: it runs the carry's own
+    rule over every document sharing a paragraph with a blocked one. The review
+    of HANDOFF-066 measured it at four times the old cost with a hundred such
+    chapters, so the delete asks without it under the write lock and the advice
+    is read after the lock is released; `lx extract --from`'s note needs only the
+    count and never asks.
 
     **The question is the harm, not the population.** A row may go when every
     translation it holds is also held by some other row in the same language —
@@ -1802,8 +1843,10 @@ def _forget_analysis(conn, did, lang, tone, render=None):
       person or an agent wrote, and this now asks it rather than a multiset,
       which a chapter re-wording one repeated line to the wording held at the
       other copy passed while the carry reverted it. *Safe* is that nothing the
-      document holds is replaced or loses a mark; *offered* is safe and leaving
-      this row blocking on fewer segments. A register that differs does not
+      document holds but a machine draft nobody held or waived is replaced or
+      loses a mark — the drafts it would replace are listed, and named in the
+      offer; *offered* is safe and leaving this row blocking on fewer segments.
+      A register that differs does not
       make a carry unsafe by itself — it makes the command need `--tone`, which
       ``same_register`` says, and under it the document's own wording does not
       align, so it is safe only where what comes back from this row is what it
@@ -1960,9 +2003,17 @@ def _forget_analysis(conn, did, lang, tone, render=None):
     # carry runs in this row's register — and then the document's own entries do
     # not align at all, every position answers from here, and whatever it held
     # is compared against what comes back. What it does not model: a memory hit,
-    # which can only fill, and a wording the acceptance path would refuse, where
-    # the carry keeps the other candidate — both make the prediction more
-    # cautious than the carry, never less.
+    # which can only fill, and a wording the acceptance path would refuse. The
+    # second is not always the cautious direction: where this row's wording would
+    # replace a machine draft and a do-not-translate term added since makes the
+    # acceptance path refuse it, the carry keeps the draft, the offer said it
+    # would not, and running it leaves the refusal — and the offer — as they were.
+    # Nothing is lost, and the offer names the drafts it would replace; the loop
+    # is recorded rather than modelled, because modelling it means the
+    # acceptance path, which lives above this module.
+    if not advise:
+        return {"segments": len(victim), "translated": sum(mine.values()),
+                "blocked": blocked, "carry": []}
     hash_of = {seg_id: h for seg_id, h, *_rest in victim}
     involved = {o for c in blocked for o, _w in holding.get(hash_of[c["id"]], [])}
     carry, old = [], Carryover(old_keys, old_entries, old_by_key)
@@ -2073,20 +2124,30 @@ def forget_doc(src, lang, discard=False, render=None):
                     f"than the {STATE_VERSION} this build reads, so this build cannot tell "
                     f"what forgetting it would lose — upgrade scriptorium to forget it. "
                     f"Nothing was deleted.")
-            out.update(_forget_analysis(conn, did, lang, tone, render))
-            if out["blocked"] and not discard:
-                out["refused"] = "wording"
+            # Under the lock, only what decides whether the rows go.
+            out.update(_forget_analysis(conn, did, lang, tone, render, advise=False))
+            if not out["blocked"] or discard:
+                conn.execute("DELETE FROM segments WHERE doc_id=? AND lang=?", (did, lang))
+                conn.execute("DELETE FROM nodes WHERE doc_id=? AND lang=?", (did, lang))
+                conn.execute("DELETE FROM documents WHERE doc_id=? AND lang=?", (did, lang))
                 return out
-            conn.execute("DELETE FROM segments WHERE doc_id=? AND lang=?", (did, lang))
-            conn.execute("DELETE FROM nodes WHERE doc_id=? AND lang=?", (did, lang))
-            conn.execute("DELETE FROM documents WHERE doc_id=? AND lang=?", (did, lang))
-            return out
+            out["refused"] = "wording"
+        # Refused, and nothing was written. Where a carry would help is advice —
+        # the same read `forget_blockers` makes without a lock — and it is the
+        # half that grows with every document sharing a paragraph, so it is taken
+        # after the lock is released rather than while every other writer waits
+        # on `BUSY_TIMEOUT`.
+        out["carry"] = _forget_analysis(conn, did, lang, tone, render)["carry"]
+        return out
     finally:
         conn.close()
 
 
-def forget_blockers(src, lang, render=None):
+def forget_blockers(src, lang, render=None, advise=True):
     """:func:`_forget_analysis` for a stored row, read-only. ``None`` if there is none.
+
+    ``advise=False`` skips the carry list, which `lx extract --from`'s note never
+    reads and which is the expensive half.
 
     Advice rather than a guard: `lx extract --from` prints whether the document
     it carried from could now be forgotten without loss, which is the moment a
@@ -2105,7 +2166,8 @@ def forget_blockers(src, lang, render=None):
         doc = _read_meta(conn, src, lang)
         if doc is None:
             return None
-        found = _forget_analysis(conn, doc_id(src), lang, doc.get("tone"), render)
+        found = _forget_analysis(conn, doc_id(src), lang, doc.get("tone"), render,
+                                 advise=advise)
         return dict(found, source=doc.get("source"))
     finally:
         conn.close()

@@ -810,27 +810,35 @@ def test_the_register_refusal_says_what_its_own_remedy_drops(tmp_path):
     r = _lx(["extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md"], tmp_path, env)
     err = r.stderr.decode("utf-8")
     assert r.returncode == 2, err
-    assert "would not be in it any more" not in err, "it holds nothing to drop"
+    assert "would carry over" not in err, "it holds nothing to drop"
     _apply_to(tmp_path, env, "ch1.md", {"s0001": "技術第一章"}, "human")
     r = _lx(["extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md"], tmp_path, env)
     err = r.stderr.decode("utf-8")
     assert r.returncode == 2, err
     assert "--tone literary" in err, err
-    assert "the 1 it holds would not be in it any more" in err, err
+    assert "none of the 1 it holds would carry over" in err, err
     assert _doc_segments(tmp_path, "ch1.md")["s0001"]["target"] == "技術第一章"
 
 
 def test_extract_from_says_what_the_document_already_held_stays(tmp_path):
     """The carried-from line used to say only what came across. Into a chapter
-    that already held work it now says that work stayed — and never across a
-    register change, where none of it did."""
+    that already held work it now says how many segments kept it — counted where
+    it landed, so never across a register change, where none of it did, and
+    never counting a paragraph the file lost."""
     env = _split_project(tmp_path)
     assert _lx(["extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md"],
                tmp_path, env).returncode == 0
     r = _lx(["extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md"], tmp_path, env)
     out = r.stdout.decode("utf-8")
     assert r.returncode == 0, r.stderr.decode("utf-8")
-    assert "What ch1.md already held — 3 translation(s) — stays" in out, out
+    assert "ch1.md kept its own wording at 3 segment(s)" in out, out
+    # A paragraph cut from the file takes its wording with it, as a plain
+    # extract does, and is not counted as staying.
+    (tmp_path / "ch1.md").write_bytes(b"# Chapter One\n\nA repeated line.\n")
+    r = _lx(["extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md"], tmp_path, env)
+    out = r.stdout.decode("utf-8")
+    assert r.returncode == 0, r.stderr.decode("utf-8")
+    assert "ch1.md kept its own wording at 2 segment(s)" in out, out
     assert _lx(["extract", "ch2.md", "--lang", "zh-TW", "--tone", "technical"],
                tmp_path, env).returncode == 0
     _apply_to(tmp_path, env, "ch2.md", {"s0001": "技術第二章"}, "human")
@@ -838,7 +846,7 @@ def test_extract_from_says_what_the_document_already_held_stays(tmp_path):
              "literary"], tmp_path, env)
     out = r.stdout.decode("utf-8")
     assert r.returncode == 0, r.stderr.decode("utf-8")
-    assert "already held" not in out and "the 1 this document held" in out, out
+    assert "kept its own wording" not in out and "the 1 this document held" in out, out
 
 
 def test_extract_from_answers_a_position_the_chapter_can_only_guess(tmp_path):

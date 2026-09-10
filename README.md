@@ -136,7 +136,7 @@ mean the translation is good; that is what review is for.
 |---|---|
 | `lx init` | scaffold config and state |
 | `lx extract SRC --lang L` | parse to segments, mask markup, reuse translation memory (`--tone literary` for prose) |
-| `lx extract SRC --lang L --from OLD` | carry another tracked document's translations across, holds and waivers included — what a split or a renamed file needs. What SRC already holds stays |
+| `lx extract SRC --lang L --from OLD` | carry another tracked document's translations across, holds and waivers included — what a split or a renamed file needs. What SRC already holds stays, except a machine draft nobody held or waived |
 | `lx forget SRC --lang L` | remove one document's state row — what a split or a renamed file leaves behind. Refuses while any translation in it is held by no other tracked document, and names each one (`--discard-wording` to drop exactly those). Never touches the translation memory, the rendered output or the source file |
 | `lx todo SRC --lang L` | pending segments as JSON, for an agent to translate |
 | `lx terms SRC --lang L` | propose glossary rows from the source text (`--append` to add them) |
@@ -475,14 +475,15 @@ and the placeholder map each wording was written against all come across, becaus
 they live with the segment.
 
 Running it again on a chapter you have worked on since is safe. What the chapter
-already holds stays — a sentence you re-worded, a paragraph `novel.md` never
-translated, a hold you lifted — and `novel.md`'s wording goes only where the
-chapter holds nothing, or only a machine draft nobody held or waived. Every
-segment where the two still differ is named, and so is every draft that gave
-way. Where `novel.md` has the better wording — you revised the novel after the
-split — read it with `lx render novel.md --lang zh-TW -o -` and re-type it in the
-chapter: the state cannot tell a chapter re-worded since from a novel revised
-since, so the command never guesses which you meant.
+already holds stays — a sentence you re-worded, a paragraph you translated that
+`novel.md` never did — and a hold you lifted on one of those is not put back.
+`novel.md`'s wording goes only where the chapter holds nothing, or only a machine
+draft — a model's, or one the translation memory filled in — that nobody held or
+waived. Every segment where the two still differ is named, and so is every
+draft that gave way. If you revised `novel.md` after the split and its wording
+is now the better one, read it with `lx render novel.md --lang zh-TW -o -` and
+re-type it in the chapter: the state cannot tell a chapter re-worded since from
+a novel revised since, so the command never guesses which you meant.
 
 **Use `--from` rather than committing first.** `lx commit` followed by a plain
 `lx extract` mostly works and quietly loses two things. The translation memory is
@@ -533,12 +534,13 @@ somewhere else too. Where one is not, it refuses and says where each one is —
 untranslated in `ch2.md` because that chapter was extracted without `--from`,
 re-worded in `ch1.md` since the carry, or in no other document because a chapter
 has not been extracted yet. It offers `lx extract <chapter> --from novel.md`
-wherever that carry would take care of some of them — a carry keeps what the
-chapter already has, so that is any chapter in the same register, and the offer
-names the machine drafts it would replace. A chapter in another register would
-lose what it holds to the `--tone` the carry needs, so there it tells you not
-to. `--discard-wording` forgets it anyway and drops exactly the segments the
-refusal named.
+wherever that carry would take care of some of them without losing anything. In
+the same register a carry keeps what the chapter already has, so every such
+chapter qualifies, and the offer names the machine drafts it would replace. A
+chapter in another register keeps none of its own wording under the `--tone` the
+carry needs, so it is offered the carry — `--tone` included — only where it
+holds nothing but machine drafts, and told not to otherwise. `--discard-wording`
+forgets it anyway and drops exactly the segments the refusal named.
 
 It asks for the document spelled the way `lx status` shows it. Two paths can
 share one state row — `docs/guide.md` and `docs_guide.md` do — and forgetting
@@ -757,7 +759,7 @@ that lost.
 ## Development
 
 ```bash
-python -m pytest -q                # 2390 collected, no network
+python -m pytest -q                # 2426 collected, no network
 python -m ruff check src tests
 ```
 
