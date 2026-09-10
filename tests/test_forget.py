@@ -403,15 +403,24 @@ def test_a_chapter_reworded_after_its_carry_is_refused_and_never_offered_a_carry
     """The case every design scored as rare and the critique showed is the
     common one: the double count is noticed after the chapters have been worked
     on. Offering `--from` here is what reverted the re-wording when it was
-    measured, so the message has to say not to."""
+    measured on 2026-09-10, so the message said not to.
+
+    Since HANDOFF-066 the carry keeps the re-wording, which changes the reason
+    and not the answer: a carry into ch1 would reach nothing the refusal is
+    about, so it is still not offered — and warning against it would now be
+    false, so that line is gone. Running it anyway is the proof."""
     _book(project, capsys)
     _carry(capsys, "ch1.md", "ch2.md")
     _apply(project, capsys, "ch1.md", {"s0002": "改寫過的第二段。"})
     code, _out, err = _lx(capsys, "forget", "novel.md", "--lang", "zh-TW")
     assert code == 2, err
     assert "s0002 — ch1.md holds a different wording" in err, err
-    assert "do not carry into ch1.md" in err and "(s0002)" in err, err
-    assert "lx extract ch1.md" not in err, "the carry would revert the re-wording"
+    assert "lx extract ch1.md" not in err, "a carry would reach nothing it names"
+    assert "do not carry into ch1.md" not in err, "a carry no longer endangers it"
+    _carry(capsys, "ch1.md")
+    [(target,)] = statedb._query(
+        project, "SELECT target FROM segments WHERE doc_id='ch1.md' AND seg_id='s0002'")
+    assert target == "改寫過的第二段。"
 
 
 def test_a_wording_the_memory_route_lost_is_named(project, capsys):
@@ -531,13 +540,17 @@ def _one_paragraph(project, capsys, paragraph, wording, origin="human", dnt=None
     (project / "novel.md").unlink()
 
 
-def test_a_carry_that_would_drop_a_hold_and_a_persons_mark_is_never_offered(
+def test_a_carry_that_used_to_drop_a_hold_and_a_persons_mark_now_keeps_both(
         project, capsys):
     """The carry a refusal called safe replaced a held, human wording with the
     old row's draft of the same words, and the forget that followed then passed:
-    the hold and the `human` were gone and nothing had said so. A document is
-    safe only where every segment it holds is matched here with at least its
-    marks, not merely its words."""
+    the hold and the `human` were gone and nothing had said so. The 2026-09-10
+    answer was never to offer it.
+
+    HANDOFF-066 removed the loss rather than the offer: the same words at the
+    same position are the chapter's, marks and all. So the carry is offered —
+    it fills the paragraph ch1 never translated — and running it exactly as
+    printed leaves s0001 human and held, after which the forget passes."""
     _ok(capsys, "init")
     _write(project, "novel.md", ["First.", "Second."])
     _ok(capsys, "extract", "novel.md", "--lang", "zh-TW")
@@ -551,8 +564,15 @@ def test_a_carry_that_would_drop_a_hold_and_a_persons_mark_is_never_offered(
     code, _out, err = _lx(capsys, "forget", "novel.md", "--lang", "zh-TW")
     assert code == 2, err
     assert "s0002 — translated here, untranslated in ch1.md" in err, err
-    assert "lx extract ch1.md" not in err, "the carry would drop the hold and the human"
-    assert "do not carry into ch1.md" in err and "(s0001)" in err, err
+    assert "do not carry into ch1.md" not in err, err
+    command = "lx extract ch1.md --lang zh-TW --from novel.md"
+    assert f"`{command}`" in err, err
+    _ok(capsys, *command.split()[1:])
+    [(target, body)] = statedb._query(
+        project, "SELECT target, body FROM segments WHERE doc_id='ch1.md' AND seg_id='s0001'")
+    found = json.loads(body)
+    assert (target, found.get("origin"), found.get("review")) == ("第一。", "human", "held")
+    _ok(capsys, "forget", "novel.md", "--lang", "zh-TW")
 
 
 def test_a_renumbered_placeholder_is_still_the_same_wording(project, capsys):
@@ -675,12 +695,14 @@ def test_a_changed_normalization_is_not_a_different_wording(project, capsys):
     _ok(capsys, "forget", "novel.md", "--lang", "zh-TW")
 
 
-def _one_mark(project, capsys, victim_origin, mark):
+def _one_mark(project, capsys, victim_origin, mark, novel_tone=None):
     """`novel.md` with two translated paragraphs; `ch1.md` the same text, holding
-    the first wording with one mark the old row's copy lacks, the second not at all."""
+    the first wording with one mark the old row's copy lacks, the second not at all.
+    ``novel_tone`` freezes the novel in another register than the chapter's."""
     _ok(capsys, "init")
     _write(project, "novel.md", ["First.", "Second."])
-    _ok(capsys, "extract", "novel.md", "--lang", "zh-TW")
+    _ok(capsys, "extract", "novel.md", "--lang", "zh-TW",
+        *(("--tone", novel_tone) if novel_tone else ()))
     _apply(project, capsys, "novel.md", {"s0001": "第一。", "s0002": "第二。"},
            origin=victim_origin)
     _write(project, "ch1.md", ["First.", "Second."])
@@ -706,14 +728,68 @@ def _one_mark(project, capsys, victim_origin, mark):
     ("human", "held"),     # only the hold differs
     ("human", "waived"),   # only the waiver differs
 ])
-def test_each_mark_alone_makes_a_carry_unsafe(project, capsys, victim_origin, mark):
-    """One mark at a time, so no guard is covered only by another one firing."""
-    _one_mark(project, capsys, victim_origin, mark)
+def test_each_mark_alone_makes_a_carry_across_registers_unsafe(
+        project, capsys, victim_origin, mark):
+    """One mark at a time, so no guard is covered only by another one firing.
+
+    Across a register line since HANDOFF-066. In one register a carry keeps
+    what the chapter holds, marks and all, so no mark makes it unsafe — the test
+    below runs that carry. The `--tone` a carry into another register needs
+    freezes the chapter's own keys out of alignment, so what lands there is the
+    novel's copy and whatever mark the chapter's carried is gone: each one alone
+    still decides it."""
+    _one_mark(project, capsys, victim_origin, mark, novel_tone="literary")
     code, _out, err = _lx(capsys, "forget", "novel.md", "--lang", "zh-TW")
     assert code == 2, err
     assert "s0002 — translated here, untranslated in ch1.md" in err, err
     assert "do not carry into ch1.md" in err and "(s0001)" in err, err
     assert "lx extract ch1.md" not in err, err
+
+
+@pytest.mark.parametrize("victim_origin,mark", [
+    ("llm:draft", None), ("human", "held"), ("human", "waived")])
+def test_an_offered_carry_run_verbatim_keeps_every_mark_the_chapter_had(
+        project, capsys, victim_origin, mark):
+    """HANDOFF-066: `--from` keeps the chapter's own words and marks where the two
+    documents hold the same words, so the carry the three tests above are
+    refused across a register line is offered within one — and the claim of
+    offering it is that running it as printed loses nothing, which is asserted
+    here rather than read."""
+    _one_mark(project, capsys, victim_origin, mark)
+    code, _out, err = _lx(capsys, "forget", "novel.md", "--lang", "zh-TW")
+    assert code == 2, err
+    command = "lx extract ch1.md --lang zh-TW --from novel.md"
+    assert f"`{command}`" in err, err
+    _ok(capsys, *command.split()[1:])
+    [(target, body)] = statedb._query(
+        project, "SELECT target, body FROM segments WHERE doc_id='ch1.md' AND seg_id='s0001'")
+    found = json.loads(body)
+    assert (target, found.get("origin")) == ("第一。", "human"), found
+    assert bool(found.get("review")) == (mark == "held"), found
+    assert (found.get("waived") == store.target_token(target)) == (mark == "waived"), found
+    _ok(capsys, "forget", "novel.md", "--lang", "zh-TW")
+
+
+def test_a_carry_that_would_revert_a_position_is_never_offered(project, capsys):
+    """Multiset is not position. ch1 sits in the configured register holding a
+    person's wording of its repeated line — the wording novel.md holds at the
+    *other* copy — so the multiset test called a `--tone literary` carry safe;
+    run, it put novel.md's wording of this copy over the person's and the forget
+    that followed passed. The advice now runs the carry's own rule, position by
+    position."""
+    _ok(capsys, "init")
+    _write(project, "novel.md", SPLIT)
+    _ok(capsys, "extract", "novel.md", "--lang", "zh-TW", "--tone", "literary")
+    _apply(project, capsys, "novel.md", SPLIT_WORDING)
+    _write(project, "ch1.md", SPLIT[:3])
+    _write(project, "ch2.md", SPLIT[3:])
+    _ok(capsys, "extract", "ch1.md", "--lang", "zh-TW")
+    _apply(project, capsys, "ch1.md", {"s0003": "重複的一行乙"})
+    _carry(capsys, "ch2.md")
+    code, _out, err = _lx(capsys, "forget", "novel.md", "--lang", "zh-TW")
+    assert code == 2, err
+    assert "lx extract ch1.md" not in err, err
+    assert "do not carry into ch1.md" in err and "(s0003)" in err, err
 
 
 def test_one_persons_copy_elsewhere_keeps_the_record(project, capsys):
@@ -749,7 +825,13 @@ def test_a_carry_is_not_offered_where_a_wording_is_held_more_often_than_here(
         project, capsys):
     """Each copy in the old row can answer for one segment of the target, not
     for every segment that shares its wording: ch1 made a repeated line
-    consistent after its carry, and a carry would put the other wording back."""
+    consistent after its carry, which a multiset of the old row's copies calls
+    matched and a positional carry used to put back.
+
+    Since HANDOFF-066 the carry keeps it, so the answer is the same and the
+    reason is not: nothing a carry into ch1 would do reaches what the refusal
+    names, and there is nothing left to warn about. The carry run anyway keeps
+    the consistent line."""
     _ok(capsys, "init")
     _write(project, "novel.md", ["A line.", "Middle.", "A line.", "Tail."])
     _ok(capsys, "extract", "novel.md", "--lang", "zh-TW", "--tone", "literary")
@@ -760,8 +842,12 @@ def test_a_carry_is_not_offered_where_a_wording_is_held_more_often_than_here(
     _apply(project, capsys, "ch1.md", {"s0003": "一行甲。"})
     code, _out, err = _lx(capsys, "forget", "novel.md", "--lang", "zh-TW")
     assert code == 2, err
-    assert "do not carry into ch1.md" in err and "(s0003)" in err, err
     assert "lx extract ch1.md" not in err, err
+    assert "do not carry into ch1.md" not in err, err
+    _carry(capsys, "ch1.md")
+    [(target,)] = statedb._query(
+        project, "SELECT target FROM segments WHERE doc_id='ch1.md' AND seg_id='s0003'")
+    assert target == "一行甲。"
 
 
 def test_a_carried_book_longer_than_one_chunk_is_forgotten(project, capsys):
