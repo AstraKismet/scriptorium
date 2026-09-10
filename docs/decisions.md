@@ -54,12 +54,13 @@ with the novel's wording of the other copy — and the forget that followed pass
 forget` already made — so a renumbered `⟦n⟧` or a stripped U+3000 indent is the
 same wording and one string naming two different terms is not. A *guess* is
 where `NEW`'s own alignment could only hand back a copy of a wording another
-fresh position also receives — a new member of a run of identical lines. A
-paragraph that merely moved is not one: its key fallback hands back its own and
-only wording. `Carryover.answers` says which answers are guesses, and whether
-the row an unplaced answer came from carried a hold or a waiver the alignment
-had to drop — a draft so marked is not one nobody held. `align` became the
-projection of `answers`, so no other caller changed. When every candidate is
+fresh position also receives — a new member of a run of identical lines, or the
+second copy of a paragraph that moved and now comes twice. A paragraph that
+merely moved is not one: its key fallback hands back its own wording, to the
+first copy that asks. `Carryover.answers` says which answers are guesses, and
+`align` became its projection, so no other caller changed. A hold or a waiver
+protects a draft where `NEW`'s alignment can place it; where a changed file
+leaves the position unplaced the mark is dropped, as every re-extract drops it. When every candidate is
 refused, what `NEW` held stays — `OLD`'s only where `NEW` held nothing or a
 guess — and the memory competes only with what would otherwise stay, which is
 divergence (27)'s rule asked of the right entry.
@@ -128,10 +129,13 @@ in a rule the critique had just added:
   kept it — and past `ALIGN_BUDGET`, where the diff makes no pair at all, every
   position of the target went the same way. A guess is now only a wording another
   fresh position also receives.
-- **A hold the alignment could not place still counts.** In a run that changed
-  size the alignment drops a hold, as a plain extract does, and the draft then
-  read as one nobody held and was replaced, under a line saying held drafts never
-  are.
+- **A held draft the alignment could not place was replaced under a line saying
+  held drafts never are.** The second commit protected it by remembering the
+  dropped hold, and the third review measured that guard firing once: the draft
+  was written back unheld, as every re-extract writes it, so the next carry
+  replaced it anyway. Keeping the mark would have meant placing a hold where
+  2026-09-08 refuses to, so the guard is gone and the line now says what is
+  true — a hold protects only where the chapter's own state can place it.
 - **An empty stored register is the default, under `--from`.** Found by the
   mutation lane, because a mutant that deleted a truthiness test was the correct
   code: `lx config set tone ""` is accepted, `canonical_tone` folds `""` onto the
@@ -154,20 +158,34 @@ in a rule the critique had just added:
 The mutation lane planted fifty-six further defects: the existing suite caught
 seventeen, its new tests — `tests/test_carry.py` — caught thirty-seven more, one
 was equivalent, and one was the empty-register defect above. Thirteen more went
-into the guards this round added, one each and each asserted to have landed:
-eleven were run as mutants and caught — two of them, the write lock held for the
-advice and `lx extract` asking for advice it never reads, change no output and
-are caught by a test that pins what the calls look like — and the other two, the
-capped id list and the offer without "where it fits", are the first version's
-own code, on which the tests that pin them fail.
+in around the second commit's changes, each asserted to have landed, and all
+thirteen were caught — two of them, the write lock held for the advice and
+`lx extract` asking for advice it never reads, change no output and are caught
+by a test that pins what the calls look like.
+
+A third review read the second commit and found, besides the guard above: the
+second copy of a moved paragraph answered with the first's wording, putting a
+person's `origin` where nobody wrote; the *named* document's empty register read
+raw, so a first carry out of a novel frozen `""` was refused naming `--tone `
+with nothing after it — older than this package; a carry that rewrote the
+document's stored register to its canonical spelling; and three sentences that
+said more than was true — the register refusal and the register line under
+`--from`, where the named document or the memory may bring the same words back,
+and the cross-register offer, which the two READMEs and this entry each stated
+differently from the code. All are fixed, each with a test that fails on the
+commit before; five mutants over the new guards were caught.
 
 ### `lx forget`'s carry advice asks the carry's rule
 
 `_forget_analysis` aligns the old row against each other document's stored
-segments and runs `carry_candidates` position by position. *Safe* is that nothing
-the document holds but a machine draft nobody held or waived is replaced or
-loses a mark — the drafts are listed, and the offer names them; *offered* is
-safe and leaving the old row blocking on fewer segments. The multiset it
+segments and runs `carry_candidates` position by position. *Safe* is that
+nothing the document holds is emptied, replaced or unmarked, except a machine
+draft nobody held or waived that the old row's wording replaces — the drafts
+are listed, and the offer names them, capped as every line of a refusal is;
+*offered* is safe and leaving the old row blocking on fewer segments. Across a
+register line none of the document's own entries align, so it is safe only
+where every paragraph it translated comes back as the same words with at least
+its marks, or is such a draft. The multiset it
 replaces passed a chapter that re-worded one repeated line to the wording held
 at the other copy, and it is what offered the register-crossing carry above.
 
@@ -178,8 +196,9 @@ a register line, where it still holds.
 
 **The delete decides under the lock and the advice is read after it.** The
 simulation is the half of the analysis that grows with every document sharing a
-paragraph, and the review measured `lx forget` at four times the old wall time
-with a hundred such chapters — all of it under `BEGIN IMMEDIATE`, where every
+paragraph, and a review lane measured `lx forget` at 4.0–4.5 s of wall time
+against 0.7–1.1 s with a hundred such chapters — its numbers, not re-measured
+here — all of it under `BEGIN IMMEDIATE`, where every
 other writer waits on a five-second `BUSY_TIMEOUT`. So `forget_doc` asks for the
 blocked list alone inside the transaction and, having refused and written
 nothing, reads the advice outside it; `lx extract --from`'s note needs only the

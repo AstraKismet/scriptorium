@@ -476,7 +476,8 @@ they live with the segment.
 
 Running it again on a chapter you have worked on since is safe. What the chapter
 already holds stays — a sentence you re-worded, a paragraph you translated that
-`novel.md` never did — and a hold you lifted on one of those is not put back.
+`novel.md` never did — and no hold or waiver you lifted is put back on wording
+the chapter keeps.
 `novel.md`'s wording goes only where the chapter holds nothing, or only a machine
 draft — a model's, or one the translation memory filled in — that nobody held or
 waived. Every segment where the two still differ is named, and so is every
@@ -538,8 +539,10 @@ wherever that carry would take care of some of them without losing anything. In
 the same register a carry keeps what the chapter already has, so every such
 chapter qualifies, and the offer names the machine drafts it would replace. A
 chapter in another register keeps none of its own wording under the `--tone` the
-carry needs, so it is offered the carry — `--tone` included — only where it
-holds nothing but machine drafts, and told not to otherwise. `--discard-wording`
+carry needs, so it is offered the carry — `--tone` included — only where every
+paragraph it translated would come back as the same words with the same marks,
+or is a machine draft `novel.md`'s wording replaces, and told not to otherwise.
+`--discard-wording`
 forgets it anyway and drops exactly the segments the refusal named.
 
 It asks for the document spelled the way `lx status` shows it. Two paths can
@@ -759,7 +762,7 @@ that lost.
 ## Development
 
 ```bash
-python -m pytest -q                # 2426 collected, no network
+python -m pytest -q                # 2430 collected, no network
 python -m ruff check src tests
 ```
 

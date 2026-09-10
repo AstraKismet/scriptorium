@@ -787,7 +787,9 @@ def test_the_register_line_under_from_counts_the_documents_own_translations(tmp_
     out = r.stdout.decode("utf-8")
     assert r.returncode == 0, r.stderr.decode("utf-8")
     assert "the register moved from technical to literary" in out, out
-    assert "the 1 this document held are not in it any more" in out, out
+    # Under `--from` the line does not say they are gone: the named document or
+    # the memory may bring the same words back, as their copy.
+    assert "none of the 1 this document held carried over" in out, out
 
 
 def test_the_register_line_is_not_printed_for_a_document_that_held_nothing(tmp_path):

@@ -775,37 +775,43 @@ class Carryover:
         apart. `lx extract` names them.
         """
         return {sid: (entry, ambiguous)
-                for sid, (entry, ambiguous, _g, _m) in self.answers(segments, tone).items()}
+                for sid, (entry, ambiguous, _g) in self.answers(segments, tone).items()}
 
     def answers(self, segments, tone):
-        """:meth:`align`, and two facts about each answer it does not establish.
+        """:meth:`align`, and for each answer whether it is only a *guess*.
 
-        ``{seg_id: (entry, ambiguous, guessed, marked)}``.
+        ``{seg_id: (entry, ambiguous, guessed)}``.
 
         ``guessed`` is true where the key fallback answered — the diff paired the
         fresh segment with nothing, or with a prior row holding no translation at
         a position it could not establish — **and the wording it handed back is
         also another fresh position's**: the prior row it came from was paired
-        with a different segment. That is a new member of a run, answered with a
-        copy of its neighbour. Where that prior row was paired with nothing, the
-        fallback is not a guess at all: the paragraph moved, and the wording is
-        its own and only one. The first spelling of this flag called every
-        fallback a guess, and measured on 2026-09-10 that let `lx extract --from`
-        put the named document's wording over a person's re-wording of a
-        paragraph the author had merely moved — and over *every* paragraph of a
-        target past `ALIGN_BUDGET`, where no pair is made at all. A pair the diff
-        made and could not establish is ``ambiguous`` without being ``guessed``,
-        because the wording there was held by a member of this run.
-
-        ``marked`` is whether the prior row an unestablished answer came from
-        carried a hold or a waiver — which the entry itself no longer does, for
-        the reason given below. `lx extract --from` asks it before letting another
-        document's wording replace a draft: a hold the alignment could not place
-        is still one reviewer's statement that the draft is theirs to finish.
+        with a different segment, or an earlier fresh segment already took it by
+        the same fallback. That is a new member of a run, or a second copy of a
+        paragraph, answered with a copy of a wording some other position has.
+        The first fresh segment to take an unpaired row is not guessing: the
+        paragraph moved, and the wording is its own. The first spelling of this
+        flag called every fallback a guess, and measured on 2026-09-10 that let
+        `lx extract --from` put the named document's wording over a person's
+        re-wording of a paragraph the author had merely moved — and over *every*
+        paragraph of a target past `ALIGN_BUDGET`, where no pair is made at all.
+        The second counted only rows the diff had paired, so a paragraph moved
+        *and* repeated answered both copies with its own wording and the second
+        put a person's `origin` where no person wrote. A pair the diff made and
+        could not establish is ``ambiguous`` without being ``guessed``, because
+        the wording there was held by a member of this run.
 
         Split out for `lx extract --from`, which holds two documents' answers for
         one position. :meth:`align` is the projection every other caller reads,
         so none of them changed.
+
+        *Lost:* reporting whether the row an unplaced answer came from carried a
+        hold or a waiver, so that `--from` could protect a draft the alignment
+        had unheld. Built, and the next review measured it firing once: the entry
+        is written back without the mark — the rule below, which a plain extract
+        follows too — so the next carry saw a draft nobody held. Keeping it would
+        have meant carrying the hold into a position this rule refuses to place
+        it in.
         """
         fresh = [(seg["id"], segment_key(seg, tone)) for seg in segments]
         keys = [key for _, key in fresh]
@@ -836,17 +842,19 @@ class Carryover:
                 if prior_runs[i + d] == fresh_runs[j + d]:
                     placed[sid] = entry
 
-        out = {}
+        out, handed = {}, set()
         for sid, key in fresh:
             if sid in placed:
-                out[sid] = (placed[sid], False, False, False)
+                out[sid] = (placed[sid], False, False)
                 continue
             row, guessed = paired.get(sid), False
             if row is None:
                 rows = self.by_key.get(key)
                 row = rows[-1] if rows else None
-                guessed = row is not None and last.get(key) in claimed
-            marked = bool(row and (row[2] or row[3]))
+                at = last.get(key)
+                guessed = row is not None and (at in claimed or at in handed)
+                if row is not None:
+                    handed.add(at)
             # Neither `review` nor the waiver survives either branch, and for
             # one reason: both are a reviewer's statement about a *position*, and
             # neither branch could establish one. Carrying a hold in took a
@@ -858,7 +866,7 @@ class Carryover:
             # deleting them to avoid mislabelling them is the trade 2026-08-17
             # refused everywhere else.
             entry = (row[0], row[1], None, False, row[4]) if row else None
-            out[sid] = (entry, entry is not None, guessed, marked)
+            out[sid] = (entry, entry is not None, guessed)
         return out
 
     def _blocks(self, keys):
@@ -1123,15 +1131,13 @@ def _origin_rank(origin):
     return 0 if is_regenerable_origin(origin) else 1
 
 
-def carry_candidates(mine, theirs, same, guessed=False, marked=False):
+def carry_candidates(mine, theirs, same, guessed=False):
     """What `lx extract NEW --from OLD` offers one segment of NEW. ``(candidates, how, keep)``.
 
     ``mine`` is NEW's own entry at this position and ``theirs`` OLD's, each a
     :class:`Carryover` entry or ``None``; ``same`` is whether the two write the
-    same words into the document (:func:`as_written`), ``guessed`` whether
-    ``mine`` is only a guess where ``theirs`` is not, and ``marked`` whether the
-    row ``mine`` came from carried a hold or a waiver its alignment could not
-    keep (both :meth:`Carryover.answers`).
+    same words into the document (:func:`as_written`), and ``guessed`` whether
+    ``mine`` is only a guess where ``theirs`` is not (:meth:`Carryover.answers`).
     ``candidates`` is ``[(entry, kind)]`` in the order they are tried, ``kind``
     being ``"from"`` for OLD's entry and ``"own"`` for NEW's; the first one the
     acceptance path takes wins. ``keep`` is the ``(entry, kind)`` kept when none
@@ -1162,10 +1168,9 @@ def carry_candidates(mine, theirs, same, guessed=False, marked=False):
       memory hit already obeys: a draft is regenerable, and the person named OLD.
       Two drafts are a tie, and a tie stays with NEW — the newer machine work,
       a polish pass paid for in the chapter, is not reverted to OLD's older one.
-      A draft whose row carried a hold or a waiver is not one nobody held, even
-      where NEW's own alignment could not place the mark and dropped it: the
-      review of the first version measured a held draft in a run that changed
-      size replaced under a line saying held drafts never are.
+      A hold or a waiver protects a draft where NEW's alignment can place it;
+      where it cannot, :meth:`Carryover.align` drops the mark, as it does on
+      every re-extract, and the draft is then one nobody held.
     * **A guess is not what NEW holds.** Where NEW's own alignment could only
       hand back a copy of another position's wording — a new member of a run —
       OLD's answer is tried first whatever either `origin` says, and the guess
@@ -1206,7 +1211,7 @@ def carry_candidates(mine, theirs, same, guessed=False, marked=False):
             lifted = (mine[0], theirs[1], mine[2], mine[3], mine[4])
             return [(lifted, "own")], "origin", (lifted, "own")
         return [(mine, "own")], None, (mine, "own")
-    if (not mine[2] and not mine[3] and not marked
+    if (not mine[2] and not mine[3]
             and _origin_rank(mine[1]) == 0 and _origin_rank(theirs[1]) > 0):
         return [(theirs, "from"), (mine, "own")], "took", (mine, "own")
     return [(mine, "own")], "differs", (mine, "own")
@@ -1856,9 +1861,11 @@ def _forget_analysis(conn, did, lang, tone, render=None, advise=True):
       it as a copy made a forget report "held by another tracked document" about
       text nothing could show.
 
-    Every read here decides whether the caller writes, so it has to run inside
-    the caller's :func:`_begin_write` — :func:`forget_doc` is the guard and
-    :func:`forget_blockers` the advice, and the advice needs no lock.
+    Asked with ``advise=False``, every read here decides whether the caller
+    writes, so it runs inside the caller's :func:`_begin_write` —
+    :func:`forget_doc` is the guard. Asked with ``advise=True`` it is advice,
+    which decides nothing and needs no lock: :func:`forget_blockers`, and
+    :func:`forget_doc` again after a refusal has released its lock.
     """
     # Each segment as ``(id, hash, wording, human, held, waived)``. `review` holds
     # one closed vocabulary — `held` — so any value is a hold; the waiver is the
@@ -2086,8 +2093,9 @@ def forget_doc(src, lang, discard=False, render=None):
     `cli.confined_path` refuses it, and the documents most likely to have moved
     would have become impossible to forget.
 
-    **Read-then-write, so the lock comes first.** Every read below decides
-    whether the deletes run, and Python's `sqlite3` would otherwise run them in
+    **Read-then-write, so the lock comes first.** Every read inside the lock
+    decides whether the deletes run — the one after it, for a refusal's carry
+    advice, decides nothing — and Python's `sqlite3` would otherwise run them in
     autocommit — :func:`_begin_write`'s docstring has the measured cost. A row
     from a *newer* build is refused rather than judged, since this build cannot
     know what its body means; an *older* one is judged, because what the

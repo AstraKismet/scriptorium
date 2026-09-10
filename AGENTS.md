@@ -524,7 +524,7 @@ Node — see the invariant below.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 2426 collected, no network. Four are
+python -m pytest -q                 # 2430 collected, no network. Four are
                                     #   conditional on three different things, so
                                     #   which two skip is a property of the machine
                                     #   AND the account: one is POSIX-only, one
@@ -1187,19 +1187,21 @@ own.
   memory answered over a person's wording `OLD` had nothing for — exit 0, nothing
   printed. `store.carry_candidates` decides each position, and `lx forget`'s
   carry advice runs the same function, so the advice and the carry cannot come to
-  disagree about the rule — only about a file edited since its last extract,
-  which the advice reads as it was stored. Where only one side holds wording, it
+  disagree about the rule — only where the advice cannot see what the carry
+  will: a file edited since its last extract, or a wording the acceptance path
+  will refuse. Where only one side holds wording, it
   answers. The same rendered words
   keep `NEW`'s, with `NEW`'s hold and waiver and the stronger `origin` of the two,
   named. Different words keep `NEW`'s unless `NEW`'s is a machine draft nobody
   held or waived and `OLD`'s is not a machine's — invariant 9, the rule a memory
-  hit already obeys — and two drafts are a tie that stays with `NEW`; a draft
-  whose row carried a hold or a waiver is not one nobody held, even where the
-  alignment could not place the mark. A position where `NEW`'s own alignment can
-  only hand back a copy of a wording another fresh position also receives — a new
-  member of a run, a *guess* (`Carryover.answers`) — is answered by `OLD`'s where
-  that is not itself a guess; a paragraph that merely moved is not a guess, and
-  keeps its own. When nothing fits, what `NEW` held is what stays.
+  hit already obeys — and two drafts are a tie that stays with `NEW`; a hold or a
+  waiver protects a draft where `NEW`'s alignment can place it, and where it
+  cannot the mark is dropped, as every re-extract drops it. A position where
+  `NEW`'s own alignment can only hand back a copy of a wording another fresh
+  position also receives — a new member of a run, or the second copy of a moved
+  paragraph: a *guess* (`Carryover.answers`) — is answered by `OLD`'s where that
+  is not itself a guess; a paragraph that merely moved keeps its own. When
+  nothing fits, what `NEW` held is what stays.
   Every difference is named, and the remedy is re-typing from
   `lx render OLD -o -`: a chapter re-worded since and a novel revised since are
   one shape in the state, so no rule can choose between them, and copying a
@@ -1264,9 +1266,11 @@ own.
   the *other* copy. In one register a carry keeps what the target holds, so it is
   offered wherever it would leave fewer segments blocked, naming the machine
   drafts it would replace. Across a register line the target's own keys do not
-  align, so a document holding anything but a machine draft that a carry would
-  replace or unmark is told not to carry, and one holding nothing else is offered
-  the carry with the `--tone` it needs — the multiset offered that `--tone` carry
+  align, so the carry — with the `--tone` it needs — is offered only where every
+  paragraph the document translated comes back as the same words with at least
+  its marks, or is a machine draft the old row's wording replaces, and the
+  document is told not to carry where anything else would be emptied, replaced
+  or unmarked — the multiset offered that `--tone` carry
   over a person's wording too, and run verbatim it overwrote the wording and let
   the forget pass, measured. The delete decides under the write lock on the
   blocked list alone; the advice, the half that grows with every document

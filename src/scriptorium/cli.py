@@ -655,10 +655,22 @@ def do_extract(src, lang, cfg, tone=None, reset=False, carry_from=None):
     # stayed. Measured by the review of HANDOFF-066, reachable through `lx config
     # set tone ""` and every row written before the register existed. The
     # ordinary extract resolves as it always did.
+    #
+    # The named document's register is read the same way and for the same
+    # reason: its rows' keys were built in the default where its stored value is
+    # empty, and the refusal below, printing that value raw, named `--tone ` with
+    # nothing after it, or `--tone None`, which was refused again. Measured by the
+    # third review of HANDOFF-066; it predates the package.
+    #
+    # Both are for comparing. The stored spelling is what the document keeps
+    # wherever there is one — `canonical_tone` decides sameness only, and the
+    # user's own string is what reaches the model's `Tone:` line — so `frozen`
+    # only fills in where the stored value is empty.
     frozen = canonical_tone(stored.get("tone")) if carry_from and stored else None
-    tone = (tone or (frozen or stored.get("tone"))
-            or (from_meta or {}).get("tone") or cfg.get("tone", DEFAULT_TONE))
-    if carry_from and canonical_tone(from_meta.get("tone")) != canonical_tone(tone):
+    from_tone = canonical_tone(from_meta.get("tone")) if carry_from else None
+    tone = (tone or stored.get("tone") or frozen or (from_meta or {}).get("tone")
+            or from_tone or cfg.get("tone", DEFAULT_TONE))
+    if carry_from and from_tone != canonical_tone(tone):
         # Refused rather than run, because the run would be indistinguishable
         # from success: every key would miss, `reused` would be 0, and the person
         # would read "this document had nothing to carry" about a book that has
@@ -673,22 +685,22 @@ def do_extract(src, lang, cfg, tone=None, reset=False, carry_from=None):
         # refusal had just recommended, counting the wrong document's
         # translations. A refusal's remedy is a code path, run in the state the
         # refusal was printed in.
-        held = (len(prior_targets(src, lang))
-                if frozen and frozen != canonical_tone(from_meta.get("tone")) else 0)
+        held = len(prior_targets(src, lang)) if frozen and frozen != from_tone else 0
         # "None of them would carry over", not "they would not be in it": where
-        # the named document holds the same words, the words come back — as its
-        # copy, with its marks, which is not what this document held.
+        # the named document or the memory holds the same words, the words come
+        # back — as its copy, with its marks, which is not what this document
+        # held. And not "only the named document's": the memory answers too.
         drops = (f" That moves {src} out of the {frozen} register, and translations do not "
-                 f"cross registers: none of the {held} it holds would carry over — each of "
-                 f"those positions would get {carry_from}'s wording or nothing. They are in "
-                 f"the last render, and in `.lx/tm.{lang}.jsonl` if they were committed."
-                 if held else "")
+                 f"cross registers: none of the {held} it holds would carry over — whatever "
+                 f"those positions get would come from {carry_from} or the translation "
+                 f"memory, if from anywhere. They are in the last render, and in "
+                 f"`.lx/tm.{lang}.jsonl` if they were committed." if held else "")
         raise UnusableCarryover(
-            f"{carry_from} is frozen in the {from_meta.get('tone')} register and this "
-            f"extract is in {tone}, so nothing would carry across — the register is part "
+            f"{carry_from} is frozen in the {from_tone} register and this extract is in "
+            f"{canonical_tone(tone)}, so nothing would carry across — the register is part "
             f"of the key the carryover matches on. Extract {src} in the same register: "
             f"`lx extract {src} --lang {lang} --from {carry_from} --tone "
-            f"{from_meta.get('tone')}`.{drops} Nothing was written.")
+            f"{from_tone}`.{drops} Nothing was written.")
     if reset:
         prior = own = no_carryover()
     else:
@@ -778,8 +790,8 @@ def do_extract(src, lang, cfg, tone=None, reset=False, carry_from=None):
         # ends up holding if nothing else fits.
         how = None
         if carry_from:
-            theirs, theirs_ambiguous, theirs_guessed, _theirs_marked = theirs_of[seg["id"]]
-            mine, mine_ambiguous, mine_guessed, mine_marked = mine_of[seg["id"]]
+            theirs, theirs_ambiguous, theirs_guessed = theirs_of[seg["id"]]
+            mine, mine_ambiguous, mine_guessed = mine_of[seg["id"]]
             # What the render writes, the comparison `lx forget` makes — a
             # renumbered `⟦n⟧` or a stripped indent is the same wording. The
             # byte-equal pair first, which is every segment of a re-carry nobody
@@ -789,8 +801,7 @@ def do_extract(src, lang, cfg, tone=None, reset=False, carry_from=None):
                 or as_written(theirs[0], theirs[4], polish)
                 == as_written(mine[0], mine[4], polish))
             candidates, how, keep = carry_candidates(
-                mine, theirs, same, guessed=mine_guessed and not theirs_guessed,
-                marked=mine_marked)
+                mine, theirs, same, guessed=mine_guessed and not theirs_guessed)
             if mine is None:
                 # Into a segment this document held nothing for, the carry is the
                 # one it always was, and so is what it names: the named entry's
@@ -1104,7 +1115,9 @@ def report_extract(src, lang, notes):
              f"{frm}'s wording replaced it: {', '.join(ids)}. A machine draft — a model's, "
              f"or a translation-memory hit's — can be had again, and {frm}'s wording was "
              f"not one, so it took the segment with its `origin` and any hold or waiver it "
-             f"carries there. A draft somebody held or waived is never replaced this way.")
+             f"carries there. A draft held or waived where this document's own state can "
+             f"place the mark is never replaced this way; where a changed file leaves the "
+             f"position unplaced, the mark is dropped first, as every re-extract drops it.")
     if notes.get("origin"):
         ids = notes["origin"]
         _out(f"  {len(ids)} segment(s) already held {frm}'s wording, and {frm} records who "
@@ -1169,9 +1182,20 @@ def report_extract(src, lang, notes):
         was, now, held = notes["register"]
         # A register change carries nothing over, deliberately — and until
         # 2026-08-17 it said nothing at all while emptying a reviewed book.
-        _out(f"  the register moved from {was} to {now}, and translations do not cross "
-             f"registers: the {held} this document held are not in it any more. They are in "
-             f"the last render, and in `.lx/tm.{lang}.jsonl` if it was committed.")
+        if notes.get("carried_from"):
+            # Under `--from` the named document answers every position in the
+            # new register, and where it holds the same words they come back —
+            # as its copy, not this document's — so "not in it any more" would
+            # be false of them. The third review of HANDOFF-066 measured that.
+            _out(f"  the register moved from {was} to {now}, and translations do not cross "
+                 f"registers: none of the {held} this document held carried over, and what "
+                 f"it holds now came from {notes['carried_from']} or the translation memory. "
+                 f"Its own are in the last render, and in `.lx/tm.{lang}.jsonl` if they were "
+                 f"committed.")
+        else:
+            _out(f"  the register moved from {was} to {now}, and translations do not cross "
+                 f"registers: the {held} this document held are not in it any more. They are "
+                 f"in the last render, and in `.lx/tm.{lang}.jsonl` if it was committed.")
 
 
 def cmd_extract(args, cfg):

@@ -370,7 +370,7 @@ def test_the_register_refusal_is_silent_where_its_remedy_keeps_the_register(
                           "novel.md", "--tone", "technical")
     assert code == 2, err
     assert "--tone literary" in err, err
-    assert "would not be in it any more" not in err, err
+    assert "would carry over" not in err, err
 
 
 def _notes(**over):
@@ -557,6 +557,73 @@ def test_a_paragraph_that_moved_keeps_the_persons_wording(project, capsys, carri
     assert "novel.md holds a different one" in out and "s0004" in out, out
 
 
+def test_a_paragraph_moved_and_repeated_keeps_its_wording_once(project, capsys):
+    """The second answer to "what is a guess", found by the third review. The
+    chapter held a card line once, which a person translated; the file was then
+    laid out as the novel's, where the line comes twice, and the chapter's own
+    diff paired neither copy. Both fell back to the one wording it held. The
+    second version called neither a guess, so the person's sentence landed twice
+    — `human` on a position no person wrote — over the novel's placed wording of
+    the second copy. The first copy to take a moved wording keeps it; the next
+    is a guess, and the novel's placed wording answers it."""
+    _init(capsys)
+    novel = ["# One", "Alpha sentence.", "Beta sentence.", "Delta sentence.", "Card line.",
+             "Echo sentence.", "Card line."]
+    _write(project, "novel.md", novel)
+    _ok(capsys, "extract", "novel.md", "--lang", "zh-TW", "--tone", "literary")
+    _apply(project, capsys, "novel.md",
+           {"s0001": "頭", "s0002": "阿爾法句。", "s0003": "貝塔句。", "s0004": "德爾塔句。",
+            "s0005": "卡甲。", "s0006": "回聲句。", "s0007": "卡乙。"}, "agent")
+    _write(project, "ch1.md", ["# One", "Card line.", "Alpha sentence.", "Beta sentence.",
+                               "Delta sentence."])
+    _ok(capsys, "extract", "ch1.md", "--lang", "zh-TW", "--tone", "literary")
+    _apply(project, capsys, "ch1.md", {"s0002": "人寫的卡。"}, "human")
+    _write(project, "ch1.md", novel)
+    _ok(capsys, "extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md")
+    held = _segs(project, "ch1.md")
+    assert (held["s0005"]["target"], held["s0005"]["origin"]) == ("人寫的卡。", "human"), held
+    assert (held["s0007"]["target"], held["s0007"]["origin"]) == ("卡乙。", "agent"), held
+
+
+@pytest.mark.parametrize("stored", ["empty", "absent"])
+def test_a_named_document_with_an_empty_register_is_read_as_the_default(
+        project, capsys, stored):
+    """The other side of the empty register, found by the third review and older
+    than the package: the named document's stored value was read raw, so a first
+    carry out of a novel frozen `""` — or with no `tone` at all, as every row
+    written before the register existed — was refused naming `--tone ` with
+    nothing after it, or `--tone None`, which was refused again. Its rows' keys
+    are in the default register, so the carry runs in it."""
+    _init(capsys)
+    _ok(capsys, "config", "set", "tone", "")
+    _write(project, "novel.md", ["# Chapter One", "Alpha sentence."])
+    _ok(capsys, "extract", "novel.md", "--lang", "zh-TW")
+    _apply(project, capsys, "novel.md", {"s0001": "第一章", "s0002": "阿爾法句。"}, "agent")
+    if stored == "absent":
+        [(meta,)] = statedb._query(project, "SELECT meta FROM documents WHERE doc_id='novel.md'")
+        found = json.loads(meta)
+        found.pop("tone", None)
+        statedb._write(project, "UPDATE documents SET meta=? WHERE doc_id='novel.md'",
+                       (json.dumps(found, ensure_ascii=False),))
+    _ok(capsys, "config", "set", "tone", "literary")
+    _write(project, "ch1.md", ["# Chapter One", "Alpha sentence."])
+    code, out, err = _lx(capsys, "extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md")
+    assert code == 0, err
+    assert "reused 2" in out and "tone literary" not in out, out
+
+
+def test_the_carry_keeps_the_registers_own_spelling(project, capsys):
+    """`canonical_tone` decides sameness and nothing else — the stored string is
+    what reaches the model's `Tone:` line. The second version resolved the
+    register to its canonical spelling under `--from`, so a carry quietly
+    rewrote what the document was frozen with; an ordinary extract never did."""
+    _alpha_book(project, capsys)
+    _ok(capsys, "extract", "ch1.md", "--lang", "zh-TW", "--tone", "  Literary ")
+    _ok(capsys, "extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md")
+    [(meta,)] = statedb._query(project, "SELECT meta FROM documents WHERE doc_id='ch1.md'")
+    assert json.loads(meta)["tone"] == "  Literary "
+
+
 def test_past_the_alignment_budget_nothing_the_target_holds_is_a_guess(
         project, capsys, monkeypatch):
     """Over `ALIGN_BUDGET` the diff makes no pair at all and every position falls
@@ -586,11 +653,18 @@ def test_past_the_alignment_budget_nothing_the_target_holds_is_a_guess(
     assert "part.md holds a different one" in out and "s0003" in out, out
 
 
-def test_a_held_draft_the_alignment_could_not_place_is_not_given_away(project, capsys):
-    """A run of identical lines changed size, so the chapter's own alignment could
-    not place its members and dropped the hold, as a plain extract does. The first
-    version then read the draft as one nobody held and replaced it with the
-    novel's wording, under a line saying a held draft never is."""
+def test_a_hold_the_alignment_cannot_place_protects_nothing_on_either_run(project, capsys):
+    """A run of identical lines changed size, so the chapter's own alignment
+    cannot place its members and drops the hold, as every re-extract does.
+
+    Three versions answered this differently. The first replaced the draft under
+    a line saying a held draft never is. The second kept it for one command by
+    remembering the dropped hold — and wrote it back unheld, so the next carry,
+    or an ordinary extract first, replaced it anyway: a guard reading state its
+    own command rewrites fires once. This one says what is true and says it the
+    same way twice: the draft is replaced and named, the line says a hold
+    protects only where the chapter's own state can place it, and a second run
+    changes nothing."""
     _init(capsys)
     _write(project, "novel.md", ["# One", "Open.", "Yes.", "Yes.", "Close."])
     _ok(capsys, "extract", "novel.md", "--lang", "zh-TW", "--tone", "literary")
@@ -603,9 +677,14 @@ def test_a_held_draft_the_alignment_could_not_place_is_not_given_away(project, c
     _ok(capsys, "hold", "ch1.md", "--lang", "zh-TW", "--ids", "s0004")
     _write(project, "ch1.md", ["# One", "Open.", "Yes.", "Yes.", "Close."])
     out = _ok(capsys, "extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md")
-    assert _segs(project, "ch1.md")["s0004"]["target"] == "草稿乙"
+    seg = _segs(project, "ch1.md")["s0004"]
+    assert (seg["target"], seg.get("review")) == ("是乙。", None), seg
     took = [line for line in out.splitlines() if "wording replaced it:" in line]
-    assert not any("s0004" in line for line in took), out
+    assert took and "s0004" in took[0], out
+    assert "where this document's own state can place the mark" in took[0], out
+    again = _ok(capsys, "extract", "ch1.md", "--lang", "zh-TW", "--from", "novel.md")
+    assert _segs(project, "ch1.md")["s0004"]["target"] == "是乙。"
+    assert "wording replaced it:" not in again, again
 
 
 @pytest.mark.parametrize("raw", ["[1]", '{"origin": "hum'])
