@@ -63,15 +63,14 @@ from operator import mul
 
 from .mask import PH_RE
 
-# `providers.errors` is the narrowest import that names this class, and today it
-# saves nothing: Python executes `providers/__init__.py` before it can bind a
-# submodule, and that file imports `base`, which imports `urllib.request` and
-# with it `ssl`. `errors.py`'s own docstring and `cli.py`'s import comment both
-# claim otherwise and both are wrong — measured 2026-09-06, `import
-# scriptorium.providers.errors` alone loads `ssl` and fifteen `email` submodules.
-# No regression: `cli.py` already paid it. It stays spelled this way because it
-# is the import that would become cheap the day that premise is made true, which
-# is HANDOFF-054.
+# `providers.errors` is the narrowest import that names this class, and which
+# submodule is named decides nothing about cost: Python executes
+# `providers/__init__.py` before it binds a submodule, and that file imports
+# `base`. Measured 2026-09-06 this line put `ssl` and the `email` package into
+# every command — `cli.py` imports this module at module scope — while
+# `errors.py` and `cli.py` both said it did not. Since 2026-09-11 it loads
+# neither, because `base` imports the transport inside `Provider._request`, and
+# `tests/test_startup_imports.py` is what holds that, not this spelling.
 from .providers.errors import ProviderError
 from .store import tm_effective, tm_path
 

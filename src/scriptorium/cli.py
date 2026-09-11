@@ -54,13 +54,26 @@ from .formats import UnknownFormat
 from .mask import placeholder_ids, repair_placeholders
 from .normalize import normalize, polish_rendered, reseat_outer_blanks
 
-# `main`'s `except` tuple needs this name at module scope. It comes from
-# `providers.errors`, which imports nothing, rather than from `providers` —
-# importing the package pulls `urllib.request` and with it `ssl`, `http.client`,
-# `socket` and fifteen `email` submodules into every command. Measured
-# 2026-08-20: that roughly doubles the cost of importing `scriptorium.cli`,
-# 41 ms to 77 ms, which `lx --help` on a bare interpreter should not pay. The
-# rest of `providers` stays behind a function-local import, with `translate`.
+# `main`'s `except` tuple names this class, and the tuple is evaluated only once
+# something has been raised — so the name has to be bound by then on every
+# path, and module scope is the one placement that cannot get that wrong. An
+# import inside `main` placed after the first statement that can raise leaves
+# the tuple naming an unbound local, and then every refusal it lists, not only a
+# backend's, becomes a traceback and exit 1.
+#
+# Binding it costs no transport because `providers/base.py` imports `urllib`,
+# `http.client` and `socket` inside `Provider._request`; which submodule this
+# line names decides nothing, since any import from `providers` executes the
+# package's `__init__`, and that imports `base`. Until 2026-09-11 this line put
+# `ssl`, `urllib.request`, `http.client`, `socket` and the `email` package into
+# every command while the comment here said it did not. Measured that day on
+# 3.12, median of seven warm runs: `import scriptorium.cli` went from 69 ms to
+# 44 ms. `tests/test_startup_imports.py` holds both halves.
+#
+# So the function-local `from .providers import …` lines below defer nothing —
+# this one has already executed the package. What the function-local imports in
+# this file do keep off the import path is `translate`, with its thread pool and
+# `logging`, and in `cmd_web` the workbench server.
 from .providers.errors import ProviderError
 from .skeleton import source_map
 from .store import (
@@ -504,8 +517,8 @@ def _protected(seg, proposal, dnt):
 def do_extract(src, lang, cfg, tone=None, reset=False, carry_from=None):
     # The first statement, above even the lazy import: this is decidable from two
     # arguments, so nothing the document or the database could say changes the
-    # answer, and a refused request must not import the provider stack, read the
-    # user's file or open `.lx/state.db`. It has to sit above the `tone or ...`
+    # answer, and a refused request must not import `translate`, read the user's
+    # file or open `.lx/state.db`. It has to sit above the `tone or ...`
     # resolution below as well, which rebinds `tone` to a truthy value and would
     # make a guard placed after it unreachable — the guard-fires-once shape.
     # The cost, accepted: `lx extract missing.md --lang zh-TW --reset` now names
@@ -571,7 +584,8 @@ def do_extract(src, lang, cfg, tone=None, reset=False, carry_from=None):
                 f"you meant a document that was extracted under another language tag, name "
                 f"that one with --lang. Nothing was written.")
     # Lazy, like every other `.translate` import in this file: extract does not
-    # talk to a model and should not pull the provider stack in to do so.
+    # talk to a model and should not load the module that does, with its thread
+    # pool and `logging`, to do so.
     from .translate import accept
 
     # **Above `formats.for_path`, not above `read_document`.** The format is
@@ -1460,9 +1474,9 @@ def cmd_todo(args, cfg):
     a project has no style sheet, and HANDOFF-203 and HANDOFF-207 will freeze
     this shape.
     """
-    # Lazily, the way `do_extract` imports `accept`: importing `translate` pulls
-    # in the provider stack, and `lx todo` is the command that exists precisely
-    # because nobody here is calling a model.
+    # Lazily, the way `do_extract` imports `accept`: `translate` is the module
+    # that calls a model, and `lx todo` is the command that exists precisely
+    # because nobody here is calling one.
     from .translate import mentions
 
     doc = load_doc(args.src, args.lang)
@@ -5991,9 +6005,9 @@ def do_select(doc, cfg, mode, ids=None, include_all=False, limit=0, over_human=F
         wanted = set(ids)
         return [s for s in doc["segments"] if s["id"] in wanted]
     if mode == "repair":
-        # Lazily, like every other reach into `translate` from here: importing it
-        # pulls in the provider stack, and `do_select` is called on paths that
-        # never dispatch to a model.
+        # Lazily, like every other reach into `translate` from here: it is the
+        # module that calls a model, and `do_select` is called on paths that
+        # never dispatch to one.
         from .translate import failing_segments
         picked = failing_segments(doc, cfg)
     elif mode == "polish":
@@ -6089,9 +6103,9 @@ def _run_translate(src, lang, cfg, segments, mode, args):
     shape so `cmd_run` can total the several passes it makes, or **`None` when
     no model was called at all** — which is not the same as a run that cost
     nothing, and is also what keeps the two early returns below from importing
-    `translate` and with it the whole provider stack. The *sentence* about the
-    numbers has already been printed by `translate_segments` through
-    `progress`, which is why nothing here formats one. Private and
+    `translate` at all. The *sentence* about the numbers has already been
+    printed by `translate_segments` through `progress`, which is why nothing
+    here formats one. Private and
     `Namespace`-coupled, so widening it costs the five call sites in this file
     and nothing else.
     """
@@ -6271,7 +6285,7 @@ def cmd_run(args, cfg):
             return
         # Local, like every other reach into `translate` from this module: a
         # `lx run` over a finished document reaches no model and must not pay
-        # for importing the provider stack to say so.
+        # for importing the module that calls one to say so.
         from .translate import usage_add
         spent = usage if spent is None else usage_add(spent, usage)
         passes += 1

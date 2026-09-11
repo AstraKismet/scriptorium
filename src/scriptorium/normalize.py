@@ -181,9 +181,9 @@ def reseat_outer_blanks(source, text, keep_added_indent=False):
     language-independent and driven by the segment rather than by config. It
     lives here because this module is where a deterministic repair goes
     (invariant 5) and because both callers already import from it — putting it in
-    `translate.py` beside `accept` would make `cli.do_apply`, which the workbench
-    calls on every save, import the provider stack to answer a question about
-    whitespace.
+    `translate.py` beside `accept` would make `cli.do_apply`, which `lx apply`
+    runs without calling a model, import the module that calls one to answer a
+    question about whitespace.
 
     **What it exists for.** A run of blanks at position 0 of a segment is not
     padding, it is the segment's position in the document's structure: a list
