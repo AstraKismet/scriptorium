@@ -130,8 +130,7 @@ import json, sys
 import scriptorium.cli
 code = None
 try:
-    scriptorium.cli.main(json.loads(sys.argv[1]))
-    code = 0
+    code = scriptorium.cli.main(json.loads(sys.argv[1])) or 0
 except SystemExit as e:
     code = e.code
 {after}
@@ -141,21 +140,30 @@ with open(sys.argv[2], "w", encoding="utf-8") as f:
 """
 
 _SWEEP = """
-import json, os, sys
+import io, json, os, sys
 import scriptorium.cli
 with open(sys.argv[1], encoding="utf-8") as f:
     plan = json.load(f)
 root = os.getcwd()
+real = sys.stdout, sys.stderr
 steps = []
 for where, argv in plan["steps"]:
     os.chdir(os.path.join(root, where))
+    out, err = io.BytesIO(), io.BytesIO()
+    wout = io.TextIOWrapper(out, encoding="utf-8", write_through=True)
+    werr = io.TextIOWrapper(err, encoding="utf-8", write_through=True)
+    sys.stdout, sys.stderr = wout, werr
     code = None
     try:
-        scriptorium.cli.main(argv)
-        code = 0
+        code = scriptorium.cli.main(argv) or 0
     except SystemExit as e:
         code = e.code
+    finally:
+        wout.flush()
+        werr.flush()
+        sys.stdout, sys.stderr = real
     steps.append({"argv": argv, "code": code,
+                  "printed": len(out.getvalue()) + len(err.getvalue()),
                   "loaded": [m for m in plan["forbidden"] if m in sys.modules]})
 os.chdir(root)
 with open(sys.argv[2], "w", encoding="utf-8") as f:
@@ -256,9 +264,11 @@ def test_no_command_that_sends_nothing_loads_the_transport(project):
     for the next, so the first command after which a forbidden module appears
     is the one named.
 
-    Each command must reach an exit code this CLI uses, 0, 1 or 2, which is the
-    proof that it ran; which of the three depends on what the commands before it
-    left behind, so it is not pinned.
+    Each command must reach an exit code this CLI uses — 0, 1 or 2, and which
+    one depends on what the commands before it left behind, so it is not pinned
+    — and must print something, captured per step. The second is the proof that
+    it ran: a probe that stopped calling `main` would still record an exit code
+    if it recorded one after the call, and it cannot make the command print.
     """
     plan = os.path.join(str(project), "sweep.json")
     with open(plan, "w", encoding="utf-8") as f:
@@ -273,6 +283,8 @@ def test_no_command_that_sends_nothing_loads_the_transport(project):
     unfinished = [(" ".join(s["argv"]), s["code"]) for s in steps
                   if s["code"] not in (0, 1, 2)]
     assert not unfinished, f"these did not reach an exit code: {unfinished}"
+    silent = [" ".join(s["argv"]) for s in steps if not s["printed"]]
+    assert not silent, f"these printed nothing, so nothing shows they ran: {silent}"
     first = next((s for s in steps if s["loaded"]), None)
     assert first is None, (
         f"`lx {' '.join(first['argv'])}` loaded {first['loaded']}, and it sends "
