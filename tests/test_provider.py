@@ -2769,7 +2769,9 @@ def test_a_stalled_error_body_leaves_no_backend_bytes_on_the_exception(
     with pytest.raises(ProviderError) as e:
         build("p", _keyed(echo, timeout=0.5)).list_models()
     said = str(e.value)
-    assert "HTTP 401" in said and "could not be read" in said, said
+    # One space after the dash: the excerpt is empty, and the note takes its
+    # place rather than following it.
+    assert "HTTP 401 — (the body could not be read)" in said, said
     assert _windows(KEY, said) == [], said
     assert e.value.__cause__ is None and e.value.__context__ is None
     formatted = "".join(traceback.format_exception(
@@ -2904,7 +2906,9 @@ def test_userinfo_in_a_connect_target_is_redacted_too(proxy, monkeypatch):
 
 def test_a_percent_encoded_password_is_redacted_in_both_forms(monkeypatch):
     """A proxy shows the bytes it received or what they decode to; both are in
-    the set, and a username alone is not, because it is not a secret."""
+    the set, and the username part of a `user:password` is not, on its own,
+    because it is not a secret. A userinfo with no `:` is the whole of it and
+    is a credential — see the bare-token test in the final round below."""
     password = "p%40ss%2Fword%3D0123456789"
     monkeypatch.setenv("LX_ECHO_KEY", "")
     p = build("p", _keyed(f"http://alice:{password}@127.0.0.1:1/v1", env=""))
@@ -2913,7 +2917,7 @@ def test_a_percent_encoded_password_is_redacted_in_both_forms(monkeypatch):
     assert p._redact(f"saw {password} and p@ss/word=0123456789") == f"saw {MARKER} and {MARKER}"
     assert p._redact("user alice refused") == "user alice refused"
     lone = build("p", _keyed("http://alicealice@127.0.0.1:1/v1", env=""))
-    assert lone._credentials() == [], "a username alone is not a secret"
+    assert lone._credentials() == ["alicealice"], "a userinfo with no `:` is a token"
 
 
 # -- C: the scan is a union of removable spans ----------------------------------
@@ -2980,8 +2984,26 @@ def test_the_scan_is_the_union_of_removable_runs(monkeypatch):
     — R2 measured a seven-character tail on screen that the eight-window
     oracle cannot see — over texts built from spelling fragments, whole
     spellings and filler, for five secret sets including both measured shapes.
+
+    **It must also generate texts whose output is longer than their input**,
+    and the `many` branch below exists for that. The first version of this
+    fuzz did not, and so did not see `_redact` rendering under a budget of the
+    input's length plus one marker: a marker is twenty-one characters and
+    replaces as few as eight, so several short whole spellings grow the output
+    past that budget and everything after the last affordable marker was
+    dropped — `'abcdefghijkl ' * 5` came back as four markers and nothing
+    else. The generator drew at most five parts, a whole spelling with
+    probability 0.15, and touching copies collapse to one marker, so no
+    expected output held more than two markers (measured, seed 76): 122 of its
+    750 texts were longer than their input and every one fit the one marker
+    of slack, which two markers exceed only when both stand for
+    eight-character wholes with fewer than six characters after them. The
+    `many` branch packs separated short wholes so that the markers outnumber
+    the characters they replace, and the count at the end pins that the shape
+    is reached.
     """
     rng = random.Random(76)
+    grew = 0
     for key, headers in _SECRET_SETS:
         monkeypatch.setenv("LX_ECHO_KEY", key)
         p = build("p", _keyed("http://127.0.0.1:1/v1", headers=headers))
@@ -2989,8 +3011,15 @@ def test_the_scan_is_the_union_of_removable_runs(monkeypatch):
         assert spellings, (key, headers)
         alphabet = "".join(sorted(set("".join(spellings)))) + "xyz .!"
         short = [s for s in spellings if len(s) <= 60] or spellings
-        for _ in range(150):
+        shortest = sorted(spellings, key=len)[:3]
+        for _ in range(180):
             parts = []
+            if rng.random() < 0.15:
+                # `many`: separated copies of a short whole spelling, plus a
+                # tail that the budget used to drop.
+                sep = rng.choice((" ", "-", "xy", ", "))
+                parts.append(sep.join([rng.choice(shortest)] * rng.randint(3, 12)))
+                parts.append(rng.choice((" tail", ". For a local server", "", "!")))
             for _piece in range(rng.randint(0, 5)):
                 kind = rng.random()
                 if kind < 0.35:
@@ -3003,7 +3032,10 @@ def test_the_scan_is_the_union_of_removable_runs(monkeypatch):
                     parts.append("".join(rng.choice(alphabet)
                                          for _ in range(rng.randint(0, 12))))
             text = "".join(parts)
-            assert p._redact(text) == _reference_redact(spellings, text), (key, headers, text)
+            expected = _reference_redact(spellings, text)
+            grew += expected.count(MARKER) >= 3 and len(expected) > len(text) + len(MARKER)
+            assert p._redact(text) == expected, (key, headers, text)
+    assert grew >= 30, (grew, "the fuzz must reach outputs that outgrow the old budget")
 
 
 def test_a_run_hidden_inside_an_earlier_run_is_still_removed(monkeypatch):
@@ -3464,6 +3496,122 @@ def test_a_bare_question_mark_and_a_fragment_are_not_a_query(echo, monkeypatch):
     with pytest.raises(ProviderError, match="query string"):
         build("p", _keyed(echo + "?key=" + KEY)).list_models()
     assert ECHO["seen"] == []
+
+
+# ── the final round: what the last review found ────────────────────────────
+
+def test_a_redaction_never_drops_the_text_after_its_markers(monkeypatch):
+    """`_redact` rendered under a budget of the input's length plus one marker,
+    and a marker is longer than a short spelling: five separated copies of a
+    twelve-character key came back as four markers and nothing after them
+    (measured). Through `_refusal`, which scans whole messages, that dropped
+    the tail of the backend's sentence and this project's own advice — the
+    `_url_hint` sentence here is what a person would have needed to read.
+    """
+    monkeypatch.setenv("LX_ECHO_KEY", "abcdefghijkl")
+    p = build("p", _keyed("http://127.0.0.1:1/v1"))
+    assert p._redact("abcdefghijkl " * 5) == (MARKER + " ") * 5
+    assert p._redact(" x ".join(["abcdefghijkl"] * 5) + " tail") == (
+        " x ".join([MARKER] * 5) + " tail")
+
+    monkeypatch.setenv("LX_ECHO_KEY", "abcdefgh")
+    p = build("p", _keyed("http://127.0.0.1:1"))
+    url = "http://127.0.0.1:1/models"
+    reason = "Tunnel connection failed: 407 " + " ".join(["abcdefgh"] * 20)
+    said = str(p._refusal(
+        f"p: cannot reach {url} — {reason}. For a local server, check that it is "
+        f"running and that base_url names the right host and port.{p._url_hint(None, url)}"))
+    assert said.count(MARKER) == 20 and _windows("abcdefgh", said) == [], said
+    assert said.endswith(
+        f"{MARKER}. For a local server, check that it is running and that base_url "
+        f"names the right host and port.{p._url_hint(None, url)}"), said
+    assert "version segment" in said, said
+
+
+def test_a_proxy_reason_phrase_full_of_a_short_credential_keeps_the_advice(proxy, monkeypatch):
+    """The same defect where it was reachable: a `CONNECT` refused with a reason
+    phrase that repeats a short `Basic` value, through the real `URLError`
+    branch, and the advice after it must still be there."""
+    pytest.importorskip("ssl")
+    basic = _through_proxy(monkeypatch, proxy, "https", "pw")
+    assert len(basic) < len(MARKER)
+    PROXY["reason"] = lambda got: " ".join([got] * 100)
+    with pytest.raises(ProviderError) as e:
+        build("p", _keyed("https://127.0.0.1:1", env="")).list_models()
+    said = str(e.value)
+    assert _proxy_saw("CONNECT", "127.0.0.1:1")["authorized"]
+    assert said.count(MARKER) == 100 and _windows(basic, said) == [], said
+    assert "For a local server" in said and "version segment" in said, said
+
+
+def test_a_bare_userinfo_token_is_redacted_when_a_proxy_quotes_the_request(
+        proxy, monkeypatch):
+    """`https://<token>@host/v1` is the ordinary way a token travels in a URL,
+    and the first `_userinfo` left a userinfo with no `:` out as "a bare
+    username": under `http_proxy` the request line and the `Host` header
+    carried the token, and a proxy quoting either printed it in full
+    (measured: fourteen windows). It is a credential now, and gated."""
+    token = "tok-" + "abcdefghij" * 2
+    assert len(token) == 24
+    _through_proxy(monkeypatch, proxy, "http")
+    PROXY["answer"] = lambda h: (502, json.dumps({
+        "error": f"cannot fetch {h.path}; Host header was {h.headers.get('Host')}"}).encode(),
+        None)
+    p = build("p", _keyed(f"http://{token}@127.0.0.1:1/v1", env=""))
+    assert p._credentials() == [token] and p._gated() == [token]
+    with pytest.raises(ProviderError) as e:
+        p.list_models()
+    said = str(e.value)
+    seen = _proxy_saw("GET", "/v1/models")
+    assert token in seen["path"] and token in seen["host"], (seen, "the positive control")
+    assert _windows(token, said) == [] and MARKER in said, said
+    assert "HTTP 502" in said and "cannot fetch" in said and "127.0.0.1:1" in said, said
+
+
+def test_a_bare_username_shorter_than_the_whole_floor_is_never_redacted(monkeypatch):
+    """The `_WHOLE` floor is what keeps a short common username in a bare
+    `name@host` out: it has no spelling, so a backend saying the name keeps it."""
+    from scriptorium.providers.base import _WHOLE
+
+    monkeypatch.setenv("LX_ECHO_KEY", "")
+    p = build("p", _keyed("http://alice@127.0.0.1:1/v1", env=""))
+    assert len("alice") < _WHOLE
+    assert p._spellings(p._credentials()) == [] and p._gated() == []
+    assert p._redact("user alice refused; alice@127.0.0.1:1 again") == (
+        "user alice refused; alice@127.0.0.1:1 again")
+
+
+def test_a_header_value_that_is_a_list_is_refused_by_the_transport_not_by_note_transport(
+        echo, monkeypatch):
+    """`_note_transport` says nothing it does can raise; a `headers` value that
+    is a list made its set comprehension raise `TypeError` — unhashable —
+    inside the `finally`, with the reply's exception as context. The class
+    name `TypeError` is still in the refusal, and it is the transport's own:
+    `http.client.putheader` refuses a list before a byte is sent, which the
+    direct call and the mock's empty record both show."""
+    import http.client
+
+    monkeypatch.setenv("LX_ECHO_KEY", KEY)
+    _echo(reason=lambda got: f"bad key {got}")
+    spec = _keyed(echo, headers={"X-List": ["a", "b"]})
+    with pytest.raises(ProviderError, match=r"could not be requested \(TypeError\)") as e:
+        build("p", spec).list_models()
+    assert e.value.__cause__ is None and e.value.__context__ is None
+    assert _windows(KEY, str(e.value)) == [], str(e.value)
+    assert ECHO["seen"] == [], "http.client refused the header before anything was sent"
+    conn = http.client.HTTPConnection("127.0.0.1", 1)
+    conn.putrequest("GET", "/")
+    with pytest.raises(TypeError):
+        conn.putheader("X-List", ["a", "b"])
+
+    p = build("p", spec)
+    headers = {"Authorization": "Bearer " + KEY}
+    req = urllib.request.Request(echo + "/models", method="GET")
+    for k, v in {**headers, **p.extra_headers}.items():
+        req.add_header(k, v)
+    req.add_header("Proxy-authorization", "Basic added-by-the-transport")
+    p._note_transport(req, headers)   # must not raise
+    assert p._transport_added == ("Basic added-by-the-transport",)
 
 
 # ── the guards: what the runtime tests cannot see, pinned by `ast` ─────────

@@ -691,9 +691,10 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
         a hand-edited `headers.Authorization` *replaces* the computed one in
         `_request`'s `{**headers, **self.extra_headers}`, so a key can be sent
         while `api_key` is empty (measured). The userinfo of `base_url`, raw and
-        unquoted, and its password on its own — see `_userinfo`. And every value
-        the transport added to a request of this provider's on its own,
-        accumulated over its life — see `_note_transport`.
+        unquoted, and where it has a password, that on its own — see
+        `_userinfo`. And every value the transport added to a request of this
+        provider's on its own, accumulated over its life — see
+        `_note_transport`.
 
         **`base_url` userinfo leaves the machine through a proxy**, which is the
         measurement that put it here after the first version of this docstring
@@ -708,9 +709,11 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
         anything is sent; the fixed, non-secret headers this code sets
         (`Content-Type`, `anthropic-version`) stay readable, because an
         Anthropic 400 naming the version must; the model id and the provider
-        name are not secrets; and a username on its own, which is not a secret
-        either and, being a common word as often as not, would be removed from
-        ordinary prose.
+        name are not secrets; and the username part of a `user:password`
+        userinfo on its own, which is not a secret either and, being a common
+        word as often as not, would be removed from ordinary prose. A userinfo
+        with no `:` is the whole of it and *is* in the set: `https://<token>@host`
+        is the ordinary way a token travels in a URL.
         """
         values = [self.api_key]
         for value in self.extra_headers.values():
@@ -731,13 +734,21 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
 
         The raw userinfo — the netloc before its **last** `@`, since a password
         may hold one percent-encoded and a hand-edited file may hold one bare
-        — the raw password after the userinfo's **first** `:`, and
-        `urllib.parse.unquote` of each, because a proxy may show either the
-        bytes it received or what they decode to. A userinfo with no `:` is a
-        bare username and is left out: not a secret, and see `_credentials`.
-        Read off the spec and not off the request URL, because the spec's
-        field is the thing the person has to go and fix, and `_request`
-        refuses a URL `urlsplit` cannot read before this is ever asked.
+        — whenever there is one; where it holds a `:`, the raw password after
+        the **first** one as well; and `urllib.parse.unquote` of each, because
+        a proxy may show either the bytes it received or what they decode to.
+        A userinfo with no `:` is in the set whole: `https://<token>@host/v1`
+        is the ordinary way a token travels in a URL, and the first version of
+        this left it out as "a bare username", so a proxy quoting the request
+        line printed the token in full beside a redacted key (measured). What
+        stays out is the *username part* of a `user:password` userinfo on its
+        own — see `_credentials`; the `_WHOLE` floor is what keeps a short
+        common username in a bare `name@host` out of the set, and a longer one
+        is removed from a backend's prose wherever it appears whole, which is
+        the cost of not knowing a token from a name. Read off the spec and not
+        off the request URL, because the spec's field is the thing the person
+        has to go and fix, and `_request` refuses a URL `urlsplit` cannot read
+        before this is ever asked.
         """
         base = self.spec.get("base_url")
         if not isinstance(base, str):
@@ -749,11 +760,11 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
         if "@" not in netloc:
             return []
         userinfo = netloc.rpartition("@")[0]
-        if ":" not in userinfo:
-            return []
-        password = userinfo.partition(":")[2]
-        return [userinfo, urllib.parse.unquote(userinfo),
-                password, urllib.parse.unquote(password)]
+        values = [userinfo, urllib.parse.unquote(userinfo)]
+        if ":" in userinfo:
+            password = userinfo.partition(":")[2]
+            values += [password, urllib.parse.unquote(password)]
+        return values
 
     def _base_url_query(self):
         """Whether `base_url` carries a query string — the write side's own predicate.
@@ -918,14 +929,19 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
         A removable run is an occurrence of a whole spelling, or `_PIECE` or
         more consecutive characters of one. The wholes are found with
         `str.find`. The pieces are one set lookup per position, and that is
-        exact rather than a prefilter: a run of `_PIECE` or more characters is
-        a substring of some spelling exactly when every `_PIECE`-gram of it is
-        a `_PIECE`-gram of some spelling — a gram inside the run is inside the
-        spelling, and a gram that is inside a spelling is itself a removable
-        run — so the union of the removable pieces is the union of the
-        `_PIECE`-grams of the text that the spellings have. The slices here
-        compare and never cut, which is why the `ast` guard over slicing admits
-        this function beside `_excerpt`.
+        exact rather than a prefilter — though not because the grams decide
+        whether a run is a substring of one spelling: a run whose grams come
+        from two different spellings is a substring of neither, so "every gram
+        of it is some spelling's" does not say that, and an earlier version of
+        this docstring claimed it did. What the code relies on is weaker and
+        true: **the union of the removable pieces equals the union of the
+        text's `_PIECE`-grams that some spelling has.** Every removable piece
+        is covered by its own grams, each of which is inside that same
+        spelling, so marking the grams marks all of it; and every such gram is
+        itself `_PIECE` consecutive characters of a spelling, so marking it
+        marks nothing the rule would not. The slices here compare and never
+        cut, which is why the `ast` guard over slicing admits this function
+        beside `_excerpt`.
         """
         whole, grams, _longest = self._tables()
         marked = bytearray(len(text))
@@ -942,7 +958,7 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
         return marked
 
     @staticmethod
-    def _render(text, marked, upto, budget):
+    def _render(text, marked, upto, budget=None):
         """``text[:upto]`` with every marked stretch collapsed to one `_MARKER`.
 
         Two stretches that overlap or touch are one marker: that is what makes
@@ -950,15 +966,23 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
         repeats the value back to back gets one marker for the lot. A stretch
         that reaches ``upto`` ends the output on its marker — for `_excerpt`,
         which scans a bounded window, what lies beyond may continue it and is
-        never shown — and the output stops once it holds ``budget`` characters,
-        because a caller that is about to cut it reads no further. The finds
-        are over the byte array and the appends are slices, so the cost is in
-        the stretches and not in the characters.
+        never shown — and with a ``budget`` the output stops once it holds that
+        many characters, because a caller that is about to cut it reads no
+        further. **`_redact` passes none**: it used to pass the input's length
+        plus one marker, and a marker is longer than a short spelling, so a
+        message holding several short whole spellings grew past that budget
+        and lost everything after the last marker it could afford — five
+        copies of a twelve-character key came back as four markers and nothing
+        else, and through `_refusal` that dropped the tail of the backend's
+        sentence and this project's own advice after it (measured). Only a
+        caller that cuts anyway may bound this. The finds are over the byte
+        array and the appends are slices, so the cost is in the stretches and
+        not in the characters.
         """
         out = []
         produced = 0
         i = 0
-        while i < upto and produced < budget:
+        while i < upto and (budget is None or produced < budget):
             j = marked.find(1, i, upto)
             if j == -1:
                 out.append(text[i:upto])
@@ -1000,7 +1024,7 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
         whole, _grams, _longest = self._tables()
         if not whole:
             return text
-        return self._render(text, self._marks(text), len(text), len(text) + len(_MARKER))
+        return self._render(text, self._marks(text), len(text))
 
     def _window(self, cap):
         """How many characters `_excerpt` scans and may show for a ``cap``.
@@ -1145,8 +1169,18 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
         """
         if req is None:
             return
+        # Only text values on our side of the comparison. What the transport
+        # adds is always text, so a value of ours that is not text can match
+        # nothing; and a hand-edited `headers` value that is a list or a block
+        # is unhashable, which made this set comprehension raise `TypeError`
+        # while the docstring above said nothing here could — inside the
+        # `finally`, with the reply's exception as its context (measured).
+        # `http.client` refuses such a header before a byte is sent, so the
+        # refusal the reader gets is that one, and this only had to stop
+        # standing in front of it.
         ours = {(name.capitalize(), value)
-                for name, value in {**headers, **self.extra_headers}.items()}
+                for name, value in {**headers, **self.extra_headers}.items()
+                if isinstance(value, str)}
         with self._transport_lock:
             added = tuple(value for name, value in req.headers.items()
                           if isinstance(value, str) and (name, value) not in ours
@@ -1588,7 +1622,7 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
                     text = e.read(_ERROR_BODY_BYTES).decode("utf-8", "replace")
                     unread = ""
                 except (OSError, http.client.HTTPException):
-                    text, unread = "", " (the body could not be read)"
+                    text, unread = "", "(the body could not be read)"
                 last = self._refusal(
                     f"{self.name}: HTTP {code} — {self._excerpt(text, 500)}{unread}"
                     f"{self._url_hint(code, url)}")
