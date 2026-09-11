@@ -55,8 +55,9 @@ from ..providers import ProviderError, available
 from ..store import load_doc, target_token, tracked
 
 # `NO_USAGE` at module level, unlike `cli.py`'s function-local reaches into the
-# same module: the `..providers` import above already pays what `cli.py` is
-# deferring, so there is nothing left here to defer.
+# same module: `cli.py` defers `translate` because most commands never call a
+# model, while this server's translation endpoints need it and the process
+# imports it once at start-up, so there is nothing here to defer.
 from ..translate import NO_USAGE
 
 STATIC = os.path.join(os.path.dirname(__file__), "static")

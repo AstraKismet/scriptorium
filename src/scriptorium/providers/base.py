@@ -6,21 +6,20 @@ individual segments all live above this layer in :mod:`scriptorium.translate`,
 so adding a backend never means reimplementing the pipeline.
 """
 
-import http.client
 import json
 import math
 import os
 import random
-import socket
 import threading
 import time
 import unicodedata
-import urllib.error
-import urllib.request
 from array import array
 
 from ..config import has_version_segment, printable_url
 from .errors import ProviderError
+
+# No transport at module scope: `http.client`, `socket` and `urllib` are imported
+# inside `Provider._request`, which says why and what fails if that changes.
 
 # Transient by contract: a timeout, a conflict, "too early", a rate limit, and
 # the 5xx family a gateway emits while a local runtime is still loading weights.
@@ -779,6 +778,35 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
             raise ProviderError(
                 f"{self.name}: base_url must be an http:// or https:// address. This one "
                 f"names another scheme, and the value is not repeated here.")
+        # **The transport is imported here, not at module scope.** Every `lx`
+        # command executes this module — `cli.py` binds `ProviderError` at module
+        # scope, and Python runs `providers/__init__.py`, which imports this file
+        # to build `KINDS`, before it binds any submodule — while these four
+        # names are used in this function and nowhere else, and only once a
+        # request is being sent. At module scope `urllib.request` brought `ssl`,
+        # `http.client`, `socket` and the `email` package with fourteen of its
+        # submodules into `lx --help`, on 3.9 through 3.12. Measured 2026-09-11
+        # on 3.12, median of seven warm runs: `import scriptorium.cli` took 69 ms
+        # with them there and 42 ms with them here.
+        # `tests/test_startup_imports.py` fails if any of the four moves back.
+        #
+        # **Here and not in `Provider.__init__`**, which would run the first
+        # import on the thread that builds the provider — `translate_segments`
+        # builds one before it starts its pool — but could not bind these names
+        # for this function without a `global`, so the statements would be here
+        # as well: two sites for one fact, bought only to keep the first import
+        # off the worker threads. The import system's per-module lock already
+        # serializes a concurrent first import. Measured 2026-09-11: 32 threads
+        # released by one `Barrier` into this function against a closed port, in
+        # a fresh interpreter, 50 times each on 3.9 and 3.12 — every thread ended
+        # in the `URLError` branch below, none in an `ImportError`, an
+        # `AttributeError` or a partially initialized module. After the first
+        # call the four statements are `sys.modules` lookups.
+        import http.client
+        import socket
+        import urllib.error
+        import urllib.request
+
         body = json.dumps(payload).encode("utf-8") if payload is not None else None
         timeout = self.timeout if timeout is None else timeout
         retries = self.retries if retries is None else retries
