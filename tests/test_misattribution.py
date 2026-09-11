@@ -238,6 +238,38 @@ def test_an_id_nobody_asked_for_refuses_the_reply():
     assert misattributed(asked, {**good, "s0006": "譯" * 30}, src, "zh-TW", CFG)
 
 
+def test_an_id_the_reply_invented_is_quoted_through_repr(tmp_path, monkeypatch):
+    """The ids named in that refusal are the reply's own choice, and the
+    sentence reaches a terminal through `progress` and a job log verbatim — so
+    an id carrying an ANSI erase-line and a bidirectional override arrived
+    there raw (HANDOFF-076 review, measured). `repr` escapes every character
+    `str.isprintable` refuses, which covers every category the provider's own
+    `_sane` drops.
+    """
+    evil = "s0001\x1b[2K\u202eEVIL"
+    src = _sources()
+    why = misattributed(list(src), {**_answers(src), evil: "譯" * 30}, src, "zh-TW", CFG)
+    assert why and "nobody asked for" in why and "EVIL" in why, why
+    assert "\x1b" not in why and "\u202e" not in why, why
+
+    src, doc = _project(tmp_path, monkeypatch)
+    segs = doc["segments"]
+
+    def answer(items):
+        if len(items) == 1:                     # the retry: answer it correctly
+            return {items[0]["id"]: _rendered(items[0])}
+        return {**{i["id"]: _rendered(i) for i in items}, evil: "譯" * 30}
+
+    lines = []
+    monkeypatch.setattr(translate_mod, "build_provider",
+                        lambda name, _cfg, model=None: _Stub(answer))
+    do_translate(src, "zh-TW", CFG, segs, "draft", batch=len(segs), concurrency=1,
+                 progress=lines.append)
+    said = [line for line in lines if "nobody asked for" in line]
+    assert said, lines
+    assert all("\x1b" not in line and "\u202e" not in line for line in said), said
+
+
 def test_a_target_outside_the_projects_own_length_band_refuses_the_reply():
     """The band is `checks.length_ratio`'s, read from the project's own config.
 

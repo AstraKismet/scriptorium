@@ -371,6 +371,8 @@ lx run book/ch1.md --lang zh-TW
 2.5 GB，不是載入。
 
 API 金鑰只從 `api_key_env` 指定的環境變數讀取，絕不寫進設定檔、狀態或記錄檔。
+後端或擋在前面的代理伺服器若在錯誤訊息裡把金鑰原樣抄回來，這段訊息在任何地方顯示之前，
+金鑰都會先換成 `[credential redacted]`；回覆內容若引用了金鑰，整份回覆直接不收。
 本機伺服器通常不需要金鑰，把 `api_key_env` 留空就不會送出 `Authorization` 標頭。
 `lx providers` 會列出設定了哪些後端，以及每個金鑰在不在。
 
@@ -645,7 +647,7 @@ Markdown 與純文字目前都可以端到端跑完：抽取、翻譯、驗證�
 ## 開發
 
 ```bash
-python -m pytest -q                # 2461 collected，不碰網路
+python -m pytest -q                # 2540 collected，不碰網路
 python -m ruff check src tests
 ```
 

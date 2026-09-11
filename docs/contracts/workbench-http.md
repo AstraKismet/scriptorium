@@ -1646,6 +1646,15 @@ absence closes.
   of `/api/job`, where a provider's own description and its transport failures
   land. The last two were raw until 2026-08-13; a URL is where a credential hides
   in something nobody thinks of as a credential.
+
+  A backend's own text is on this surface too — `GET /api/models`' `error`, and
+  `/api/job`'s `log`, `failures` and `error` — and a backend or a proxy in front
+  of one may quote the request's credential back in it. That broke this
+  paragraph until 2026-09-11 without any key, type or status being wrong. Every
+  such sentence is now built by `Provider._refusal`, which removes every
+  credential the request carried, and a reply that quotes one is refused whole;
+  the paragraph holds again and `contract_version` did not move, because the
+  sentences are free text. See `docs/decisions.md`, 2026-09-11.
 - **No authentication of any kind.** No cookie, no `Authorization`, no token, no
   session. Loopback plus the admission gate is the entire model.
 - **No locking, and no server-side merge.** Version 2 added a per-segment token

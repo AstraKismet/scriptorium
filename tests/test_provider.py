@@ -4,11 +4,18 @@ This is the contract that matters for local deployment: the request must be
 plain enough that llama.cpp, Ollama, LM Studio, and vLLM all accept it.
 """
 
+import ast
+import base64
 import json
+import math
 import os
+import random
 import sys
 import threading
 import time
+import traceback
+import urllib.error
+import urllib.request
 from array import array
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -16,8 +23,10 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from scriptorium.config import DEFAULT_CONFIG  # noqa: E402
 from scriptorium.providers import build  # noqa: E402
 from scriptorium.providers.base import ProviderError  # noqa: E402
+from scriptorium.store import load_doc  # noqa: E402
 from scriptorium.translate import translate_segments  # noqa: E402
 
 SEEN = {}
@@ -226,12 +235,21 @@ def test_a_listing_that_answers_the_wrong_shape_masks_the_url(models_server):
     masked and had been for a year. It passed without ever executing the line it
     was written for.
 
-    **The credential shape used here is the query string, not userinfo**, and
-    that is a measured constraint rather than a preference:
+    **The credential shape used here was the query string, not userinfo**, and
+    that was a measured constraint rather than a preference:
     `urllib.request.urlopen` cannot reach a URL carrying userinfo at all — it
     fails `getaddrinfo` before a byte goes out — so the `?key=SECRET` proxy
-    shape is the only one that reaches this branch. `printable_url` strips both,
-    and the userinfo half is covered by the `describe()` assertion above.
+    shape was the only one that reached this branch. `printable_url` strips
+    both, and the userinfo half is covered by the `describe()` assertion above.
+
+    **Since 2026-09-11 the `?key=` shape never reaches the branch at all.** A
+    `base_url` carrying a query string is refused at `_request`'s door, before
+    the transport is imported: every request appends its own path after
+    `base_url`, so `/v1?key=X/models` can reach no endpoint, and its one
+    measured effect was a 404 page quoting the query back. So the query half of
+    this test now asserts the door — the refusal names no value and the mock
+    sees no request — and the API-key half stays on the wrong-shape branch over
+    a plain URL, which is the branch this message was written for.
     """
     port = models_server.rsplit(":", 1)[1].split("/")[0]
     MODELS["payload"] = {"object": "list"}          # no `data` array: the shape error
@@ -239,13 +257,24 @@ def test_a_listing_that_answers_the_wrong_shape_masks_the_url(models_server):
     try:
         for kind, url in (("openai", f"http://127.0.0.1:{port}/v1?key=SUPERSECRET"),
                           ("anthropic", f"http://127.0.0.1:{port}?key=SUPERSECRET")):
+            MODELS["method"] = None
             spec = {"providers": {"p": {
                 "kind": kind, "base_url": url, "model": "m", "retries": 0,
-                "timeout": 5, "api_key_env": "LX_TEST_KEY" if kind == "anthropic" else ""}}}
+                "timeout": 5, "api_key_env": "LX_TEST_KEY"}}}
+            with pytest.raises(ProviderError, match="query string") as caught:
+                build("p", spec).list_models()
+            said = str(caught.value)
+            assert "SUPERSECRET" not in said, f"{kind} refusal repeated the query"
+            assert "sk-not-a-real-key" not in said, f"{kind} refusal leaked the key"
+            assert MODELS["method"] is None, f"{kind}: refused at the door, yet a request went out"
+        for kind, url in (("openai", f"http://127.0.0.1:{port}/v1"),
+                          ("anthropic", f"http://127.0.0.1:{port}")):
+            spec = {"providers": {"p": {
+                "kind": kind, "base_url": url, "model": "m", "retries": 0,
+                "timeout": 5, "api_key_env": "LX_TEST_KEY"}}}
             with pytest.raises(ProviderError, match="model list") as caught:
                 build("p", spec).list_models()
             said = str(caught.value)
-            assert "SUPERSECRET" not in said, f"{kind} listing leaked the query"
             assert "sk-not-a-real-key" not in said, f"{kind} listing leaked the key"
             assert "127.0.0.1" in said, "the host survives, or the message is unfollowable"
     finally:
@@ -2052,3 +2081,1708 @@ def test_a_nested_embedding_is_named_for_what_it_is(embeddings_server):
     assert "not a non-empty array" in str(base64ish.value)
     assert "version segment" not in str(base64ish.value)
     assert "llama.cpp" not in str(base64ish.value)
+
+
+# ── a backend that quotes the request back ─────────────────────────────────
+#
+# HANDOFF-076. A backend — or a proxy in front of one — that answers by quoting
+# the request's `Authorization` header put the key this project read from
+# `api_key_env` into the `HTTPError` message, and from there onto every display
+# surface: `lx models` on stderr, `GET /api/models`'s `error`, every per-segment
+# failure of `lx translate`, `POST /api/job`'s `log` and `error`, `lx audit`.
+# The rule since 2026-09-11: a credential the request carried never reaches a
+# reader through a backend's own text. `Provider._refusal` redacts and tames
+# the whole of every message, `_excerpt` cuts only after it redacts, and
+# `_request` refuses a 200 that quotes the key before anything parses it.
+#
+# The tests here are the runtime half. The three `ast` guards at the end of the
+# file are the structural half, and each says what it cannot see — which is why
+# both halves exist.
+
+#: A key of the shape a hosted backend issues: past thirty-two characters and
+#: carrying `/`, `+` and `=`, the three characters the JSON, PHP, percent and
+#: HTML spellings disagree about.
+KEY = "sk-live/AbC+dEf=GhI/jKl+mNo=PqR/sTu+vWx=0123456789"
+
+#: The exact text the redaction leaves behind. Pinned as a literal here rather
+#: than read off the module, so a rename of the constant cannot pass this file
+#: by itself — the sentence a person reads is the thing under test.
+MARKER = "[credential redacted]"
+
+#: What the echo mock answers. `answer` takes the handler and returns
+#: `(status, body bytes, reason phrase or None)`; `seen` records every request
+#: that reached it, which is how a test proves one was *not* sent.
+ECHO = {"answer": None, "seen": []}
+
+
+def _echo(status=401, header="Authorization", body=None, reason=None, extra=None,
+          stall=False):
+    """Stage the echo mock: quote ``header`` back in the body, and in the reason phrase if asked.
+
+    ``body`` and ``reason`` are called with the header's value as the mock
+    received it — a `str`, empty when the request carried no such header — so
+    every test's payload is *reflected* rather than typed in: what the mock
+    quotes is what the provider actually sent. ``extra`` adds response headers
+    (a `Retry-After`). ``stall`` promises the body in `Content-Length` and never
+    sends it, so the client's read of an error body times out — the shape that
+    made `e.read()` raise inside `_request`'s handler.
+    """
+    body = body or (lambda got: json.dumps({"error": f"invalid api key; you sent {got}"}))
+
+    def answer(handler):
+        got = handler.headers.get(header) or ""
+        return status, body(got).encode("utf-8"), reason(got) if reason else None
+
+    ECHO["answer"] = answer
+    ECHO["extra"] = dict(extra or {})
+    ECHO["stall"] = stall
+    ECHO["seen"].clear()
+
+
+class EchoHandler(BaseHTTPRequestHandler):
+    """Reflects a request header into its reply, the way a gateway's error page does.
+
+    One class for `GET` and `POST`, choosing its answer from `ECHO` the way
+    `ModelsHandler` chooses from `MODELS`, so a listing, a completion and an
+    embeddings request all reach the same reflecting far end.
+    """
+
+    def log_message(self, *a):
+        pass
+
+    def _reflect(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        if n:
+            self.rfile.read(n)
+        ECHO["seen"].append({"method": self.command, "path": self.path})
+        status, body, reason = ECHO["answer"](self)
+        self.send_response(status, reason)
+        self.send_header("Content-Type", "application/json")
+        for name, value in ECHO.get("extra", {}).items():
+            self.send_header(name, value)
+        if ECHO.get("stall"):
+            # Headers out, body never: the client's read of it times out. The
+            # sleep outlasts every client timeout a stalling test configures,
+            # and this is a threading server, so nobody else waits on it.
+            self.send_header("Content-Length", str(len(body) + 100))
+            self.end_headers()
+            self.wfile.flush()
+            time.sleep(1.5)
+            return
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    do_GET = do_POST = _reflect
+
+
+@pytest.fixture(scope="module")
+def echo():
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), EchoHandler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{httpd.server_address[1]}/v1"
+    httpd.shutdown()
+
+
+def _windows(secret, text, width=8):
+    """The ``width``-character windows of ``secret`` found in ``text`` — the oracle.
+
+    Never `secret not in text`: that passes a fix applied after the cut, which
+    leaves the head of the key on screen, and an exact-match-only fix, which
+    misses every spelling but one. Eight is `_WHOLE`, the shortest run the
+    redaction ever removes, so a surviving window is a run it should have seen.
+    """
+    return sorted({secret[i:i + width] for i in range(len(secret) - width + 1)
+                   if secret[i:i + width] in text})
+
+
+def _keyed(url, kind="openai", env="LX_ECHO_KEY", **extra):
+    """A provider `p` whose key comes from ``env``: one attempt, a short timeout."""
+    return {"providers": {"p": {"kind": kind, "base_url": url, "model": "m",
+                                "api_key_env": env, "retries": 0, "timeout": 5,
+                                **extra}}}
+
+
+def _bare(url):
+    """`echo` without its `/v1`, for the Anthropic class, which appends its own."""
+    return url.rsplit("/v1", 1)[0]
+
+
+def _call(p, which):
+    """One of the three doors into `_request` on ``p``, by name."""
+    if which == "list_models":
+        return p.list_models()
+    if which == "complete":
+        return p.complete("s", "u")
+    return p.embed(["a"])
+
+
+def test_lx_models_prints_no_window_of_a_key_the_backend_echoed(
+        echo, tmp_path, monkeypatch, capsys):
+    """T1, acceptance criterion 3: `lx models --provider p` exits 2 and neither
+    stream carries the key.
+
+    On ce43de5 — reverted and watched failing while this was written — stderr
+    was `lx: p: HTTP 401 — {"error": "invalid api key; you sent Bearer <the
+    key>"}`, the key in full. The backend's own words survive on purpose:
+    "invalid api key" is what the person needs to read, and a fix that dropped
+    the body would pass the first two assertions alone.
+    """
+    from scriptorium import cli
+
+    monkeypatch.setenv("LX_ECHO_KEY", KEY)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "lx.config.json").write_text(json.dumps(_keyed(echo)), encoding="utf-8")
+    _echo()
+    with pytest.raises(SystemExit) as e:
+        cli.main(["models", "--provider", "p"])
+    out = capsys.readouterr()
+    shown = out.out + out.err
+    assert e.value.code == 2, shown
+    assert _windows(KEY, shown) == [], shown
+    assert MARKER in shown and "invalid api key" in shown, shown
+    assert ECHO["seen"], "the request must have reached the mock for this to test anything"
+
+
+def test_a_run_reports_no_window_of_the_key_in_its_lines_or_its_failures(
+        echo, tmp_path, monkeypatch):
+    """T3, acceptance criterion 4: the run's own surfaces, through `cli.do_translate`.
+
+    A fix confined to the `lx models` path leaves `translate.run_batch`'s
+    `batch 1/1 failed (…)` line and every `retry_one` reason carrying the key —
+    the two sinks `lx translate`, `lx run` and `lx repair` print from.
+    """
+    from scriptorium import cli
+
+    monkeypatch.setenv("LX_ECHO_KEY", KEY)
+    root = tmp_path / "nest" / "proj"
+    (root / "config").mkdir(parents=True)
+    (root / "config" / "dnt.txt").write_text("", encoding="utf-8")
+    (root / "d.md").write_bytes(b"The gate stood open when she came down the hill.\n")
+    monkeypatch.chdir(root)
+    _echo()
+    cfg = {**json.loads(json.dumps(DEFAULT_CONFIG)), **_keyed(echo), "routing": {"draft": "p"}}
+    cli.do_extract("d.md", "zh-TW", cfg)
+    segments = load_doc("d.md", "zh-TW")["segments"]
+
+    lines = []
+    applied, failures, _refused = cli.do_translate(
+        "d.md", "zh-TW", cfg, segments, "draft", concurrency=1, progress=lines.append)
+    assert applied == 0 and [sid for sid, _why in failures] == ["s0001"], (lines, failures)
+    for text in lines + [why for _sid, why in failures]:
+        assert _windows(KEY, text) == [], text
+    assert all(MARKER in why and "invalid api key" in why for _sid, why in failures), failures
+    assert any(MARKER in line and "failed" in line for line in lines), lines
+
+
+def test_an_anthropic_listing_that_echoes_x_api_key_is_redacted_too(echo, monkeypatch):
+    """T5: the Messages API sends the key as `x-api-key`, and the redaction is
+    the key's, not the header's — a fix on one backend leaves the other."""
+    monkeypatch.setenv("LX_ECHO_KEY", KEY)
+    _echo(header="x-api-key")
+    with pytest.raises(ProviderError) as e:
+        build("p", _keyed(_bare(echo), kind="anthropic")).list_models()
+    said = str(e.value)
+    assert _windows(KEY, said) == [], said
+    assert MARKER in said and "invalid api key" in said, said
+
+
+def test_a_key_that_begins_at_character_490_is_redacted_before_the_cut(echo, monkeypatch):
+    """T6: the 500-character display window used to be cut *first*.
+
+    Measured on ce43de5: a key beginning at decoded character 490 left its
+    first ten characters on screen whatever the match rule was, because the
+    slice happened before anything looked at the body. `_excerpt` holds the
+    order now, and the `ast` guard below pins that it is the only cut.
+    """
+    monkeypatch.setenv("LX_ECHO_KEY", KEY)
+    _echo(body=lambda got: "x" * (490 - len("Bearer ")) + got + " is not a key we issued")
+    with pytest.raises(ProviderError) as e:
+        build("p", _keyed(echo)).list_models()
+    said = str(e.value)
+    assert _windows(KEY, said) == [], said
+    assert MARKER in said, said
+
+
+def test_a_php_escaped_body_is_redacted_by_its_own_spelling(echo, monkeypatch):
+    """T7: PHP's `json_encode` writes `/` as `\\/` by default, so an exact match
+    on the key misses a body from any PHP gateway."""
+    assert "/" in KEY, "the premise: the key has a character PHP escapes"
+    monkeypatch.setenv("LX_ECHO_KEY", KEY)
+    _echo(body=lambda got: json.dumps({"error": f"you sent {got}"}).replace("/", "\\/"))
+    with pytest.raises(ProviderError) as e:
+        build("p", _keyed(echo)).complete("s", "u")
+    said = str(e.value)
+    assert _windows(KEY, said) == [], said
+    assert MARKER in said and "you sent" in said, said
+
+
+def test_a_backend_that_quotes_only_the_head_of_the_header_is_still_redacted(
+        echo, monkeypatch):
+    """T8: a backend that cuts the value it echoes shows a *piece* of the key,
+    and a piece of twelve characters or more is removed like the whole."""
+    monkeypatch.setenv("LX_ECHO_KEY", KEY)
+    _echo(body=lambda got: json.dumps({"error": f"bad credential {got[:20]}"}))
+    head = ("Bearer " + KEY)[:20]
+    with pytest.raises(ProviderError) as e:
+        build("p", _keyed(echo)).complete("s", "u")
+    said = str(e.value)
+    assert _windows(head, said) == [], said
+    assert MARKER in said and "bad credential" in said, said
+
+
+def test_a_backends_own_mask_is_left_as_written(echo, monkeypatch):
+    """T9: OpenAI answers `Incorrect API key provided: sk-proj-****abcd`.
+
+    `sk-proj-` is eight characters and a *piece* — the whole key is longer — so
+    it sits below the twelve-character piece floor; `abcd` is four. The body
+    reaches the reader exactly as the backend wrote it, which is what
+    separates the floors from an over-eager rule that removes every prefix.
+    """
+    proj = "sk-proj-" + "Ab/Cd+Ef=Gh" * 3 + "wxyz"
+    assert len(proj) >= 32
+    monkeypatch.setenv("LX_ECHO_KEY", proj)
+    _echo(body=lambda got: json.dumps(
+        {"error": f"Incorrect API key provided: sk-proj-****{proj[-4:]}"}))
+    with pytest.raises(ProviderError) as e:
+        build("p", _keyed(echo)).complete("s", "u")
+    said = str(e.value)
+    assert "Incorrect API key provided: sk-proj-****wxyz" in said, said
+    assert MARKER not in said, said
+
+
+def test_a_configured_header_value_is_redacted_beside_the_key(echo, monkeypatch):
+    """T10: `headers` is sent verbatim, and a hand-edited value there is a secret
+    the request carried — with `api_key_env` empty, so a key-only fix fails.
+
+    The second half is a whole-number value: `http.client.putheader` sends an
+    `int` as its decimal, so the decimal is what a backend can echo, and it was
+    in the secret set by contract and pinned by nothing (review-tests F6).
+    """
+    proxy_key = "pk-ABCDEFGHJKLMNPQRSTUVW"
+    assert len(proxy_key) == 24
+    _echo(header="X-Proxy-Key", body=lambda got: json.dumps({"error": f"proxy refused {got}"}))
+    with pytest.raises(ProviderError) as e:
+        build("p", _keyed(echo, env="", headers={"X-Proxy-Key": proxy_key})).complete("s", "u")
+    said = str(e.value)
+    assert proxy_key not in said and _windows(proxy_key, said) == [], said
+    assert MARKER in said and "proxy refused" in said, said
+
+    _echo(header="X-Account", body=lambda got: json.dumps({"error": f"account {got} refused"}))
+    with pytest.raises(ProviderError) as e:
+        build("p", _keyed(echo, env="", headers={"X-Account": 123456789})).complete("s", "u")
+    said = str(e.value)
+    assert "123456789" not in said and MARKER in said and "refused" in said, said
+
+
+@pytest.mark.parametrize("kind,call,shape,wording", [
+    ("openai", "list_models", lambda v: {"object": "list", "note": v}, "model list"),
+    ("openai", "complete", lambda v: {"note": v}, "unexpected response shape"),
+    ("openai", "complete", lambda v: {"choices": [{"message": {"content": [v]}}]},
+     "unexpected response shape"),
+    ("anthropic", "list_models", lambda v: {"note": v}, "model list"),
+    ("anthropic", "complete", lambda v: {"content": [], "note": v}, "empty completion"),
+    ("openai", "embed", lambda v: {"object": "list", "note": v}, "embeddings list"),
+], ids=["openai-listing", "openai-no-choices", "openai-content-not-text",
+        "anthropic-listing", "anthropic-empty-completion", "embeddings"])
+@pytest.mark.parametrize("straddles", [False, True], ids=["short", "straddling-the-cut"])
+def test_every_wrong_shape_refusal_redacts_a_header_value_it_quotes(
+        echo, monkeypatch, kind, call, shape, wording, straddles):
+    """T11: the five `str(data)[:300]` sites, and a fix confined to the
+    `HTTPError` branch misses all of them.
+
+    The body quotes the **`X-Proxy-Key` value and not the API key**, so the 200
+    gate cannot be what refused the reply — the last assertion says so — and
+    what is under test is each wrong-shape message going through `_excerpt`.
+
+    Two bodies per site. A short one, where the value sits well inside the
+    300-character excerpt; and one padded so that the value **straddles the
+    cut** — measured (review-tests F2): with short bodies alone, reverting all
+    five sites to `str(data)[:300]` left this test green, because `_refusal`
+    re-scans the whole message and a value wholly inside the cut is redacted
+    there anyway. Only a value the cut splits tells the two apart. Each row
+    asserts its own site's wording, so a site cannot pass on a neighbour's.
+    """
+    proxy_key = "pk-ABCDEFGHJKLMNPQRSTUVW"
+    monkeypatch.setenv("LX_ECHO_KEY", KEY)
+    pad = ""
+    if straddles:
+        # Where the value lands in `str(data)` for this shape, so that it
+        # starts ten characters before the 300th and ends after it.
+        at = str(shape("MARK")).index("MARK")
+        pad = "x" * (300 - 10 - at)
+    _echo(status=200, header="X-Proxy-Key", body=lambda got: json.dumps(shape(pad + got)))
+    p = build("p", _keyed(echo if kind == "openai" else _bare(echo), kind=kind,
+                          headers={"X-Proxy-Key": proxy_key}))
+    with pytest.raises(ProviderError, match=wording) as e:
+        _call(p, call)
+    said = str(e.value)
+    assert proxy_key not in said and _windows(proxy_key, said) == [], said
+    assert MARKER in said, said
+    assert "quotes the credential" not in said, "the gate, not the excerpt, refused this"
+
+
+def test_a_200_that_quotes_the_key_is_refused_whole(echo, monkeypatch):
+    """T12: the gate, at all three doors, and then through a run.
+
+    A completion whose content quotes the key would otherwise be stored by
+    `accept` → `store.save_targets` → `lx commit` → `.lx/tm.*.jsonl`, which is
+    tracked in git — measured, with `lx check` green. A listing row whose id is
+    the key would sit in a dropdown; an embeddings reply quoting it would be
+    parsed. Refused whole and never rewritten: rewriting content is code
+    writing a translation.
+    """
+    monkeypatch.setenv("LX_ECHO_KEY", KEY)
+
+    def key_of(got):
+        return got[len("Bearer "):]
+
+    cases = {
+        "complete": lambda got: json.dumps({"choices": [{"message": {
+            "content": json.dumps({"s1": "leaked " + key_of(got)})}}]}),
+        "list_models": lambda got: json.dumps({"data": [{"id": key_of(got)}]}),
+        "embed": lambda got: json.dumps({"data": [{"index": 0, "embedding": [1.0, 0.0]}],
+                                         "note": key_of(got)}),
+    }
+    for call, body in cases.items():
+        _echo(status=200, body=body)
+        with pytest.raises(ProviderError) as e:
+            _call(build("p", _keyed(echo)), call)
+        said = str(e.value)
+        assert "with text that quotes the credential this request carried" in said, (call, said)
+        assert _windows(KEY, said) == [], (call, said)
+        assert "a completion" in said if call == "complete" else True, said
+
+    _echo(status=200, body=cases["complete"])
+    segments = [{"id": "s1", "kind": "para", "masked": "One sentence."}]
+    doc = {"lang": "zh-TW", "tone": "literary", "segments": segments}
+    cfg = dict(_keyed(echo), glossary="", dnt="",
+               batch={"size": 25, "concurrency": 1, "context": 0})
+    lines = []
+    results, failures = translate_segments(segments, doc, cfg, provider_name="p",
+                                           progress=lines.append)
+    assert results == {}, "nothing from a refused reply may be stored"
+    assert [sid for sid, _why in failures] == ["s1"], failures
+    for text in lines + [why for _sid, why in failures]:
+        assert _windows(KEY, text) == [], text
+    assert all("quotes the credential" in why for _sid, why in failures), failures
+
+
+def test_a_placeholder_key_shorter_than_the_gate_is_not_refused(echo, monkeypatch):
+    """T13: `sk-no-key-required` is eighteen characters, llama.cpp's own
+    examples use it, and it appears legitimately in the technical documents
+    this project translates — a gate with no floor would refuse every one."""
+    from scriptorium.providers.base import _GATE
+
+    monkeypatch.setenv("LX_ECHO_KEY", "sk-no-key-required")
+    assert len("sk-no-key-required") < _GATE <= 32
+    _echo(status=200, body=lambda got: json.dumps({"choices": [{"message": {
+        "content": f"set OPENAI_API_KEY to {got[len('Bearer '):]}"}}]}))
+    assert build("p", _keyed(echo)).complete("s", "u") == (
+        "set OPENAI_API_KEY to sk-no-key-required")
+
+
+def test_the_floors_of_the_redaction(monkeypatch):
+    """T14, on `_redact` directly: the two floors, the identity, and the accepted cost.
+
+    A value shorter than `_WHOLE` is never redacted, and no message says so — a
+    note would state a length class of the key. The identity case is the one
+    that bites: with no key, `"" in text` is true everywhere and a
+    `str.replace` without the floor puts a marker between every two characters.
+    The last case documents the cost the design accepted rather than hiding
+    it: a key literally equal to wrapper text redacts the wrapper.
+    """
+    from scriptorium.providers.base import _MARKER, _PIECE, _WHOLE
+
+    assert (_WHOLE, _PIECE, _MARKER) == (8, 12, MARKER)
+
+    def redact(key, text):
+        monkeypatch.setenv("LX_ECHO_KEY", key)
+        return build("p", _keyed("http://127.0.0.1:1/v1"))._redact(text)
+
+    assert redact("abcdefg", "key abcdefg here") == "key abcdefg here"
+    assert redact("abcdefgh", "key abcdefgh here") == f"key {MARKER} here"
+    forty = KEY[:40]
+    assert redact(forty, "x " + forty[:11] + " y") == "x " + forty[:11] + " y"
+    assert redact(forty, "x " + forty[:12] + " y") == f"x {MARKER} y"
+    identity = build("p", _keyed("http://127.0.0.1:1/v1", env=""))
+    assert identity._credentials() == []
+    assert identity._redact("abc") == "abc"
+    assert redact("HTTP 401", "p: HTTP 401 — invalid model") == f"p: {MARKER} — invalid model"
+
+
+def test_a_body_is_redacted_before_it_is_tamed(echo, monkeypatch):
+    """T15: `_redact` → `_tame`, and the marker survives the taming.
+
+    The body opens with a bidirectional override and closes with an ANSI
+    erase-line around the echoed key. Both become `U+FFFD`, the key becomes
+    the marker, and the marker — ASCII by design — is intact between them.
+
+    That first shape does not separate the order (review-tests F3, measured:
+    tame-then-redact left the suite green), because the controls sit outside
+    the key. The second does: a key with an ESC **inside** it, echoed raw.
+    Tamed first, the ESC is U+FFFD and no spelling matches; redacted first,
+    the whole key is the marker.
+    """
+    monkeypatch.setenv("LX_ECHO_KEY", KEY)
+    _echo(body=lambda got: "\u202eyou sent " + got + "\x1b[2K")
+    with pytest.raises(ProviderError) as e:
+        build("p", _keyed(echo)).complete("s", "u")
+    said = str(e.value)
+    assert MARKER in said and "�" in said, said
+    assert "\x1b" not in said and "\u202e" not in said, said
+    assert _windows(KEY, said) == [], said
+
+    inside = KEY[:10] + "\x1b" + KEY[10:]
+    monkeypatch.setenv("LX_ECHO_KEY", inside)
+    _echo(body=lambda got: "you sent " + got)        # raw: the ESC stays a byte
+    with pytest.raises(ProviderError) as e:
+        build("p", _keyed(echo)).complete("s", "u")
+    said = str(e.value)
+    assert ECHO["seen"], "the request must have reached the mock"
+    assert _windows(inside, said) == [] and _windows(KEY, said) == [], said
+    assert MARKER in said and "\x1b" not in said, said
+
+
+def test_a_reason_phrase_that_quotes_the_key_never_reaches_a_traceback(echo, monkeypatch):
+    """T16: nothing is raised inside `_request`'s handlers, so nothing is chained.
+
+    The chained `HTTPError.__str__` is `HTTP Error 401: <reason phrase>`, and
+    the reason phrase is the backend's bytes too — so a backend that put the
+    key there reached `str(e.__cause__)` and every formatted traceback while
+    the message itself was clean. `raise last from None` hid it from the
+    traceback and left it on `__context__`, the last object holding the value
+    (review-claims, review-tests F7); the rule now is that no handler raises.
+
+    **The positive control comes first**: the same request made with `urlopen`
+    directly is an `HTTPError` whose `.msg` carries a window of the key, so the
+    assertions below cannot pass vacuously the day the mock stops putting the
+    header in its reason phrase.
+    """
+    monkeypatch.setenv("LX_ECHO_KEY", KEY)
+    _echo(reason=lambda got: f"bad key {got}")
+    req = urllib.request.Request(echo + "/chat/completions", data=b"{}", method="POST")
+    req.add_header("Authorization", "Bearer " + KEY)
+    with pytest.raises(urllib.error.HTTPError) as raw:
+        urllib.request.urlopen(req, timeout=5)
+    assert _windows(KEY, raw.value.msg) != [], "the mock must quote the key in its reason phrase"
+
+    with pytest.raises(ProviderError) as e:
+        build("p", _keyed(echo)).complete("s", "u")
+    formatted = "".join(traceback.format_exception(
+        type(e.value), e.value, e.value.__traceback__))
+    assert _windows(KEY, formatted) == [], formatted
+    assert e.value.__cause__ is None and e.value.__context__ is None
+
+
+# A forward proxy that refuses everything. `Proxy-Authorization` is a header
+# urllib adds on its own from `http_proxy`/`https_proxy` userinfo — the
+# provider never sees the value — and a proxy answering 407 quotes it back
+# exactly as a gateway quotes `Authorization`.
+
+PROXY = {"reason": None, "answer": None, "seen": []}
+
+
+class ProxyHandler(BaseHTTPRequestHandler):
+    """407 to a proxied `GET`/`POST` and to a `CONNECT`, quoting the credential it was sent.
+
+    `PROXY["answer"]`, when set, replaces the 407 with whatever
+    `(status, body bytes, reason)` it returns for the handler — a 502 naming
+    the request-target, or a 200 of the wrong shape — because a proxy's error
+    page quotes the request line and the `Host` header as readily as the
+    credential.
+    """
+
+    def log_message(self, *a):
+        pass
+
+    def _refuse(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        if n:
+            self.rfile.read(n)
+        got = self.headers.get("Proxy-Authorization") or ""
+        PROXY["seen"].append({"method": self.command, "path": self.path,
+                              "host": self.headers.get("Host") or "",
+                              "authorized": bool(got)})
+        if PROXY["answer"]:
+            status, body, reason = PROXY["answer"](self)
+        else:
+            status = 407
+            reason = PROXY["reason"](got) if PROXY["reason"] else None
+            # No body on a refused `CONNECT`: `http.client` raises on the status
+            # line and closes, and a write into the closed socket is noise.
+            body = (b"" if self.command == "CONNECT" else
+                    json.dumps({"error": f"proxy authentication failed; you sent {got}"}).encode())
+        self.send_response(status, reason)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if body:
+            self.wfile.write(body)
+
+    do_GET = do_POST = do_CONNECT = _refuse
+
+
+@pytest.fixture(scope="module")
+def proxy():
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), ProxyHandler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield httpd.server_address[1]
+    httpd.shutdown()
+
+
+def _through_proxy(monkeypatch, port, scheme, secret=None):
+    """Route ``scheme`` requests through the mock proxy; the `Basic` value urllib will send.
+
+    With no ``secret`` the proxy is reached with no credential of its own,
+    which is the shape that shows what a `base_url` carries through it.
+    """
+    userinfo = f"user:{secret}@" if secret else ""
+    monkeypatch.setenv(f"{scheme}_proxy", f"http://{userinfo}127.0.0.1:{port}")
+    for name in ("no_proxy", "NO_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    # urllib caches its proxy table in the opener it builds on the first
+    # `urlopen` and never reads the environment again, so without this reset
+    # the variables above are invisible; `monkeypatch` puts the old opener back.
+    monkeypatch.setattr(urllib.request, "_opener", None)
+    PROXY["reason"] = None
+    PROXY["answer"] = None
+    PROXY["seen"].clear()
+    if secret is None:
+        return ""
+    return "Basic " + base64.b64encode(f"user:{secret}".encode()).decode("ascii")
+
+
+def _proxy_saw(method, path):
+    """The proxy's record of the one request a test sent, found rather than indexed.
+
+    Indexed, `PROXY["seen"][0]` was once a `POST` to `localhost:11434` — a
+    thread left running by an earlier test file, whose next attempt built its
+    opener while a test here had `http_proxy` set, and so arrived at this mock
+    before the request under test did (measured in one full-suite run).
+    """
+    hits = [s for s in PROXY["seen"] if s["method"] == method and path in s["path"]]
+    assert hits, (method, path, PROXY["seen"])
+    return hits[0]
+
+
+def test_a_proxy_that_quotes_proxy_authorization_is_redacted(proxy, monkeypatch):
+    """T17: a secret the transport added, not one the configuration holds.
+
+    A secret set built from the configuration alone — the key and `headers` —
+    has never seen this value, and the body reaches the `HTTPError` branch
+    like any other 4xx. `sent` is read off the request after `urlopen` fails,
+    where urllib leaves the header it added.
+    """
+    basic = _through_proxy(monkeypatch, proxy, "http", "proxy-secret-" + "0123456789" * 3)
+    with pytest.raises(ProviderError) as e:
+        build("p", _keyed("http://127.0.0.1:1/v1", env="")).list_models()
+    said = str(e.value)
+    assert _proxy_saw("GET", "http://127.0.0.1:1/v1/models") == {
+        "method": "GET", "path": "http://127.0.0.1:1/v1/models", "host": "127.0.0.1:1",
+        "authorized": True}, (
+        "the request must have gone through the proxy carrying the credential")
+    assert "HTTP 407" in said and "proxy authentication failed" in said, said
+    assert _windows(basic, said) == [] and MARKER in said, said
+
+
+def test_a_refused_connect_is_redacted_and_tamed(proxy, monkeypatch):
+    """T18: the `URLError` branch carries a remote server's bytes too.
+
+    An `https://` target goes through the proxy as `CONNECT`, and a refusal
+    surfaces as `OSError("Tunnel connection failed: 407 <the proxy's reason
+    phrase>")` inside `e.reason` — the proxy's own text, which reached a
+    terminal untamed with an ESC in it (measured), and here quotes the
+    credential besides.
+    """
+    pytest.importorskip("ssl")
+    basic = _through_proxy(monkeypatch, proxy, "https", "proxy-secret-" + "9876543210" * 3)
+    PROXY["reason"] = lambda got: f"bad proxy credential {got}\x1b[2K"
+    with pytest.raises(ProviderError) as e:
+        build("p", _keyed("https://127.0.0.1:1/v1", env="")).list_models()
+    said = str(e.value)
+    assert _proxy_saw("CONNECT", "127.0.0.1:1")["authorized"], (
+        "urllib must have sent the credential on CONNECT")
+    assert "cannot reach" in said and "407" in said, said
+    assert _windows(basic, said) == [] and MARKER in said, said
+    assert "\x1b" not in said and "�" in said, said
+    # The host survives: a secret set read off `req.header_items()` — the
+    # unredirected half included — redacts `Host` too, and every test stayed
+    # green until this line existed (review-tests F5, measured).
+    assert "127.0.0.1:1" in said, said
+
+
+def test_a_base_url_carrying_a_query_is_refused_before_anything_is_sent(echo, monkeypatch):
+    """T19: the door, not a mask.
+
+    Every request appends its own path after `base_url`, so `/v1?key=X` is
+    requested as `/v1?key=X/models` — the path moves into the query, no endpoint
+    is reachable, and the one measured effect was a 404 page quoting the query
+    back onto stderr. Refused before the transport is imported; the mock sees
+    nothing; the refusal names neither the query nor the key.
+    """
+    monkeypatch.setenv("LX_ECHO_KEY", KEY)
+    _echo()
+    secret = "QUERYSECRET0123456789"
+    for kind, calls in (("openai", ("list_models", "complete", "embed")),
+                        ("anthropic", ("list_models", "complete"))):
+        base = (echo if kind == "openai" else _bare(echo)) + f"?key={secret}"
+        for call in calls:
+            with pytest.raises(ProviderError, match="query string") as e:
+                _call(build("p", _keyed(base, kind=kind)), call)
+            said = str(e.value)
+            assert secret not in said and _windows(KEY, said) == [], (kind, call, said)
+    assert ECHO["seen"] == [], "refused at the door, yet a request went out"
+
+
+# ── the fix round: what four review lanes and a mutation pass found ─────────
+#
+# Each test below names the finding it closes. The measured ones came from
+# probes against 5d6a240, the first implementation; the mutation pass measured
+# that dropping one spelling form at a time left the whole suite green, which
+# is why every spelling family has a separating test of its own here.
+
+def _redact_with(monkeypatch, key, text, header=None, base_url="http://127.0.0.1:1/v1"):
+    """`_redact(text)` on a provider whose key is ``key``, or whose one header value is."""
+    monkeypatch.setenv("LX_ECHO_KEY", "" if header is not None else key)
+    extra = {"headers": {"X-Proxy-Key": header}} if header is not None else {}
+    return build("p", _keyed(base_url, **extra))._redact(text)
+
+
+# -- A: nothing raised inside a handler, so nothing chained --------------------
+
+def test_a_stalled_error_body_leaves_no_backend_bytes_on_the_exception(
+        echo, tmp_path, monkeypatch, capsys):
+    """review-surfaces F1: a 401 whose body stalls made `e.read()` raise inside
+    the `HTTPError` handler, and the exception that left `_request` — not a
+    `ProviderError`, not in `cli.main`'s exit-2 tuple — carried the `HTTPError`
+    as `__context__`, reason phrase and all: `lx models` answered exit 1 with a
+    traceback holding forty-three windows of the key.
+
+    Now the read is guarded, the message says the body could not be read, the
+    refusal is raised outside the handler, and the chain is empty.
+    """
+    from scriptorium import cli
+
+    monkeypatch.setenv("LX_ECHO_KEY", KEY)
+    _echo(reason=lambda got: f"bad key {got}", stall=True)
+    with pytest.raises(ProviderError) as e:
+        build("p", _keyed(echo, timeout=0.5)).list_models()
+    said = str(e.value)
+    # One space after the dash: the excerpt is empty, and the note takes its
+    # place rather than following it.
+    assert "HTTP 401 — (the body could not be read)" in said, said
+    assert _windows(KEY, said) == [], said
+    assert e.value.__cause__ is None and e.value.__context__ is None
+    formatted = "".join(traceback.format_exception(
+        type(e.value), e.value, e.value.__traceback__))
+    assert _windows(KEY, formatted) == [], formatted
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "lx.config.json").write_text(
+        json.dumps(_keyed(echo, timeout=0.5)), encoding="utf-8")
+    _echo(reason=lambda got: f"bad key {got}", stall=True)
+    with pytest.raises(SystemExit) as exit_:
+        cli.main(["models", "--provider", "p"])
+    out = capsys.readouterr()
+    shown = out.out + out.err
+    assert exit_.value.code == 2, shown
+    assert _windows(KEY, shown) == [], shown
+
+
+def test_a_retry_after_that_is_not_a_number_never_raises_inside_the_handler(
+        echo, monkeypatch):
+    """review-surfaces F1, second trigger: `Retry-After: nan` survives `float()`
+    and `time.sleep(nan)` raised `ValueError` inside the handler, with the 429
+    — whose reason phrase quoted the key — as its context. The wait is now
+    computed outside the handler and a non-finite value falls through to the
+    computed backoff, like an HTTP-date does.
+    """
+    from scriptorium.providers import base as base_module
+
+    waits = []
+    monkeypatch.setattr(base_module.time, "sleep", waits.append)
+    monkeypatch.setenv("LX_ECHO_KEY", KEY)
+    _echo(status=429, reason=lambda got: f"rate limited {got}", extra={"Retry-After": "nan"})
+    with pytest.raises(ProviderError) as e:
+        build("p", _keyed(echo, retries=1)).list_models()
+    assert len(ECHO["seen"]) == 2, ECHO["seen"]
+    assert len(waits) == 1 and math.isfinite(waits[0]) and 1.0 <= waits[0] < 2.0, waits
+    assert "HTTP 429" in str(e.value), str(e.value)
+    assert e.value.__cause__ is None and e.value.__context__ is None
+    formatted = "".join(traceback.format_exception(
+        type(e.value), e.value, e.value.__traceback__))
+    assert _windows(KEY, formatted) == [], formatted
+
+
+@pytest.mark.parametrize("shape", [
+    "http-401", "reason-phrase", "not-json", "gate", "masked-invalid-url", "unreachable",
+    "read-timeout", "query-door",
+])
+def test_no_refusal_leaving_request_carries_an_exception_on_its_chain(
+        echo, stalling, monkeypatch, shape):
+    """Every refusal shape the suite drives through `_request`: `__cause__` and
+    `__context__` both `None`. `raise last from None` gave `__cause__ is None`
+    and `__suppress_context__` and still left the `HTTPError` on `__context__`;
+    the `InvalidURL` branch chained the exception whose message quotes the
+    userinfo; the not-JSON refusal chained a `JSONDecodeError` whose `.doc` is
+    the whole body. Nothing is raised inside a handler now, so none of them
+    have anything to chain.
+    """
+    monkeypatch.setenv("LX_ECHO_KEY", KEY)
+    secret = "SUPERSECRETPASSWORD"
+    if shape == "http-401":
+        _echo()
+        spec = _keyed(echo)
+    elif shape == "reason-phrase":
+        _echo(reason=lambda got: f"bad key {got}")
+        spec = _keyed(echo)
+    elif shape == "not-json":
+        _echo(status=200, body=lambda got: "<html>not an api</html>")
+        spec = _keyed(echo)
+    elif shape == "gate":
+        _echo(status=200, body=lambda got: json.dumps(
+            {"choices": [{"message": {"content": got}}]}))
+        spec = _keyed(echo)
+    elif shape == "masked-invalid-url":
+        spec = _keyed(f"http://alice:{secret}@exa\nmple.invalid/v1", env="")
+    elif shape == "unreachable":
+        spec = _keyed("http://127.0.0.1:1/v1", timeout=0.2)
+    elif shape == "read-timeout":
+        spec = _keyed(stalling, timeout=0.3)
+    else:
+        spec = _keyed(echo + "?key=" + secret)
+    with pytest.raises(ProviderError) as e:
+        build("p", spec).complete("s", "u")
+    assert e.value.__cause__ is None and e.value.__context__ is None, shape
+    formatted = "".join(traceback.format_exception(
+        type(e.value), e.value, e.value.__traceback__))
+    assert _windows(KEY, formatted) == [] and secret not in formatted, formatted
+
+
+# -- B: base_url userinfo leaves the machine through a proxy -------------------
+
+def test_userinfo_in_base_url_is_redacted_when_a_proxy_quotes_the_request(
+        proxy, monkeypatch):
+    """review-surfaces F3 and review-claims (h), measured: the contract's
+    "userinfo never leaves the machine" was measured with no proxy. Under
+    `http_proxy` urllib writes the full URL as the request-target and
+    `user:password@host` as `Host`, and a proxy answering 502 with either put
+    the password on stderr beside a redacted key. The proxy here has no
+    credential of its own, so what it sees is what `base_url` carried.
+    """
+    password = "pw-" + "0123456789" * 2 + "!"
+    assert len(password) == 24
+    _through_proxy(monkeypatch, proxy, "http")
+    PROXY["answer"] = lambda h: (502, json.dumps({
+        "error": f"cannot fetch {h.path}; Host header was {h.headers.get('Host')}"}).encode(),
+        None)
+    with pytest.raises(ProviderError) as e:
+        build("p", _keyed(f"http://alice:{password}@127.0.0.1:1/v1", env="")).list_models()
+    said = str(e.value)
+    seen = _proxy_saw("GET", "/v1/models")
+    assert password in seen["path"], (seen, "the positive control: the password left the machine")
+    assert password in seen["host"], seen
+    assert _windows(password, said) == [] and _windows("alice:" + password, said) == [], said
+    assert MARKER in said and "HTTP 502" in said and "cannot fetch" in said, said
+    assert "127.0.0.1:1" in said, "the host survives, or the message is unfollowable"
+
+
+def test_userinfo_in_a_connect_target_is_redacted_too(proxy, monkeypatch):
+    """The `https_proxy` half of the same finding: the `CONNECT` target carries
+    the userinfo, and a proxy whose reason phrase names it reaches the
+    `URLError` branch as `Tunnel connection failed: 400 <that phrase>`."""
+    pytest.importorskip("ssl")
+    password = "pw-" + "9876543210" * 2 + "!"
+    _through_proxy(monkeypatch, proxy, "https")
+    PROXY["answer"] = lambda h: (400, b"", f"bad tunnel target {h.path}")
+    with pytest.raises(ProviderError) as e:
+        build("p", _keyed(f"https://alice:{password}@127.0.0.1:1/v1", env="")).list_models()
+    said = str(e.value)
+    assert password in _proxy_saw("CONNECT", "127.0.0.1")["path"], PROXY["seen"]
+    assert _windows(password, said) == [] and _windows("alice:" + password, said) == [], said
+    assert MARKER in said and "cannot reach" in said and "400" in said, said
+
+
+def test_a_percent_encoded_password_is_redacted_in_both_forms(monkeypatch):
+    """A proxy shows the bytes it received or what they decode to; both are in
+    the set, and the username part of a `user:password` is not, on its own,
+    because it is not a secret. A userinfo with no `:` is the whole of it and
+    is a credential — see the bare-token test in the final round below."""
+    password = "p%40ss%2Fword%3D0123456789"
+    monkeypatch.setenv("LX_ECHO_KEY", "")
+    p = build("p", _keyed(f"http://alice:{password}@127.0.0.1:1/v1", env=""))
+    assert p._credentials() == [f"alice:{password}", "alice:p@ss/word=0123456789",
+                                password, "p@ss/word=0123456789"]
+    assert p._redact(f"saw {password} and p@ss/word=0123456789") == f"saw {MARKER} and {MARKER}"
+    assert p._redact("user alice refused") == "user alice refused"
+    lone = build("p", _keyed("http://alicealice@127.0.0.1:1/v1", env=""))
+    assert lone._credentials() == ["alicealice"], "a userinfo with no `:` is a token"
+
+
+# -- C: the scan is a union of removable spans ----------------------------------
+
+def _coverage(spellings, text):
+    """Which positions the union rule marks, written literally: every `(i, j)` is tried.
+
+    A removable run is an occurrence of a whole spelling, or `_PIECE` or more
+    consecutive characters that are a substring of some spelling; every
+    character in any removable run is marked. The `j` loop stops once
+    `text[i:j]` is a substring of no spelling, because no longer run at `i`
+    can be one — that is the only shortcut, and it is the rule's own. Slow on
+    purpose: it is the oracle, not the implementation.
+    """
+    from scriptorium.providers.base import _PIECE, _WHOLE
+
+    whole = set(spellings)
+    n = len(text)
+    covered = [False] * n
+    for i in range(n):
+        for j in range(i + 1, n + 1):
+            run = text[i:j]
+            if not any(run in s for s in spellings):
+                break
+            if j - i >= _WHOLE and (run in whole or j - i >= _PIECE):
+                for k in range(i, j):
+                    covered[k] = True
+    return covered
+
+
+def _reference_redact(spellings, text):
+    """`_coverage` collapsed: each maximal marked stretch becomes one marker."""
+    covered = _coverage(spellings, text)
+    n = len(text)
+    out, i = [], 0
+    while i < n:
+        if covered[i]:
+            out.append(MARKER)
+            while i < n and covered[i]:
+                i += 1
+        else:
+            out.append(text[i])
+            i += 1
+    return "".join(out)
+
+
+#: Secret sets for the fuzz: `(key, headers)`. The first two are the measured
+#: greedy-family shapes — a header value ending with the key's head, and a
+#: whole short key inside a longer non-removable run of a header value.
+_SECRET_SETS = [
+    ("abcdefghijklmnopqrstuv", {"X-Other": "z" + "abcdefghijklmnopqrstuv"[:12]}),
+    ("abcdefgh", {"X-Other": "xxabcdefghyyzzz"}),
+    (KEY, {"Authorization": "Bearer " + KEY}),
+    ("sk-proj-" + "Ab/Cd+Ef=Gh" * 3 + "wxyz", {"X-Proxy-Key": "pk-ABCDEFGHJKLMNPQRSTUVW"}),
+    ("abcdefghijklmnopqrs", {"X-Other": "z" + "abcdefghijklmnopqrs"[:12]}),
+]
+
+
+def test_the_scan_is_the_union_of_removable_runs(monkeypatch):
+    """review-representation R2 and review-tests F1, measured: a removable run
+    consumed at one position hid a longer removable run that began inside it,
+    and the known shape, a whole short spelling that is a proper prefix of a
+    longer run. Fuzzed against the literal rule, **compared as exact strings**
+    — R2 measured a seven-character tail on screen that the eight-window
+    oracle cannot see — over texts built from spelling fragments, whole
+    spellings and filler, for five secret sets including both measured shapes.
+
+    **It must also generate texts whose output is longer than their input**,
+    and the `many` branch below exists for that. The first version of this
+    fuzz did not, and so did not see `_redact` rendering under a budget of the
+    input's length plus one marker: a marker is twenty-one characters and
+    replaces as few as eight, so several short whole spellings grow the output
+    past that budget and everything after the last affordable marker was
+    dropped — `'abcdefghijkl ' * 5` came back as four markers and nothing
+    else. The generator drew at most five parts, a whole spelling with
+    probability 0.15, and touching copies collapse to one marker, so no
+    expected output held more than two markers (measured, seed 76): 122 of its
+    750 texts were longer than their input and every one fit the one marker
+    of slack, which two markers exceed only when both stand for
+    eight-character wholes with fewer than six characters after them. The
+    `many` branch packs separated short wholes so that the markers outnumber
+    the characters they replace, and the count at the end pins that the shape
+    is reached.
+    """
+    rng = random.Random(76)
+    grew = 0
+    for key, headers in _SECRET_SETS:
+        monkeypatch.setenv("LX_ECHO_KEY", key)
+        p = build("p", _keyed("http://127.0.0.1:1/v1", headers=headers))
+        spellings = p._spellings(p._credentials())
+        assert spellings, (key, headers)
+        alphabet = "".join(sorted(set("".join(spellings)))) + "xyz .!"
+        short = [s for s in spellings if len(s) <= 60] or spellings
+        shortest = sorted(spellings, key=len)[:3]
+        for _ in range(180):
+            parts = []
+            if rng.random() < 0.15:
+                # `many`: separated copies of a short whole spelling, plus a
+                # tail that the budget used to drop.
+                sep = rng.choice((" ", "-", "xy", ", "))
+                parts.append(sep.join([rng.choice(shortest)] * rng.randint(3, 12)))
+                parts.append(rng.choice((" tail", ". For a local server", "", "!")))
+            for _piece in range(rng.randint(0, 5)):
+                kind = rng.random()
+                if kind < 0.35:
+                    s = rng.choice(spellings)
+                    a = rng.randint(0, len(s) - 1)
+                    parts.append(s[a:rng.randint(a + 1, min(len(s), a + 24))])
+                elif kind < 0.5:
+                    parts.append(rng.choice(short))
+                else:
+                    parts.append("".join(rng.choice(alphabet)
+                                         for _ in range(rng.randint(0, 12))))
+            text = "".join(parts)
+            expected = _reference_redact(spellings, text)
+            grew += expected.count(MARKER) >= 3 and len(expected) > len(text) + len(MARKER)
+            assert p._redact(text) == expected, (key, headers, text)
+    assert grew >= 30, (grew, "the fuzz must reach outputs that outgrow the old budget")
+
+
+def test_a_run_hidden_inside_an_earlier_run_is_still_removed(monkeypatch):
+    """R2's own case: a header value that ends with the key's first ten
+    characters is consumed first, and the greedy scan resumed after it, so
+    only the key's tail was seen — ten characters, under the piece floor."""
+    key = "ABCDEFGHIJKLMNOPQRST"
+    hdr = "xxxxxxxxxxxx" + key[:10]
+    monkeypatch.setenv("LX_ECHO_KEY", key)
+    p = build("p", _keyed("http://127.0.0.1:1/v1", headers={"X-Proxy-Key": hdr}))
+    assert p._redact("you sent " + hdr + key[10:] + ".") == f"you sent {MARKER}."
+    key = "abcdefghijklmnopqrstuv"
+    monkeypatch.setenv("LX_ECHO_KEY", key)
+    p = build("p", _keyed("http://127.0.0.1:1/v1", headers={"X-Other": "z" + key[:12]}))
+    assert p._redact("you sent z" + key + ".") == f"you sent {MARKER}."
+
+
+def test_a_whole_short_spelling_inside_a_longer_run_is_still_removed(monkeypatch):
+    """The known shape: the longest run at the key's position is ten characters
+    of a header value, not removable, and the greedy scan never considered the
+    eight-character whole key inside it."""
+    monkeypatch.setenv("LX_ECHO_KEY", "abcdefgh")
+    p = build("p", _keyed("http://127.0.0.1:1/v1", headers={"X-Other": "xxabcdefghyyzzz"}))
+    assert p._redact("you sent abcdefghyy.") == f"you sent {MARKER}yy."
+
+
+# -- D: the 200 gate matches pieces, per value ---------------------------------
+
+def test_a_200_that_quotes_a_piece_of_the_key_is_refused(echo, monkeypatch):
+    """review-surfaces F2, review-claims (b), measured: the gate matched whole
+    spellings, so a completion quoting `KEY[:24]` was accepted and went through
+    `lx commit` into the tracked memory with `lx check` green, while the same
+    bytes in a 401 body were redacted."""
+    monkeypatch.setenv("LX_ECHO_KEY", KEY)
+    _echo(status=200, body=lambda got: json.dumps({"choices": [{"message": {
+        "content": "leaked " + got[len("Bearer "):][:24]}}]}))
+    with pytest.raises(ProviderError, match="quotes the credential") as e:
+        build("p", _keyed(echo)).complete("s", "u")
+    assert _windows(KEY, str(e.value)) == [], str(e.value)
+
+
+def test_the_gate_floor_is_the_length_of_the_value(echo, monkeypatch):
+    """A value exactly `_GATE` long quoted whole is refused and one shorter is
+    not; and an eighteen-character key whose percent spelling is twenty is
+    accepted (review-surfaces F8: the floor was applied per spelling). The
+    lengths come from `_GATE`, never from a literal."""
+    from scriptorium.providers.base import _GATE
+
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef"
+    for n, refused in ((_GATE, True), (_GATE - 1, False)):
+        key = alphabet[:n]
+        monkeypatch.setenv("LX_ECHO_KEY", key)
+        _echo(status=200, body=lambda got: json.dumps({"choices": [{"message": {
+            "content": "see " + got[len("Bearer "):]}}]}))
+        p = build("p", _keyed(echo))
+        if refused:
+            with pytest.raises(ProviderError, match="quotes the credential"):
+                p.complete("s", "u")
+        else:
+            assert p.complete("s", "u") == "see " + key
+
+    short = "sk/no-key-required"
+    assert len(short) < _GATE <= len(urllib.parse.quote(short, safe=""))
+    monkeypatch.setenv("LX_ECHO_KEY", short)
+    _echo(status=200, body=lambda got: json.dumps({"choices": [{"message": {
+        "content": "see sk%2Fno-key-required and " + got[len("Bearer "):]}}]}))
+    assert build("p", _keyed(echo)).complete("s", "u") == (
+        "see sk%2Fno-key-required and sk/no-key-required")
+
+
+def test_a_200_that_quotes_the_proxy_credential_is_refused_by_the_gate(proxy, monkeypatch):
+    """review-surfaces F6, review-claims (d), measured: the five wrong-shape
+    sites had no request to read `sent` off, and a wrong-shape 200 from a proxy
+    quoting `Proxy-Authorization` printed sixty-six windows of the `Basic`
+    value. The transport's additions are on the instance now and the gate
+    reads them, so the reply is refused before any site sees it."""
+    basic = _through_proxy(monkeypatch, proxy, "http", "proxy-secret-" + "0123456789" * 3)
+    assert len(basic) >= 20
+    PROXY["answer"] = lambda h: (200, json.dumps({
+        "object": "list", "debug": "proxy saw " + (h.headers.get("Proxy-Authorization") or "")
+    }).encode(), None)
+    with pytest.raises(ProviderError, match="quotes the credential") as e:
+        build("p", _keyed("http://127.0.0.1:1/v1", env="")).list_models()
+    said = str(e.value)
+    assert _proxy_saw("GET", "http://127.0.0.1:1/v1/models")["authorized"]
+    assert _windows(basic, said) == [] and "did not answer" not in said, said
+
+
+def test_a_200_that_quotes_the_userinfo_is_refused_by_the_gate(proxy, monkeypatch):
+    """Userinfo of twenty-four characters, quoted back by a proxy in a 200 of
+    the right shape: gated like the key, because it left the machine too."""
+    password = "pw-" + "0123456789" * 2 + "!"
+    _through_proxy(monkeypatch, proxy, "http")
+    PROXY["answer"] = lambda h: (200, json.dumps({"choices": [{"message": {
+        "content": "fetched " + h.path}}]}).encode(), None)
+    with pytest.raises(ProviderError, match="quotes the credential") as e:
+        build("p", _keyed(f"http://alice:{password}@127.0.0.1:1/v1", env="")).complete("s", "u")
+    assert _windows(password, str(e.value)) == [], str(e.value)
+
+
+def _plain_gate(spellings, text):
+    """The gate's rule, written as the plain loop: every `_GATE`-window of every spelling."""
+    from scriptorium.providers.base import _GATE
+
+    return any(s[k:k + _GATE] in text
+               for s in spellings if len(s) >= _GATE
+               for k in range(len(s) - _GATE + 1))
+
+
+def test_the_gate_prefilter_is_equivalent_to_the_plain_loop(monkeypatch):
+    """`_quotes_credential` searches aligned half-windows and confirms each hit;
+    fuzzed against the plain loop over texts built from windows, pieces, whole
+    spellings, NUL-laced pieces and filler."""
+    from scriptorium.providers.base import _GATE
+
+    rng = random.Random(76)
+    for key, headers in _SECRET_SETS[2:] + [("sk-" + "K7/Q+z=Xp9mL2vB4nR8t", {})]:
+        monkeypatch.setenv("LX_ECHO_KEY", key)
+        p = build("p", _keyed("http://alice:pw-0123456789abcdef!@127.0.0.1:1/v1",
+                              headers=headers))
+        spellings = p._spellings(p._gated())
+        assert spellings
+        alphabet = "".join(sorted(set("".join(spellings)))) + "xyz .!"
+        hits = 0
+        for _ in range(400):
+            parts = []
+            for _piece in range(rng.randint(0, 4)):
+                kind = rng.random()
+                s = rng.choice(spellings)
+                if kind < 0.3:
+                    a = rng.randint(0, max(0, len(s) - _GATE))
+                    parts.append(s[a:a + rng.randint(_GATE - 3, _GATE + 2)])
+                elif kind < 0.45:
+                    parts.append(s)
+                elif kind < 0.55:
+                    a = rng.randint(0, max(0, len(s) - _GATE))
+                    parts.append("\x00".join(s[a:a + _GATE]))
+                else:
+                    parts.append("".join(rng.choice(alphabet)
+                                         for _ in range(rng.randint(0, 30))))
+            text = "".join(parts)
+            expected = _plain_gate(spellings, text)
+            hits += expected
+            assert p._quotes_credential(text) == expected, (key, text)
+        assert 0 < hits < 400, "the fuzz must exercise both answers"
+
+
+# -- E: `_excerpt` scans a bounded window ---------------------------------------
+
+def _cut(shown, cap):
+    """`_excerpt`'s own cut: at ``cap``, or where a marker straddling it ends."""
+    if len(shown) <= cap:
+        return shown
+    end = cap
+    start = shown.rfind(MARKER, 0, cap + len(MARKER) - 1)
+    if start != -1 and start + len(MARKER) > cap:
+        end = start + len(MARKER)
+    return shown[:end]
+
+
+def _consumed(spellings, text, end):
+    """The input position at which the unbounded rule's output first holds ``end`` characters."""
+    covered = _coverage(spellings, text)
+    n = len(text)
+    produced, i = 0, 0
+    while i < n and produced < end:
+        if covered[i]:
+            produced += len(MARKER)
+            while i < n and covered[i]:
+                i += 1
+        else:
+            produced += 1
+            i += 1
+    return i
+
+
+def test_an_excerpt_never_shows_less_redaction_than_the_unbounded_rule(monkeypatch):
+    """Property 1 of the bounded window, in the two shapes that reach its edge.
+
+    A body that repeats the value back to back for longer than the window is
+    one marked stretch reaching the window's end: the excerpt is that marker
+    and nothing after it, where the unbounded rule would go on to show the
+    tail — never less redaction, and less text. And a run that **begins in the
+    window's last `_PIECE - 1` characters** and ends beyond it: the marks are
+    taken over that much past the window, so it is a marker; scanned only to
+    the window it would be unmarked, and its first characters would be shown
+    where the unbounded rule shows a marker. The second case is arranged so
+    that the output has not reached ``cap`` when the window ends — a long
+    stretch, one marker, absorbs most of the window.
+    """
+    from scriptorium.providers.base import _tame
+
+    key = "abcdefghijkl"
+    monkeypatch.setenv("LX_ECHO_KEY", key)
+    p = build("p", _keyed("http://127.0.0.1:1/v1"))
+    cap = 60
+    window = p._window(cap)
+    unbounded = lambda text: _cut(_tame(p._redact(text)), cap)  # noqa: E731
+
+    text = key * (window // len(key) + 2) + " tail"
+    assert len(text) > window
+    excerpt = p._excerpt(text, cap)
+    assert excerpt == MARKER, excerpt
+    assert unbounded(text) == MARKER + " tail"
+    assert unbounded(text).startswith(excerpt)
+
+    # `key` starts four characters before the window's end and runs eight past
+    # it; before it, a stretch of `count` keys is one marker, and enough x's
+    # that the marker and the `!` after it are shown before the cut.
+    start = window - 4
+    count = (start - 1 - 22) // len(key)
+    xs = start - 1 - count * len(key)
+    assert xs + len(MARKER) + 1 < cap, (xs, cap)
+    text = "x" * xs + key * count + "!" + key + "tail"
+    assert text.index(key, start - 1) == start and start + len(key) > window
+    excerpt = p._excerpt(text, cap)
+    assert excerpt == "x" * xs + MARKER + "!" + MARKER, excerpt
+    assert excerpt == unbounded(text)
+    assert _windows(key, excerpt) == [] and key[:4] not in excerpt
+
+
+def test_an_excerpt_is_exact_wherever_the_unbounded_output_reaches_the_cap_inside_the_window(
+        monkeypatch):
+    """Property 2, fuzzed: wherever the unbounded rule's output reaches the cut
+    at an input position inside the window, the excerpt is `_tame(_redact(text))`
+    cut the same way, exactly; beyond it, the excerpt is a prefix of that."""
+    from scriptorium.providers.base import _tame
+
+    rng = random.Random(76)
+    for key, headers in _SECRET_SETS[:2] + [("abcdefghijkl", {}), ("sk-0123456789ab", {})]:
+        monkeypatch.setenv("LX_ECHO_KEY", key)
+        p = build("p", _keyed("http://127.0.0.1:1/v1", headers=headers))
+        spellings = p._spellings(p._credentials())
+        alphabet = "".join(sorted(set("".join(spellings)))) + "xyz .!\x1b\u202e"
+        exact = beyond = 0
+        for _ in range(100):
+            cap = rng.choice((10, 21, 40))
+            window = p._window(cap)
+            parts = []
+            while sum(map(len, parts)) < rng.randint(0, 3 * window // 2):
+                kind = rng.random()
+                s = rng.choice(spellings)
+                if kind < 0.4:
+                    a = rng.randint(0, len(s) - 1)
+                    parts.append(s[a:rng.randint(a + 1, len(s))])
+                elif kind < 0.7:
+                    parts.append(s * rng.randint(1, 4))
+                else:
+                    parts.append("".join(rng.choice(alphabet)
+                                         for _ in range(rng.randint(0, 20))))
+            text = "".join(parts)
+            reference = _cut(_tame(p._redact(text)), cap)
+            excerpt = p._excerpt(text, cap)
+            if _consumed(spellings, text, len(reference)) <= window:
+                assert excerpt == reference, (key, cap, text)
+                exact += 1
+            else:
+                assert reference.startswith(excerpt), (key, cap, text)
+                beyond += 1
+        assert exact and beyond, (key, exact, beyond, "both branches must be exercised")
+
+
+# -- F: what the transport added is decided by name and value --------------------
+
+def test_a_configured_proxy_header_overwritten_by_urllib_is_still_redacted(proxy, monkeypatch):
+    """review-claims (d), measured: a hand-edited `headers.Proxy-Authorization`
+    is overwritten by urllib unconditionally under an `http_proxy` with
+    userinfo, so a set that excluded the transport's additions *by name* held
+    the configured value and not the sent one — a 407 quoting what was sent
+    printed thirty-five windows of it."""
+    basic = _through_proxy(monkeypatch, proxy, "http", "proxy-secret-" + "0123456789" * 3)
+    with pytest.raises(ProviderError) as e:
+        build("p", _keyed("http://127.0.0.1:1/v1", env="", headers={
+            "Proxy-Authorization": "Basic configured-value-here"})).list_models()
+    said = str(e.value)
+    assert _proxy_saw("GET", "http://127.0.0.1:1/v1/models")["authorized"]
+    assert "HTTP 407" in said and _windows(basic, said) == [] and MARKER in said, said
+
+
+# -- G: the floor is the value's ------------------------------------------------
+
+def test_a_value_shorter_than_the_whole_floor_has_no_spelling(monkeypatch):
+    """review-representation R7, measured: a seven-character value was redacted
+    in its JSON, HTML and percent spellings, which are eight or longer,
+    contradicting "a value shorter than `_WHOLE` is never redacted"."""
+    from scriptorium.providers.base import _WHOLE, Provider
+
+    value = 'ab<cd"e'
+    assert len(value) < _WHOLE
+    assert Provider._spellings([value]) == []
+    monkeypatch.setenv("LX_ECHO_KEY", value)
+    p = build("p", _keyed("http://127.0.0.1:1/v1"))
+    for echoed in ('{"error":"you sent ab<cd\\"e."}', "<pre>you sent ab&lt;cd&quot;e.</pre>",
+                   "redirect ?k=ab%3Ccd%22e"):
+        assert p._redact(echoed) == echoed
+
+
+# -- H: one separating test per spelling family ---------------------------------
+#
+# The mutation pass measured that dropping the `\/` forms, `strip()`, `repr`,
+# the lower-case percent form or `html.escape` one at a time left the whole
+# suite green, because every test key had runs of twelve or more between its
+# special characters and the piece rule redacted them without the spelling.
+# Each value below has its special characters fewer than `_WHOLE` apart, so
+# that without the one form under test no removable run survives and a window
+# of the value is on screen. The oracle is over the spelling the backend used.
+
+def test_a_stripped_value_is_its_own_spelling(monkeypatch):
+    """Python's `http.server` keeps a trailing space; other parsers strip it."""
+    key = "abcdefgh "
+    said = _redact_with(monkeypatch, key, "you sent abcdefgh.")
+    assert said == f"you sent {MARKER}.", said
+
+
+def test_a_json_escaped_value_is_its_own_spelling(monkeypatch):
+    """`"`, `/` and `+` every few characters, echoed by a Python backend: it
+    writes `\\"`, leaves `/` and `+` bare, so the raw form breaks at every
+    `"`, the PHP derivative at every `/`, the Go/.NET derivative at every `+`,
+    and only the plain `json.dumps` form matches."""
+    from scriptorium.providers.base import _JSON_EXTRA, _json_escape
+
+    key = 'ab+cd"ef/gh+ij"kl/mn+op"qr/st+uv"wx/yz+01"23'
+    dumped = json.dumps(key)[1:-1]
+    assert dumped != key and dumped.replace("/", "\\/") != dumped
+    assert _JSON_EXTRA.sub(_json_escape, dumped) != dumped
+    said = _redact_with(monkeypatch, key, json.dumps({"error": "you sent " + key}))
+    assert _windows(dumped, said) == [] and MARKER in said, said
+
+
+def test_a_php_escaped_slash_is_its_own_spelling(monkeypatch):
+    """`/` every ten characters, so each `\\/`-led piece is eleven with its
+    slash — under the piece floor, where T7's key was not (its pieces were
+    exactly twelve, which is why dropping this form left T7 green)."""
+    key = "AbCdEfGhIj/KlMnOpQrSt/UvWxYz0123/456789abcd/EFGHIJKLMN"
+    body = json.dumps({"error": "you sent " + key}).replace("/", "\\/")
+    said = _redact_with(monkeypatch, key, body)
+    assert _windows(key.replace("/", "\\/"), said) == [] and MARKER in said, said
+
+
+def test_a_repr_spelling_is_its_own_form(monkeypatch):
+    """`str(data)` presents a dict through `repr`, which writes `\\'` for a
+    value holding both quote kinds where `json.dumps` writes `\\"`."""
+    key = "a'b\"cdefg'h\"ijklm'n\"opqrs'tu\"vwxy'z\"01234"
+    shown = repr(key)[1:-1]
+    assert shown != key and shown != json.dumps(key)[1:-1]
+    said = _redact_with(monkeypatch, key, str({"note": "Bearer " + key}))
+    assert _windows(shown, said) == [] and MARKER in said, said
+
+
+def test_a_lower_case_percent_spelling_is_its_own_form(monkeypatch):
+    """`urllib.parse.quote` writes upper-case hex; a server that lower-cases it
+    breaks every run at each `%xx`, and the key has one every few characters."""
+    key = "ab/cd+ef=gh/ij+kl=mn/op+qr=st/uv+wx=yz"
+    upper = urllib.parse.quote(key, safe="")
+    lower = "".join(c.lower() if c in "ABCDEF" else c for c in upper)
+    assert lower != upper
+    said = _redact_with(monkeypatch, key, "redirect to ?k=" + lower)
+    assert _windows(lower, said) == [] and MARKER in said, said
+
+
+def test_an_html_escaped_value_is_its_own_spelling(monkeypatch):
+    """`&`, `<` and `"` every few characters, on an HTML error page."""
+    import html
+
+    value = 'pk-ab&cd<ef"gh&ij<kl"mn&op<qr"st'
+    escaped = html.escape(value, quote=True)
+    said = _redact_with(monkeypatch, "", "<p>refused " + escaped + "</p>", header=value)
+    assert _windows(escaped, said) == [] and MARKER in said, said
+
+
+@pytest.mark.parametrize("entity", ["&#39;", "&#039;"])
+def test_an_apostrophe_as_a_decimal_entity_is_its_own_spelling(monkeypatch, entity):
+    """Go and Express write `&#39;`, PHP `&#039;`, Python `&#x27;`."""
+    import html
+
+    value = "ab'cdefg'hijkl'mnopq'rstuv'wxyz0"
+    escaped = html.escape(value, quote=True).replace("&#x27;", entity)
+    assert entity in escaped
+    said = _redact_with(monkeypatch, value, "<p>refused " + escaped + "</p>")
+    assert _windows(escaped, said) == [] and MARKER in said, said
+
+
+def test_a_go_or_dotnet_json_escape_is_its_own_spelling(monkeypatch):
+    """Go's `encoding/json` writes `<`, `>` and `&` as `\\u003c`, `\\u003e`,
+    `\\u0026`; .NET's `System.Text.Json` those and `'` and `+` besides."""
+    value = "ab<cdefg>hijkl&mnopq'rstuv+wxyz0"
+    escaped = value
+    for ch in "<>&'+":
+        escaped = escaped.replace(ch, f"\\u{ord(ch):04x}")
+    assert escaped != json.dumps(value)[1:-1]
+    said = _redact_with(monkeypatch, value, '{"error":"you sent ' + escaped + '"}')
+    assert _windows(escaped, said) == [] and MARKER in said, said
+
+
+def test_an_upper_case_unicode_escape_is_its_own_spelling(monkeypatch):
+    """.NET writes `\\u201C` where Python writes `\\u201c`."""
+    value = "ab“cdefg”hijkl“mnopq”rstuv“wxyz0"
+    lower = json.dumps(value)[1:-1]
+    upper = lower.replace("\\u201c", "\\u201C").replace("\\u201d", "\\u201D")
+    assert upper != lower and "\\u201C" in upper
+    said = _redact_with(monkeypatch, value, '{"error":"you sent ' + upper + '"}')
+    assert _windows(upper, said) == [] and MARKER in said, said
+
+
+@pytest.mark.parametrize("encoding", ["utf-16-le", "utf-16-be"])
+def test_a_utf16_body_read_as_utf8_is_its_own_spelling(monkeypatch, encoding):
+    """review-representation R3, measured: a UTF-16 error body decoded as UTF-8
+    shows the key with a NUL between each character, which `_tame` turned into
+    U+FFFD — every character legible. Both byte orders."""
+    monkeypatch.setenv("LX_ECHO_KEY", KEY)
+    p = build("p", _keyed("http://127.0.0.1:1/v1"))
+    body = ('{"error":"invalid api key; you sent Bearer ' + KEY + '"}').encode(encoding)
+    said = p._excerpt(body.decode("utf-8", "replace"), 500)
+    assert MARKER in said, said
+    for sep in ("\x00", "�"):
+        assert sep.join(KEY[:12]) not in said, said
+    assert "�i�n�v�a�l�i�d" in said or "i�n�v�a�l�i�d�" in said, "the backend's words survive"
+
+
+def test_a_basic_values_decoded_text_is_its_own_spelling(proxy, monkeypatch):
+    """review-representation R8: a proxy can echo the `user:password` it
+    decoded rather than the `Basic` value it was sent; both, and the password
+    alone, are spellings of the value."""
+    from scriptorium.providers.base import Provider
+
+    secret = "proxy-secret-" + "0123456789" * 3
+    basic = "Basic " + base64.b64encode(f"user:{secret}".encode()).decode("ascii")
+    forms = Provider._spellings([basic])
+    assert f"user:{secret}" in forms and secret in forms
+    assert "Basic not-base64!!" in Provider._spellings(["Basic not-base64!!"]), (
+        "a value that is not base64 keeps its own spellings and adds none")
+
+    _through_proxy(monkeypatch, proxy, "http", secret)
+    PROXY["answer"] = lambda h: (407, json.dumps({"error": "refused " + base64.b64decode(
+        h.headers.get("Proxy-Authorization")[len("Basic "):]).decode()}).encode(), None)
+    with pytest.raises(ProviderError) as e:
+        build("p", _keyed("http://127.0.0.1:1/v1", env="")).list_models()
+    said = str(e.value)
+    assert _windows(secret, said) == [] and MARKER in said and "refused" in said, said
+
+
+# -- I: the query predicate is the write side's ----------------------------------
+
+def test_a_bare_question_mark_and_a_fragment_are_not_a_query(echo, monkeypatch):
+    """review-claims (e), measured: `lx config set` accepted `http://h/v1?` —
+    `urlsplit(...).query` is empty — and every request then refused it; and a
+    `?` inside a fragment was refused as "a query string". Both reach the mock
+    now; `?key=` still stops at the door (T19)."""
+    monkeypatch.setenv("LX_ECHO_KEY", KEY)
+    for suffix in ("?", "#?x"):
+        _echo()
+        with pytest.raises(ProviderError, match="HTTP 401") as e:
+            build("p", _keyed(echo + suffix)).list_models()
+        assert "query string" not in str(e.value), (suffix, str(e.value))
+        assert ECHO["seen"], (suffix, "the request must have reached the mock")
+        assert _windows(KEY, str(e.value)) == [], str(e.value)
+    _echo()
+    with pytest.raises(ProviderError, match="query string"):
+        build("p", _keyed(echo + "?key=" + KEY)).list_models()
+    assert ECHO["seen"] == []
+
+
+# ── the final round: what the last review found ────────────────────────────
+
+def test_a_redaction_never_drops_the_text_after_its_markers(monkeypatch):
+    """`_redact` rendered under a budget of the input's length plus one marker,
+    and a marker is longer than a short spelling: five separated copies of a
+    twelve-character key came back as four markers and nothing after them
+    (measured). Through `_refusal`, which scans whole messages, that dropped
+    the tail of the backend's sentence and this project's own advice — the
+    `_url_hint` sentence here is what a person would have needed to read.
+    """
+    monkeypatch.setenv("LX_ECHO_KEY", "abcdefghijkl")
+    p = build("p", _keyed("http://127.0.0.1:1/v1"))
+    assert p._redact("abcdefghijkl " * 5) == (MARKER + " ") * 5
+    assert p._redact(" x ".join(["abcdefghijkl"] * 5) + " tail") == (
+        " x ".join([MARKER] * 5) + " tail")
+
+    monkeypatch.setenv("LX_ECHO_KEY", "abcdefgh")
+    p = build("p", _keyed("http://127.0.0.1:1"))
+    url = "http://127.0.0.1:1/models"
+    reason = "Tunnel connection failed: 407 " + " ".join(["abcdefgh"] * 20)
+    said = str(p._refusal(
+        f"p: cannot reach {url} — {reason}. For a local server, check that it is "
+        f"running and that base_url names the right host and port.{p._url_hint(None, url)}"))
+    assert said.count(MARKER) == 20 and _windows("abcdefgh", said) == [], said
+    assert said.endswith(
+        f"{MARKER}. For a local server, check that it is running and that base_url "
+        f"names the right host and port.{p._url_hint(None, url)}"), said
+    assert "version segment" in said, said
+
+
+def test_a_proxy_reason_phrase_full_of_a_short_credential_keeps_the_advice(proxy, monkeypatch):
+    """The same defect where it was reachable: a `CONNECT` refused with a reason
+    phrase that repeats a short `Basic` value, through the real `URLError`
+    branch, and the advice after it must still be there."""
+    pytest.importorskip("ssl")
+    basic = _through_proxy(monkeypatch, proxy, "https", "pw")
+    assert len(basic) < len(MARKER)
+    PROXY["reason"] = lambda got: " ".join([got] * 100)
+    with pytest.raises(ProviderError) as e:
+        build("p", _keyed("https://127.0.0.1:1", env="")).list_models()
+    said = str(e.value)
+    assert _proxy_saw("CONNECT", "127.0.0.1:1")["authorized"]
+    assert said.count(MARKER) == 100 and _windows(basic, said) == [], said
+    assert "For a local server" in said and "version segment" in said, said
+
+
+def test_a_bare_userinfo_token_is_redacted_when_a_proxy_quotes_the_request(
+        proxy, monkeypatch):
+    """`https://<token>@host/v1` is the ordinary way a token travels in a URL,
+    and the first `_userinfo` left a userinfo with no `:` out as "a bare
+    username": under `http_proxy` the request line and the `Host` header
+    carried the token, and a proxy quoting either printed it in full
+    (measured: fourteen windows). It is a credential now, and gated."""
+    token = "tok-" + "abcdefghij" * 2
+    assert len(token) == 24
+    _through_proxy(monkeypatch, proxy, "http")
+    PROXY["answer"] = lambda h: (502, json.dumps({
+        "error": f"cannot fetch {h.path}; Host header was {h.headers.get('Host')}"}).encode(),
+        None)
+    p = build("p", _keyed(f"http://{token}@127.0.0.1:1/v1", env=""))
+    assert p._credentials() == [token] and p._gated() == [token]
+    with pytest.raises(ProviderError) as e:
+        p.list_models()
+    said = str(e.value)
+    seen = _proxy_saw("GET", "/v1/models")
+    assert token in seen["path"] and token in seen["host"], (seen, "the positive control")
+    assert _windows(token, said) == [] and MARKER in said, said
+    assert "HTTP 502" in said and "cannot fetch" in said and "127.0.0.1:1" in said, said
+
+
+def test_a_bare_username_shorter_than_the_whole_floor_is_never_redacted(monkeypatch):
+    """The `_WHOLE` floor is what keeps a short common username in a bare
+    `name@host` out: it has no spelling, so a backend saying the name keeps it."""
+    from scriptorium.providers.base import _WHOLE
+
+    monkeypatch.setenv("LX_ECHO_KEY", "")
+    p = build("p", _keyed("http://alice@127.0.0.1:1/v1", env=""))
+    assert len("alice") < _WHOLE
+    assert p._spellings(p._credentials()) == [] and p._gated() == []
+    assert p._redact("user alice refused; alice@127.0.0.1:1 again") == (
+        "user alice refused; alice@127.0.0.1:1 again")
+
+
+def test_a_header_value_that_is_a_list_is_refused_by_the_transport_not_by_note_transport(
+        echo, monkeypatch):
+    """`_note_transport` says nothing it does can raise; a `headers` value that
+    is a list made its set comprehension raise `TypeError` — unhashable —
+    inside the `finally`, with the reply's exception as context. The class
+    name `TypeError` is still in the refusal, and it is the transport's own:
+    `http.client.putheader` refuses a list before a byte is sent, which the
+    direct call and the mock's empty record both show."""
+    import http.client
+
+    monkeypatch.setenv("LX_ECHO_KEY", KEY)
+    _echo(reason=lambda got: f"bad key {got}")
+    spec = _keyed(echo, headers={"X-List": ["a", "b"]})
+    with pytest.raises(ProviderError, match=r"could not be requested \(TypeError\)") as e:
+        build("p", spec).list_models()
+    assert e.value.__cause__ is None and e.value.__context__ is None
+    assert _windows(KEY, str(e.value)) == [], str(e.value)
+    assert ECHO["seen"] == [], "http.client refused the header before anything was sent"
+    conn = http.client.HTTPConnection("127.0.0.1", 1)
+    conn.putrequest("GET", "/")
+    with pytest.raises(TypeError):
+        conn.putheader("X-List", ["a", "b"])
+
+    p = build("p", spec)
+    headers = {"Authorization": "Bearer " + KEY}
+    req = urllib.request.Request(echo + "/models", method="GET")
+    for k, v in {**headers, **p.extra_headers}.items():
+        req.add_header(k, v)
+    req.add_header("Proxy-authorization", "Basic added-by-the-transport")
+    p._note_transport(req, headers)   # must not raise
+    assert p._transport_added == ("Basic added-by-the-transport",)
+
+
+# ── the guards: what the runtime tests cannot see, pinned by `ast` ─────────
+#
+# Parsed, never grepped — a guard that matched literal text was defeated by a
+# rename once. A module is in scope when it defines `class Provider` or a class
+# whose bases name `Provider`, so a third backend is covered the day it is
+# written and `providers/__init__.py` (config refusals, no transport, no class)
+# is out by that property rather than by name.
+
+_SRC = os.path.join(os.path.dirname(__file__), "..", "src")
+_PACKAGE = os.path.join(_SRC, "scriptorium")
+
+
+def _package_modules():
+    """``(path, tree)`` for every module under `src/scriptorium/`."""
+    for dirpath, _dirs, files in os.walk(_PACKAGE):
+        if "__pycache__" in dirpath:
+            continue
+        for name in sorted(files):
+            if name.endswith(".py"):
+                path = os.path.join(dirpath, name)
+                with open(path, encoding="utf-8") as f:
+                    yield path, ast.parse(f.read(), filename=path)
+
+
+def _names_provider(node):
+    return (isinstance(node, ast.Name) and node.id == "Provider") or (
+        isinstance(node, ast.Attribute) and node.attr == "Provider")
+
+
+def _provider_modules():
+    """``{path: tree}`` for every module in scope, and the positive control on the set."""
+    found = {}
+    for path, tree in _package_modules():
+        if any(isinstance(node, ast.ClassDef)
+               and (node.name == "Provider" or any(map(_names_provider, node.bases)))
+               for node in ast.walk(tree)):
+            found[path] = tree
+    names = {os.path.basename(path) for path in found}
+    assert names >= {"base.py", "openai_compat.py", "anthropic.py"}, names
+    assert "__init__.py" not in names, "the package has no provider class and is out of scope"
+    return found
+
+
+def _scoped(tree):
+    """Every node of ``tree`` with the names of the defs it sits inside, outermost first."""
+    stack = [(tree, ())]
+    while stack:
+        node, scope = stack.pop()
+        for child in ast.iter_child_nodes(node):
+            inner = scope
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                inner = scope + (child.name,)
+            yield child, inner
+            stack.append((child, inner))
+
+
+def _where(path, node):
+    return f"{os.path.relpath(path, _SRC)}:{node.lineno}"
+
+
+def test_every_provider_error_is_built_by_refusal():
+    """T21, G1 — construction. In every in-scope module, `ProviderError(...)` is
+    called only inside `_refusal`; no assignment aliases the class and no
+    import renames it; every in-scope module calls `self._refusal` at least
+    once; and exactly one `_refusal` is defined across them.
+
+    What it cannot see: that the *right* value went through `_refusal` — a
+    message built from a variable this guard cannot follow — and any data
+    flow at all. The runtime tests above are the answer to both.
+    """
+    refusals = []
+    for path, tree in _provider_modules().items():
+        calls = 0
+        for node, scope in _scoped(tree):
+            if isinstance(node, ast.Call):
+                f = node.func
+                if (isinstance(f, ast.Name) and f.id == "ProviderError") or (
+                        isinstance(f, ast.Attribute) and f.attr == "ProviderError"):
+                    assert "_refusal" in scope, (
+                        f"{_where(path, node)} builds a ProviderError outside `_refusal`, "
+                        f"so its message is neither redacted nor tamed. Write "
+                        f"`raise self._refusal(...)`.")
+                if (isinstance(f, ast.Attribute) and f.attr == "_refusal"
+                        and isinstance(f.value, ast.Name) and f.value.id == "self"):
+                    calls += 1
+            elif isinstance(node, ast.FunctionDef) and node.name == "_refusal":
+                refusals.append(_where(path, node))
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                value = node.value
+                assert not (isinstance(value, ast.Name) and value.id == "ProviderError"), (
+                    f"{_where(path, node)} aliases ProviderError, which walks around G1")
+            elif isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    assert not (alias.name == "ProviderError" and alias.asname), (
+                        f"{_where(path, node)} imports ProviderError under another name")
+        assert calls >= 1, f"{os.path.relpath(path, _SRC)} never calls self._refusal"
+    assert len(refusals) == 1, refusals
+
+
+#: Where a slice may stand. `_excerpt` is the one cut of backend text, and the
+#: window it hands `_marks` is its cut too; `_listing` cuts a *row count*
+#: (`[:_MAX_ROWS]`), never text; `_spellings` strips the quotes `json.dumps`
+#: and `repr` put around a value and the `Basic ` off a proxy credential;
+#: `_tables` slices spellings into grams and `_marks` and `_quotes_credential`
+#: slice to compare, never to cut; and `_render` copies the unmarked spans
+#: between markers, up to the bound `_excerpt` chose after `_marks` had run
+#: over it. The contract named the first three; the rest are here because a
+#: scan cannot be written without `text[i:j]`, and the report says so.
+_MAY_SLICE = {"_excerpt", "_listing", "_spellings", "_tables", "_marks", "_render",
+              "_quotes_credential"}
+
+
+def test_backend_text_is_cut_in_one_place_and_only_after_it_is_redacted():
+    """T21, G2 — order. Every `ast.Slice` in an in-scope module is lexically
+    inside one of `_MAY_SLICE`, so a new `str(data)[:300]` fails the suite;
+    that is what pins "nothing is cut before it is redacted".
+
+    What it cannot see: a cut spelled without a slice — `textwrap.shorten`,
+    `text[:n]` hidden behind `operator.getitem` — and whether the slice inside
+    `_excerpt` really comes after the redaction. T6 above is the answer to the
+    second; nothing mechanical answers the first, which is why this docstring
+    names it.
+    """
+    seen_in_excerpt = 0
+    for path, tree in _provider_modules().items():
+        for node, scope in _scoped(tree):
+            if isinstance(node, ast.Slice):
+                assert set(scope) & _MAY_SLICE, (
+                    f"{_where(path, node)} slices outside {sorted(_MAY_SLICE)}. Backend "
+                    f"text is cut by `_excerpt`, after it is redacted, and nowhere else.")
+                seen_in_excerpt += "_excerpt" in scope
+    assert seen_in_excerpt >= 1, "the positive control: `_excerpt` cuts with a slice"
+
+
+_TRANSPORT = ("urllib.request", "urllib.error", "http.client", "socket")
+
+
+def _imports_transport(node):
+    if isinstance(node, ast.Import):
+        named = [alias.name for alias in node.names]
+    elif isinstance(node, ast.ImportFrom):
+        module = node.module or ""
+        named = [module] + [f"{module}.{alias.name}" for alias in node.names]
+    else:
+        return False
+    return any(name == t or name.startswith(t + ".") for name in named for t in _TRANSPORT)
+
+
+def test_the_transport_is_imported_inside_request_and_nowhere_else():
+    """T21, G3 — one door. Across every module in `src/scriptorium/`, every
+    import naming `urllib.request`, `urllib.error`, `http.client` or `socket`
+    is lexically inside `Provider._request`. That is the premise that makes
+    the 200 gate and the error-body redaction total: every backend byte enters
+    through the one function that holds both. `tests/test_startup_imports.py`
+    pins that `lx` does not *load* these and does not stop a method importing
+    one; this stops a second door.
+
+    What it cannot see: a transport reached without importing it —
+    `importlib.import_module("urllib.request")`, or `http.server`'s own client
+    — and a module outside `src/scriptorium/`.
+    """
+    hits = [(path, node, scope) for path, tree in _package_modules()
+            for node, scope in _scoped(tree) if _imports_transport(node)]
+    assert hits, "the positive control: `Provider._request` imports the transport"
+    outside = [_where(path, node) for path, node, scope in hits
+               if not ("Provider" in scope and "_request" in scope
+                       and scope.index("Provider") < scope.index("_request"))]
+    assert outside == [], (
+        f"{outside} import the transport outside `Provider._request`. Every backend "
+        f"byte enters through that one function; a second door is a second place "
+        f"for a credential to reach a reader.")
+    assert {os.path.basename(path) for path, _n, _s in hits} == {"base.py"}

@@ -3,6 +3,291 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-09-11 · A backend that quotes the credential back gets it redacted, and the provider is where that is decided
+
+Closing HANDOFF-076. A backend — or a proxy in front of one — that answers an
+error by quoting the request's `Authorization` header put the key read from
+`api_key_env` on every display surface this project has. Measured on `ce43de5`
+with a mock that answers `401 {"error": "invalid api key; you sent <header>"}`:
+
+```
+$ lx models --provider p            exit 2
+lx: p: HTTP 401 — {"error": "invalid api key; you sent Bearer <the key>"}
+$ lx translate doc.md --lang zh-TW  exit 0
+batch 1/1 failed (p: HTTP 401 — {"error": "… Bearer <the key>"}); retrying segment by segment
+  unresolved s0001: p: HTTP 401 — {"error": "… Bearer <the key>"}
+```
+
+The same text reached `GET /api/models`' `error`, `POST /api/job`'s `log`,
+`failures` and `error`, and `lx audit`. The package recorded identical output
+at `6a6c6a5`, before HANDOFF-054's change. And it was already a contract
+violation — `docs/contracts/workbench-http.md` says no credential appears on
+that surface, "and that includes free text" — so restoring it moves no
+`contract_version`.
+
+**This is the sixth time invariant 6's list of display surfaces was wrong, and
+the first time the path to the value was the backend itself.** Every earlier one
+was a value this project printed through a surface nobody had counted, and
+`config.printable_url` answered it. Nothing this project prints could answer
+this one: the value arrived as somebody else's text.
+
+### The rule
+
+A credential the request carried never reaches a reader through a backend's own
+text. It is held in `providers/base.py`, where the credentials are known, and
+not at the places a message is printed:
+
+- **`Provider._refusal` is the only constructor of `ProviderError`** in any
+  module that defines a provider. It redacts every credential from the *whole*
+  message — wrapper text included — and then applies `_tame`, so an
+  interpolation somebody adds next year is covered without anybody remembering.
+- **`Provider._excerpt` is the only place a backend's text is cut**, and it cuts
+  after it redacts. The old order cut first: a key beginning at decoded
+  character 490 left its first ten characters on screen whatever the match rule
+  was. It scans a bounded window, so what it costs does not grow with the reply.
+- **`_request` refuses a 200 reply that quotes a credential**, before any reader
+  parses it (the *gate*). One check covers all three doors — completions,
+  listings, embeddings — and every reader downstream of them:
+  `translate.parse_reply`'s refusal, which quotes completion content;
+  `translate.misattributed`, which quotes reply-chosen ids (and now through
+  `repr`, which it never did); the listing dropdown; and a completion stored by
+  `accept` → `store.save_targets` → `lx commit` → `.lx/tm.*.jsonl`, **which is
+  tracked in git** (measured: a key written there with `lx check` at exit 0).
+  Refused whole, never rewritten: rewriting content is code writing a
+  translation, and `misattributed` and `_vectors` already refuse a reply whole
+  when it cannot be trusted.
+- **No exception leaving `_request` carries a backend's bytes on its chain.**
+  Nothing raises or sleeps inside an `except` block of its retry loop; each
+  handler records and the loop acts after it, so every `ProviderError` it raises
+  has `__cause__` and `__context__` both `None`. `raise … from None` was the
+  first answer and was not enough (below).
+- **A `base_url` carrying a query string is refused before anything is sent**,
+  by the predicate `lx config set` already uses, `urlsplit(...).query`. Every
+  call site appends its own path after `base_url`, so `http://h/v1?key=X` is
+  requested as `/v1?key=X/models`: the path moves into the query and the
+  request cannot reach an endpoint that routes by path. Its one effect was a 404
+  page quoting the query back.
+
+Three `ast` guards in `tests/test_provider.py` pin the structure: every
+`ProviderError(...)` in a provider module is inside `_refusal`, and no alias of
+the class exists; every slice in those modules is inside a function that cuts
+after redacting or compares without cutting; and `urllib.request`,
+`urllib.error`, `http.client` and `socket` are imported inside
+`Provider._request` and nowhere else in `src/`, which is the premise that makes
+the gate and the error-body redaction total. A module is in scope when it
+defines a provider class, so a third backend is covered the day it is written.
+What each guard cannot see is in its docstring, and that is why the runtime
+tests exist.
+
+### What counts as a credential
+
+The value of `api_key_env`; every value in the `headers` block; the userinfo of
+`base_url`, raw and unquoted — the whole of it when it has no `:`, since
+`https://<token>@host/v1` is how a token travels in a URL, and its password on
+its own when it has one; and every value of a header the transport added to a
+request on its own, accumulated over the provider's life. Today that last is
+urllib's `Proxy-Authorization`, built from `http_proxy`/`https_proxy`
+userinfo, and it is decided by name **and** value because urllib overwrites a
+same-named header from the `headers` block. Not in the set: the username part
+of `user:password` alone, the model id, the provider name, and the headers this
+code sets to fixed non-secret values (`Content-Type`, `anthropic-version`),
+because an Anthropic 400 naming the version has to stay readable.
+
+`headers` values are all in the set because `lx config set` already treats that
+block as credential-grade and refuses to write it; a per-name list of which
+headers are secret is the enumeration this project keeps being wrong about. The
+cost is recorded rather than engineered away: a configured `HTTP-Referer` or
+`X-Title` a backend names in an error reads `[credential redacted]`.
+
+### How a credential is recognised
+
+**By the values this provider holds, in a closed list of spellings** — never by
+what looks like a token (invariant 4). Per value: as sent and stripped; both
+`json.dumps` escapings, each with `/` as `\/` (PHP's default), with `<`, `>`,
+`&`, `'` and `+` written `\u00XX` (Go's `encoding/json`, .NET's
+`System.Text.Json`) and with every `\uXXXX` in upper-case hex (.NET); `repr`,
+which is how this project's own `str(data)` sites print a dict; percent-encoded
+in either case; `html.escape`, with `'` also as `&#39;` and `&#039;`; the value
+with a NUL between its characters, which is a UTF-16 body read as UTF-8; and,
+for a `Basic` value, its decoded `user:password` and password. The list is a
+claim about the encoders looked at, not about encoders: its first version
+stopped at `html.escape` and said the rest did not exist.
+
+**A value shorter than eight characters is never redacted, and no message says
+so.** That is the placeholder population of local runtimes — `EMPTY`,
+`ollama`, `sk-1234` — and a note would state a length class of the key. The
+floor is the value's length, never a spelling's. From eight, a whole spelling is
+removed wherever it appears; from twelve, any contiguous run of a spelling is
+(`_PIECE`), which is what a backend that cut, wrapped or masked a value still
+shows. The guarantee is per run: a backend that prints a key in groups of eleven
+shows all of it, separators between, and that is a designed exposure, stated
+where the constant is.
+
+**Every character inside any removable run is marked, and each marked stretch
+becomes one `[credential redacted]`.** The first implementation took the
+longest run at each position and continued after it, and review measured two
+ways that passes over a removable run — a whole short spelling inside a longer
+run that was not removable, and a removable run starting inside the one just
+consumed (`you sent [credential redacted]KLMNOPQRST.` for a twenty-character
+key). A reference implementation of the rule, written literally and slowly, is
+fuzz-compared against the scan as exact strings: an eight-character-window
+oracle cannot see the seven-character tail the second shape left.
+
+One marker for every source: the `Authorization` value contains the key, so a
+per-source label would have to choose between overlapping sources, and the
+backend's own sentence already says what was echoed. It is ASCII, carries no
+`"` or `\`, and says nothing about length. A backend can write it too.
+
+### The gate is narrower than the redaction, on purpose
+
+A refused reply is a lost translation; an over-redacted error costs a glance.
+So the gate reads only the credentials that can never legitimately appear in a
+translation — the API key, the userinfo, and what the transport added — each
+only when the value is twenty characters or longer, and it refuses a reply that
+contains **twenty consecutive characters** of any spelling of one. Twenty and
+not twelve: a user-chosen key made of words (`translation-server-key`) has
+twelve-character pieces (`translation-`) that occur in ordinary prose. Twenty
+and not the whole value: the first gate matched whole spellings only, and a
+completion quoting the first twenty-four characters of a key went through
+`lx commit` into the tracked memory. `sk-no-key-required`, the placeholder
+llama.cpp's own examples use, is eighteen characters and is never gated — a
+technical document that mentions it translates.
+
+### Measured on the finished change
+
+- **No false refusals.** Over the 3013 paragraphs of this repository's tracked
+  documentation, as bare text and as 121 translate-shaped replies, the gate
+  refused nothing for any realistic key — five hosted shapes, a JWT, word-made
+  keys, every local placeholder, a userinfo password.
+- **The redaction removes non-secret text only where the configured value is
+  itself ordinary text:** a word-made key's twelve-character pieces (23
+  paragraphs for `translation-server-key`), a configured `X-Title` of
+  `scriptorium` (41), a password that is a common word (200 for
+  `translation`). Error messages only; nothing is refused.
+- **A backend that does not echo a credential reads exactly as it did.** 487
+  error shapes — both kinds, with and without a key and `headers`: 401, 403,
+  404, 413, 429, 5xx, wrong-shape and not-JSON 200s, timeouts, refused
+  connections — and 471 are byte-identical to `ce43de5`. The other sixteen are
+  a 401 whose body stalls, which was a bare `TimeoutError` traceback and is now
+  `HTTP 401 — (the body could not be read)`.
+- **Cost:** under a millisecond per ordinary request for everything this added.
+  `_excerpt` on a 16 MiB wrong-shape reply: 18 ms, and 43 ms when the reply is
+  a 4 KiB header value repeated — where the first implementation took 0.8 s and
+  9 s on 4 MiB of the same two. The gate: 39 ms on a 16 MiB reply with a
+  108-character key. A transport-added value of 4 KiB would cost the gate
+  seconds on the largest embeddings reply, as the round that wrote it measured;
+  a real `Basic` value is tens of bytes.
+- `python -m pytest -q`: 2461 collected at `ce43de5`, 2540 now, green on 3.12 and
+  on 3.9.
+
+### What review found
+
+The design was synthesized by the coordinating session from three independent
+security-tier proposals and a fourth lane that attacked their shared brief; the
+implementation, two review rounds, a mutation pass and two fix rounds all ran at
+the security tier. The frozen design was wrong in six places, two of them
+blockers:
+
+1. **`from None` does not remove a context.** An exception raised *inside* the
+   `HTTPError` handler — a body that stalls, so `e.read()` times out; or
+   `Retry-After: nan`, so `time.sleep(nan)` raises — chained the `HTTPError`,
+   whose reason phrase is the backend's, and `lx models` printed a traceback
+   carrying forty-three windows of the key at exit 1. And `from None` leaves
+   `__context__` set where it hides it. Hence the rule that nothing raises
+   inside a handler.
+2. **Userinfo leaves the machine through a proxy.** The design said it never
+   did, measured with the proxy axis held at "none": under `http_proxy`, urllib
+   writes the full URL as the request-target and `user:password@host` as the
+   `Host` header, and a proxy whose error names either printed the password
+   beside a redacted key. That claim was in the coordinating session's own
+   contract; a sweep is blind to the axis it does not vary.
+3. The gate matched whole spellings only (above).
+4. **`_excerpt` scanned the whole reply before cutting to three hundred
+   characters** — 0.8 s for a 4 MiB wrong-shape listing, reachable from a
+   dropdown, and 9 s for 4 MiB of a 4 KiB header value repeated, on a completion
+   door with no size bound. It scans a bounded window now, and a
+   marked stretch that reaches the window's end is treated as running to the
+   end of the text, so the bound can only over-redact what is not shown.
+5. The greedy scan (above).
+6. **The fix for (5) introduced a regression of its own**: the union rendered
+   under an output budget of the input's length plus one marker, a marker is
+   longer than a short spelling, and a message holding several short
+   credentials lost everything after the last marker the budget could afford —
+   the backend's sentence and this project's own advice with it. Found by the
+   last review lane's own reference, 157 of 5404 cases; the test file's fuzz
+   had never generated an output longer than its input.
+
+The mutation pass found the spelling list was not load-bearing in the tests:
+removing the `\/` forms, the stripped form, `repr`, the lower-case percent form
+or `html.escape`, one at a time, left all 2487 tests green, because every test
+key had runs of twelve or more between its special characters and the piece
+rule caught them without the spelling. Each family now has a test whose key
+spaces its special characters closer than eight apart, and each was removed on
+a copy to watch its test go red.
+
+### Alternatives that lost
+
+- **Pattern-based token redaction** (`sk-…`, entropy): not decidable, misses a
+  self-hosted key of any shape, removes model ids that look like tokens, and
+  never knows whose value it hid.
+- **Dropping backend bodies altogether**: loses "invalid model name", "rate
+  limited" and "context length exceeded", which are why the body is printed.
+- **Withholding the whole body on a hit**: cheaper than a marker, and loses the
+  backend's own diagnosis when a debug page dumps request headers beside a real
+  error. Nor is it what a value below the floor gets: below the floor nothing
+  happens, because withholding every body that mentions `ollama` would cost
+  more than the placeholder is worth.
+- **Redaction at the sinks**, as the rule or as a second layer: seven sinks
+  today and none holds a secret; the list has been wrong six times; a stored
+  translation has no sink; and a second copy of the rule is a second place for
+  it to be wrong.
+- **Redaction in `ProviderError.__init__`**, or through a process-wide registry:
+  it runs after a site has cut the text, and a registry is new mutable state
+  holding credentials.
+- **Rewriting a 200 reply in place** (a walk replacing the key in every string
+  leaf): code writing a translation, stored under `llm:*`.
+- **Decoding escapes before matching**: rewrites the non-secret text a person
+  reads and turns a literal `\u001b` into a real ESC before `_tame` sees it.
+- **Query values in the secret set** instead of refusing the query: sends the
+  secret to a URL that cannot work, to redact its echo.
+- **Refusing a userinfo `base_url` at the door** like the query: through a proxy
+  such a URL can be answered, so it is redacted rather than refused.
+- **Dropping a listing row that quotes a credential** rather than refusing the
+  reply: the gate runs before the reply is parsed, and a reply that quotes the
+  credential is evidence about the reply, not about one row.
+
+### Corrections to the record
+
+- 2026-08-12, "`base_url` refuses a query string": "the escape for a genuine one
+  is hand-editing, exactly as it is for a header" was never true. No
+  query-carrying `base_url` has reached an endpoint through this client, because
+  every call site appends its path after it. `cli._field_base_url`'s docstring
+  repeated the sentence and is corrected.
+- HANDOFF-076 called the redirect defect, `docs/contracts/workbench-http.md`
+  divergence (33), "its own package". There was none; it is HANDOFF-078, which
+  also carries the half review found — urllib follows a redirect to `ftp`, so
+  "only http(s) leaves `_request`" holds for the first hop only.
+- `Provider._sane`'s docstring called `lx models` "the one place in this project
+  where text from a remote server reaches a terminal". It had not been for a
+  year.
+
+### Left open, and where it lives
+
+- A refusal in `cli._field_kind` and two in `providers.build` repeat the value a
+  key could have been pasted into: HANDOFF-077.
+- A redirect carries `Authorization` to another host: HANDOFF-078.
+- Three tests start a translation job and return without stubbing the provider
+  or waiting for it, so the job dials `localhost:11434` after the test has ended
+  — on a machine running Ollama the suite sends it the fixture's text: HANDOFF-079.
+- Residuals, by design: a value shorter than eight characters; a 200 reply
+  quoting fewer than twenty consecutive characters of a credential, or a
+  `headers` value; a backend's own mask (`sk-proj-****abcd`), left as written; a
+  key laced with format characters by a backend that wants it shown — it already
+  holds the key. And the chain rule rests on `_refusal`, `_excerpt` and
+  `_note_transport` never raising inside a handler: each is written not to, and
+  a fault injected into any of them would chain the reply's exception (measured
+  by injection; no real path reaches one).
+
 ## 2026-09-11 · The provider transport loads when a request is sent, and `providers/errors.py` never kept it off
 
 Closing HANDOFF-054. `providers/errors.py` held one two-line class and a

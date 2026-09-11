@@ -1,7 +1,7 @@
 """Anthropic Messages API."""
 
 from ..config import printable_url
-from .base import Provider, ProviderError
+from .base import Provider
 
 
 class AnthropicProvider(Provider):
@@ -31,7 +31,7 @@ class AnthropicProvider(Provider):
         base = self.spec.get("base_url", "https://api.anthropic.com").rstrip("/")
         key = self.api_key
         if not key:
-            raise ProviderError(
+            raise self._refusal(
                 f"{self.name}: no API key. Set the environment variable named in "
                 f"providers.{self.name}.api_key_env.")
         data = self._get(f"{base}/v1/models", {
@@ -40,10 +40,13 @@ class AnthropicProvider(Provider):
         })
         rows = data.get("data") if isinstance(data, dict) else None
         if not isinstance(rows, list):
-            # `printable_url`; see the twin of this message in `openai_compat`.
-            raise ProviderError(
+            # `printable_url` and `_excerpt`; see the twin of this message in
+            # `openai_compat`. This one stood untamed as well as uncut-after-
+            # redaction until 2026-09-11 — the day a rule about an untrusted
+            # reply was again written private to the other backend first.
+            raise self._refusal(
                 f"{self.name}: {printable_url(base)}/v1/models did not answer a model "
-                f"list (expected a `data` array): {str(data)[:300]}")
+                f"list (expected a `data` array): {self._excerpt(str(data), 300)}")
         return self._listing(rows)
 
     def complete(self, system, user):
@@ -58,7 +61,7 @@ class AnthropicProvider(Provider):
         }
         key = self.api_key
         if not key:
-            raise ProviderError(
+            raise self._refusal(
                 f"{self.name}: no API key. Set the environment variable named in "
                 f"providers.{self.name}.api_key_env.")
         headers = {
@@ -70,5 +73,6 @@ class AnthropicProvider(Provider):
         blocks = data.get("content") or []
         text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
         if not text:
-            raise ProviderError(f"{self.name}: empty completion: {str(data)[:300]}")
+            raise self._refusal(
+                f"{self.name}: empty completion: {self._excerpt(str(data), 300)}")
         return text

@@ -18,7 +18,7 @@ said "verified" of all six, and five of them had never been run.
 """
 
 from ..config import printable_url
-from .base import Provider, ProviderError, _tame
+from .base import Provider
 
 
 class OpenAICompatProvider(Provider):
@@ -56,9 +56,13 @@ class OpenAICompatProvider(Provider):
             # `describe()` on 2026-08-13, reintroduced by a new surface — which is
             # exactly what AGENTS.md means by "the enumerated list is a symptom of
             # the rule and never its definition".
-            raise ProviderError(
+            #
+            # `_excerpt`, which redacts, tames and only then cuts: a 200 of the
+            # wrong shape that quotes a request header back — a gateway's
+            # debug page does — is backend text like an error body is.
+            raise self._refusal(
                 f"{self.name}: {printable_url(base)}/models did not answer an OpenAI "
-                f"model list (expected a `data` array): {_tame(str(data)[:300])}")
+                f"model list (expected a `data` array): {self._excerpt(str(data), 300)}")
         return self._listing(rows)
 
     def embed(self, texts):
@@ -88,7 +92,7 @@ class OpenAICompatProvider(Provider):
         # over a question already answered, and then a sentence about the server
         # where the truth is that the caller asked for nothing.
         if not texts:
-            raise ProviderError(f"{self.name}: nothing to embed.")
+            raise self._refusal(f"{self.name}: nothing to embed.")
         url = f"{base}/embeddings"
         headers = {"Content-Type": "application/json"}
         key = self.api_key
@@ -127,8 +131,13 @@ class OpenAICompatProvider(Provider):
             choice = data["choices"][0]
             content = choice["message"]["content"]
         except (KeyError, IndexError, TypeError) as e:
-            raise ProviderError(
-                f"{self.name}: unexpected response shape: {str(data)[:300]}") from e
+            # `_excerpt` and not a bare `str(data)[:300]`, which is what stood
+            # here, untamed, until 2026-09-11: a 200 of the wrong shape is a
+            # backend's own text and can quote the request back. The `ast`
+            # guard in `tests/test_provider.py` refuses a slice here now.
+            raise self._refusal(
+                f"{self.name}: unexpected response shape: "
+                f"{self._excerpt(str(data), 300)}") from e
         # `not content.strip()`, not `content is None`. An empty string and a
         # string of spaces are both a model that produced nothing, and both used
         # to be returned as success — measured 2026-08-20, `complete()` returned
@@ -149,11 +158,11 @@ class OpenAICompatProvider(Provider):
         # an `AttributeError`, which is worse. It joins the shape error above,
         # where it belongs.
         if not isinstance(content, str):
-            raise ProviderError(
+            raise self._refusal(
                 f"{self.name}: unexpected response shape: message.content is "
-                f"{type(content).__name__}, not text: {str(data)[:300]}")
+                f"{type(content).__name__}, not text: {self._excerpt(str(data), 300)}")
         if not content.strip():
-            raise ProviderError(
+            raise self._refusal(
                 f"{self.name}: empty completion — the model returned no text. "
                 "It may have hit max_tokens, or stopped on its first token; raise "
                 "`max_tokens` or lower `batch.size` if it recurs.")

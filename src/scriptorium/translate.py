@@ -438,9 +438,15 @@ def misattributed(asked, mapping, sources, lang, cfg):
     """
     extra = sorted(k for k in mapping if k not in set(asked))
     if extra:
+        # `repr`, because these ids are the reply's own choice and this
+        # sentence reaches a terminal through `progress` and a job log
+        # verbatim: an id carrying an ESC or a bidirectional override arrived
+        # there raw (measured, review-surfaces F5). `repr` escapes everything
+        # `str.isprintable` refuses, which covers every category `_sane`
+        # drops, and `parse_reply` already relies on it for the same reason.
         return (f"the reply answered {len(extra)} id(s) nobody asked for "
-                f"({', '.join(extra[:3])}{', …' if len(extra) > 3 else ''}), so it "
-                f"was not tracking which segment it was translating")
+                f"({', '.join(map(repr, extra[:3]))}{', …' if len(extra) > 3 else ''}), "
+                f"so it was not tracking which segment it was translating")
     # One answer for two different sources. At most one of them can be right,
     # and the sources are compared because a document really can hold the same
     # sentence twice — the memory key exists because it does.

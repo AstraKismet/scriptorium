@@ -28,7 +28,16 @@ import pytest
 # Before the path insert on purpose: this module does its own, so importing it
 # here is what makes `scriptorium` importable below — the shape `test_memory.py`
 # uses for `statedb`.
-from test_provider import EMBED, EmbeddingsHandler, _embed_reset
+from test_provider import (
+    EMBED,
+    KEY,
+    MARKER,
+    EchoHandler,
+    EmbeddingsHandler,
+    _echo,
+    _embed_reset,
+    _windows,
+)
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -756,3 +765,49 @@ def test_the_note_says_a_skipped_record_left_the_rival_pool(
 
     assert len(report["skipped"]) == 1
     assert "not offered as a rival" in report["note"]
+
+
+# ── an embedding backend that quotes the key back ──────────────────────────
+
+@pytest.fixture(scope="module")
+def echo():
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), EchoHandler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{httpd.server_address[1]}/v1"
+    httpd.shutdown()
+
+
+def test_an_audit_whose_backend_echoes_the_key_reports_no_window_of_it(
+        tmp_path, monkeypatch, echo, capsys):
+    """HANDOFF-076's T20: the `_embed_post` door, through `audit.embed_texts` and `lx audit`.
+
+    The embeddings request takes its own door into `Provider._request`, so a
+    redaction that covered `_post` and `_get` alone would leave this one. The
+    batch fails, every per-input retry fails, nothing has answered, and the
+    batch error is re-raised to `cli.main` — which prints it on stderr and
+    exits 2, the surface asserted last.
+    """
+    from scriptorium import cli
+    from scriptorium.providers import build
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LX_ECHO_KEY", KEY)
+    _echo()
+    cfg = _cfg(echo)
+    cfg["providers"]["bge"].update({"api_key_env": "LX_ECHO_KEY", "retries": 0, "timeout": 5})
+
+    with pytest.raises(ProviderError) as e:
+        audit.embed_texts(build("bge", cfg), ["alpha", "beta"])
+    said = str(e.value)
+    assert _windows(KEY, said) == [], said
+    assert MARKER in said and "invalid api key" in said, said
+
+    append_tm("zh-TW", _tm((A, TA), (B, TB)))
+    (tmp_path / "lx.config.json").write_text(json.dumps(cfg), encoding="utf-8")
+    with pytest.raises(SystemExit) as exit_:
+        cli.main(["audit", "--lang", "zh-TW"])
+    out = capsys.readouterr()
+    shown = out.out + out.err
+    assert exit_.value.code == 2, shown
+    assert _windows(KEY, shown) == [], shown
+    assert MARKER in out.err and "invalid api key" in out.err, shown

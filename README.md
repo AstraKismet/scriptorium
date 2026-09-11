@@ -417,9 +417,12 @@ The first-ever request for a model is the outlier and it is worth stating plainl
 104.9 s, of which nearly all was a 2.5 GB HuggingFace download, not a load.
 
 API keys are read from the environment variable named in `api_key_env` and are
-never written to config, state or logs. Local servers usually need no key — leave
-`api_key_env` empty and no `Authorization` header is sent. `lx providers` shows
-what is configured and whether each key is present.
+never written to config, state or logs. A backend or a proxy that quotes a key
+back in its error has it replaced by `[credential redacted]` before the message
+is shown anywhere, and a reply that quotes one is refused rather than read.
+Local servers usually need no key — leave `api_key_env` empty and no
+`Authorization` header is sent. `lx providers` shows what is configured and
+whether each key is present.
 
 `lx config set` will not put a credential in the file: `api_key_env` takes the
 *name* of a variable and nothing that looks like a key, a `base_url` carrying a
@@ -762,7 +765,7 @@ that lost.
 ## Development
 
 ```bash
-python -m pytest -q                # 2461 collected, no network
+python -m pytest -q                # 2540 collected, no network
 python -m ruff check src tests
 ```
 

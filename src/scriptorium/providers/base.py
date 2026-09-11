@@ -10,16 +10,20 @@ import json
 import math
 import os
 import random
+import re
 import threading
 import time
 import unicodedata
+import urllib.parse
 from array import array
 
 from ..config import has_version_segment, printable_url
 from .errors import ProviderError
 
-# No transport at module scope: `http.client`, `socket` and `urllib` are imported
-# inside `Provider._request`, which says why and what fails if that changes.
+# No transport at module scope: `http.client`, `socket`, `urllib.request` and
+# `urllib.error` are imported inside `Provider._request`, which says why and
+# what fails if that changes. `urllib.parse` is not the transport — `config`
+# already loads it for `printable_url` — and `_spellings` needs its `quote`.
 
 # Transient by contract: a timeout, a conflict, "too early", a rate limit, and
 # the 5xx family a gateway emits while a local runtime is still loading weights.
@@ -119,6 +123,81 @@ _MAX_EMBED_DIMS = 16384
 #: unknown rather than told a wrong one.
 _MAX_TOKENS_REPORTED = 10 ** 12
 
+#: The shortest value the redaction removes whole. Below it a value is a
+#: placeholder by every local runtime's own convention — `EMPTY` is 5,
+#: `ollama` 6, `sk-1234` 7 — and replacing one would delete ordinary characters
+#: from the backend's sentence, which is the one thing the package's red lines
+#: forbid a floor to do. `password` and `lm-studio` are removed wherever they
+#: appear whole; a reader who sees that learns their key is a word, which is
+#: worth knowing. A value shorter than this is never redacted and **no message
+#: says so**: a note would state a length class of the key.
+_WHOLE = 8
+
+#: The shortest *proper* run of a value the redaction removes — what a backend
+#: that cut the value, wrapped it, or masked all but its head still shows. The
+#: false-positive population of a piece rule is ordinary words inside a
+#: placeholder key, `required` inside `sk-no-key-required`, and twelve clears
+#: them. OpenAI's own mask `sk-proj-****abcd` is left as the backend wrote it:
+#: `sk-proj-` is eight and `abcd` is four.
+#:
+#: **The guarantee is per run, not per key**: no contiguous run of twelve or
+#: more of a value survives. A backend that prints the key in groups of eleven
+#: with a separator between shows all of it, eleven characters at a time
+#: (measured). That is a designed exposure and not a defect — such a backend
+#: already holds the key, and a rule that chased separators would have to
+#: remove ordinary text — and it is stated here so that nobody reads "at most
+#: eleven" as a bound on the key.
+_PIECE = 12
+
+#: What the redaction writes in a value's place. ASCII, so `_tame` passes it;
+#: no `"` or `\`, so a JSON body it lands in stays well-formed; no `⟦`/`⟧`;
+#: fixed text, so it says nothing about the value's length. **One marker for
+#: every source**: the `Authorization` value contains the key, so a per-source
+#: label would have to choose between overlapping sources, and the sentence the
+#: backend wrote already says what was echoed.
+_MARKER = "[credential redacted]"
+
+#: The shortest run of a credential that refuses a 200 reply whole: a window
+#: of this many consecutive characters of any spelling of a gated value (see
+#: `_gated`), not the whole spelling — a completion quoting the first
+#: twenty-four characters of a key was measured accepted, and banked. A value
+#: is gated only when it is itself this long: `sk-no-key-required` — the
+#: placeholder llama.cpp's own examples use, eighteen characters — appears
+#: legitimately in the technical documents this project also translates, and
+#: a user-chosen key on a self-hosted gateway can be shorter than this too;
+#: such a key is not gated, and the error path still redacts it from
+#: `_WHOLE`. Every hosted key is at least thirty-two. Windows of this length
+#: and not of `_PIECE`, because a key made of words (`translation-server-key`)
+#: has twelve-character pieces that occur in ordinary prose, and a refused
+#: reply is a lost translation where an over-redacted error costs a glance.
+_GATE = 20
+
+#: How much of an error body is read. Bounded where `e.read()` was not, and
+#: sized so the redaction window is larger than the display window: any run of
+#: a value that starts inside the 500 characters `_request` shows ends inside
+#: this.
+_ERROR_BODY_BYTES = 64 * 1024
+
+#: The pieces of a spelling that `_spellings` rewrites: a `%XX` pair, for the
+#: lower-case percent form; a `\\uXXXX` escape, for the upper-case hex .NET
+#: writes; and the five characters Go's and .NET's JSON encoders escape by
+#: default that Python's does not.
+_PERCENT = re.compile(r"%[0-9A-F]{2}")
+_JSON_HEX = re.compile(r"\\u([0-9a-f]{4})")
+_JSON_EXTRA = re.compile(r"[<>&'+]")
+
+
+def _percent_lower(m):
+    return m.group(0).lower()
+
+
+def _json_upper(m):
+    return "\\u" + m.group(1).upper()
+
+
+def _json_escape(m):
+    return f"\\u{ord(m.group(0)):04x}"
+
 
 def _finite(value, cast):
     """`cast(value)`, refusing an infinity or a NaN.
@@ -143,6 +222,10 @@ def _tame(text):
     the whole of what the reader has to go on, and deleting a byte from the
     middle of the server's explanation is worse than showing that something was
     there. `U+FFFD` is what a reader already knows means "not representable".
+
+    It runs **after** `Provider._redact` and never before it — `_refusal` and
+    `_excerpt` hold the order — so it can never change a credential's spelling
+    under the match, and the marker it is handed is ASCII and passes through.
     """
     return "".join("�" if unicodedata.category(ch) in _UNSAFE_CATEGORIES else ch
                    for ch in text)
@@ -256,6 +339,14 @@ class Provider:
         # `anthropic.py` records the day that cost this project a whole class's
         # protection. `None` until a first reply arrives; nothing else reads it.
         self._embed_dims = None
+        # What the transport added to a request of this provider's on its
+        # own, accumulated for its life — see `_note_transport`. A tuple
+        # replaced under the lock and never mutated, so a reader takes the
+        # old one or the new one; and `_tables`' memo beside it, the same
+        # shape for the same reason.
+        self._transport_added = ()
+        self._transport_lock = threading.Lock()
+        self._scan_memo = None
 
     # -- credentials -------------------------------------------------------
     @property
@@ -299,7 +390,7 @@ class Provider:
         and a list that became a gate would refuse a working configuration on
         the strength of an optional endpoint.
         """
-        raise ProviderError(
+        raise self._refusal(
             f"{self.name}: a {self.kind} backend does not publish a model list here. "
             f"Set the model by hand: `lx config set providers.{self.name}.model <id>`.")
 
@@ -323,7 +414,7 @@ class Provider:
         ends a run or skips one record is the caller's policy, and a normalizer
         here would have to answer it before the caller could.
         """
-        raise ProviderError(
+        raise self._refusal(
             f"{self.name}: a {self.kind} backend does not serve embeddings here. "
             f"`lx audit` needs an OpenAI-compatible embedding backend — point "
             f"`embedding.provider` at one.")
@@ -333,8 +424,11 @@ class Provider:
     def _sane(text):
         """Whether a listed id or status is safe to put in front of a person.
 
-        **`lx models` is the one place in this project where text from a remote
-        server reaches a terminal**, so a model list is untrusted input. Measured
+        A model list is untrusted input: `lx models` puts text from a remote
+        server in front of a person, and it was the first place in this project
+        to do so — an error body, a wrong-shape reply, an embeddings reply and
+        a `URLError` reason are the others, and `_refusal` and `_excerpt` hold
+        those. Measured
         2026-08-20 against a hostile mock: an id of
         `evil[2K
 TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
@@ -441,50 +535,52 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
         **One refusal below prints part of the reply and every other one prints
         only a type name**, which is the opposite of what an earlier version of
         this paragraph claimed. The exception is the first: a reader whose
-        backend answered the wrong shape needs to see some of it, so
-        `str(data)[:300]` goes through `_tame` — and `_tame` is what makes that
-        safe, not `repr`. A reply whose top level is a JSON *string* reaches the
-        message unquoted, because `str` of a string is the string; the control
+        backend answered the wrong shape needs to see some of it, so `str(data)`
+        goes through `_excerpt` — redacted of every value the request carried,
+        tamed, and only then cut to 300 characters, in that order, because a cut
+        taken first left the head of a key on screen. `repr` is not what makes
+        it safe: a reply whose top level is a JSON *string* reaches the message
+        unquoted, because `str` of a string is the string; the control
         characters and the bidirectional overrides are gone either way, which is
         the property that matters. Everything after it names a type and nothing
         else, so there is no second place for a backend's own text to arrive.
         """
         rows = data.get("data") if isinstance(data, dict) else None
         if not isinstance(rows, list):
-            raise ProviderError(
+            raise self._refusal(
                 f"{self.name}: {printable_url(url)} did not answer an embeddings list "
                 f"(expected a `data` array, got {type(data).__name__}): "
-                f"{_tame(str(data)[:300])}{self._url_hint(None, url)}")
+                f"{self._excerpt(str(data), 300)}{self._url_hint(None, url)}")
         if len(rows) != count:
-            raise ProviderError(
+            raise self._refusal(
                 f"{self.name}: asked {printable_url(url)} for {count} embedding(s) and "
                 f"it answered {len(rows)}. Nothing in the reply says which input each "
                 f"row belongs to, so none of it is used.")
         out = [None] * count
         for row in rows:
             if not isinstance(row, dict):
-                raise ProviderError(
+                raise self._refusal(
                     f"{self.name}: {printable_url(url)} answered a row that is not an "
                     f"object ({type(row).__name__}).")
             idx = row.get("index")
             if isinstance(idx, bool) or not isinstance(idx, int) or not 0 <= idx < count:
-                raise ProviderError(
+                raise self._refusal(
                     f"{self.name}: {printable_url(url)} answered a row whose `index` is "
                     f"not a position in this request.")
             if out[idx] is not None:
-                raise ProviderError(
+                raise self._refusal(
                     f"{self.name}: {printable_url(url)} answered `index` {idx} twice, so "
                     f"at least one input has no vector and one has two.")
             out[idx] = self._vector(row.get("embedding"), url)
         width = len(out[0])
         if any(len(v) != width for v in out):
-            raise ProviderError(
+            raise self._refusal(
                 f"{self.name}: {printable_url(url)} answered vectors of different "
                 f"widths in one reply, which cannot be compared with each other.")
         if self._embed_dims is None:
             self._embed_dims = width
         elif width != self._embed_dims:
-            raise ProviderError(
+            raise self._refusal(
                 f"{self.name}: {printable_url(url)} answered {width}-dimension vectors "
                 f"where an earlier request of this run got {self._embed_dims}. The "
                 f"backend changed model mid-run and the two cannot be compared.")
@@ -527,7 +623,7 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
         the one `array` itself refuses.
         """
         if not isinstance(value, list) or not value:
-            raise ProviderError(
+            raise self._refusal(
                 f"{self.name}: {printable_url(url)} answered a row whose `embedding` is "
                 f"not a non-empty array ({type(value).__name__}).")
         if isinstance(value[0], list):
@@ -538,27 +634,27 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
             # before this is reached, so what arrives here is the nested body
             # behind a gateway that wrapped it — still the same diagnosis, and
             # `_url_hint` keeps it silent where the path is not the cause.
-            raise ProviderError(
+            raise self._refusal(
                 f"{self.name}: {printable_url(url)} answered a row whose `embedding` is "
                 f"an array of arrays, which is what llama.cpp's own `/embeddings` "
                 f"handler returns.{self._url_hint(None, url)}")
         if len(value) > _MAX_EMBED_DIMS:
-            raise ProviderError(
+            raise self._refusal(
                 f"{self.name}: {printable_url(url)} answered a {len(value)}-dimension "
                 f"vector, which no real embedding model serves.")
         for x in value:
             if isinstance(x, bool) or not isinstance(x, (int, float)):
-                raise ProviderError(
+                raise self._refusal(
                     f"{self.name}: {printable_url(url)} answered a vector holding "
                     f"{type(x).__name__}, not numbers.")
         try:
             vec = array("f", value)
         except OverflowError:
-            raise ProviderError(
+            raise self._refusal(
                 f"{self.name}: {printable_url(url)} answered a vector holding a whole "
                 f"number too large to be a coordinate.") from None
         if not all(map(math.isfinite, vec)):
-            raise ProviderError(
+            raise self._refusal(
                 f"{self.name}: {printable_url(url)} answered a vector holding a value "
                 f"that is not a finite number this project can store. `json.loads` takes "
                 f"the bare tokens NaN and Infinity, and a value merely too large for "
@@ -566,6 +662,531 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
                 f"downstream, they make every comparison false, so a poisoned reply "
                 f"would report a clean store.")
         return vec
+
+    # -- what a backend may say about the request it was sent ---------------
+    #
+    # A credential the request carried never reaches a reader through a
+    # backend's own text. Four things hold that, and they are held here — in
+    # the class that knows what was sent — rather than at the places a message
+    # is printed. Every catcher (`cli.main`, `translate.run_batch` and
+    # `retry_one`, `web/server._models`, the `/api/job` worker,
+    # `audit.embed_texts`) formats `str(e)` and holds no secret; there are seven
+    # of them today, and invariant 6's enumerated list of display surfaces has
+    # been wrong five times, each a new path to an old value. So: `_refusal` is
+    # the one constructor of `ProviderError` in any module that defines a
+    # provider, and the whole of every message is scanned, wrapper text
+    # included; `_excerpt` is the one place backend text is cut, and it cuts
+    # after it redacts; `_request` refuses a 200 that quotes a credential before
+    # a single reader parses it; and no exception `_request` raises carries a
+    # backend's bytes on its chain, because nothing is raised inside a handler
+    # there. `tests/test_provider.py` pins the first three by `ast` and the
+    # fourth at runtime, so a site added later inherits them or fails the suite.
+
+    def _credentials(self):
+        """The values a message may not carry, deduplicated, in a fixed order.
+
+        The API key, read from the environment as the header was built. Every
+        `headers` value that is text, and the decimal of one that is a whole
+        number, because `http.client.putheader` sends an `int` as its decimal —
+        a hand-edited `headers.Authorization` *replaces* the computed one in
+        `_request`'s `{**headers, **self.extra_headers}`, so a key can be sent
+        while `api_key` is empty (measured). The userinfo of `base_url`, raw and
+        unquoted, and where it has a password, that on its own — see
+        `_userinfo`. And every value the transport added to a request of this
+        provider's on its own, accumulated over its life — see
+        `_note_transport`.
+
+        **`base_url` userinfo leaves the machine through a proxy**, which is the
+        measurement that put it here after the first version of this docstring
+        said it never did. Without a proxy `http.client` fails on the netloc
+        before a byte is sent, and that is the only case the claim had been
+        measured on. Under `http_proxy` urllib writes the full URL as the
+        request-target and `user:password@host` as the `Host` header; under
+        `https_proxy` the `CONNECT` target carries it; and a proxy whose error
+        page names either put the password on stderr beside a redacted key.
+
+        Not in the set, each for a reason: a `base_url` query is refused before
+        anything is sent; the fixed, non-secret headers this code sets
+        (`Content-Type`, `anthropic-version`) stay readable, because an
+        Anthropic 400 naming the version must; the model id and the provider
+        name are not secrets; and the username part of a `user:password`
+        userinfo on its own, which is not a secret either and, being a common
+        word as often as not, would be removed from ordinary prose. A userinfo
+        with no `:` is the whole of it and *is* in the set: `https://<token>@host`
+        is the ordinary way a token travels in a URL.
+        """
+        values = [self.api_key]
+        for value in self.extra_headers.values():
+            if isinstance(value, str):
+                values.append(value)
+            elif isinstance(value, int) and not isinstance(value, bool):
+                values.append(str(value))
+        values.extend(self._userinfo())
+        values.extend(self._transport_added)
+        out = []
+        for value in values:
+            if value and value not in out:
+                out.append(value)
+        return out
+
+    def _userinfo(self):
+        """What `base_url` carries before its `@`, in the forms a proxy can echo.
+
+        The raw userinfo — the netloc before its **last** `@`, since a password
+        may hold one percent-encoded and a hand-edited file may hold one bare
+        — whenever there is one; where it holds a `:`, the raw password after
+        the **first** one as well; and `urllib.parse.unquote` of each, because
+        a proxy may show either the bytes it received or what they decode to.
+        A userinfo with no `:` is in the set whole: `https://<token>@host/v1`
+        is the ordinary way a token travels in a URL, and the first version of
+        this left it out as "a bare username", so a proxy quoting the request
+        line printed the token in full beside a redacted key (measured). What
+        stays out is the *username part* of a `user:password` userinfo on its
+        own — see `_credentials`; the `_WHOLE` floor is what keeps a short
+        common username in a bare `name@host` out of the set, and a longer one
+        is removed from a backend's prose wherever it appears whole, which is
+        the cost of not knowing a token from a name. Read off the spec and not
+        off the request URL, because the spec's field is the thing the person
+        has to go and fix, and `_request` refuses a URL `urlsplit` cannot read
+        before this is ever asked.
+        """
+        base = self.spec.get("base_url")
+        if not isinstance(base, str):
+            return []
+        try:
+            netloc = urllib.parse.urlsplit(base.strip()).netloc
+        except ValueError:
+            return []
+        if "@" not in netloc:
+            return []
+        userinfo = netloc.rpartition("@")[0]
+        values = [userinfo, urllib.parse.unquote(userinfo)]
+        if ":" in userinfo:
+            password = userinfo.partition(":")[2]
+            values += [password, urllib.parse.unquote(password)]
+        return values
+
+    def _base_url_query(self):
+        """Whether `base_url` carries a query string — the write side's own predicate.
+
+        `bool(urlsplit(...).query)`, which is what `cli._field_base_url` asks
+        before it writes, so the two sides agree on `http://h/v1?` (no query:
+        accepted by both) and on a `?` inside a fragment (not a query: accepted
+        by both). A URL `urlsplit` cannot read answers `False`; the request then
+        fails in `_request`'s masked branch. A method rather than a line in
+        `_request`, because that function imports `urllib.error` and
+        `urllib.request` and so cannot name `urllib.parse` before it does.
+        """
+        base = self.spec.get("base_url")
+        if not isinstance(base, str):
+            return False
+        try:
+            return bool(urllib.parse.urlsplit(base.strip()).query)
+        except ValueError:
+            return False
+
+    def _gated(self):
+        """The values a 200 reply may not quote `_GATE` characters of, deduplicated.
+
+        The API key, the userinfo values and what the transport added — every
+        credential **except a `headers` value**, and each only when the value
+        itself is `_GATE` or longer. A `headers` value such as an
+        `HTTP-Referer` URL can legitimately appear in a translation, and a
+        refused reply is a lost translation where an over-redacted error costs
+        a glance; the floor is the value's own length and never a spelling's,
+        because an eighteen-character placeholder whose percent form is twenty
+        was measured refusing a completion the raw form accepted.
+        """
+        values = [self.api_key] + self._userinfo() + list(self._transport_added)
+        out = []
+        for value in values:
+            if len(value) >= _GATE and value not in out:
+                out.append(value)
+        return out
+
+    @staticmethod
+    def _spellings(values):
+        """Every form a default encoder gives each value, deduplicated.
+
+        A closed list, on purpose: a redaction that guessed at "anything that
+        looks like a token" is not decidable (invariant 4), and this is. Per
+        value: the value and the value stripped, because Python's `http.server`
+        keeps a trailing space where other parsers strip it (measured, both);
+        the two `json.dumps` escapings, each also with `/` as `\\/`, which PHP's
+        `json_encode` emits by default — and each of those four also with `<`,
+        `>`, `&`, `'` and `+` as `\\u003c`-style escapes, which Go's
+        `encoding/json` writes for the first three and .NET's
+        `System.Text.Json` for all five by default, and again with every
+        `\\uXXXX` in upper-case hex, which .NET writes where Python writes
+        lower; `repr`, which is how this project's own `str(data)` sites present
+        a dict; `urllib.parse.quote` with its hex in either case; `html.escape`,
+        also with `'` as `&#39;` (Go, Express) and `&#039;` (PHP) where Python
+        writes `&#x27;`; for an ASCII value, the value with a NUL between every
+        two characters and one at either end, which is what a UTF-16 body looks
+        like after `decode("utf-8", "replace")` — `_tame` then turns each NUL
+        into U+FFFD and every character of the key is legible between them
+        (measured, both byte orders); and for a `Basic <base64>` value, the
+        `user:password` it encodes and the password after the first `:`, because
+        a proxy can echo what it decoded rather than what it was sent.
+
+        Not spelled: case-folded, base64 of the value, NFKC/full-width, every
+        ASCII character as `\\u`, numeric entities for ordinary characters. No
+        default encoder looked at produces them, and a form nobody produces is
+        a cost with no case behind it. That is a claim about the encoders
+        looked at and not about encoders: the first version of this list
+        stopped at `html.escape` and said the rest did not exist, and three of
+        the forms above came from reading Go's, .NET's and PHP's defaults.
+
+        Not decoded on the other side either. Unescaping the displayed body
+        before matching — every `\\u201c` back to `“` — rewrites the non-secret
+        text a person reads, and turns a literal `\\u001b` into a real ESC before
+        `_tame` sees it. Measured, and refused.
+
+        **The floor is a property of the value, not of a form.** A value
+        shorter than `_WHOLE` gets no spelling at all: its JSON or HTML form can
+        be `_WHOLE` or longer, and redacting that contradicts "a value shorter
+        than `_WHOLE` is never redacted" — measured, a seven-character value
+        redacted in three spellings. A form shorter than `_WHOLE` — a stripped
+        value, a decoded `Basic` — is dropped as well, so the scan can take
+        "every spelling is long enough" as given.
+
+        `html` and `base64` are imported here rather than at module scope: about
+        5 ms each at import against 42 for `import scriptorium.cli`, measured,
+        and `_request` documents the same pattern for a heavier case.
+
+        Nothing here raises. `quote` is given `surrogatepass` because an
+        environment value can hold a lone surrogate — `os.environ` decodes with
+        `surrogateescape` on POSIX — and this runs inside `_request`'s handlers,
+        where a raise would chain the backend's bytes (see `_request`).
+        """
+        import base64
+        import html
+
+        out = []
+        for value in values:
+            if len(value) < _WHOLE:
+                continue
+            forms = [value, value.strip()]
+            for dumped in (json.dumps(value)[1:-1],
+                           json.dumps(value, ensure_ascii=False)[1:-1]):
+                for json_form in (dumped, dumped.replace("/", "\\/")):
+                    for form in (json_form, _JSON_EXTRA.sub(_json_escape, json_form)):
+                        forms.append(form)
+                        forms.append(_JSON_HEX.sub(_json_upper, form))
+            forms.append(repr(value)[1:-1])
+            quoted = urllib.parse.quote(value, safe="", errors="surrogatepass")
+            forms.append(quoted)
+            forms.append(_PERCENT.sub(_percent_lower, quoted))
+            escaped = html.escape(value, quote=True)
+            forms.append(escaped)
+            forms.append(escaped.replace("&#x27;", "&#39;"))
+            forms.append(escaped.replace("&#x27;", "&#039;"))
+            if value.isascii():
+                laced = "\x00".join(value)
+                forms.append(laced + "\x00")
+                forms.append("\x00" + laced)
+            if value.startswith("Basic "):
+                try:
+                    decoded = base64.b64decode(value[len("Basic "):],
+                                               validate=True).decode("utf-8")
+                except ValueError:      # binascii.Error and UnicodeDecodeError both
+                    decoded = None
+                if decoded is not None:
+                    forms.append(decoded)
+                    if ":" in decoded:
+                        forms.append(decoded.partition(":")[2])
+            for form in forms:
+                if len(form) >= _WHOLE and form not in out:
+                    out.append(form)
+        return out
+
+    def _tables(self):
+        """``(whole, grams, longest)`` for the current secret set, memoized on it.
+
+        `whole` is the set of spellings, `grams` the set of their `_PIECE`-grams
+        and `longest` the longest spelling's length — what `_marks` and
+        `_excerpt` read. Building the gram set is the one cost here that grows
+        with the value (a four-kilobyte header value has tens of thousands), so
+        it is kept on the instance and rebuilt only when the spellings change,
+        which they do when `_note_transport` records a value; the memo is one
+        tuple replaced by assignment, so a batch thread reads the old one or
+        the new one and never half of each.
+        """
+        spellings = tuple(self._spellings(self._credentials()))
+        memo = self._scan_memo
+        if memo is not None and memo[0] == spellings:
+            return memo[1:]
+        whole = frozenset(spellings)
+        grams = frozenset(s[k:k + _PIECE] for s in spellings
+                          for k in range(len(s) - _PIECE + 1))
+        longest = max(map(len, spellings), default=0)
+        self._scan_memo = (spellings, whole, grams, longest)
+        return whole, grams, longest
+
+    def _marks(self, text):
+        """One byte per position of ``text``: 1 where a removable run covers it.
+
+        A removable run is an occurrence of a whole spelling, or `_PIECE` or
+        more consecutive characters of one. The wholes are found with
+        `str.find`. The pieces are one set lookup per position, and that is
+        exact rather than a prefilter — though not because the grams decide
+        whether a run is a substring of one spelling: a run whose grams come
+        from two different spellings is a substring of neither, so "every gram
+        of it is some spelling's" does not say that, and an earlier version of
+        this docstring claimed it did. What the code relies on is weaker and
+        true: **the union of the removable pieces equals the union of the
+        text's `_PIECE`-grams that some spelling has.** Every removable piece
+        is covered by its own grams, each of which is inside that same
+        spelling, so marking the grams marks all of it; and every such gram is
+        itself `_PIECE` consecutive characters of a spelling, so marking it
+        marks nothing the rule would not. The slices here compare and never
+        cut, which is why the `ast` guard over slicing admits this function
+        beside `_excerpt`.
+        """
+        whole, grams, _longest = self._tables()
+        marked = bytearray(len(text))
+        for s in whole:
+            at = text.find(s)
+            while at != -1:
+                marked[at:at + len(s)] = b"\x01" * len(s)
+                at = text.find(s, at + 1)
+        if grams:
+            ones = b"\x01" * _PIECE
+            for i in range(len(text) - _PIECE + 1):
+                if text[i:i + _PIECE] in grams:
+                    marked[i:i + _PIECE] = ones
+        return marked
+
+    @staticmethod
+    def _render(text, marked, upto, budget=None):
+        """``text[:upto]`` with every marked stretch collapsed to one `_MARKER`.
+
+        Two stretches that overlap or touch are one marker: that is what makes
+        the marks a union rather than a scan, and it is also why a backend that
+        repeats the value back to back gets one marker for the lot. A stretch
+        that reaches ``upto`` ends the output on its marker — for `_excerpt`,
+        which scans a bounded window, what lies beyond may continue it and is
+        never shown — and with a ``budget`` the output stops once it holds that
+        many characters, because a caller that is about to cut it reads no
+        further. **`_redact` passes none**: it used to pass the input's length
+        plus one marker, and a marker is longer than a short spelling, so a
+        message holding several short whole spellings grew past that budget
+        and lost everything after the last marker it could afford — five
+        copies of a twelve-character key came back as four markers and nothing
+        else, and through `_refusal` that dropped the tail of the backend's
+        sentence and this project's own advice after it (measured). Only a
+        caller that cuts anyway may bound this. The finds are over the byte
+        array and the appends are slices, so the cost is in the stretches and
+        not in the characters.
+        """
+        out = []
+        produced = 0
+        i = 0
+        while i < upto and (budget is None or produced < budget):
+            j = marked.find(1, i, upto)
+            if j == -1:
+                out.append(text[i:upto])
+                break
+            out.append(text[i:j])
+            out.append(_MARKER)
+            produced += j - i + len(_MARKER)
+            k = marked.find(0, j, upto)
+            i = upto if k == -1 else k
+        return "".join(out)
+
+    def _redact(self, text):
+        """``text`` with every run of a credential's spelling replaced by `_MARKER`.
+
+        **A union, not a scan.** Every character that belongs to any removable
+        run is marked (`_marks`), and each maximal marked stretch — overlapping
+        or touching — becomes one marker (`_render`). The left-to-right scan
+        this replaced took the longest run at each position and continued after
+        it, which was wrong in two measured shapes: a whole short spelling that
+        is a proper prefix of a longer, non-removable run was never considered,
+        and a run consumed at one position hid a longer removable run that began
+        inside it — `you sent [credential redacted]KLMNOPQRST.` for a
+        twenty-character key whose first ten characters another header value
+        ended with. Nothing else is touched, so "invalid model name" and "rate
+        limited" read exactly as the backend wrote them.
+
+        What it does not do, by design: a backend that prints the key in groups
+        of eleven with a separator between, or laces it with format characters,
+        shows all of it — it already holds the key, and a rule that chased that
+        would have to remove ordinary text. The marker text can be written by a
+        backend too, and then reads as a redaction. Neither is a defect of the
+        rule; both are its edge, stated.
+
+        **The identity when there is nothing to redact**, and a test pins it:
+        with `api_key_env: ""` the secret set is empty, `"" in text` is true at
+        every position, and a `str.replace` written without the floor would put
+        a marker between every two characters.
+        """
+        whole, _grams, _longest = self._tables()
+        if not whole:
+            return text
+        return self._render(text, self._marks(text), len(text))
+
+    def _window(self, cap):
+        """How many characters `_excerpt` scans and may show for a ``cap``.
+
+        The unbounded rule's output reaches ``cap`` after at most ``cap``
+        unmarked characters and `cap // len(_MARKER) + 1` markers — a marker
+        is never cut, so no more of them start before the cut — and each marker
+        stands for a stretch that is one spelling long, or two where the body
+        quotes a header value that contains the key beside the key itself. So
+        the window is ``cap`` plus that many markers' worth of two spellings,
+        and the excerpt is exact whenever every stretch it shows is that short;
+        a body that repeats a value back to back for longer than the window is
+        one marker and ends there. Measured on the build before this one:
+        redacting the whole of a sixteen-megabyte wrong-shape reply before the
+        cut cost 2.2 s on ordinary text and 69 s against a four-kilobyte header
+        value, reachable from a dropdown.
+        """
+        _whole, _grams, longest = self._tables()
+        return cap + (cap // len(_MARKER) + 1) * 2 * longest
+
+    def _excerpt(self, text, cap):
+        """At most ``cap`` characters of a backend's text, redacted and tamed first.
+
+        The one place in these modules where backend text is cut, and an `ast`
+        guard says so — "redact before the cut" then holds by construction
+        rather than by every site remembering it. Measured on the build before
+        the last one: a key beginning at decoded character 490 left its first
+        ten characters on screen whatever the match rule was, because the slice
+        came first. A marker is never cut: a cut that falls inside one moves to
+        where the marker ends, so nobody reads `[credential re` and wonders
+        what the rest was.
+
+        **It scans a bounded window and tames only what it emits.** The window
+        is `_window`; the marks are taken over `_PIECE - 1` characters past it,
+        so a run that begins in the window's last characters and ends beyond it
+        is seen — every mark inside the window is then final. Two properties,
+        each pinned by a test: never less redaction than the unbounded rule,
+        because a marked stretch that reaches the window's end is emitted as its
+        marker and ends the excerpt, and what was not scanned is not shown; and
+        exact wherever the unbounded rule's output reaches ``cap`` inside the
+        window. `_tame` runs on the cut and not on the window, because it is
+        one character in, one out, and taming a megabyte to show 300 characters
+        of it was 1.5 s of the 2.2 the whole thing cost.
+        """
+        whole, _grams, _longest = self._tables()
+        if not whole:
+            return _tame(text[:cap])
+        window = self._window(cap)
+        marked = self._marks(text[:window + _PIECE - 1])
+        shown = self._render(text, marked, min(len(text), window), cap + len(_MARKER))
+        if len(shown) > cap:
+            end = cap
+            start = shown.rfind(_MARKER, 0, cap + len(_MARKER) - 1)
+            if start != -1 and start + len(_MARKER) > cap:
+                end = start + len(_MARKER)
+            shown = shown[:end]
+        return _tame(shown)
+
+    def _refusal(self, message):
+        """The `ProviderError` every refusal in a provider module is built by.
+
+        The only constructor of the class in any module that defines a provider
+        — callers write `raise self._refusal(...)` — and the whole message is
+        scanned, wrapper text included. That is the structural floor: an
+        interpolation somebody adds next year is redacted and tamed without
+        anybody remembering. No message literal in these modules carries a
+        `Cc`/`Cf`/`Zl`/`Zp` character, so taming the whole message changes
+        nothing the project wrote. The cost, accepted and pinned by a test that
+        documents it: a key literally equal to wrapper text — `HTTP 401` —
+        redacts the wrapper.
+        """
+        return ProviderError(_tame(self._redact(message)))
+
+    def _quotes_credential(self, text):
+        """Whether ``text`` holds `_GATE` consecutive characters of a gated value's spelling.
+
+        The rule is every `_GATE`-window of every spelling of every `_gated`
+        value, and the first version of this matched whole spellings only — so a
+        completion quoting the first twenty-four characters of the key was
+        accepted, banked through `lx commit` into the tracked memory with
+        `lx check` green, while the same bytes in a 401 body were redacted.
+
+        The windows are not searched for one by one. Every window of twenty
+        contains a ten-character piece of the spelling that starts at a multiple
+        of ten, so those pieces are searched with `str.find` — C speed over a
+        sixteen-megabyte embeddings reply — and each hit is confirmed against
+        the windows that contain it, at the offsets the hit fixes. A spelling
+        every window of which carries a NUL — the UTF-16 forms — is not searched
+        when the text has none. A test fuzz-compares this against the plain
+        loop. What it costs is measured in the closing report of the change that
+        wrote it; a piece that is a common word in the text costs one
+        confirmation per occurrence.
+        """
+        gated = self._gated()
+        if not gated:
+            return False
+        half = _GATE // 2
+        laced = "\x00" in text
+        pieces = {}
+        for s in self._spellings(gated):
+            if len(s) < _GATE:
+                continue
+            if not laced and max(map(len, s.split("\x00"))) < _GATE:
+                continue
+            for m in range(0, len(s) - half + 1, half):
+                pieces.setdefault(s[m:m + half], []).append((s, m))
+        for piece, sites in pieces.items():
+            at = text.find(piece)
+            while at != -1:
+                for s, m in sites:
+                    for k in range(max(0, m - half + 1), min(m, len(s) - _GATE) + 1):
+                        start = at - (m - k)
+                        if start >= 0 and text[start:start + _GATE] == s[k:k + _GATE]:
+                            return True
+                at = text.find(piece, at + 1)
+        return False
+
+    def _note_transport(self, req, headers):
+        """Record every header value the transport added to ``req`` on its own.
+
+        `urllib` stores a header name through `str.capitalize`, so the pairs this
+        code added — ``headers`` and `extra_headers` — are compared that way,
+        **as name and value**: a hand-edited `headers.Proxy-Authorization` is
+        overwritten by `ProxyHandler` unconditionally, so a comparison by name
+        alone found the value actually sent in neither set, and a 407 quoting it
+        printed thirty-five windows of it (measured). What is left today is
+        exactly `Proxy-authorization`, built from `http_proxy`/`https_proxy`
+        userinfo: a proxy answering 407 quoted it back into the `HTTPError`
+        branch, and after `urlopen` fails `req.headers` still carries it.
+        `req.headers` and not `header_items()`: the unredirected half holds
+        `Host` and `Content-length`, which are not secrets, and a test asserts
+        the host survives the message.
+
+        Accumulated for the life of the provider — one run — as an immutable
+        tuple replaced by assignment, never shrinking, and read by
+        `_credentials` and `_gated` alone. Kept on the instance rather than
+        passed along because five refusal sites that quote a reply have no
+        request to read it off, and a wrong-shape 200 quoting the proxy's
+        credential printed sixty-six windows of it through them (measured). It
+        runs after every attempt, before any message that quotes the reply is
+        built. Nothing it does can raise.
+        """
+        if req is None:
+            return
+        # Only text values on our side of the comparison. What the transport
+        # adds is always text, so a value of ours that is not text can match
+        # nothing; and a hand-edited `headers` value that is a list or a block
+        # is unhashable, which made this set comprehension raise `TypeError`
+        # while the docstring above said nothing here could — inside the
+        # `finally`, with the reply's exception as its context (measured).
+        # `http.client` refuses such a header before a byte is sent, so the
+        # refusal the reader gets is that one, and this only had to stop
+        # standing in front of it.
+        ours = {(name.capitalize(), value)
+                for name, value in {**headers, **self.extra_headers}.items()
+                if isinstance(value, str)}
+        with self._transport_lock:
+            added = tuple(value for name, value in req.headers.items()
+                          if isinstance(value, str) and (name, value) not in ours
+                          and value not in self._transport_added)
+            if added:
+                self._transport_added = self._transport_added + added
 
     # -- transport ---------------------------------------------------------
     def _backoff(self, attempt, retry_after=None):
@@ -575,7 +1196,8 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
         returning 429 knows its own window and an exponential guess does not.
         Its HTTP-date spelling is deliberately not honoured: parsing a date to
         wait on it is more machinery than this case earns, and falling through
-        to our own backoff is never wrong, only slower.
+        to our own backoff is never wrong, only slower. A number that is not
+        finite falls through the same way, for the reason in the body.
 
         Jitter because a batch runs several requests concurrently against one
         server. Without it every one of them fails together and then retries in
@@ -584,9 +1206,16 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
         """
         if retry_after:
             try:
-                return min(max(float(retry_after), 0.0), _MAX_BACKOFF)
+                seconds = float(retry_after)
             except ValueError:
-                pass  # an HTTP-date; use the backoff we control
+                seconds = None  # an HTTP-date; use the backoff we control
+            # `nan` and the infinities survive `float()` and none of them
+            # survives `time.sleep`, which raises `ValueError` — inside the
+            # handler that called this, until `_request` stopped sleeping
+            # there. They fall through like the date does (measured: a 429
+            # with `Retry-After: nan` ended `lx models` in a traceback).
+            if seconds is not None and math.isfinite(seconds):
+                return min(max(seconds, 0.0), _MAX_BACKOFF)
         return min(2 ** attempt + random.uniform(0, 1), _MAX_BACKOFF)
 
     def _url_hint(self, code, url):
@@ -687,7 +1316,8 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
         # silent GET — unreachable from the two callers that exist today and a
         # trap set for the third. A POST with a JSON `null` body is a strange
         # thing to want, but it is not a GET.
-        data = self._request(url, headers, payload=payload, method="POST")
+        data = self._request(url, headers, payload=payload, method="POST",
+                             what="a completion")
         # Here rather than in each `complete()`, and that is the whole reason
         # this counter is trustworthy: `_post`'s two callers are exactly the two
         # `complete()` implementations, so a reply cannot be counted twice and a
@@ -765,19 +1395,47 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
     def _request(self, url, headers, payload=None, method="POST",
                  timeout=None, retries=None, max_bytes=None, what=None,
                  advice=None):
-        # **Only http(s) leaves this function.** `urllib`'s stock opener also
-        # speaks `file:`, `ftp:` and `data:`, so a hand-edited `base_url` of
-        # `file:///…` made the one endpoint a browser gesture can reach into a
-        # local-file read whose content comes back inside the wrong-shape error
-        # message. No configuration this project writes can produce one —
-        # `_field_base_url` refuses an empty netloc — so this costs nothing and
-        # closes the hand-edited case. A plain prefix test rather than
-        # `urlsplit`, because that parser raises on some of the inputs this is
-        # here to refuse.
+        # **Only http(s) leaves this function on the first hop.** `urllib`'s
+        # stock opener also speaks `file:`, `ftp:` and `data:`, so a hand-edited
+        # `base_url` of `file:///…` made the one endpoint a browser gesture can
+        # reach into a local-file read whose content comes back inside the
+        # wrong-shape error message. No configuration this project writes can
+        # produce one — `_field_base_url` refuses an empty netloc — so this
+        # costs nothing and closes the hand-edited case. A plain prefix test
+        # rather than `urlsplit`, because that parser raises on some of the
+        # inputs this is here to refuse. What it does not close: a backend
+        # answering a redirect, which urllib follows to any scheme it speaks
+        # and with `Authorization` still attached — that is
+        # `docs/contracts/workbench-http.md` divergence (33), open, and its own
+        # package.
         if not str(url).lower().startswith(("http://", "https://")):
-            raise ProviderError(
+            raise self._refusal(
                 f"{self.name}: base_url must be an http:// or https:// address. This one "
                 f"names another scheme, and the value is not repeated here.")
+        # **A `base_url` carrying a query string is refused here, beside the
+        # scheme check and before anything is sent.** Every request this project
+        # builds appends its own path after `base_url` — `/models`,
+        # `/embeddings`, `/chat/completions`, `/v1/models`, `/v1/messages` — so
+        # `http://h/v1?key=X` is requested as `/v1?key=X/models`: the path moves
+        # into the query and no endpoint that routes by path can be reached
+        # (measured on the request line). Its one possible effect was a 404 page
+        # quoting the query back — `Cannot GET /v1?key=…/models`, on stderr.
+        # `lx config set` has refused to write the shape since 2026-08-12; a
+        # hand-edited file still carries it. Read off the spec rather than off
+        # `url`, because the spec's field is the thing the person has to go and
+        # fix. **The predicate is the write side's** — `urlsplit(...).query`,
+        # which `cli._field_base_url` uses — and not `"?" in url`: that accepted
+        # `http://h/v1?` at `lx config set` and refused it at every request, and
+        # refused a `?` inside a fragment as "a query string" (measured). A
+        # URL `urlsplit` cannot read is not refused here; the request then
+        # fails in the masked branch below.
+        if self._base_url_query():
+            raise self._refusal(
+                f"{self.name}: base_url carries a query string. Every request appends "
+                f"its own path after base_url, so the query moves that path into the "
+                f"query and the request cannot reach an endpoint. Remove it — a "
+                f"credential belongs in the environment variable named by "
+                f"`api_key_env` — and the value is not repeated here.")
         # **The transport is imported here, not at module scope.** Every `lx`
         # command executes this module — `cli.py` binds `ProviderError` at module
         # scope, and Python runs `providers/__init__.py`, which imports this file
@@ -811,12 +1469,35 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
         timeout = self.timeout if timeout is None else timeout
         retries = self.retries if retries is None else retries
         last = None
+        # **Nothing is raised, and nothing sleeps, inside a handler below.** An
+        # exception raised inside an `except` block gets the exception being
+        # handled as its `__context__`, and inside the `HTTPError` handler that
+        # is the `HTTPError`, whose `__str__` is `HTTP Error 401: <reason
+        # phrase>` — the backend's bytes. `raise last from None` hides the
+        # context from a formatted traceback and leaves it on `__context__`,
+        # the last object holding the value; and it did nothing for the two
+        # measured ways a handler raised something *else*: a 401 whose body
+        # stalls made `e.read()` raise a timeout inside the handler, a 429 with
+        # `Retry-After: nan` made `time.sleep(nan)` raise `ValueError` inside
+        # it, and neither is a `ProviderError` nor in `cli.main`'s exit-2
+        # tuple, so `lx models` answered a traceback carrying forty-three
+        # windows of the key. So each handler only records — what to raise,
+        # whether it is final, what the server said about waiting — and the
+        # loop raises or sleeps after the `try`. Every `ProviderError` this
+        # function raises has `__cause__` and `__context__` both `None`, and
+        # a test asserts it for every refusal shape the suite drives.
         for attempt in range(retries + 1):
             # Every sleep below is guarded by this. The loop used to wait after
             # its final attempt and then leave and raise anyway, so `retries=0`
             # cost a second of pure latency per failed call — which the suite
             # paid on every run.
             final = attempt == retries
+            # `None` before the `try`, so a failure inside `Request(...)` below
+            # reaches the handlers with no stale request from the attempt
+            # before it and no unbound name.
+            req = None
+            fatal = None
+            retry_after = None
             try:
                 # **Constructed inside the `try`, and this is depth rather than
                 # the guard.** `Request.__init__` raises `ValueError("unknown url
@@ -838,65 +1519,125 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
                 req = urllib.request.Request(url, data=body, method=method)
                 for k, v in {**headers, **self.extra_headers}.items():
                     req.add_header(k, v)
-                with urllib.request.urlopen(req, timeout=timeout) as resp:
-                    # Bounded for a listing, unbounded for a completion. One
-                    # extra byte is read so that "exactly at the cap" and "over
-                    # it" are distinguishable without a second call.
-                    raw = resp.read() if max_bytes is None else resp.read(max_bytes + 1)
+                # `_note_transport` in a `finally`, so it runs before any
+                # handler below reads the reply: urllib adds its own headers to
+                # `req` inside `urlopen`, before the connection, and a message
+                # built from the body has to know them by then.
+                try:
+                    with urllib.request.urlopen(req, timeout=timeout) as resp:
+                        # Bounded for a listing, unbounded for a completion. One
+                        # extra byte is read so that "exactly at the cap" and
+                        # "over it" are distinguishable without a second call.
+                        raw = resp.read() if max_bytes is None else resp.read(max_bytes + 1)
+                        status = getattr(resp, "status", 200)
+                finally:
+                    self._note_transport(req, headers)
                 if max_bytes is not None and len(raw) > max_bytes:
                     # `what` rather than a hard-coded "a model list". The listing
                     # was this branch's only caller for a year and the sentence
                     # said so; the moment a second bounded read existed, that
                     # sentence became a wrong one the new caller inherited
                     # silently. Found by the security-tier pass over this change.
-                    raise ProviderError(
+                    raise self._refusal(
                         f"{self.name}: {printable_url(url)} answered more than "
                         f"{max_bytes} bytes for {what or 'this request'}, which no real "
                         f"backend does. Nothing was parsed.")
+                # A `UnicodeDecodeError` holds the whole body as `.object` and a
+                # `JSONDecodeError` as `.doc`, so neither is kept past its
+                # handler and neither is chained: what survives of each is its
+                # `str`, which names a position and never quotes the body.
+                problem = None
                 try:
-                    return json.loads(raw.decode("utf-8"))
-                except (ValueError, UnicodeDecodeError) as e:
-                    # A 200 that is not JSON. Outside the three handlers
-                    # below, `json.loads` raised straight through them and
-                    # out of `cli.main`, which has no `ValueError` in its
-                    # exit-2 tuple: a traceback and exit 1. Every other
-                    # caller was shielded by `translate.run_batch`'s blanket
-                    # `except Exception`; `cli.do_models` is not, and the
-                    # trigger is the very misconfiguration `_url_hint` was
-                    # added for — a proxy or a web UI at the root answering
-                    # HTML. OpenRouter's bare host answers 200 with 131 KB
-                    # of it. Raised here rather than retried: a server that
-                    # answered the wrong content type will answer it again.
-                    raise ProviderError(
-                        f"{self.name}: {printable_url(url)} answered {resp.status if hasattr(resp, 'status') else 200} "
-                        f"but not JSON ({e}). Check that base_url points at the API "
-                        f"rather than at a web page."
-                        f"{self._url_hint(404, url)}") from e
+                    text = raw.decode("utf-8")
+                except UnicodeDecodeError as e:
+                    problem = str(e)
+                if problem is None:
+                    # **The 200 gate.** A reply that quotes a credential is
+                    # refused whole, before `json.loads`, and it is not retried.
+                    # One check here covers all three doors — `_post`, `_get`,
+                    # `_embed_post` — and every reader of a reply that would
+                    # otherwise have to know: `translate.parse_reply`'s refusal,
+                    # which quotes completion content and holds no secret;
+                    # `misattributed`, which quotes reply-chosen ids; `_listing`
+                    # rows in a dropdown; and a completion whose content is
+                    # stored by `accept` → `store.save_targets` → `lx commit` →
+                    # `.lx/tm.*.jsonl`, which is tracked in git (measured: a
+                    # key written there with `lx check` green — and, before the
+                    # gate matched pieces, twenty-four characters of one).
+                    # Refused and never rewritten — rewriting content is code
+                    # writing a translation, and `misattributed` and `_vectors`
+                    # already refuse a reply whole when it cannot be trusted. No
+                    # excerpt of the body, which is the point.
+                    if self._quotes_credential(text):
+                        raise self._refusal(
+                            f"{self.name}: {printable_url(url)} answered {what or 'this request'} "
+                            f"with text that quotes the credential this request carried, so "
+                            f"none of it is used.")
+                    try:
+                        return json.loads(text)
+                    except ValueError as e:
+                        # A 200 that is not JSON. Outside the handlers below,
+                        # `json.loads` raised straight through them and out of
+                        # `cli.main`, which has no `ValueError` in its exit-2
+                        # tuple: a traceback and exit 1. Every other caller was
+                        # shielded by `translate.run_batch`'s blanket
+                        # `except Exception`; `cli.do_models` is not, and the
+                        # trigger is the very misconfiguration `_url_hint` was
+                        # added for — a proxy or a web UI at the root answering
+                        # HTML. OpenRouter's bare host answers 200 with 131 KB
+                        # of it. Raised here rather than retried: a server that
+                        # answered the wrong content type will answer it again.
+                        problem = str(e)
+                raise self._refusal(self._not_json(url, status, problem))
             except urllib.error.HTTPError as e:
-                # `_tame`, not a bare slice. This body is the backend's own bytes
-                # and it is the **only** interpolation on this path that reaches a
-                # reader unescaped: `{name!r}` and `str(data)[:300]` beside it go
-                # through `repr`, which turns an ESC or a `U+202E` into a literal
-                # `\x1b` / `‮`, and this one did not. Measured 2026-09-01 by
-                # the security-tier pass over `GET /api/models`: a 4xx body of
-                # `x\x1b[2Ky` erases the line it is printed on, and a `U+202E`
-                # reverses the display of everything after it — in a terminal for
-                # `lx models`, and now in a browser, where `textContent` stops
-                # markup and does nothing about a bidirectional override.
+                # **The body is the backend's own bytes: read bounded, redacted,
+                # tamed and cut, in that order, and `_excerpt` holds the
+                # order.** A `_tame(...[:500])` written here cut first, so a key
+                # beginning at decoded character 490 left its first ten
+                # characters on screen whatever the match rule was — measured
+                # two builds ago. The bound is what makes the redaction window
+                # larger than the display window, where `e.read()` had no bound
+                # at all.
                 #
-                # It is the same rule `_sane` states for a listing row, applied
-                # where the enumeration missed: `_sane` filters `id` and `status`
-                # and never touched an *error* body, so the docstring's claim that
-                # the drop protects both surfaces was true of the rows alone.
-                detail = _tame(e.read().decode("utf-8", "replace")[:500])
-                last = ProviderError(
-                    f"{self.name}: HTTP {e.code} — {detail}{self._url_hint(e.code, url)}")
-                if e.code not in _RETRYABLE:
-                    raise last from e
-                if not final:
-                    time.sleep(self._backoff(attempt, e.headers.get("Retry-After")))
+                # `_tame` is here for the reason `_sane` states for a listing
+                # row, applied where the enumeration missed: this used to be
+                # the only interpolation on this path reaching a reader
+                # unescaped. Measured 2026-09-01 by the security-tier pass over
+                # `GET /api/models`: a 4xx body of `x\x1b[2Ky` erases the line
+                # it is printed on, and a `U+202E` reverses the display of
+                # everything after it — in a terminal for `lx models`, and in a
+                # browser, where `textContent` stops markup and does nothing
+                # about a bidirectional override.
+                #
+                # The read is guarded: a body whose bytes never arrive raises a
+                # timeout out of `e.read`, and one cut short raises
+                # `IncompleteRead`, and either raised from here carried the
+                # `HTTPError` — reason phrase included — out of this function as
+                # `__context__` (measured). The message says the body could not
+                # be read, and shows nothing of it.
+                code = e.code
+                hdrs = e.headers
+                retry_after = hdrs.get("Retry-After") if hdrs is not None else None
+                try:
+                    text = e.read(_ERROR_BODY_BYTES).decode("utf-8", "replace")
+                    unread = ""
+                except (OSError, http.client.HTTPException):
+                    text, unread = "", "(the body could not be read)"
+                last = self._refusal(
+                    f"{self.name}: HTTP {code} — {self._excerpt(text, 500)}{unread}"
+                    f"{self._url_hint(code, url)}")
+                if code not in _RETRYABLE:
+                    fatal = last
             except urllib.error.URLError as e:
-                last = ProviderError(
+                # `e.reason` can be a remote server's own bytes: on a refused
+                # `CONNECT` through a proxy it is `Tunnel connection failed:
+                # 407 <the proxy's reason phrase>`, and an ESC in that phrase
+                # reached a terminal untamed until this went through
+                # `_refusal` (measured). `str(...)` of it and nothing more is
+                # kept: the exception itself is not chained, for the reason
+                # above the loop.
+                reason = str(e.reason)
+                last = self._refusal(
                     # Masked for the same reason `describe` is: this message
                     # reaches `/api/job`'s `error` field, and a URL is the one
                     # place a credential hides in something nobody thinks of as
@@ -907,12 +1648,10 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
                     # half moved into `_url_hint`. The field is the thing to go
                     # and look at whichever way the URL is wrong — "it must end
                     # in /v1" was the part that was sometimes false.
-                    f"{self.name}: cannot reach {printable_url(url)} — {e.reason}. "
+                    f"{self.name}: cannot reach {printable_url(url)} — {reason}. "
                     f"For a local server, check that it is running and that "
                     f"base_url names the right host and port."
                     f"{self._url_hint(None, url)}")
-                if not final:
-                    time.sleep(self._backoff(attempt))
             # `socket.timeout` only became an alias of the builtin in 3.10, and
             # 3.9 is the declared floor and a CI matrix entry. There a stalled
             # read — headers received, body never arriving — raises the socket
@@ -923,8 +1662,8 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
             except (TypeError, ValueError, http.client.HTTPException) as e:
                 # A URL `urllib` will not even attempt, and every other failure
                 # this client raises on its own rather than as an `OSError`. No
-                # exchange happened, so no retry can help and this raises rather
-                # than setting `last`.
+                # exchange happened, so no retry can help and this is fatal
+                # rather than `last`.
                 #
                 # **The class, not the member.** `http.client.InvalidURL` is the
                 # one that was measured, and it is neither a `ValueError` nor an
@@ -948,13 +1687,13 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
                 # `cli.main`'s exit-2 tuple either. That is invariant 6's own
                 # clause rather than a new rule: the enumerated list of display
                 # surfaces is a symptom and never the definition, and this was a
-                # fourth surface nobody had counted. `from None` because the
-                # chained original carries the same value into a traceback.
-                raise ProviderError(
+                # fourth surface nobody had counted. Only the class name is
+                # kept; the exception, whose message carries the value, is
+                # neither chained nor referenced once this handler ends.
+                fatal = self._refusal(
                     f"{self.name}: {printable_url(url)} could not be requested "
                     f"({type(e).__name__}). Check `base_url` — and a credential belongs in "
-                    f"the environment variable named by `api_key_env`, never in the URL."
-                ) from None
+                    f"the environment variable named by `api_key_env`, never in the URL.")
             except (TimeoutError, socket.timeout):
                 # The caller's own sentence, not one derived from `method`. It
                 # branched on `method == "GET"`, which meant "is this the
@@ -966,10 +1705,31 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
                 # listing's "it is not answering", which is false of a backend
                 # loading a model. Each caller states its own remedy because each
                 # caller has a different one.
-                last = ProviderError(
+                last = self._refusal(
                     f"{self.name}: timed out after {timeout}s."
                     + (advice or " Local models on CPU are slow — raise `timeout` or "
                                  "lower `batch.size`."))
-                if not final:
-                    time.sleep(self._backoff(attempt))
-        raise last or ProviderError(f"{self.name}: request failed")
+            # Outside every handler: nothing is being handled here, so what is
+            # raised carries no context, and a sleep that raises — it cannot,
+            # since `_backoff` refuses a non-finite `Retry-After` — would not
+            # either.
+            if fatal is not None:
+                raise fatal
+            if not final:
+                time.sleep(self._backoff(attempt, retry_after))
+        raise last or self._refusal(f"{self.name}: request failed")
+
+    def _not_json(self, url, status, problem):
+        """The sentence for a 200 that could not be read as JSON.
+
+        ``problem`` is the `str` of a `UnicodeDecodeError` or a
+        `json.JSONDecodeError` — the string and never the exception, because
+        the first holds the whole body as `.object` and the second as `.doc`,
+        and the string of either names a position and never quotes the body.
+        That is what lets it stand in a message; the message still goes through
+        `_refusal` like every other. One function for the two sites that raise
+        it, so the two cannot drift apart.
+        """
+        return (f"{self.name}: {printable_url(url)} answered {status} but not JSON "
+                f"({problem}). Check that base_url points at the API rather than at a "
+                f"web page.{self._url_hint(404, url)}")
