@@ -68,7 +68,7 @@ from .normalize import normalize, polish_rendered, reseat_outer_blanks
 # `ssl`, `urllib.request`, `http.client`, `socket` and the `email` package into
 # every command while the comment here said it did not. Measured that day on
 # 3.12, median of seven warm runs: `import scriptorium.cli` went from 69 ms to
-# 44 ms. `tests/test_startup_imports.py` holds both halves.
+# 42 ms. `tests/test_startup_imports.py` holds both halves.
 #
 # So the function-local `from .providers import …` lines below defer nothing —
 # this one has already executed the package. What the function-local imports in

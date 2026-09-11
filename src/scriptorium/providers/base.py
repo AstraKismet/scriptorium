@@ -787,7 +787,7 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
         # `http.client`, `socket` and the `email` package with fourteen of its
         # submodules into `lx --help`, on 3.9 through 3.12. Measured 2026-09-11
         # on 3.12, median of seven warm runs: `import scriptorium.cli` took 69 ms
-        # with them there and 44 ms with them here.
+        # with them there and 42 ms with them here.
         # `tests/test_startup_imports.py` fails if any of the four moves back.
         #
         # **Here and not in `Provider.__init__`**, which would run the first

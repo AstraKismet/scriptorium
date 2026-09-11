@@ -3,6 +3,158 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-09-11 · The provider transport loads when a request is sent, and `providers/errors.py` never kept it off
+
+Closing HANDOFF-054. `providers/errors.py` held one three-line class and a
+docstring saying it existed so that `cli.py` could name `ProviderError` at
+module scope without loading the provider transport — `urllib.request`, and with
+it `ssl`, `http.client`, `socket` and the `email` package — into every `lx`
+command. It never did that. Python executes a package's `__init__` before it
+binds a submodule, `providers/__init__.py` imported `base` to build `KINDS`, and
+`base` imported `urllib.request` at module scope, so
+`from .providers.errors import ProviderError` loaded exactly what
+`from .providers import ProviderError` would have. The commit that created the
+module, ec20935 of 2026-08-20, is also where `cli.py` first imported anything
+from `providers` at module scope: the 41 ms its comment cited was the tree
+before it, and was never restored. Found on 2026-09-06, entry of that date.
+Measured again on 3.9, 3.10, 3.11 and 3.12: `lx --help` and `lx config get` both
+ended with every one of those modules in `sys.modules`, and none of them is
+loaded at interpreter startup on any of the four.
+
+### The rule
+
+`base` imports `http.client`, `socket`, `urllib.error` and `urllib.request`
+inside `Provider._request`, the one function that uses them, after its scheme
+check and before its retry loop. Nothing else moved: `providers/__init__.py`,
+`KINDS`, the class and every import of it are as they were. The transport
+loads when a request is sent and not before — `lx providers`,
+`lx config set providers.<name>.kind`, `lx extract` and `lx todo` included.
+
+Measured on the development machine, warm bytecode, median of seven runs:
+`import scriptorium.cli` timed in process, and `lx --help` as a whole process.
+
+| interpreter | import at 6a6c6a5 | import after | `--help` at 6a6c6a5 | `--help` after |
+|---|---|---|---|---|
+| 3.10 | 72.3 ms | 43.4 ms | 122.4 ms | 98.8 ms |
+| 3.11 | 69.9 ms | 44.1 ms | 114.4 ms | 94.4 ms |
+| 3.12 | 69.4 ms | 42.0 ms | 134.9 ms | 108.6 ms |
+
+3.9 is left out of the timings on purpose. The only 3.9 on that machine was
+installed under the temporary directory, and its extension-module loads came out
+bimodal — one `unicodedata` import took either 42 ms or 82 ms — so its times
+measure where it was installed. Its `sys.modules` answers are unaffected and
+match the other three. The suite starts `python -m scriptorium` 858 times per
+run, counted with a plugin that logs every `Popen`, and one run of it on 3.12
+took 178.5 s before and 161.9 s after; one run each, not a controlled
+comparison.
+
+### Why this and not what the package listed
+
+The package named three options; reading where the cost came from found a
+fourth, and this is it. A, B and this one were each built in a worktree of their
+own against the same acceptance test, each reviewed by an adversarial pass that
+planted defects in it, and a fifth pass attacked the brief all four shared and
+measured, command by command, which commands load the transport on each tree.
+
+- **A, a lazy `providers/__init__.py`** — `build` imports its classes when
+  called, `KINDS` and `Provider` resolve through a module `__getattr__` — is
+  1 to 4 ms faster on a bare import across 3.10 to 3.12, because `base`,
+  `anthropic` and `openai_compat` are not executed at all. It lost on what it leaves. `lx config set
+  providers.<name>.kind` still loads the transport, because it reads `KINDS`,
+  and so does any `build()` that never sends. Sixteen threads reading `KINDS`
+  for the first time at once received sixteen different dicts: harmless while
+  nothing mutates the registry, and the implementation's own comment said every
+  caller held the same one. And `dir()` on the package stopped listing two of
+  its names.
+- **B, `ProviderError` moved to a top-level `scriptorium/errors.py`,** makes
+  `cli`'s own import free and leaves eight model-free commands paying — `lx
+  providers`, `lx extract`, `lx todo`, `lx style`, `lx renderings`,
+  `lx repair --dry-run`, `lx run --dry-run` and `lx config set
+  providers.<name>.kind` — which are the commands an agent's loop and the CI job
+  run. It also moves the class's `__module__` and leaves `providers.errors` a
+  spelling that still costs the whole transport.
+- **C, accept the cost and delete the claim,** rewrites the same eleven comments
+  this change rewrites and keeps the cost.
+
+Every command that loads the transport under this change also loads it under A
+and under B, so on that table it dominates both; A's few milliseconds are the
+one thing it gives up.
+
+### What it costs
+
+The four imports are local to `_request`, the function every security-tier pass
+over the provider has touched, and that is an unusual shape: a future method
+that needs the transport imports it locally too, and a tidy-up that moves them
+back to module scope is caught by the test below and by nothing at write time.
+`base.py` says so beneath its own imports, which is where that tidy-up would
+start. The first import now happens on whichever worker thread reaches
+`_request` first. The import system's per-module lock serializes it: 32 threads
+released by one `Barrier` into `_request` against a closed port, in a fresh
+interpreter, 50 times on each of 3.9 and 3.12, all ended in the `URLError`
+branch and none in an import error. After the first call the four statements
+are `sys.modules` lookups.
+
+### `errors.py` stays, for a smaller reason
+
+Importing it is cheap now, and so is importing `base` or the package; it plays
+no part in the saving. Folding the class back into `base` would change
+`ProviderError.__module__`, which every traceback naming it prints, and move
+every import that spells this path, for nothing — and the package had put
+changing what `ProviderError` is outside its scope. Its docstring says that now,
+rather than what it said before.
+
+### The red line had no test
+
+`cli.main` catches `ProviderError` by name, and nothing asserted it: at 6a6c6a5,
+with the class removed from `main`'s `except` tuple, the whole suite stayed
+green — 2445 passed and 2 skipped on 3.12. `tests/test_startup_imports.py`
+holds both halves.
+
+- Seven commands, one per route into the providers package — `--help`,
+  `config get`, `status --json`, `providers`, `config set
+  providers.local.kind openai`, `extract` and `todo` — each run in a clean
+  interpreter under `-S` inside a scaffolded project. Each must print its own
+  marker, so a probe that never ran the command cannot pass, and none may load
+  `ssl`, `urllib.request`, `urllib.error`, `http.client`, `socket` or `email`.
+  All four names `_request` imports are listed, so moving any one of them back
+  fails, not only the one that drags the rest in.
+- A positive control that sees `urllib.request`, `http.client` and `socket`
+  load when it asks for them — not `ssl`, which both import inside a `try`, so
+  an interpreter built without OpenSSL would fail the control for no defect.
+- Every module that binds `ProviderError` at module scope, found with `ast`
+  rather than listed, binds the one class; `cli`, `audit` and the workbench
+  server each catch it by name.
+- A command replaced by one that raises the providers' own class exits 2 with
+  one line, and so do the two real paths, `providers.build` and `_request`'s
+  scheme refusal. The replacement is the point: `ConfigError` is in the same
+  tuple, and with `ProviderError` removed from it, an unknown-provider refusal
+  rewritten as a `ConfigError` passed a version of this test that matched the
+  message text.
+
+Sixteen planted defects, each proved to have landed and each restored from a
+copy: each of the four transport names moved back to module scope; a transport
+import planted in each of the three function-local routes; the name moved into
+`main` above its first raising statement, and below it; the name dropped from
+the tuple, and dropped while the unknown-provider refusal became a
+`ConfigError`; a second class in `audit`; a probe that never runs the command;
+a control whose import never reaches it; and the local imports removed from
+`_request`. All sixteen were caught, each by the test aimed at it.
+
+### Corrected alongside
+
+The eleven comments that stated the premise or leaned on it now say what is
+true: `errors.py`, `cli.py`'s import comment and `audit.py`'s, plus six in
+`cli.py` and one each in `normalize.py` and `web/server.py` that justified a
+lazy `translate` import by the provider stack it would pull in. It pulls in none
+now; what that laziness keeps off the path is `translate` itself, its thread
+pool and `logging`. "Fifteen `email` submodules", written in four places,
+counted the package as one of its own submodules: it is the package and
+fourteen. The 2026-08-20 entry carries a correction in place, and the
+2026-09-06 entry's pointer to the package points here.
+
+Linux was not checked by hand. Every probe and both suites ran on Windows, and
+the ubuntu legs of CI are the check on `-S` and on the startup module set there.
+
 ## 2026-09-11 · The configuration decides a document's register once; afterwards only `--tone` moves it
 
 Closing HANDOFF-074. `cli.do_extract` resolves the register as `tone or
@@ -3112,7 +3264,7 @@ wide-model reply (a batch of sixteen at four thousand dimensions is 1.33 MiB; th
 real reason `_MAX_LIST_BYTES` is not reused is scope, not size); and that
 importing `providers.errors` avoids the provider stack (Python executes the
 package `__init__` first, so it does not — `errors.py`'s own docstring rests on
-the same false premise, which is HANDOFF-054).
+the same false premise; closed 2026-09-11, entry of that date).
 
 ### What is still not known
 
@@ -6332,6 +6484,16 @@ entry, so following the printed advice changed nothing; a module-scope
 `scriptorium.cli`'s import time, 41 ms to 77 ms — the type now lives in
 `providers/errors.py`, which imports nothing; and `has_version_segment` used
 `\d`, which is Unicode-aware, so `/v١` counted as a version segment.
+
+*Corrected 2026-09-11.* The sentence about `providers/errors.py` was false the
+day it was written. Python executes `providers/__init__.py` before it binds a
+submodule, and that file imported `base`, so importing `providers.errors` loaded
+everything importing the package did — and this change is where `cli.py` first
+imported anything from `providers` at module scope, so the 77 ms it attributed
+to the package import is what its own import cost too, and the 41 ms was the
+tree before it. The `email` count is the package and fourteen submodules. What
+keeps the transport out of `lx --help` since 2026-09-11 is `base` importing it
+inside `Provider._request`; see that date's entry.
 
 *And one claim in this very entry was false and is corrected above:* it said the
 block spelling of `lx config set` "is the spelling the README's own example

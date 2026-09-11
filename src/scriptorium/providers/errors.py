@@ -16,7 +16,7 @@ package into every `lx` command, `lx --help` included. Found on 2026-09-06;
 Since 2026-09-11 what keeps the transport off the import path is `base` itself,
 which imports it inside `Provider._request`, the one function that uses it.
 Measured that day on 3.12, median of seven warm runs: `import scriptorium.cli`
-went from 69 ms to 44 ms, and on 3.9 through 3.12 `lx --help` loads none of
+went from 69 ms to 42 ms, and on 3.9 through 3.12 `lx --help` loads none of
 those modules. `tests/test_startup_imports.py` holds both. This module plays no
 part in it — importing `base`, or the package, is exactly as cheap.
 
