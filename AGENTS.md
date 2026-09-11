@@ -208,6 +208,27 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    guard got wrong: it caught `ValueError`, which is `InvalidURL`'s nearest
    *plausible* base and not its real one. Catch the class; never name the member.
 
+   **The sixth time, on 2026-09-11, the path to the value was the backend
+   itself.** A backend or a proxy that answers an error by quoting the request's
+   `Authorization` header back put the key into `lx models`' stderr,
+   `lx translate`'s failure lines at exit 0, `GET /api/models`' `error` and
+   `POST /api/job`'s log — and no masking of what this project prints could reach
+   it, because the value arrived as somebody else's text. So it is decided where
+   a backend's bytes enter, not where messages leave: `Provider._refusal` is the
+   only constructor of `ProviderError` in a provider module and removes every
+   credential the request carried — the `api_key_env` value, every `headers`
+   value, the `base_url` userinfo, and what the transport added on its own —
+   from the whole message, in a closed list of spellings; `Provider._excerpt` is
+   the one place a backend's text is cut, after it is redacted; `_request`
+   refuses a 200 reply that quotes a credential before anything parses it,
+   because a completion's content reaches `.lx/tm.*.jsonl`, which is tracked;
+   and nothing in `_request` raises inside an `except` block, so no exception
+   carries a backend's bytes on its chain. Three `ast` guards in
+   `tests/test_provider.py` pin the construction point, the cut and the one
+   door. A value shorter than eight characters — the placeholder population of
+   local runtimes — is never redacted, and no message says so.
+   `docs/decisions.md`, 2026-09-11.
+
    A rule is enforced where a field **lands**. A key may not be addressed *inside*
    something that holds one value, whether the field table says so or the merged
    configuration's own type does: without that, `providers.new.api_key_env.x`
@@ -524,7 +545,7 @@ Node — see the invariant below.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 2461 collected, no network. Four are
+python -m pytest -q                 # 2540 collected, no network. Four are
                                     #   conditional on three different things, so
                                     #   which two skip is a property of the machine
                                     #   AND the account: one is POSIX-only, one

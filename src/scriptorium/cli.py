@@ -5014,9 +5014,12 @@ def _field_base_url(cfg, path, value):
     two ways — `https://u:p@host/v1` and `https://host/v1?key=…` — and both put
     it into a file `lx init` scaffolds into a repository. Refusing *every* query
     rather than a guessed-at list of parameter names is invariant 4: a query in a
-    `base_url` is unusual, the rule is decidable without judgement, and the
-    escape for a genuine one is hand-editing the file, exactly as it is for a
-    header.
+    `base_url` is unusual, and the rule is decidable without judgement. There is
+    no escape by hand-editing either, though this said so until 2026-09-11:
+    every request appends its own path after `base_url`, so a query moves that
+    path into the query and no endpoint that routes by path is reached, and
+    `Provider._request` refuses such a URL before anything is sent — asking the
+    same `urlsplit(...).query` this does. `docs/decisions.md`, 2026-09-11.
     """
     if not isinstance(value, str) or not value.strip():
         raise ConfigError(_URL_ADVICE.format(path=path))

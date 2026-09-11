@@ -2525,12 +2525,12 @@ def test_a_body_is_redacted_before_it_is_tamed(echo, monkeypatch):
     the whole key is the marker.
     """
     monkeypatch.setenv("LX_ECHO_KEY", KEY)
-    _echo(body=lambda got: "‮you sent " + got + "\x1b[2K")
+    _echo(body=lambda got: "\u202eyou sent " + got + "\x1b[2K")
     with pytest.raises(ProviderError) as e:
         build("p", _keyed(echo)).complete("s", "u")
     said = str(e.value)
     assert MARKER in said and "�" in said, said
-    assert "\x1b" not in said and "‮" not in said, said
+    assert "\x1b" not in said and "\u202e" not in said, said
     assert _windows(KEY, said) == [], said
 
     inside = KEY[:10] + "\x1b" + KEY[10:]
@@ -3269,7 +3269,7 @@ def test_an_excerpt_is_exact_wherever_the_unbounded_output_reaches_the_cap_insid
         monkeypatch.setenv("LX_ECHO_KEY", key)
         p = build("p", _keyed("http://127.0.0.1:1/v1", headers=headers))
         spellings = p._spellings(p._credentials())
-        alphabet = "".join(sorted(set("".join(spellings)))) + "xyz .!\x1b‮"
+        alphabet = "".join(sorted(set("".join(spellings)))) + "xyz .!\x1b\u202e"
         exact = beyond = 0
         for _ in range(100):
             cap = rng.choice((10, 21, 40))
