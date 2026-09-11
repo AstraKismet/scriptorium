@@ -5,7 +5,7 @@ choice that won — the reasoning is what future changes need.
 
 ## 2026-09-11 · The provider transport loads when a request is sent, and `providers/errors.py` never kept it off
 
-Closing HANDOFF-054. `providers/errors.py` held one three-line class and a
+Closing HANDOFF-054. `providers/errors.py` held one two-line class and a
 docstring saying it existed so that `cli.py` could name `ProviderError` at
 module scope without loading the provider transport — `urllib.request`, and with
 it `ssl`, `http.client`, `socket` and the `email` package — into every `lx`
@@ -28,7 +28,10 @@ inside `Provider._request`, the one function that uses them, after its scheme
 check and before its retry loop. Nothing else moved: `providers/__init__.py`,
 `KINDS`, the class and every import of it are as they were. The transport
 loads when a request is sent and not before — `lx providers`,
-`lx config set providers.<name>.kind`, `lx extract` and `lx todo` included.
+`lx config set providers.<name>.kind`, `lx extract` and `lx todo` included, and
+a provider that is built and then refuses to send. `lx web` is the one command
+this does not reach: `http.server` imports `ssl`, `http.client`, `socket` and
+the `email` package itself, so there only `urllib.request` waits for a request.
 
 Measured on the development machine, warm bytecode, median of seven runs:
 `import scriptorium.cli` timed in process, and `lx --help` as a whole process.
@@ -41,27 +44,29 @@ Measured on the development machine, warm bytecode, median of seven runs:
 
 3.9 is left out of the timings on purpose. The only 3.9 on that machine was
 installed under the temporary directory, and its extension-module loads came out
-bimodal — one `unicodedata` import took either 42 ms or 82 ms — so its times
-measure where it was installed. Its `sys.modules` answers are unaffected and
-match the other three. The suite starts `python -m scriptorium` 858 times per
-run, counted with a plugin that logs every `Popen`, and one run of it on 3.12
-took 178.5 s before and 161.9 s after; one run each, not a controlled
-comparison.
+bimodal — `-X importtime` put one `unicodedata` load at about 2 ms in some runs
+and at 36 to 74 ms in the rest, where 3.10 and 3.12 took under 2 ms every time —
+so its times measure where it was installed. Its `sys.modules` answers are
+unaffected and match the other three. Before this change the suite started
+`python -m scriptorium` 856 times per run, counted with a plugin that logs every
+`Popen`; one clean run of it on 3.12 took 178.5 s at 6a6c6a5 and 162.0 s at
+this change, fourteen tests larger — one run each, not a controlled comparison.
 
 ### Why this and not what the package listed
 
 The package named three options; reading where the cost came from found a
 fourth, and this is it. A, B and this one were each built in a worktree of their
 own against the same acceptance test, each reviewed by an adversarial pass that
-planted defects in it, and a fifth pass attacked the brief all four shared and
-measured, command by command, which commands load the transport on each tree.
+planted defects in it, and one more pass attacked the brief the three builds
+shared and measured, command by command, which commands load the transport on
+each tree.
 
 - **A, a lazy `providers/__init__.py`** — `build` imports its classes when
   called, `KINDS` and `Provider` resolve through a module `__getattr__` — is
   1 to 4 ms faster on a bare import across 3.10 to 3.12, because `base`,
-  `anthropic` and `openai_compat` are not executed at all. It lost on what it leaves. `lx config set
-  providers.<name>.kind` still loads the transport, because it reads `KINDS`,
-  and so does any `build()` that never sends. Sixteen threads reading `KINDS`
+  `anthropic` and `openai_compat` are not executed at all. It lost on what it
+  leaves. `lx config set providers.<name>.kind` still loads the transport,
+  because it reads `KINDS`, and so does any `build()` that never sends. Sixteen threads reading `KINDS`
   for the first time at once received sixteen different dicts: harmless while
   nothing mutates the registry, and the implementation's own comment said every
   caller held the same one. And `dir()` on the package stopped listing two of
@@ -70,9 +75,9 @@ measured, command by command, which commands load the transport on each tree.
   `cli`'s own import free and leaves eight model-free commands paying — `lx
   providers`, `lx extract`, `lx todo`, `lx style`, `lx renderings`,
   `lx repair --dry-run`, `lx run --dry-run` and `lx config set
-  providers.<name>.kind` — which are the commands an agent's loop and the CI job
-  run. It also moves the class's `__module__` and leaves `providers.errors` a
-  spelling that still costs the whole transport.
+  providers.<name>.kind` — `lx extract` and `lx todo` among them, which an
+  agent's loop and the CI job both run. It also moves the class's `__module__`
+  and leaves `providers.errors` a spelling that still costs the whole transport.
 - **C, accept the cost and delete the claim,** rewrites the same eleven comments
   this change rewrites and keeps the cost.
 
@@ -82,17 +87,30 @@ one thing it gives up.
 
 ### What it costs
 
-The four imports are local to `_request`, the function every security-tier pass
-over the provider has touched, and that is an unusual shape: a future method
-that needs the transport imports it locally too, and a tidy-up that moves them
-back to module scope is caught by the test below and by nothing at write time.
-`base.py` says so beneath its own imports, which is where that tidy-up would
-start. The first import now happens on whichever worker thread reaches
-`_request` first. The import system's per-module lock serializes it: 32 threads
-released by one `Barrier` into `_request` against a closed port, in a fresh
-interpreter, 50 times on each of 3.9 and 3.12, all ended in the `URLError`
-branch and none in an import error. After the first call the four statements
-are `sys.modules` lookups.
+The four imports are local to `_request`, the function that masks a configured
+`base_url` out of every failure message (invariant 6), and that is an unusual
+shape: a future method that needs the transport imports it locally too, and a
+tidy-up that moves them back to module scope is caught by the test below and by
+nothing at write time. `base.py` says so beneath its own imports, which is where
+that tidy-up would start. The masking depends on it in a way that is easy to
+miss: an `except` clause naming a module that is not bound raises `NameError`
+while the original is being handled, and the traceback then prints the
+original — which for an `http.client.InvalidURL` quotes the password. So this
+went to a security-tier pass, which drove a userinfo `base_url` with a bad port
+and with a bad host, a `?key=` URL, a stalled read and a 401 through `lx models`
+and through the provider API, each as the first request of a fresh interpreter,
+the first two again from 32 threads at once, on 3.9 and 3.12, and cleared it.
+It also found what this change did not touch: a backend whose error body quotes
+the `Authorization` header gets the key printed, identically at 6a6c6a5 —
+reproduced, and HANDOFF-076.
+
+In a pooled run — `translate_segments` uses a pool whenever it has more than one
+worker, which is the default — the first import happens on whichever worker
+thread reaches `_request` first. The import system's per-module lock serializes
+it: 32 threads released by one `Barrier` into `_request` against a closed port,
+in a fresh interpreter, 50 times on each of 3.9 and 3.12, all ended in the
+`URLError` branch and none in an import error. After the first call the four
+statements are `sys.modules` lookups.
 
 ### `errors.py` stays, for a smaller reason
 
@@ -110,14 +128,22 @@ with the class removed from `main`'s `except` tuple, the whole suite stayed
 green — 2445 passed and 2 skipped on 3.12. `tests/test_startup_imports.py`
 holds both halves.
 
-- Seven commands, one per route into the providers package — `--help`,
-  `config get`, `status --json`, `providers`, `config set
-  providers.local.kind openai`, `extract` and `todo` — each run in a clean
-  interpreter under `-S` inside a scaffolded project. Each must print its own
-  marker, so a probe that never ran the command cannot pass, and none may load
-  `ssl`, `urllib.request`, `urllib.error`, `http.client`, `socket` or `email`.
-  All four names `_request` imports are listed, so moving any one of them back
-  fails, not only the one that drags the rest in.
+- Seven commands covering the four routes into the providers package —
+  `--help`, `config get`, `status --json`, `providers`, `config set
+  providers.local.kind openai`, `extract` and `todo` — each in a clean
+  interpreter under `-S` inside a scaffolded project, each required to print
+  its own marker, and none allowed to load `ssl`, `urllib.request`,
+  `urllib.error`, `http.client`, `socket` or `email`. All four names `_request`
+  imports are listed, so moving any one of them back fails, not only the one
+  that drags the rest in.
+- Then every command `cli.build_parser` defines, in a form that sends nothing,
+  in one interpreter, under the same rule: each must reach exit 0, 1 or 2 and
+  print something, captured per step. Among them is `lx models` against a
+  backend whose `file:///` base_url `_request` refuses — a provider built and
+  then refused before sending — which is what holds the imports below the
+  scheme check and out of `Provider.__init__`, the property that separates this
+  change from A. A second test reads the parser and refuses a command that is
+  in neither the sweep nor the one named exception, `lx web`.
 - A positive control that sees `urllib.request`, `http.client` and `socket`
   load when it asks for them — not `ssl`, which both import inside a `try`, so
   an interpreter built without OpenSSL would fail the control for no defect.
@@ -131,23 +157,41 @@ holds both halves.
   rewritten as a `ConfigError` passed a version of this test that matched the
   message text.
 
-Sixteen planted defects, each proved to have landed and each restored from a
-copy: each of the four transport names moved back to module scope; a transport
-import planted in each of the three function-local routes; the name moved into
-`main` above its first raising statement, and below it; the name dropped from
-the tuple, and dropped while the unknown-provider refusal became a
-`ConfigError`; a second class in `audit`; a probe that never runs the command;
-a control whose import never reaches it; and the local imports removed from
-`_request`. All sixteen were caught, each by the test aimed at it.
+Twenty-three planted defects over the final tree, each proved to have landed
+and each restored from a copy. Twenty-two are defects, and all twenty-two were
+caught: each of the four transport names moved back to module scope; a
+transport import in each of the three function-local routes, in
+`Provider.__init__`, above the scheme check, and inside `lx commit`'s own
+function; the name moved into `main` above its first raising statement, and
+below it; the name dropped from the tuple, and dropped while the
+unknown-provider refusal became a `ConfigError`; a second class in `audit`,
+another inside a module-level `try`, and one inside a module-level `if` in
+`anthropic`; a probe and a sweep that each record an exit code without calling
+`main`; a control whose import never reaches it; `socket` alone removed from
+`_request`'s imports, and all four removed. `tests/test_startup_imports.py`
+caught all but the last two, which `tests/test_provider.py` caught. The two
+placements inside `main` are caught by the `ast` binding test alone, and the one
+above the first raising statement is a placement the test forbids rather than a
+behaviour that fails. The twenty-third binds the same class by assignment, an
+equivalent spelling, and passes, as it should.
+
+That is the second version of this test, and the first is worth the paragraph.
+It probed the seven commands and nothing else, and the final review passed it
+three defects — a transport import inside `lx commit`, in `Provider.__init__`,
+and above the scheme check. Its replacement's sweep then passed a probe that
+never called `main`, because the exit code was recorded on the line after the
+call — the shape an earlier review had just found in the per-command probe.
+Proof that a command ran is something the command produced, never something
+the probe did afterwards.
 
 ### Corrected alongside
 
 The eleven comments that stated the premise or leaned on it now say what is
-true: `errors.py`, `cli.py`'s import comment and `audit.py`'s, plus six in
-`cli.py` and one each in `normalize.py` and `web/server.py` that justified a
-lazy `translate` import by the provider stack it would pull in. It pulls in none
-now; what that laziness keeps off the path is `translate` itself, its thread
-pool and `logging`. "Fifteen `email` submodules", written in four places,
+true: `errors.py`, `cli.py`'s import comment and `audit.py`'s; six in `cli.py`
+that justified a lazy `translate` import by the provider stack it would pull
+in; and one each in `normalize.py` and `web/server.py` that argued from the
+same premise. `translate` pulls in none of it now; what that laziness keeps off
+the path is `translate` itself, its thread pool and `logging`. "Fifteen `email` submodules", written in four places,
 counted the package as one of its own submodules: it is the package and
 fourteen. The 2026-08-20 entry carries a correction in place, and the
 2026-09-06 entry's pointer to the package points here.
