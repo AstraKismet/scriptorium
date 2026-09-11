@@ -30,6 +30,7 @@ from scriptorium.store import (  # noqa: E402
 )
 from scriptorium.web import server as web_server  # noqa: E402
 from scriptorium.web.server import _Handler, _own_hosts, _own_origins  # noqa: E402
+from test_provider import KEY, MARKER, EchoHandler, _echo, _windows  # noqa: E402
 
 
 def _try_post(base, path, obj):
@@ -2445,3 +2446,70 @@ def test_the_served_page_carries_no_script_of_its_own():
         "commit what it writes -- the built output is tracked so that `lx web` "
         "works from a bare checkout with no Node installed."
     )
+
+
+# ── a backend that quotes the key back, on the wire ────────────────────────
+#
+# HANDOFF-076's acceptance criterion 4. The mock is `test_provider.py`'s echo
+# handler — one reflecting far end for every surface — and what is asserted
+# here is that the two surfaces which hand a provider's sentence to a browser
+# carry no window of the key: `GET /api/models`'s `error`, and a job record.
+# Neither test stubs the provider away: a sink-only fix on `cli.main` passes
+# nothing here, and the job must really dial the mock.
+
+@pytest.fixture(scope="module")
+def echo():
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), EchoHandler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{httpd.server_address[1]}/v1"
+    httpd.shutdown()
+
+
+def _echoing_provider(url):
+    return {"kind": "openai", "base_url": url, "model": "m",
+            "api_key_env": "LX_ECHO_KEY", "timeout": 5, "retries": 0}
+
+
+def test_a_listing_error_carries_no_window_of_an_echoed_key(
+        base, tmp_path, monkeypatch, echo):
+    """T2: the `error` field a dropdown renders.
+
+    The endpoint answers `200` with the provider's sentence in `error` by
+    design, so the sentence *is* the surface; `str(e)` at the endpoint holds
+    no secret to redact, which is why the fix lives in `Provider`.
+    """
+    root = _config_project(tmp_path, monkeypatch)
+    monkeypatch.setenv("LX_ECHO_KEY", KEY)
+    _routed(root, echo, p=_echoing_provider(echo))
+    _echo()
+    code, body = _get(base, "/api/models?provider=p")
+    assert code == 200
+    answer = json.loads(body)
+    assert answer["models"] == [] and answer["error"], answer
+    assert _windows(KEY, body.decode("utf-8")) == [], answer["error"]
+    assert MARKER in answer["error"] and "invalid api key" in answer["error"], answer
+
+
+def test_a_job_record_carries_no_window_of_an_echoed_key(
+        base, tmp_path, monkeypatch, echo):
+    """T4: `POST /api/translate` then `POST /api/job`, against the real provider.
+
+    **No `_no_network` stub here, on purpose**: the record's `log` is
+    `translate.run_batch`'s progress line and its `failures` are `retry_one`'s
+    reasons, both built from the provider's sentence, and a duck-typed stand-in
+    never builds one. `retries: 0` and a one-paragraph document keep the run
+    to two attempts.
+    """
+    root = _config_project(tmp_path, monkeypatch)
+    monkeypatch.setenv("LX_ECHO_KEY", KEY)
+    _routed(root, echo, routing={"draft": "p"}, p=_echoing_provider(echo))
+    (root / "d.md").write_bytes(b"The gate stood open when she came down the hill.\n")
+    assert _post(base, "/api/extract", {"src": "d.md", "lang": "zh-TW"})[0] == 200
+    _echo()
+    started = json.loads(_post(base, "/api/translate", {"src": "d.md", "lang": "zh-TW"})[1])
+    assert started["total"] == 1 and started["route"]["provider"] == "p", started
+    job = _finish(base, started["id"])
+    record = json.dumps(job, ensure_ascii=False)
+    assert job["failures"] and job["applied"] == 0, record
+    assert _windows(KEY, record) == [], record
+    assert MARKER in record and "invalid api key" in record, record
