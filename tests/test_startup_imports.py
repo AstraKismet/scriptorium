@@ -35,7 +35,7 @@ PACKAGE = os.path.join(SRC, "scriptorium")
 #: module scope fails here — not only the one that drags the rest in.
 FORBIDDEN = ("ssl", "urllib.request", "urllib.error", "http.client", "socket", "email")
 
-#: Seven commands covering the four routes into the providers package, each run
+#: Seven commands covering four of the routes into the providers package, each run
 #: in an interpreter of its own and each with a marker its own output must
 #: contain — the proof that the command really ran, since a probe that never
 #: reached `main` would otherwise report nothing loaded and pass.
@@ -57,8 +57,9 @@ COMMANDS = [
     (["todo", "doc.md", "--lang", "zh-TW"], b'"source": "doc.md"'),
 ]
 
-#: Every command `cli.build_parser` defines, each in a form that sends nothing,
-#: as `(directory, argv)` and run in this order in one interpreter — so state
+#: Every command `cli.build_parser` defines except those in `NOT_SWEPT`, each in
+#: a form that sends nothing, as `(directory, argv)` and run in this order in
+#: one interpreter — which reaches the routes the seven above do not — so state
 #: flows: `apply` before `hold`, the carry before `forget`, `--reset` last.
 #: `models --provider filey` is a request refused before it is sent: the
 #: scaffold's `filey` backend has a `file:///` base_url, which `_request`
@@ -122,7 +123,8 @@ SWEEP = [
 #: The commands the sweep leaves out, and why. `lx web` starts a server that
 #: does not return, and `http.server` imports `ssl`, `http.client`, `socket` and
 #: the `email` package itself: the workbench pays for its own transport whatever
-#: `base` does, and only `urllib.request` waits there for a request.
+#: `base` does, and only `urllib.request` and `urllib.error` wait there for a
+#: request.
 NOT_SWEPT = {("web",)}
 
 _PROBE = """
@@ -207,7 +209,7 @@ def scaffold(tmp_path_factory):
 
 @pytest.fixture
 def project(scaffold, tmp_path):
-    """A private copy, because most of the commands write to the project."""
+    """A private copy: some commands write to the project, and so does the sweep."""
     return shutil.copytree(str(scaffold), str(tmp_path / "proj"))
 
 
@@ -331,11 +333,11 @@ def test_every_command_is_swept_or_named():
 def test_the_probe_sees_the_transport_when_it_is_loaded(project):
     """The positive control, so the tests above cannot pass by seeing nothing.
 
-    Asserted on `urllib.request` and the two forbidden modules it imports
+    Asserted on `urllib.request` and two of the forbidden modules it imports
     unconditionally, `http.client` and `socket`. `ssl` is imported inside a
     `try` by both it and `http.client`, so on an interpreter built without
-    OpenSSL — the locked-down machine invariant 1 names — the control would fail
-    for a reason that is not a defect.
+    OpenSSL — the locked-down machine invariant 1 names — a control asserting it
+    would fail for a reason that is not a defect.
     """
     report, stdout = _probe(["--help"], project, after="import urllib.request")
     assert report["code"] == 0 and b"usage:" in stdout, report
@@ -361,8 +363,9 @@ def _module_scope(body):
 def _module_level_bindings(name):
     """``{module: how}`` for each module that binds `name` at module scope.
 
-    `how` is ``"class"`` for a definition, and ``"import"`` or ``"assign"`` for
-    a name bound to something defined elsewhere.
+    `how` is ``"class"`` for a class statement, ``"import"`` for an import and
+    ``"assign"`` for an assignment; the identity check in the test is what
+    refuses an assignment that makes a class of its own.
     """
     found = {}
     for dirpath, _dirs, files in os.walk(PACKAGE):
@@ -393,9 +396,9 @@ def test_provider_error_is_one_class_bound_at_module_scope_wherever_it_is_caught
     """`cli.main`, `audit` and the workbench server catch `ProviderError` by name.
 
     Each `except` tuple is evaluated only once something has been raised, so the
-    name has to be bound by then on every path — module scope is the placement
-    no later edit can get wrong — and it has to be the class the providers
-    raise. Moved into `main` after the first statement that can raise, the
+    name has to be bound by then on every path — at module scope no reordering
+    of the catching function can leave it unbound — and it has to be the class
+    the providers raise. Moved into `main` after the first statement that can raise, the
     tuple names an unbound local for anything raised before the import runs,
     and that refusal becomes a traceback; a second class of the same name
     catches nothing the providers raise.

@@ -3,8 +3,7 @@
 `cli.main` catches `ProviderError` so that a backend failure is one sentence and
 exit 2 rather than a traceback. Its `except` tuple is evaluated only once
 something has been raised, so the name has to be bound by then on every path,
-and a module-scope import is the placement no later edit to `main` can get
-wrong.
+and at module scope no reordering of `main` can leave it unbound.
 
 This module was created on 2026-08-20 so that binding the name would not load
 the provider transport, and it never did that. Python executes

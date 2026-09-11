@@ -31,7 +31,8 @@ loads when a request is sent and not before — `lx providers`,
 `lx config set providers.<name>.kind`, `lx extract` and `lx todo` included, and
 a provider that is built and then refuses to send. `lx web` is the one command
 this does not reach: `http.server` imports `ssl`, `http.client`, `socket` and
-the `email` package itself, so there only `urllib.request` waits for a request.
+the `email` package itself, so there only `urllib.request` and `urllib.error`
+wait for a request.
 
 Measured on the development machine, warm bytecode, median of seven runs:
 `import scriptorium.cli` timed in process, and `lx --help` as a whole process.
@@ -88,18 +89,19 @@ one thing it gives up.
 ### What it costs
 
 The four imports are local to `_request`, the function that masks a configured
-`base_url` out of every failure message (invariant 6), and that is an unusual
-shape: a future method that needs the transport imports it locally too, and a
-tidy-up that moves them back to module scope is caught by the test below and by
-nothing at write time. `base.py` says so beneath its own imports, which is where
+`base_url` out of every failure message it composes (invariant 6), and that is
+an unusual shape: a future method that needs the transport imports it locally
+too, and a tidy-up that moves them back to module scope is caught by the test
+below and by nothing at write time. `base.py` says so beneath its own imports, which is where
 that tidy-up would start. The masking depends on it in a way that is easy to
 miss: an `except` clause naming a module that is not bound raises `NameError`
 while the original is being handled, and the traceback then prints the
 original — which for an `http.client.InvalidURL` quotes the password. So this
-went to a security-tier pass, which drove a userinfo `base_url` with a bad port
-and with a bad host, a `?key=` URL, a stalled read and a 401 through `lx models`
-and through the provider API, each as the first request of a fresh interpreter,
-the first two again from 32 threads at once, on 3.9 and 3.12, and cleared it.
+went to a security-tier pass, which drove a userinfo `base_url` with a bad
+port, with no port and with a bad host, a `?key=` URL, a stalled read and a 401
+through `lx models` and through the provider API, each as the first request of
+a fresh interpreter, the three userinfo shapes again from 32 threads at once, on
+3.9 and 3.12, and cleared it.
 It also found what this change did not touch: a backend whose error body quotes
 the `Authorization` header gets the key printed, identically at 6a6c6a5 —
 reproduced, and HANDOFF-076.
@@ -128,7 +130,7 @@ with the class removed from `main`'s `except` tuple, the whole suite stayed
 green — 2445 passed and 2 skipped on 3.12. `tests/test_startup_imports.py`
 holds both halves.
 
-- Seven commands covering the four routes into the providers package —
+- Seven commands covering four of the routes into the providers package —
   `--help`, `config get`, `status --json`, `providers`, `config set
   providers.local.kind openai`, `extract` and `todo` — each in a clean
   interpreter under `-S` inside a scaffolded project, each required to print
@@ -136,8 +138,10 @@ holds both halves.
   `urllib.error`, `http.client`, `socket` or `email`. All four names `_request`
   imports are listed, so moving any one of them back fails, not only the one
   that drags the rest in.
-- Then every command `cli.build_parser` defines, in a form that sends nothing,
-  in one interpreter, under the same rule: each must reach exit 0, 1 or 2 and
+- Then every other command `cli.build_parser` defines but `lx web`, in a form
+  that sends nothing, in one interpreter, under the same rule — which reaches
+  the routes the seven do not, `build` inside `do_models` and `do_audit` among
+  them: each must reach exit 0, 1 or 2 and
   print something, captured per step. Among them is `lx models` against a
   backend whose `file:///` base_url `_request` refuses — a provider built and
   then refused before sending — which is what holds the imports below the
@@ -157,7 +161,7 @@ holds both halves.
   rewritten as a `ConfigError` passed a version of this test that matched the
   message text.
 
-Twenty-three planted defects over the final tree, each proved to have landed
+Twenty-three planted mutants over the final tree, each proved to have landed
 and each restored from a copy. Twenty-two are defects, and all twenty-two were
 caught: each of the four transport names moved back to module scope; a
 transport import in each of the three function-local routes, in
@@ -177,8 +181,9 @@ equivalent spelling, and passes, as it should.
 
 That is the second version of this test, and the first is worth the paragraph.
 It probed the seven commands and nothing else, and the final review passed it
-three defects — a transport import inside `lx commit`, in `Provider.__init__`,
-and above the scheme check. Its replacement's sweep then passed a probe that
+four defects — a transport import inside `lx commit`, in `Provider.__init__`,
+and above the scheme check, and a second `ProviderError` class inside a
+module-level `if` in `anthropic`, which only `tests/test_provider.py` caught. Its replacement's sweep then passed a probe that
 never called `main`, because the exit code was recorded on the line after the
 call — the shape an earlier review had just found in the per-command probe.
 Proof that a command ran is something the command produced, never something

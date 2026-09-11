@@ -56,11 +56,12 @@ from .normalize import normalize, polish_rendered, reseat_outer_blanks
 
 # `main`'s `except` tuple names this class, and the tuple is evaluated only once
 # something has been raised — so the name has to be bound by then on every
-# path, and module scope is the placement no later edit to `main` can get
-# wrong. An import inside `main` placed after the first statement that can raise
-# leaves the tuple naming an unbound local for anything raised before that line
-# runs, and that refusal — whichever class it is, not only a backend's —
-# becomes a traceback and exit 1.
+# path. At module scope no reordering of `main` can leave it unbound; only a
+# second binding of the name inside `main` could, by making it local there. An
+# import inside `main` placed after the first statement that can raise leaves
+# the tuple naming an unbound local for anything raised before that line runs,
+# and that refusal — whichever class it is, not only a backend's — becomes a
+# traceback and exit 1.
 #
 # Binding it costs no transport because `providers/base.py` imports `urllib`,
 # `http.client` and `socket` inside `Provider._request`; which submodule this
