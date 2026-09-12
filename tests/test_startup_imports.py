@@ -446,7 +446,11 @@ def test_a_provider_error_inside_a_command_is_one_line_and_exit_2(
 
 
 @pytest.mark.parametrize("config, argv, start", [
-    (None, ["models", "--provider", "nope"], "lx: unknown provider 'nope'"),
+    # `unknown provider` and not `unknown provider 'nope'`: since 2026-09-13 no
+    # refusal repeats the value it refused, and the name typed after
+    # `--provider` is one (`docs/decisions.md`, 2026-09-13). What this row
+    # holds is where the sentence is raised, not what it says.
+    (None, ["models", "--provider", "nope"], "lx: unknown provider"),
     ({"providers": {"local": {"kind": "openai", "base_url": "file:///x", "model": "m"}}},
      ["models", "--provider", "local"],
      "lx: local: base_url must be an http:// or https:// address"),

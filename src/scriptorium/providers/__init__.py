@@ -3,7 +3,7 @@
 import math
 import os
 
-from ..config import printable_url
+from ..config import is_env_name, printable_url
 from .anthropic import AnthropicProvider
 from .base import Provider, ProviderError
 from .openai_compat import OpenAICompatProvider
@@ -15,6 +15,11 @@ KINDS = {
 }
 
 __all__ = ["Provider", "ProviderError", "build", "available"]
+
+
+def _accepted_kinds():
+    """The remedy a refusal about `kind` names — one spelling, for `cli._field_kind` too."""
+    return ", ".join(sorted(KINDS))
 
 
 def build(name, cfg, model=None):
@@ -30,8 +35,16 @@ def build(name, cfg, model=None):
     """
     specs = cfg.get("providers", {})
     if name not in specs:
+        # **The name is not repeated**, since 2026-09-13. It arrives from a
+        # `--provider` flag, a `?provider=` query, a job request's `provider` or a
+        # hand-edited routing entry, and each is a box a key can be pasted into;
+        # this sentence then reached stderr, `GET /api/models`' `error` and a
+        # job's `log`. The configured names are keys of the file, not anything
+        # the caller sent, and they are the remedy. `unknown provider` stays the
+        # sentence's first words, because two tests and a person's eye look for it.
         raise ProviderError(
-            f"unknown provider {name!r}. Configured: {', '.join(sorted(specs)) or 'none'}")
+            f"unknown provider: nothing is configured under that name. "
+            f"Configured: {', '.join(sorted(specs)) or 'none'}")
     spec = specs[name]
     # **A malformed spec is a `ProviderError`, like every other refusal here.**
     # It used to be whatever Python raised on the way past: a scalar block gave
@@ -46,7 +59,9 @@ def build(name, cfg, model=None):
     # No message here repeats a value. The field is named, and `lx providers`
     # is where the row is read — the reason `_field_api_key_env` gives, applied
     # to the knobs beside it, because a mispasted key lands in whichever box the
-    # hand slipped into.
+    # hand slipped into. This comment said so for a year while the `kind` refusal
+    # below it quoted the kind and the name refusal above it quoted the name; both
+    # stopped on 2026-09-13. `name` past the check above is a key of the file.
     if not isinstance(spec, dict):
         raise ProviderError(
             f"providers.{name} is a block of settings — `kind`, `base_url`, `model` and "
@@ -54,8 +69,10 @@ def build(name, cfg, model=None):
     if model and model != spec.get("model"):
         spec = {**spec, "model": model}
     kind = spec.get("kind", "openai")
-    if kind not in KINDS:
-        raise ProviderError(f"unknown provider kind {kind!r}; expected one of {sorted(KINDS)}")
+    if not isinstance(kind, str) or kind not in KINDS:
+        raise ProviderError(
+            f"providers.{name}.kind is not a backend this build has. Accepted: "
+            f"{_accepted_kinds()} — fix it in lx.config.json; `lx providers` names the row.")
     try:
         return KINDS[kind](name, spec)
     except (TypeError, ValueError) as e:
@@ -104,9 +121,19 @@ def _summary(name, spec):
     # `kind` defaults to `openai` and the other two to empty, which is what
     # `build()` reads — so an explicit `"kind": ""` stays empty here and is
     # refused there, rather than being projected as a backend nobody configured.
+    #
+    # **A `kind` this build has no backend for is not projected either**, since
+    # 2026-09-13: the row keeps `""` and says so in `error`, the shape a
+    # non-string `kind` already had. It used to be echoed verbatim, so a key
+    # pasted into the box by hand reached `lx providers`, every `/api/state` and
+    # every `POST /api/config` reply — while `build()` refused the same row. The
+    # contract's value set for the field is the three kinds; nothing a client
+    # could act on is lost, because `build()` would refuse the row it showed.
     for field, absent in (("kind", "openai"), ("model", ""), ("base_url", "")):
         value = spec.get(field, absent)
-        if isinstance(value, str):
+        if field == "kind" and isinstance(value, str) and value not in KINDS:
+            problems.append(f"`kind` is one of {_accepted_kinds()}")
+        elif isinstance(value, str):
             row[field] = printable_url(value) if field == "base_url" else value
         else:
             # Not an error the row can carry a value for: the contract documents
@@ -145,7 +172,7 @@ def _summary(name, spec):
             # built at all and the row is not a configured backend.
             problems.append(f"`{field}` is a number")
     env = spec.get("api_key_env") or ""
-    if isinstance(env, str):
+    if env == "" or is_env_name(env):
         row["key_env"] = env
         row["needs_key"] = bool(env)
         row["key_present"] = bool(os.environ.get(env)) if env else True
@@ -153,6 +180,14 @@ def _summary(name, spec):
         # `os.environ.get` raises `TypeError: str expected` on a non-string, which
         # is how this function used to take the whole endpoint down over one
         # hand-edited field.
+        #
+        # **And a string that is not a name is not shown.** The contract has
+        # always said `key_env` is "the variable's name. Never its value", and
+        # until 2026-09-13 this branch copied any string through — so a key typed
+        # into the file's `api_key_env` was masked by `lx config get` and printed
+        # whole by `lx providers`, `/api/state` and the backend editor beside it.
+        # Two surfaces disagreeing about one value is what invariant 6 names;
+        # `config.is_env_name` is the one answer, and the row stays red.
         problems.append("`api_key_env` is the NAME of an environment variable, as text")
     if not problems:
         return row

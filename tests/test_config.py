@@ -1317,3 +1317,318 @@ def test_printable_url_reads_a_bad_port_inside_its_own_guard():
     assert "example.invalid" not in out
     assert printable_url("https://alice:s3cr3t@example.invalid:8443/v1") == \
         "https://example.invalid:8443/v1"
+
+
+# ── no refusal repeats the value it refused ───────────────────────────────
+#
+# Invariant 6 since 2026-09-13: a refusal of a value names the field, what is
+# accepted and — for a non-string — its shape, and never the value or its length,
+# in every field and not only in the three a key was expected to land in. Until
+# then `_field_kind`, `_as_text`, `_as_number`, `_as_count`, `_field_route`,
+# `_field_embedding_provider`, `_field_tone`, `_decode` and both refusals in
+# `providers.build` quoted what they refused (`docs/contracts/workbench-http.md`
+# divergence (29)). And a field whose value it can never legally hold is not
+# displayed either: a hand-edited `kind`, `api_key_env` or `base_url`.
+#
+# Three halves, each blind to something the others see. The sweep reads what a
+# person would read, over every pattern the field table has *today and later*,
+# since it iterates the table. The `ast` guard reads how every refusal is built,
+# including branches no value in the sweep reaches. The surface tests carry the
+# sentence through `lx` itself. `tests/test_web.py` holds the wire's half.
+
+from test_provider import _windows  # noqa: E402
+
+#: HANDOFF-077's value: 32 characters, key-shaped, and lower-case with a hyphen,
+#: so `api_key_env`'s shape rule refuses it rather than storing it. An upper-case
+#: token of that length is a legal variable name and is stored — a residual
+#: `_field_api_key_env`'s docstring already records, not something this tests.
+KEYLIKE = "sk-PASTEDabcdefghijklmnopqrstuv1"
+
+#: Every `(pattern, shape)` the sweep finds **storing** the value instead of
+#: refusing it. These are not refusals, so no sentence repeats anything; they are
+#: the other half of divergence (29), which HANDOFF-080 owns, pinned so that the
+#: day a rule starts or stops storing a key-shaped value somebody has to decide
+#: it here. A rule added later that stores one fails this test by default.
+STORES_A_KEY = {
+    ("providers.*.model", "text"), ("providers.*.model", "padded"),
+    ("providers.*.model", "text:model"), ("providers.*.model", "provider:text"),
+    ("providers.*.model", "json-list"), ("providers.*.model", "json-block"),
+    ("routing.*", "provider:text"), ("routing.*", "model-block"),
+    ("tone", "text"), ("tone", "padded"), ("tone", "text:model"),
+    ("tone", "provider:text"), ("tone", "json-list"), ("tone", "json-block"),
+}
+
+
+def _shapes(value):
+    """The ways a value reaches a field rule: a word, a word with a colon, and JSON."""
+    return {
+        "text": value,
+        "padded": f"  {value}\n",
+        "text:model": f"{value}:m",
+        "provider:text": f"p:{value}",
+        "list": [value],
+        "block": {"x": value},
+        "provider-block": {"provider": value},
+        "model-block": {"provider": "p", "model": value},
+        "json-list": json.dumps([value]),
+        "json-block": json.dumps({"provider": value}),
+    }
+
+
+def _sweep_cfg():
+    return {**DEFAULT_CONFIG, "providers": {**DEFAULT_CONFIG["providers"],
+                                            "p": {"kind": "openai", "model": "m"}}}
+
+
+def _addressed(pattern):
+    return pattern.replace("routing.*", "routing.draft").replace("*", "p")
+
+
+def test_no_field_rule_repeats_a_value_it_refuses_and_only_the_pinned_ones_store_it():
+    """Every pattern in the field table, every shape, the leaf spelling and the block spelling.
+
+    The table is iterated rather than listed, so a field rule added later is
+    swept the day it is registered — which is the only moment anybody could
+    notice that it quotes what it refuses.
+    """
+    cfg, stored, refused = _sweep_cfg(), set(), 0
+    for pattern in cli._CONFIG_FIELDS:
+        key = _addressed(pattern)
+        parent, _, leaf = key.rpartition(".")
+        for label, shape in _shapes(KEYLIKE).items():
+            spellings = [(key, shape)]
+            if parent:
+                spellings.append((parent, json.dumps({leaf: shape})))
+            for address, raw in spellings:
+                try:
+                    parts, value = cli.config_value(cfg, address, raw)
+                except ConfigError as e:
+                    refused += 1
+                    assert _windows(KEYLIKE, str(e)) == [], (pattern, label, address, str(e))
+                    continue
+                if _windows(KEYLIKE, json.dumps(value)) and address == key:
+                    stored.add((pattern, label))
+    assert refused > 100, refused
+    assert stored == STORES_A_KEY, (
+        "a field rule changed whether it stores a key-shaped value — HANDOFF-080 "
+        f"owns this set: gained {stored - STORES_A_KEY}, lost {STORES_A_KEY - stored}")
+
+
+@pytest.mark.parametrize("current", [True, 3, 2.5])
+def test_a_key_with_no_rule_is_refused_by_its_type_without_being_repeated(current):
+    """`_decode`'s branches: a boolean a hand-edited file holds, and a number."""
+    cfg = {**DEFAULT_CONFIG, "handmade": current}
+    with pytest.raises(ConfigError) as caught:
+        cli.config_value(cfg, "handmade", KEYLIKE)
+    assert _windows(KEYLIKE, str(caught.value)) == [], str(caught.value)
+    assert "handmade" in str(caught.value)
+
+
+def test_a_non_string_value_is_named_by_its_shape():
+    """What a refusal keeps when it loses the value: the field, the shape, the accepted set."""
+    cfg = _sweep_cfg()
+    for raw, shape in (([KEYLIKE], "a list"), ({"x": KEYLIKE}, "a block"),
+                       (None, "null"), (7, "a number"), ("   ", "blank text")):
+        with pytest.raises(ConfigError) as caught:
+            cli.config_value(cfg, "providers.p.kind", raw)
+        assert shape in str(caught.value) and "providers.p.kind" in str(caught.value)
+    with pytest.raises(ConfigError) as caught:
+        cli.config_value(cfg, "providers.p.kind", KEYLIKE)
+    assert str(caught.value) == ("providers.p.kind is not a backend this build has. "
+                                 "Accepted: anthropic, openai, openai-compatible.")
+
+
+def test_build_repeats_neither_the_name_nor_the_kind_it_refuses():
+    """`providers.build` is outside the `ast` guard, so both of its refusals are read here."""
+    from scriptorium.providers import ProviderError, build
+    cfg = _sweep_cfg()
+    with pytest.raises(ProviderError) as caught:
+        build(KEYLIKE, cfg)
+    assert _windows(KEYLIKE, str(caught.value)) == [], str(caught.value)
+    assert str(caught.value).startswith("unknown provider")
+    assert str(caught.value).endswith("openai, p")     # the configured names are the remedy
+    for kind in (KEYLIKE, [KEYLIKE], ""):
+        with pytest.raises(ProviderError) as caught:
+            build("p", {"providers": {"p": {"kind": kind, "model": "m"}}})
+        assert _windows(KEYLIKE, str(caught.value)) == [], str(caught.value)
+        assert "providers.p.kind" in str(caught.value)
+
+
+def test_a_field_holding_what_it_never_may_is_not_displayed():
+    """`kind`, `api_key_env` and `base_url`, hand-edited, on both display functions.
+
+    `providers.available` feeds `lx providers`, `/api/state` and every
+    `POST /api/config` reply; `cli._printable` feeds `lx config get` and the
+    typed readback. They answered differently for `api_key_env` until 2026-09-13
+    — masked by one, printed whole by the other — and neither masked the other
+    two fields at all.
+    """
+    from scriptorium.config import NOT_AN_ADDRESS
+    from scriptorium.providers import available
+    specs = {"k": {"kind": KEYLIKE, "model": "m"},
+             "e": {"kind": "openai", "api_key_env": KEYLIKE},
+             "u": {"kind": "openai", "base_url": KEYLIKE},
+             "ok": {"kind": "anthropic", "base_url": "https://api.anthropic.com",
+                    "api_key_env": "ANTHROPIC_API_KEY"}}
+    cfg = {**DEFAULT_CONFIG, "providers": specs}
+    rows = {row["name"]: row for row in available(cfg)}
+    assert _windows(KEYLIKE, json.dumps(rows)) == [], rows
+    assert rows["k"]["kind"] == "" and "kind" in rows["k"]["error"]
+    assert rows["e"]["key_env"] == "" and "api_key_env" in rows["e"]["error"]
+    assert rows["e"]["needs_key"] is True and rows["e"]["key_present"] is False
+    assert rows["u"]["base_url"] == NOT_AN_ADDRESS and "error" not in rows["u"]
+    assert rows["ok"]["kind"] == "anthropic" and "error" not in rows["ok"]
+    assert rows["ok"]["key_env"] == "ANTHROPIC_API_KEY"
+
+    shown = cli.do_config_get(cfg, "providers")
+    assert _windows(KEYLIKE, shown) == [], shown
+    assert cli.do_config_get(cfg, "providers.k.kind") == cli._NOT_A_KIND
+    assert cli.do_config_value(cfg, "providers.u.base_url") == NOT_AN_ADDRESS
+    assert cli.do_config_get(cfg, "providers.ok.kind") == "anthropic"
+
+
+@pytest.mark.parametrize("url", [KEYLIKE, "file:///x", "ftp://host/v1", "localhost:11434/v1",
+                                 "https:///v1"])
+def test_printable_url_prints_nothing_of_what_is_not_an_http_address(url):
+    """The test `_field_base_url` refuses a write with, applied to what may be shown."""
+    from scriptorium.config import NOT_AN_ADDRESS, printable_url
+    assert printable_url(url) == NOT_AN_ADDRESS
+    assert printable_url("http://localhost:11434/v1") == "http://localhost:11434/v1"
+    assert printable_url(" https://api.openai.com/v1") == " https://api.openai.com/v1"
+
+
+def test_lx_repeats_no_part_of_a_key_pasted_into_a_box_beside_the_credential_fields(tmp_path):
+    """HANDOFF-077's criterion 3, and the same value through every command that reads it back.
+
+    `lx config set providers.p.kind <key>` first, as the package measured it —
+    then a hand-edited file carrying the value in `kind`, `api_key_env` and
+    `base_url`, read by the commands a person runs to see what is wrong, and the
+    name refused by `--provider`.
+    """
+    env = _project(tmp_path)
+    r = _lx(["config", "set", "providers.p.kind", KEYLIKE], tmp_path, env)
+    assert r.returncode == 2, _both(r)
+    assert _windows(KEYLIKE, _both(r)) == [], _both(r)
+    assert "Accepted: anthropic, openai, openai-compatible" in _err(r)
+
+    data = _config(tmp_path)
+    data["providers"] = {"k": {"kind": KEYLIKE, "model": "m"},
+                         "e": {"kind": "openai", "api_key_env": KEYLIKE},
+                         "u": {"kind": "openai", "base_url": KEYLIKE}}
+    (tmp_path / "lx.config.json").write_text(json.dumps(data), encoding="utf-8")
+    for args, code in ((["providers"], 0), (["config", "get", "providers"], 0),
+                       (["models", "--provider", "k"], 2),
+                       (["models", "--provider", KEYLIKE], 2)):
+        r = _lx(args, tmp_path, env)
+        assert r.returncode == code, (args, _both(r))
+        assert "Traceback" not in _err(r), (args, _err(r))
+        assert _windows(KEYLIKE, _both(r)) == [], (args, _both(r))
+
+
+# The `ast` half. What flows from a value parameter — `value`, `raw`, `v` — may
+# reach a `raise` in a function a configuration value can reach only as an
+# argument to `_shape_of`, or as a decoder's position (`e.msg`, `e.lineno`,
+# `e.colno`, `e.pos`), and it may not be handed to another such function in any
+# parameter but its value parameter. What it cannot see: a value read back out of
+# `cfg` rather than received, a helper outside `cli.py`, and a message a callee
+# outside the closure builds — `providers.build` is the one of those this
+# project has, and the test above reads its sentences instead.
+
+_VALUE_PARAMS = frozenset({"value", "raw", "v"})
+_POSITION_ATTRS = frozenset({"msg", "lineno", "colno", "pos"})
+
+
+def _refusal_closure():
+    import ast
+    tree = ast.parse(pathlib.Path(cli.__file__).read_text(encoding="utf-8"))
+    defs = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    table = next(node.value for node in tree.body if isinstance(node, ast.Assign)
+                 and any(getattr(t, "id", None) == "_CONFIG_FIELDS" for t in node.targets))
+    todo = ["config_value"] + [node.id for entry in table.values for node in ast.walk(entry)
+                               if isinstance(node, ast.Name) and node.id in defs]
+    seen = {}
+    while todo:
+        name = todo.pop()
+        if name in seen:
+            continue
+        seen[name] = defs[name]
+        todo += [node.func.id for node in ast.walk(defs[name]) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Name) and node.func.id in defs]
+    return seen
+
+
+def _tainted_names(fn):
+    import ast
+    tainted = {a.arg for a in fn.args.args if a.arg in _VALUE_PARAMS}
+
+    def names(node):
+        return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+
+    def targets(node):
+        return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+
+    while True:
+        before = set(tainted)
+        for node in ast.walk(fn):
+            if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign, ast.NamedExpr)):
+                if node.value is not None and names(node.value) & tainted:
+                    for target in (node.targets if isinstance(node, ast.Assign) else [node.target]):
+                        tainted |= targets(target)
+            elif isinstance(node, (ast.For, ast.comprehension)):
+                if not names(node.iter) & tainted:
+                    continue
+                # A block's *keys* become the address of the field below them —
+                # `lx config set providers '{"x": {"kind": …}}'` is refused as
+                # `providers.x.kind` — and the contract's rule is that a key name
+                # is not a value. So iterating `.items()` taints what is held, not
+                # what it is held under, and `.keys()` taints nothing.
+                method = getattr(getattr(node.iter, "func", None), "attr", None)
+                if method == "keys":
+                    continue
+                if (method == "items" and isinstance(node.target, ast.Tuple)
+                        and len(node.target.elts) == 2):
+                    tainted |= targets(node.target.elts[1])
+                else:
+                    tainted |= targets(node.target)
+            elif isinstance(node, ast.withitem):
+                if node.optional_vars is not None and names(node.context_expr) & tainted:
+                    tainted |= targets(node.optional_vars)
+            elif isinstance(node, ast.Try):
+                if any(names(stmt) & tainted for stmt in node.body):
+                    tainted |= {h.name for h in node.handlers if h.name}
+        if tainted == before:
+            return tainted
+
+
+def test_a_refusal_in_the_configuration_writer_is_built_from_nothing_it_was_handed():
+    import ast
+    closure = _refusal_closure()
+    assert {"_field_kind", "_field_route", "_as_text", "_as_number", "_decode",
+            "_as_block", "_field_tone"} <= set(closure), sorted(closure)
+    problems = []
+    for name, fn in closure.items():
+        tainted = _tainted_names(fn)
+        parents = {child: node for node in ast.walk(fn) for child in ast.iter_child_nodes(node)}
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Raise):
+                for part in (node.exc, node.cause):
+                    for leak in ast.walk(part) if part is not None else ():
+                        if not (isinstance(leak, ast.Name) and leak.id in tainted):
+                            continue
+                        up = parents.get(leak)
+                        if isinstance(up, ast.Attribute) and up.attr in _POSITION_ATTRS:
+                            continue
+                        if (isinstance(up, ast.Call) and isinstance(up.func, ast.Name)
+                                and up.func.id == "_shape_of"):
+                            continue
+                        problems.append(f"{name}:{node.lineno} raises with {leak.id}")
+            elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                  and node.func.id in closure):
+                params = [a.arg for a in closure[node.func.id].args.args]
+                bound = list(zip(params, node.args)) + [(k.arg, k.value) for k in node.keywords]
+                for param, arg in bound:
+                    if param not in _VALUE_PARAMS and any(
+                            isinstance(n, ast.Name) and n.id in tainted for n in ast.walk(arg)):
+                        problems.append(
+                            f"{name}:{node.lineno} hands a value to {node.func.id}({param}=…)")
+    assert problems == [], problems
