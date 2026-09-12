@@ -449,13 +449,51 @@ def dump_json(path, obj, create_mode=None):
         raise
 
 
+#: An environment variable's name: what `api_key_env` holds, and the only thing
+#: it may hold. `fullmatch`, and the length bounded inside the pattern rather
+#: than after it, because `$` matches *before* a trailing newline — a pasted
+#: `"OPENAI_API_KEY\n"` satisfies `^…$` and a trailing newline is exactly what a
+#: clipboard carries. Here rather than in `cli.py` for `printable_url`'s reason:
+#: `providers.available` is a display surface too, and two copies of the pattern
+#: are two answers to "may this be printed".
+ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
+
+#: What a base URL that is not an http(s) address with a host prints as — and a
+#: value that is not text at all, which a hand-edited file can hold.
+NOT_AN_ADDRESS = "(not an http:// or https:// address)"
+
+#: What a base URL this parser cannot read prints as.
+UNREADABLE_URL = "(unreadable base_url)"
+
+
+def is_env_name(value):
+    """Whether `value` has the shape of an environment variable's name, and so may be shown."""
+    return isinstance(value, str) and bool(ENV_NAME_RE.fullmatch(value))
+
+
 def printable_url(url):
-    """A base URL as it is safe to print: no userinfo, no query.
+    """A base URL as it is safe to print: no userinfo, no query — and nothing that is not one.
 
     Neither is writable through `lx config set` any more, but a hand-edited file
     can hold both and a proxy that takes `?key=` is a real shape. The host is
     what a person needs to see — it answers "where is my document going" — and
     the rest is dropped rather than trusted.
+
+    **A string with no http(s) scheme or no host prints as `NOT_AN_ADDRESS`**,
+    since 2026-09-13. It used to come back verbatim, because nothing in it was
+    userinfo or a query — so a key hand-pasted into `base_url`, one of the boxes
+    one lands in, was refused by `lx config set` and then printed whole by
+    `lx providers`, `lx config get` and `/api/state`. The test is
+    `cli._field_base_url`'s own, so what may be displayed and what may be
+    written are one answer, and `Provider._request` refuses to send such a URL.
+
+    **An empty value is not a non-address, and comes back as it is.** A provider
+    block with no `base_url` at all is a working configuration — each provider
+    class supplies its own default — and its callers hand this `""`. The first
+    version of the rule above printed the placeholder for it, so a backend that
+    translates perfectly was described as misconfigured on `lx providers`,
+    `/api/state`, the backend editor and the first line of every run. Found by
+    the security-tier re-derivation of 2026-09-13, before it shipped.
 
     It lives here rather than in `cli.py` because `providers.available` is the
     other display surface and feeds both `lx providers` and `/api/state`. One
@@ -464,6 +502,12 @@ def printable_url(url):
     `lx config get` had just masked.
     """
     if not isinstance(url, str):
+        # A list or a block where the URL belongs is not an address either, and
+        # its repr is whatever was pasted into it. `lx config get` and
+        # `Provider.describe()` both printed one whole until the security-tier
+        # re-derivation of 2026-09-13 planted it.
+        return NOT_AN_ADDRESS
+    if not url.strip():
         return url
     # **Every read of `parsed` is inside the guard, and that is the whole shape
     # of this function.** `SplitResult.port` is a *lazy property* that parses on
@@ -474,11 +518,17 @@ def printable_url(url):
     # and exit 1 instead of this project's one sentence and exit 2. The masking
     # function crashed inside the mask.
     try:
-        parsed = urllib.parse.urlsplit(url)
+        parsed = urllib.parse.urlsplit(url.strip())
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            return NOT_AN_ADDRESS
         carries = bool(parsed.username or parsed.password or parsed.query)
         if not carries:
             return url
         host = parsed.hostname or ""
+        if ":" in host:
+            # `hostname` drops an IPv6 literal's brackets, and without them the
+            # port reads as one more group of the address.
+            host = f"[{host}]"
         if parsed.port:
             host = f"{host}:{parsed.port}"
         return urllib.parse.urlunsplit(
@@ -488,7 +538,7 @@ def printable_url(url):
         # this function did before and is wrong here for the reason the function
         # exists: it may be the userinfo-bearing one. Nothing about it is
         # printable, so nothing of it is printed.
-        return "(unreadable base_url)"
+        return UNREADABLE_URL
 
 
 

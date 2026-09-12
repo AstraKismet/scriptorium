@@ -3,6 +3,215 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-09-13 · No refusal repeats the value it refused, in any field, and no field shows a value it can never hold
+
+Closing HANDOFF-077, and the *repeated back* half of
+`docs/contracts/workbench-http.md` divergence (29). Invariant 6 said a refusal on
+`api_key_env`, `base_url` or `headers` never echoes the value, because a mispasted
+key lands in whichever box the hand slipped into. On `128de46` thirteen sentences
+beside those three quoted exactly what they refused:
+
+```
+$ lx config set providers.p.kind sk-PASTED…      exit 2
+lx: providers.p.kind = 'sk-PASTED…' is not a backend this build has. Accepted: …
+```
+
+— `_field_kind`; `_as_text`'s `got {value!r}`, which a JSON body reaches with a
+list or a block; `_as_number`'s four sentences and `_as_count`'s, which every
+provider knob and every `batch.*` key goes through; `_field_route`'s and
+`_field_embedding_provider`'s `unknown provider '…'`; `_field_tone`; `_decode`'s
+boolean branch; and both refusals in `providers.build`, the unknown name and the
+unknown kind, which reached `lx models`, `lx translate`, `lx run` and `lx audit`
+on stderr, `GET /api/models`' `error`, and a job's `error` and `log`.
+
+### The rule
+
+**A refusal of a value names the field, what is accepted, and — for a non-string
+from a JSON body — its shape, and never the value: not whole, not in part, not
+the `repr` of a wrong-typed one, and not its length.** It is not scoped to any
+field. The line is drawn by where a value came from — the terminal argument, the
+form field, the request body, the query — the way invariant 11 draws its own,
+because the box a key was pasted into does not know it holds one. Every refusal
+the field table can raise, `_decode`'s, and `providers.build`'s follow it.
+`cli._shape_of` is the one describer a refusal may hand a value to; the configured
+provider names a refusal lists are keys of the file, not anything the caller sent,
+and stay because they are the remedy.
+
+Decided with the maintainer, from an option set produced by two independent
+security-tier design lanes and a third lane attacking the package's premises.
+What lost:
+
+- **Credential fields only**, the status quo with the false comment in
+  `providers/__init__.py` corrected. It contradicts the package's own goal and
+  leaves all thirteen.
+- **Every provider field**, the package's other horn. A rule about *where* a field
+  sits: `batch.*` shares `_as_number` with the provider knobs, so the helper
+  would split into two sentences or the rule would already be wider than its
+  wording; `routing.*`, `embedding.provider` and `tone` stay outside it; and the
+  next field would have to be classified by a person, which is not decidable.
+- **Echo only a value shorter than eight characters**, HANDOFF-076's redaction
+  floor. A sentence that changes shape with length states a length class, which is
+  the red line; and it misses the typos it would exist for — `openai-compat` is
+  thirteen characters.
+- **Echo a value once it has parsed as a number**, since a credential never does.
+  Correct, and buys nothing a reader lacks: the number is the line above.
+- **"Did you mean X"** from the accepted set, by `difflib` at a fixed cutoff.
+  Measured to fire for every typo tried and for no key-shaped value, and declined:
+  the accepted list is already the remedy and every set involved is small.
+- **Echo on the terminal, not on the wire.** Two rules for one refusal, which is
+  invariant 8's shape.
+
+**The argument recorded against widening in (29) did not survive a measurement.**
+It said `kind` has three legal values and naming the rejected one is most of the
+message. Side by side, the message is the field and the accepted list, both kept;
+the value is on the line above in a terminal, in the caller's own request on the
+wire, and on the page it cannot be sent at all — the backend editor offers `kind`
+as a `<select>` and the knobs as `type="number"`.
+
+### What may be displayed follows the same line
+
+A field whose value is one it can never legally hold is not displayed, because
+the field's own writer refuses exactly those:
+
+- **`api_key_env`** that is not the shape of a name: `providers._summary` copied
+  any string into `key_env`, so a key typed into the file was masked by
+  `lx config get` and printed whole by `lx providers`, `/api/state` and every
+  `POST /api/config` reply — two surfaces disagreeing about one value, and the
+  contract had always said "never its value". It is `""` with `error` now, and
+  `config.is_env_name` is the one predicate both surfaces read.
+- **`base_url`** that is not an http(s) address with a host:
+  `config.printable_url` returned it verbatim because nothing in it was userinfo
+  or a query. It prints `(not an http:// or https:// address)`, by the test
+  `_field_base_url` refuses a write with, and the row names it in `error`, since
+  `Provider._request` refuses every request such a row would make. **An absent or
+  empty `base_url` is not that** and prints as nothing, as before: a block with no
+  `base_url` is a working backend, because each provider class supplies its own
+  default. The first version of this change got that wrong — it described a
+  working backend as not an address, with no `error`, on `lx providers`,
+  `/api/state`, the backend editor and the first line of every run, and this
+  entry claimed no working configuration lost anything. The security-tier
+  re-derivation found it before it shipped; a test holds it. A `base_url` that
+  is not text at all — a list or a block in a hand-edited file — is not an
+  address either: it printed whole through `lx config get` and
+  `Provider.describe()`, and `providers.build` now refuses it by name where a
+  `str.rstrip` inside the request used to answer `lx models` with a traceback.
+- **`kind`** this build has no backend for: `""` with `error` in the row — the
+  shape a non-string `kind` already had — and `<not a backend this build has …>`
+  in `lx config get`. The contract's value note is edited and **its version does
+  not move**: the documented values were always the three kinds, `""` with
+  `error` was already a row this field produced, and a row `build()` refuses was
+  never one a client could use. **Nor for the other two**, re-derived at the
+  security tier: `key_env` as `""` with `needs_key: true`, `key_present: false`
+  and `error` is exactly the row a non-string `api_key_env` already produced, and
+  the contract had always said "never its value"; `base_url` is documented as a
+  printable form, and `(unreadable base_url)` became a value of it on 2026-09-01
+  with no version move. A new `error` on a row is additive.
+- **Not a dangling reference.** A hand-edited `routing.<stage>` or
+  `embedding.provider` naming a provider nothing is configured under is refused by
+  its writer too, and is still displayed — by `lx routing show`, `lx config get`,
+  `/api/state`'s routing stages. It is a different kind of value: a name that
+  becomes legal the moment its provider is added, where a `kind` this build lacks,
+  a non-name `api_key_env` and a non-address `base_url` are illegal whatever else
+  the file holds. `/api/state`'s routing `provider` is also a frozen field. Left to
+  HANDOFF-080, which owns names.
+- **The `lx web` request log** prints each query parameter's name and `=…`, never
+  its value, and a token with no `=` as `…`. `?provider=` is a box a key can be pasted into, and the terminal's
+  scrollback outlives any reply. Spelling the endpoint `POST`, which lost on
+  2026-09-01, was a different fix for this; logging names only costs one debug
+  detail and no contract field.
+
+### How it is held
+
+Three halves, each blind to something the others see. `tests/test_config.py`
+**sweeps** every pattern in `cli._CONFIG_FIELDS` — iterated, so a rule added later
+is swept the day it is registered — with ten value shapes in the leaf and the
+block spelling, and pins the set of `(pattern, shape)` pairs that *store* a
+key-shaped value instead of refusing it, so that a rule starting to store one
+fails by default. An **`ast` guard** walks every function in `cli.py` a
+configuration value can reach, and the field table's own lambdas, and asserts
+that no name flowing from a value parameter — or from the environment, whose
+contents are credentials here — reaches a `raise` except as `_shape_of`'s argument
+or a JSON decoder's position, and that none is handed to such a function in any
+other parameter. The **surface tests** carry the value through `lx` and through
+`POST /api/config`, `GET /api/models`, `GET /api/state`, a job, and the log;
+`providers.build`'s two sentences are compared whole, because "not its length"
+is not something a window can see.
+
+Thirty-six defects were planted one at a time and all thirty-six failed a test;
+files were restored from a byte copy and sha1-checked. The first eighteen were
+the coordinating session's: each refusal restored, each display unmasked,
+the log restored, and three the sweep cannot reach, two of which only the `ast`
+guard caught — an echo in `_as_number`'s non-finite branch, which no key-shaped
+string reaches, and `str(e)` of a decoder error. The other ten came from the
+security-tier re-derivation, which planted its own and found **three that
+survived the first version of the tests**: `_field_api_key_env` printing the
+first eight characters of the matched variable's content — the one refusal that
+holds a real secret, whose test compared the whole string; a character count
+added to `providers.build`'s sentence; and the masks in `cli._printable` reaching
+only the field and not a block beneath it, so `lx config get
+providers.p.kind.x` printed a hand-edited block's contents. The guard also could
+not see the table's lambdas or the environment. All of those are held now, the
+last two by the guard alone. The last eight came from the lane that cleared the
+fixes, and three of *those* had survived: a `password`-only userinfo
+(`http://:<key>@host/v1`, a spelling gateways document) that dropping
+`parsed.password` from the check would have printed whole with the suite green;
+an IPv6 literal with no port; and a `base_url` of spaces. Each has a test now.
+The guard still cannot see a value read back out of `cfg` rather than received,
+or a helper outside `cli.py`.
+
+### Corrections to the record
+
+- **HANDOFF-077 never mentioned divergence (29)**, which had recorded the same
+  class, with most of the same sites, since 2026-08-20.
+- **(29) called the *written down* half the one with "no such tension".** It is
+  the other way round: the model id (29) cites as the value a key-shape rule
+  would wrongly refuse is a `model` value. The tension is in `model`, not in
+  `kind`. Corrected in (29) and carried into HANDOFF-080.
+- **The package said the wire echo was "the only copy the page did not already
+  hold"** — false of `kind` and the knobs, which the page cannot send; only a
+  client this repository did not write reaches those refusals with a key.
+- **The package's OUT excluded `providers.*.model` "whose readback prints the
+  written value by design"**, conflating a readback with the store (29) was about.
+- **`_field_embedding_provider`'s docstring** called its echo "safe and
+  deliberate" and said `_field_kind` did the same for the same reason; `kind` sits
+  in the block with both credential fields. **`_field_tone`'s** said its value
+  "is nowhere near a credential". Both rewritten.
+- **The package named three surface families**; the unknown-name refusal also
+  reached `lx translate`, `lx run`, `lx audit` and a job's `log`, and each is
+  tested now.
+- **Invariant 6's "every display surface shares `printable_url`"** was true of
+  the URL and not of the name: `_summary` never asked whether `api_key_env` was
+  one, so `/api/state` and `lx config get` answered differently.
+
+### Left open, and where it lives
+
+- **A key typed into a box that accepts text is stored**: `providers.*.model`, the
+  model half of a `routing.*` entry, `tone`, and a new provider's *name*, which
+  then appears in every `Configured:` list. HANDOFF-080.
+- **By decision, not repaired**: `GET /api/models`' `provider` and
+  `POST /api/translate`'s `route.provider` read back a name nothing is configured
+  under, to the caller that sent it — frozen field semantics, and narrowing them
+  is a version decision; the toolbar's model id still opens the job log, since a
+  model id is shown on every surface by design; `lx translate --dry-run` prints
+  the `--provider` and `--model` a person typed.
+- **A key is not a value.** `writable_key`, `config.split_key` and
+  `do_routing_set` repeat the *key* they refuse, including a `*` segment a client
+  filled in; the contract has said a key name is not a value since 2026-08-13.
+- **A key shaped like a variable name** — upper-case, or short — is still accepted
+  by `api_key_env` and shown as a name, the residual `_field_api_key_env`'s
+  docstring already records.
+- **Decided, not repaired**: a key sitting in the path, host or port position of
+  an otherwise valid http URL (`http://host:<key>/v1`) is an address by the rule
+  above and is written and shown — the rule is about values that are not
+  addresses, and guessing which segment of an address is a secret is judgement;
+  and a hand-edited `base_url` with leading whitespace is shown without `error`
+  although the transport refuses it, since whether surrounding whitespace is
+  acceptable is the transport's answer and it names the failure when it refuses.
+- **A dangling provider name in `routing.*` or `embedding.provider`** is displayed
+  as written, above; and the backend editor's key hint reads "` is not set`" with
+  an empty name for a masked `api_key_env`, a frontend sentence that the row's
+  `error` now explains. Both are in HANDOFF-080.
+
 ## 2026-09-11 · A backend that quotes the credential back gets it redacted, and the provider is where that is decided
 
 Closing HANDOFF-076. A backend — or a proxy in front of one — that answers an

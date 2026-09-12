@@ -2513,3 +2513,120 @@ def test_a_job_record_carries_no_window_of_an_echoed_key(
     assert job["failures"] and job["applied"] == 0, record
     assert _windows(KEY, record) == [], record
     assert MARKER in record and "invalid api key" in record, record
+
+
+# ── a key pasted into the wrong box, on the wire ───────────────────────────
+#
+# HANDOFF-077's criterion 4, and the rest of what reaches a browser or the
+# terminal running `lx web`. Since 2026-09-13 no refusal repeats the value it
+# refused, and no field shows a value it can never legally hold. The terminal's
+# half and the `ast` guard are in `tests/test_config.py`.
+#
+# **What these do not assert, on purpose.** `GET /api/models`' `provider` and
+# `POST /api/translate`'s `route.provider` read back the name that was asked
+# for even when nothing is configured under it — the contract freezes that
+# (`docs/contracts/workbench-http.md`, *GET /api/models*) — so those two
+# fields are excluded by name rather than by reading the whole body.
+
+#: The same 32 characters `tests/test_config.py` uses.
+KEYLIKE = "sk-PASTEDabcdefghijklmnopqrstuv1"
+
+
+def test_no_admitted_key_repeats_a_value_it_refuses_over_the_wire(base, tmp_path, monkeypatch):
+    """Every pattern `POST /api/config` admits, with the shapes a JSON body can carry.
+
+    Iterated from `cli.HTTP_WRITABLE_KEYS`, so a key admitted later is swept the
+    day it is admitted. A `200` is the other half of divergence (29) — the value
+    was stored, not refused — and only the pinned one may answer it.
+    """
+    root = _config_project(tmp_path, monkeypatch)
+    blank = json.dumps({"providers": {"p": {"kind": "openai", "model": "m"}}})
+    stored = set()
+    for pattern in cli.HTTP_WRITABLE_KEYS:
+        key = pattern.replace("routing.*", "routing.draft").replace("*", "p")
+        for label, value in (("text", KEYLIKE), ("list", [KEYLIKE]),
+                             ("block", {"x": KEYLIKE}), ("provider-block", {"provider": KEYLIKE})):
+            (root / "lx.config.json").write_text(blank, encoding="utf-8")
+            body = {"key": key, "value": value}
+            if pattern == "providers.*.base_url":
+                body["confirm_base_url"] = True
+            code, reply = _try_post(base, "/api/config", body)
+            if code == 200:
+                stored.add((pattern, label))
+                continue
+            assert code == 400, (key, label, code, reply)
+            assert _windows(KEYLIKE, reply.decode("utf-8")) == [], (key, label, reply)
+    assert stored == {("providers.*.model", "text")}, stored
+
+
+def test_a_listing_for_a_hand_edited_kind_carries_no_window_of_it(base, tmp_path, monkeypatch):
+    """Criterion 4: `GET /api/models?provider=p`, `kind` holding the value, the whole body."""
+    root = _config_project(tmp_path, monkeypatch)
+    (root / "lx.config.json").write_text(json.dumps(
+        {"providers": {"p": {"kind": KEYLIKE, "model": "m", "base_url": "http://127.0.0.1:9/v1"}},
+         "routing": {"draft": "p"}}), encoding="utf-8")
+    code, body = _get(base, "/api/models?provider=p")
+    assert code == 200
+    answer = json.loads(body)
+    assert answer["models"] == [] and "providers.p.kind" in answer["error"], answer
+    assert _windows(KEYLIKE, body.decode("utf-8")) == [], answer
+
+
+def test_a_name_asked_for_by_query_is_not_repeated_by_the_refusal_or_the_log(
+        base, tmp_path, monkeypatch, capsys):
+    """`?provider=<key>`: the sentence in `error`, and the request line on stdout.
+
+    The log is the one copy that outlives the reply — it is in the scrollback of
+    whatever terminal started `lx web` — and it logged the whole query until
+    2026-09-13. `capsys` reaches the server thread because `print` reads
+    `sys.stdout` when it is called.
+    """
+    root = _config_project(tmp_path, monkeypatch)
+    _routed(root, "http://127.0.0.1:9/v1")
+    capsys.readouterr()
+    code, body = _get(base, "/api/models?provider=" + KEYLIKE + "&junk=" + KEYLIKE + "&" + KEYLIKE)
+    assert code == 200
+    answer = json.loads(body)
+    assert answer["error"].startswith("unknown provider"), answer
+    assert _windows(KEYLIKE, answer["error"]) == [], answer["error"]
+    out = capsys.readouterr().out
+    # A token with no `=` is the whole of what that position sent, so it goes
+    # with the values — the security-tier re-derivation found it printed whole.
+    assert "GET /api/models?provider=…&junk=…&…" in out, out
+    assert _windows(KEYLIKE, out) == [], out
+
+
+def test_state_shows_no_field_holding_what_it_never_may(base, tmp_path, monkeypatch):
+    """`GET /api/state` over a hand-edited `kind`, `api_key_env` and `base_url`."""
+    from scriptorium.config import NOT_AN_ADDRESS
+    root = _config_project(tmp_path, monkeypatch)
+    (root / "lx.config.json").write_text(json.dumps({"providers": {
+        "k": {"kind": KEYLIKE, "model": "m"},
+        "e": {"kind": "openai", "api_key_env": KEYLIKE, "model": "m"},
+        "u": {"kind": "openai", "base_url": KEYLIKE, "model": "m"}}}), encoding="utf-8")
+    code, body = _get(base, "/api/state")
+    assert code == 200
+    assert _windows(KEYLIKE, body.decode("utf-8")) == [], body
+    rows = {row["name"]: row for row in json.loads(body)["providers"]}
+    assert rows["k"]["kind"] == "" and "kind" in rows["k"]["error"]
+    assert rows["e"]["key_env"] == "" and rows["e"]["key_present"] is False
+    assert rows["u"]["base_url"] == NOT_AN_ADDRESS
+
+
+def test_a_job_asked_for_an_unconfigured_name_does_not_repeat_it(base, tmp_path, monkeypatch):
+    """`POST /api/translate {"provider": <key>}`: the job's `error` and `log`.
+
+    `providers.build` refuses before anything is dialled, so no stub is needed
+    and none is installed — a stub would replace the function whose sentence is
+    under test. `route` is the contract's readback and is left out by name.
+    """
+    root = _config_project(tmp_path, monkeypatch)
+    _routed(root, "http://127.0.0.1:9/v1")
+    (root / "d.md").write_bytes(b"The gate stood open when she came down the hill.\n")
+    assert _post(base, "/api/extract", {"src": "d.md", "lang": "zh-TW"})[0] == 200
+    started = json.loads(_post(base, "/api/translate",
+                               {"src": "d.md", "lang": "zh-TW", "provider": KEYLIKE})[1])
+    job = _finish(base, started["id"])
+    assert job["error"] and job["error"].startswith("unknown provider"), job
+    said = json.dumps({"error": job["error"], "log": job["log"], "failures": job["failures"]})
+    assert _windows(KEYLIKE, said) == [], said

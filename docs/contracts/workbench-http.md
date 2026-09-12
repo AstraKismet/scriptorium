@@ -123,7 +123,11 @@ nothing here.
   `Cache-Control` at all, and `Connection: close`. A client that parses every
   response as JSON breaks on it. This server never produces a 405.
 - Every `/api/*` request is logged to the server's stdout as `  <METHOD> <path>`,
-  including refused ones. Query strings are logged with it; request bodies are not.
+  including refused ones. A query string is logged as its parameter **names**,
+  each followed by `=…` — `GET /api/models?provider=…` — and never their values;
+  request bodies are not logged at all. Until 2026-09-13 the whole query was, so a
+  name mispasted into `?provider=` reached the scrollback of the terminal running
+  `lx web` (divergence (29)). This describes the server's stdout, not the wire.
 
 ## Request admission
 
@@ -394,7 +398,7 @@ validated if sent, then discarded.
 
 | Key | Type | Meaning |
 |---|---|---|
-| `provider` | string | The backend that was asked, resolved through `config.resolve_route`. **It echoes the `provider` you sent even when no such backend is configured** — `resolve_route` does not validate the name, and `providers.build` is what refuses it, so an unknown name comes back here with the refusal in `error`. `""` only when the whole `routing` block is unreadable. |
+| `provider` | string | The backend that was asked, resolved through `config.resolve_route`. **It echoes the `provider` you sent even when no such backend is configured** — `resolve_route` does not validate the name, and `providers.build` is what refuses it, so an unknown name comes back here with the refusal in `error`. `""` only when the whole `routing` block is unreadable. **This field is the only place the name comes back**: since 2026-09-13 the sentence in `error` does not repeat it and the request log does not print it, and this readback is left as frozen — it returns to the caller that sent it, and narrowing it is a version decision nobody has taken. |
 | `configured` | string | The model id this project would send **today**, resolved most-specific-first — the caller's `provider`, then the routing entry's model, then the provider's own. `""` when unknown. Present on the failure path too, and that is what it is for. |
 | `models` | array of *model* | Sorted by id. **Present and empty** when the listing failed. |
 | `error` | string \| null | The sentence when the listing failed, `null` when it did not. **Always present**, like `POST /api/job`'s. |
@@ -1353,10 +1357,16 @@ key is never writable, whatever you send", and a client that could not tell the
 two apart could not decide between asking the person and giving up. See *Errors*
 — the sentence is for a person, and the status is what a client switches on.
 
-**No credential is writable, and none is readable.** `api_key_env` takes the
-**name** of an environment variable; a value shaped like a key is `400` and the
-refusal does not repeat it. `providers[].key_env` and `key_present` are how a
-client shows what is configured and whether the variable is set.
+**No credential field is writable with a credential, and none is readable.**
+`api_key_env` takes the **name** of an environment variable; a value shaped like
+a key is `400`. **No refusal on this endpoint repeats the value it refused**, in
+any field — since 2026-09-13, and before that only in `api_key_env` and
+`base_url` (divergence (29)); a non-string is named by its shape, `a list` or
+`a block`. `providers[].key_env` and `key_present` are how a client shows what is
+configured and whether the variable is set. What is *not* true is that nothing
+here can store a key: `providers.*.model`, and the model half of a `routing.*`
+entry, accept any text, so a key typed into that box is written and read back in
+`value` — the open half of (29), which HANDOFF-080 owns.
 
 **There is no `GET /api/config`.** `/api/state` already projects what a settings
 screen draws — `providers` and the resolved `routing` — and a second read
@@ -1438,17 +1448,17 @@ an entry in `docs/decisions.md`.
 | Key | Type | Notes |
 |---|---|---|
 | `name` | string | |
-| `kind` | string | `openai`, `openai-compatible`, `anthropic`. Echoed from configuration without validation, so a hand-edited file can produce another string; `build()` refuses it later. |
+| `kind` | string | `openai`, `openai-compatible`, `anthropic`, or `""` with `error` present. **Since 2026-09-13 a hand-edited value this build has no backend for is not echoed**: the row carries `""` and names the field in `error`, the shape a non-string `kind` already had. It used to be echoed without validation, so a key pasted into the file's `kind` reached every `/api/state`. No contract version move: the documented values were always these three, `""` with `error` was already a row this field produced, and a row `build()` refuses was never one a client could use. |
 | `model` | string | The provider's own default. |
-| `base_url` | string | **Printable form.** Not the URL to call. |
+| `base_url` | string | **Printable form.** Not the URL to call. No userinfo and no query, and since 2026-09-13 a value that is not an http(s) address with a host — the shape `lx config set` refuses to write — is `(not an http:// or https:// address)` rather than itself, with `error` present. `""` when the block has no `base_url` key: that is a working backend, whose provider class supplies the default, and it carries no `error`. A key that is present and blank, or not text at all, is `""` **with** `error`, because the provider would send it as written; one the parser cannot read is `(unreadable base_url)` with `error`. |
 | `needs_key` | boolean | Whether an `api_key_env` is configured. |
 | `key_present` | boolean | Whether that variable is set in the server's environment. `true` when no key is needed. |
-| `key_env` | string | The variable's **name**. Never its value. |
+| `key_env` | string | The variable's **name**. Never its value. A hand-edited `api_key_env` that is not the shape of a name is `""`, with `needs_key: true`, `key_present: false` and `error` — until 2026-09-13 any string was copied through, so the sentence before this one was false of a hand-edited key while `lx config get` masked the same value. |
 | `timeout` | number \| null | Seconds. |
 | `temperature` | number \| null | |
 | `max_tokens` | number \| null | |
 | `retries` | number \| null | |
-| `error` | string | **Present only when this provider's block cannot be read** — the shape the *routing stage* below already had. The other eleven keys are still there and still hold values of the type above, so a client can render the row either way; what it must not do is treat a row carrying `error` as configured. A spec whose `api_key_env` is unreadable reports `needs_key: true` and `key_present: false` rather than the "no key needed" pair, which would be a green light nobody earned. Added by the change that closed (15). |
+| `error` | string | **Present only when this provider's block cannot be read** — the shape the *routing stage* below already had. The other eleven keys are still there and still hold values of the type above, so a client can render the row either way; what it must not do is treat a row carrying `error` as configured. A spec whose `api_key_env` is unreadable reports `needs_key: true` and `key_present: false` rather than the "no key needed" pair, which would be a green light nobody earned. Added by the change that closed (15). **Cannot be read** includes, since 2026-09-13, a `kind` this build has no backend for, an `api_key_env` that is not a name, and a `base_url` that is not an http(s) address — rows `providers.build` refuses, or whose credential or every request the transport cannot use — and the sentence names the field, never the value. An additive widening of when `error` appears; no version move. |
 
 The four numeric knobs were added on 2026-09-01 so that a settings form can
 prefill them; they are additive and did not bump. **Their `null` is a value and
@@ -2380,6 +2390,27 @@ today. What the endpoint changes is who can reach them.
     maintainer's own backend. Both are `docs/decisions.md` entries. The narrower
     half — `model` accepting and storing a key — has no such tension and is the
     part to schedule first.
+
+    **Half closed on 2026-09-13, by HANDOFF-077.** *Repeated back* is closed:
+    no refusal repeats the value it refused, in any field — `kind`, the four
+    knobs and every `batch.*` key, `routing.*`, `embedding.provider`, `tone`, a
+    hand-edited boolean, and both refusals in `providers.build`, which is what
+    `GET /api/models`' `error` and a job's `log` carried; the `lx web` request log
+    prints a query's parameter names and not their values; and a hand-edited
+    `kind`, `api_key_env` or `base_url` that the field can never legally hold is
+    not displayed by `/api/state` or by any reply beside it. The argument
+    recorded above against widening lost to a measurement: the message was the
+    field and the accepted list, both kept, and the workbench offers `kind` as a
+    `<select>` that cannot send a key at all. *Written down* is **open** and is
+    HANDOFF-080: `providers.*.model`, the model half of a `routing.*` entry,
+    `tone` and a new provider's name still store whatever they are given. And the
+    sentence above calling that half the one with "no such tension" is wrong: the
+    model id it cites is exactly the value a key-shape rule would refuse, so the
+    tension is in `model` and not in `kind`, whose legal values are three short
+    words. Left as they are, by decision: `GET /api/models`' `provider` and
+    `POST /api/translate`'s `route.provider` read back a name nobody configured,
+    to the caller that sent it, and the toolbar's model id still opens the job
+    log. `docs/decisions.md`, 2026-09-13.
 
 Appended 2026-08-21 by the adversarial pass over the block map and the sentence
 rule. Open.

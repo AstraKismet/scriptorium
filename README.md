@@ -427,9 +427,13 @@ whether each key is present.
 `lx config set` will not put a credential in the file: `api_key_env` takes the
 *name* of a variable and nothing that looks like a key, a `base_url` carrying a
 username or password is refused, and `providers.*.headers` — which goes onto the
-wire verbatim — is not writable from the command line at all. No `lx` command
-takes key material on a command line, because argv is visible in a process
-listing and lands in shell history before any refusal can run.
+wire verbatim — is not writable from the command line at all. No refusal, in any
+field, repeats the value it refused, and a value a field can never hold — a
+`kind` this build has no backend for, an `api_key_env` that is not a name, a
+`base_url` that is not an http(s) address — is not shown back by `lx providers`
+or `lx config get` either. No `lx` command takes key material on a command line,
+because argv is visible in a process listing and lands in shell history before
+any refusal can run.
 
 ## Translation memory
 
@@ -635,7 +639,8 @@ Every rule it enforces is the CLI's. The page sends one key per request and
 renders whatever `lx config set` would have said, so the two surfaces cannot
 disagree about what is writable — and **no field is meant to hold an API key**:
 `api_key_env` takes the *name* of an environment variable, and a value shaped
-like a key is refused there and in `base_url` without being repeated back. The
+like a key is refused there and in `base_url`, and no refusal on the page repeats
+what it refused, whichever box it was typed into. The
 honest caveat is that the *model* box stores whatever you type, a key pasted into
 the wrong field included; `docs/contracts/workbench-http.md` records that as a
 known divergence rather than pretending otherwise. Changing `base_url` needs an
@@ -765,7 +770,7 @@ that lost.
 ## Development
 
 ```bash
-python -m pytest -q                # 2540 collected, no network
+python -m pytest -q                # 2559 collected, no network
 python -m ruff check src tests
 ```
 

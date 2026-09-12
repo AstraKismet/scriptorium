@@ -272,6 +272,34 @@ def _require(path, **fields):
         raise ValueError(f"{path} needs {' and '.join(sorted(missing))}")
 
 
+def _loggable(path):
+    """A request target as the stdout log may show it: the path, and each parameter's name only.
+
+    **A query value never reaches the log.** `GET /api/models?provider=` takes a
+    name a person may have pasted a key into, and the request line used to be
+    printed whole — so the value landed in the scrollback of the terminal running
+    `lx web`, which outlives any response body, while every POST body stayed out
+    of it. Since 2026-09-13 no refusal repeats a submitted value either, and this
+    is the same rule on the one surface that is not a reply. The names stay:
+    `GET /api/doc?src=…&lang=…` still says which request it was. Spelling the
+    endpoint `POST` was the alternative recorded against this on 2026-09-01, and
+    it lost for a reason that does not touch this one.
+    """
+    head, sep, query = path.partition("?")
+    if not sep:
+        return path
+    # As the request line spelled them, still percent-encoded: `http.server` has
+    # already refused a target with whitespace in it, so a name cannot start a
+    # second log line. A fragment has no business in a request target and is
+    # dropped with the values.
+    # A token with no `=` is not a name with an empty value to this log: it is
+    # the whole of what the caller sent in that position, so it is dropped with
+    # the values. Found by the security-tier re-derivation, 2026-09-13.
+    parts = [part for part in query.partition("#")[0].split("&") if part]
+    return head + "?" + "&".join(
+        f"{part.partition('=')[0]}=…" if "=" in part else "…" for part in parts)
+
+
 def _flag(body, name, consequence):
     """A request field that must be the JSON boolean, never something truthy.
 
@@ -301,7 +329,7 @@ class _Handler(BaseHTTPRequestHandler):
     # -- plumbing ---------------------------------------------------------
     def log_message(self, fmt, *args):  # quieter than the default
         if self.path.startswith("/api/"):
-            print(f"  {self.command} {self.path}", flush=True)
+            print(f"  {self.command} {_loggable(self.path)}", flush=True)
 
     def _send(self, code, body, ctype="application/json; charset=utf-8"):
         if isinstance(body, (dict, list)):
@@ -813,10 +841,13 @@ def _config_write(body):
     request per field, and `_CONFIG_LOCK` is what makes six of them at once
     behave.
 
-    The reply carries no readback of what the caller sent. `value` is the
+    The reply is not a readback of what the caller sent: `value` is the
     *effective* value afterwards, through the same projection `lx config get`
     prints — so a `base_url` a hand-edited file carries a `?key=` in is masked
-    here as it is there. `providers` and `routing` are `/api/state`'s own
+    here as it is there. For a key that accepts any text — a `model`, a routing
+    entry's model — the effective value *is* what was sent, and a key pasted
+    into that box comes straight back. That is the half of divergence (29)
+    HANDOFF-080 owns; a refusal on this endpoint repeats nothing since 2026-09-13. `providers` and `routing` are `/api/state`'s own
     projections, and they are here rather than left to a second request because
     `/api/state` loads every segment of every document in the project to answer,
     which is a strange price for redrawing one form.

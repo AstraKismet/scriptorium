@@ -191,7 +191,31 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    *refusals* are the other half — the two fields a mispasted key lands in still
    never repeat what they refused, and the gate in front of them is handed no
    value at all, so it has none to leak. What the fields *beside* those two do
-   with one is `docs/contracts/workbench-http.md` divergence (29), open.
+   with one is `docs/contracts/workbench-http.md` divergence (29) — half closed
+   on 2026-09-13, below, and the half that stores one is HANDOFF-080.
+
+   **Since 2026-09-13 no refusal repeats the value it refused, in any field** —
+   not whole, not in part, not the `repr` of a wrong-typed one, and not its
+   length. The rule used to be scoped to the three fields above, and thirteen
+   sentences beside them quoted what they refused: `kind`, every number,
+   `routing.*`, `embedding.provider`, `tone`, a boolean, and both of
+   `providers.build`'s refusals, which reached stderr, `GET /api/models`' `error`
+   and a job's `log`. A mispasted key lands in whichever box the hand slipped
+   into and the box does not know, so the line is drawn by where a value **came
+   from**, the way invariant 11 draws its own. A refusal names the field, what
+   is accepted, and — for a non-string from a JSON body — its shape through
+   `cli._shape_of`; the configured provider names a refusal lists are keys of
+   the file and stay, because they are the remedy. `tests/test_config.py` holds
+   it three ways: a sweep over every pattern the field table has, an `ast` guard
+   that no name flowing from a value parameter reaches a `raise` in any function
+   a configuration value can reach, and the terminal; `tests/test_web.py` holds
+   the wire. **A field whose value is one it can never legally hold is not
+   displayed either** — a hand-edited `kind` outside the backends this build
+   has, an `api_key_env` that is not a name, a `base_url` that is not an http(s)
+   address — on `lx config get`, `lx providers`, `/api/state` and every reply
+   beside them, because the field's own writer refuses exactly those. And the
+   `lx web` request log names a query's parameters, never their values.
+   `docs/decisions.md`, 2026-09-13.
 
    It was wrong a **fourth** time on 2026-09-01, and this one had been reachable
    from a terminal long before any of the three above. A `base_url` a hand-edited
@@ -545,7 +569,7 @@ Node — see the invariant below.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 2540 collected, no network. Four are
+python -m pytest -q                 # 2559 collected, no network. Four are
                                     #   conditional on three different things, so
                                     #   which two skip is a property of the machine
                                     #   AND the account: one is POSIX-only, one

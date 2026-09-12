@@ -15,6 +15,7 @@ from . import __version__, audit, formats, renderings, sentences, suggest
 from .checks import HELD, check_segment, is_held, is_waived, workable
 from .config import (
     DEFAULT_TONE,
+    ENV_NAME_RE,
     GLOSSARY_HEADER,
     MISSING,
     PATH_VALUED_KEYS,
@@ -28,6 +29,7 @@ from .config import (
     glossary_lines,
     glossary_rows,
     has_version_segment,
+    is_env_name,
     load_config,
     load_dnt,
     load_glossary,
@@ -4881,12 +4883,9 @@ def cmd_untracked(args, cfg):
 
 # ── configuration ──────────────────────────────────────────────────────────
 
-#: An environment variable's name: what `api_key_env` holds, and the only thing
-#: it may hold. `fullmatch`, and the length bounded inside the pattern rather
-#: than after it, because `$` matches *before* a trailing newline — a pasted
-#: `"OPENAI_API_KEY\n"` satisfies `^…$` and a trailing newline is exactly what a
-#: clipboard carries. `_LANG_RE` above avoids the same trap by ending in `\Z`.
-_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
+#: An environment variable's name is `config.ENV_NAME_RE`, shared with the
+#: display surfaces in `providers/__init__.py`. `_LANG_RE` above avoids the same
+#: trailing-newline trap it documents by ending in `\Z`.
 
 #: A credential of this length is essentially never upper-case, and an
 #: environment variable name of this length essentially always is. See
@@ -4898,6 +4897,7 @@ _ENV_LONG = 20
 _ENV_CONTENT_FLOOR = 8
 
 _NOT_A_NAME = "<not an environment variable name — see `lx config set --help`>"
+_NOT_A_KIND = "<not a backend this build has — `lx providers` names the accepted ones>"
 _HIDDEN_HEADER = "<hidden — a header value is sent to the backend verbatim>"
 
 _ENV_SHAPE_ADVICE = (
@@ -4911,8 +4911,7 @@ _ENV_SHAPE_ADVICE = (
 
 _URL_ADVICE = (
     "{path} is the base URL of an HTTP endpoint, and the value is not repeated "
-    "here — this field sits right above api_key_env and is one of the two a "
-    'mispasted key lands in. A local runtime looks like '
+    "here, in case it is a key. A local runtime looks like "
     '"http://localhost:11434/v1"; a hosted one like "https://api.openai.com/v1".'
 )
 
@@ -4926,19 +4925,55 @@ _ENV_LOOKS_LIKE_KEY_ADVICE = (
 )
 
 
+def _shape_of(value):
+    """What arrived, in words that carry none of it: the one describer a refusal may use.
+
+    **No refusal of a value repeats the value**, in any field, and this is how a
+    refusal still says what was wrong. A mispasted key lands in whichever box the
+    hand slipped into — the field does not know it holds one — and the value is
+    already on the caller's side of the surface: the line above in a terminal,
+    the form field on the page, the request a client built. A refusal that quoted
+    it added a copy to stderr, to a CI log and to a response body, and nothing a
+    reader lacked. Until 2026-09-13 the rule covered `api_key_env`, `base_url`
+    and `headers` only, and thirteen sentences beside them quoted what they
+    refused — `docs/decisions.md`, 2026-09-13.
+
+    The type is a *shape*, not a length and not a fragment: a non-string only
+    reaches a rule from a JSON body or a JSON block, and there "a list" is the
+    whole of what the caller needs to know. `tests/test_config.py` holds the rule
+    by `ast` — a tainted name reaches a raise only as this function's argument.
+    """
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true or false"
+    if isinstance(value, (int, float)):
+        return "a number"
+    if isinstance(value, list):
+        return "a list"
+    if isinstance(value, dict):
+        return "a block"
+    if isinstance(value, str):
+        return "blank text" if not value.strip() else "text"
+    return "something that is not text"
+
+
 def _as_text(path, value, what):
     if not isinstance(value, str) or not value.strip():
-        raise ConfigError(f"{path} is {what}, as text — got {value!r}.")
+        raise ConfigError(f"{path} is {what}, as text — got {_shape_of(value)}.")
     return value.strip()
 
 
 def _as_number(path, value, what, low=None, high=None):
     if isinstance(value, bool) or not isinstance(value, (int, float, str)):
-        raise ConfigError(f"{path} is {what} — got {value!r}.")
+        raise ConfigError(f"{path} is {what} — got {_shape_of(value)}.")
     try:
         number = float(value)
     except ValueError:
-        raise ConfigError(f"{path} is {what} — got {value!r}.") from None
+        # `from None` is load-bearing twice here: `float()`'s own message quotes
+        # the text it could not read, so a chained cause would carry the value
+        # into any traceback that printed it.
+        raise ConfigError(f"{path} is {what} — got text that is not a number.") from None
     # `nan` and `inf` are what `float()` accepts and no window rejects: every
     # comparison against a `nan` is False, so it passes `low` and `high` both,
     # and `int(nan)` then raises the interpreter's own ValueError — which is not
@@ -4946,17 +4981,17 @@ def _as_number(path, value, what, low=None, high=None):
     # every other refused value gets one sentence and exit 2. `1e400` is `inf`
     # by the same door.
     if not math.isfinite(number):
-        raise ConfigError(f"{path} is {what} — got {value!r}.")
+        raise ConfigError(f"{path} is {what} — got a number that is not finite.")
     if (low is not None and number < low) or (high is not None and number > high):
         window = f"between {low} and {high}" if high is not None else f"{low} or more"
-        raise ConfigError(f"{path} is {what}, {window} — got {value!r}.")
+        raise ConfigError(f"{path} is {what}, {window} — got one outside that.")
     return int(number) if number == int(number) else number
 
 
 def _as_count(path, value, what, low=1):
     number = _as_number(path, value, what, low=low)
     if number != int(number):
-        raise ConfigError(f"{path} is {what}, a whole number — got {value!r}.")
+        raise ConfigError(f"{path} is {what}, a whole number — got one with a fraction.")
     return int(number)
 
 
@@ -4968,8 +5003,13 @@ def _as_list(path, raw):
     if text.startswith("["):
         try:
             decoded = json.loads(text)
-        except ValueError as e:
-            raise ConfigError(f"{path} is a list, and that is not valid JSON ({e}).") from None
+        except json.JSONDecodeError as e:
+            # The position, never `str(e)` of an arbitrary `ValueError`: a
+            # decoder's message names where it stopped, and the attributes are
+            # what the `ast` guard can tell apart from text that quotes a value.
+            raise ConfigError(
+                f"{path} is a list, and that is not valid JSON "
+                f"({e.msg} at line {e.lineno} column {e.colno}).") from None
         if not isinstance(decoded, list):
             raise ConfigError(f"{path} is a list.")
         return decoded
@@ -4981,22 +5021,30 @@ def _as_block(path, raw):
         return raw
     try:
         decoded = json.loads(raw)
-    except ValueError as e:
+    except json.JSONDecodeError as e:
         raise ConfigError(
             f"{path} is a block, so its value is a JSON object — "
-            f"""`lx config set {path} '{{"key": "value"}}'` ({e}).""") from None
+            f"""`lx config set {path} '{{"key": "value"}}'` """
+            f"({e.msg} at line {e.lineno} column {e.colno}).") from None
     if not isinstance(decoded, dict):
         raise ConfigError(f"{path} is a block, so its value is a JSON object.")
     return decoded
 
 
 def _field_kind(cfg, path, value):
-    from .providers import KINDS
+    """One of the backends this build has.
+
+    The rejected value is not repeated, and until 2026-09-13 it was — on the
+    argument, recorded as divergence (29), that `kind` has three legal values
+    and naming the rejected one is most of the message. Measured, it is not: the
+    message is the field and the accepted list, both kept; the value is the line
+    above in a terminal, and the workbench offers `kind` as a `<select>` that
+    cannot send one. What the echo did add was a copy of whatever was pasted.
+    """
+    from .providers import KINDS, _accepted_kinds
     kind = _as_text(path, value, "a backend kind")
     if kind not in KINDS:
-        raise ConfigError(
-            f"{path} = {kind!r} is not a backend this build has. "
-            f"Accepted: {', '.join(sorted(KINDS))}.")
+        raise ConfigError(f"{path} is not a backend this build has. Accepted: {_accepted_kinds()}.")
     return kind
 
 
@@ -5004,11 +5052,11 @@ def _field_base_url(cfg, path, value):
     """Where the document under translation is sent. Refuses what cannot be that.
 
     **No refusal here echoes the value.** This field sits directly above
-    `api_key_env` in every provider block, so it is one of the two a mispasted
-    key lands in — and a refusal that names the accepted shape must not also
-    repeat what was rejected. Measured: the not-a-URL branch interpolated it, so
+    `api_key_env` in every provider block, and it was the first place the rule
+    was learned: the not-a-URL branch interpolated the value, so
     `lx config set providers.openai.base_url sk-ant-…` printed the key to stderr,
-    into the scrollback, and into any CI log that captured it.
+    into the scrollback, and into any CI log that captured it. Since 2026-09-13
+    the rule is not this field's but every refusal's — `_shape_of` says why.
 
     **A query string is refused as well as userinfo.** A credential reaches a URL
     two ways — `https://u:p@host/v1` and `https://host/v1?key=…` — and both put
@@ -5079,7 +5127,7 @@ def _field_api_key_env(cfg, path, value):
         return ""      # the shipped default for a local runtime: no key needed
     if not isinstance(value, str):
         raise ConfigError(_ENV_SHAPE_ADVICE.format(path=path))
-    if not _ENV_NAME_RE.fullmatch(value):
+    if not ENV_NAME_RE.fullmatch(value):
         raise ConfigError(_ENV_SHAPE_ADVICE.format(path=path))
     if value in os.environ:
         return value
@@ -5147,11 +5195,15 @@ def _field_route(cfg, path, value):
     specs = cfg.get("providers") or {}
     if provider not in specs:
         # The whole value of checking here: today a typo surfaces as a run-time
-        # failure, after the extract and however long the person waited.
+        # failure, after the extract and however long the person waited. The name
+        # is not repeated — a routing entry is one more box a key can be pasted
+        # into — and the configured names are, because they are keys of the file
+        # rather than anything this request sent, and they are the remedy.
         raise ConfigError(
-            f"unknown provider {provider!r}. Configured: "
-            f"{', '.join(sorted(specs)) or 'none'} — `lx providers` lists them with "
-            f"their models and their key status.")
+            f"{path} names a provider this project has not configured — in "
+            f"`<provider>:<model>` the provider is the part before the first colon. "
+            f"Configured: {', '.join(sorted(specs)) or 'none'} — `lx providers` lists "
+            f"them with their models and their key status.")
     # The bare string is kept when there is no model to add. Every configuration
     # in existence is written that way and `DEFAULT_CONFIG` still ships it, so a
     # writer that upgraded every entry to the object form would quietly make one
@@ -5174,10 +5226,13 @@ def _field_embedding_provider(cfg, path, value):
     translation in the project is POSTed to, so a typo caught at write time is
     caught before anything leaves the machine.
 
-    The rejected value **is** echoed, which is safe and deliberate — this key is
-    nowhere near `api_key_env` or `base_url`, the two boxes a mispasted
-    credential lands in, and naming the typo is the whole point of checking
-    early. `_field_kind` does the same for the same reason.
+    The rejected name is **not** echoed. Until 2026-09-13 this docstring said
+    the echo was safe and deliberate because the key is "nowhere near"
+    `api_key_env` or `base_url`, and that `_field_kind` did the same for the same
+    reason — a rule scoped by where a field sits, which is not decidable for the
+    next field and was false of `kind`, which sits in the same block as both.
+    Naming the typo was never the point of checking early; catching it is, and
+    the configured names beside the refusal are what fixes it.
     """
     name = _as_text(path, value, "the name of a configured provider")
     if not name.strip():
@@ -5186,7 +5241,7 @@ def _field_embedding_provider(cfg, path, value):
     specs = cfg.get("providers") or {}
     if name.strip() not in specs:
         raise ConfigError(
-            f"unknown provider {name.strip()!r}. Configured: "
+            f"{path} names a provider this project has not configured. Configured: "
             f"{', '.join(sorted(specs)) or 'none'} — `lx providers` lists them. An "
             f"embedding backend is an ordinary provider block: give it the `base_url` "
             f"of a server that serves `/embeddings`.")
@@ -5206,12 +5261,15 @@ def _field_tone(cfg, path, value):
     **No whitelist.** An unrecognized register is still accepted and still
     selects the default brief — a recorded defect of its own, and deciding here
     what a register may be would make this rule the definition of one, which
-    nothing is today. The value is echoed: it is nowhere near a credential.
+    nothing is today. The refusal says what shape arrived and not what it was —
+    every refusal's rule, `_shape_of`; "it is nowhere near a credential" was the
+    argument this docstring made until 2026-09-13, and a register box is as good
+    a place to paste a key as any other.
     """
     if not isinstance(value, str) or not value.strip():
         raise ConfigError(
-            f"{path} is a register name, as text — got {value!r}. To go back to the "
-            f"default register, `lx config unset {path}`.")
+            f"{path} is a register name, as text — got {_shape_of(value)}. To go back "
+            f"to the default register, `lx config unset {path}`.")
     return value.strip()
 
 
@@ -5344,7 +5402,7 @@ def _decode(cfg, parts, raw):
             return True
         if word in ("false", "no", "off", "0"):
             return False
-        raise ConfigError(f"{key} is true or false — got {raw!r}.")
+        raise ConfigError(f"{key} is true or false — got something that is neither.")
     if isinstance(current, (int, float)):
         return _as_number(key, raw, "a number")
     if isinstance(current, str):
@@ -5521,7 +5579,12 @@ def writable_key(key, confirm_base_url=False):
 # -- what may be printed ---------------------------------------------------
 
 def _is_env_name(value):
-    return not value or (isinstance(value, str) and bool(_ENV_NAME_RE.fullmatch(value)))
+    return not value or is_env_name(value)
+
+
+def _is_kind(value):
+    from .providers import KINDS
+    return isinstance(value, str) and value in KINDS
 
 
 def _printable_spec(spec):
@@ -5532,8 +5595,10 @@ def _printable_spec(spec):
         shown["api_key_env"] = _NOT_A_NAME
     if isinstance(shown.get("headers"), dict):
         shown["headers"] = {name: _HIDDEN_HEADER for name in shown["headers"]}
-    if isinstance(shown.get("base_url"), str):
+    if "base_url" in shown:
         shown["base_url"] = printable_url(shown["base_url"])
+    if "kind" in shown and not _is_kind(shown["kind"]):
+        shown["kind"] = _NOT_A_KIND
     return shown
 
 
@@ -5545,6 +5610,14 @@ def _printable(parts, value):
     printable. A hand-edited file is the case it exists for: `lx config set` will
     not write a key into `api_key_env` or a header at all, and this project has
     no say over what somebody typed into the file directly.
+
+    **A field whose value is one it can never legally hold is not shown** — an
+    `api_key_env` that is not a name, a `base_url` that is not an http(s)
+    address, a `kind` this build has no backend for. Each of those is what the
+    field's own writer refuses, so what is printable and what is writable are one
+    answer, and a key pasted into the box by hand is not printed back by the
+    command a person runs to see what went wrong. `kind` joined on 2026-09-13;
+    `providers._summary` answers the same for `lx providers` and `/api/state`.
     """
     if not parts or parts[0] != "providers":
         return value
@@ -5561,8 +5634,12 @@ def _printable(parts, value):
                 if isinstance(value, dict) else value)
     if field == "api_key_env":
         return value if _is_env_name(value) else _NOT_A_NAME
-    if field == "base_url" and isinstance(value, str):
+    if field == "base_url":
         return printable_url(value)
+    if field == "kind" and not _is_kind(value):
+        # At any depth, as `api_key_env` above is: a hand-edited `kind` that is a
+        # block is read one level down by `lx config get providers.p.kind.x`.
+        return _NOT_A_KIND
     return value
 
 
