@@ -458,8 +458,12 @@ def dump_json(path, obj, create_mode=None):
 #: are two answers to "may this be printed".
 ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
 
-#: What a base URL that is not an http(s) address with a host prints as.
+#: What a base URL that is not an http(s) address with a host prints as — and a
+#: value that is not text at all, which a hand-edited file can hold.
 NOT_AN_ADDRESS = "(not an http:// or https:// address)"
+
+#: What a base URL this parser cannot read prints as.
+UNREADABLE_URL = "(unreadable base_url)"
 
 
 def is_env_name(value):
@@ -497,7 +501,13 @@ def printable_url(url):
     and the disagreement was `lx providers` showing in full what
     `lx config get` had just masked.
     """
-    if not isinstance(url, str) or not url.strip():
+    if not isinstance(url, str):
+        # A list or a block where the URL belongs is not an address either, and
+        # its repr is whatever was pasted into it. `lx config get` and
+        # `Provider.describe()` both printed one whole until the security-tier
+        # re-derivation of 2026-09-13 planted it.
+        return NOT_AN_ADDRESS
+    if not url.strip():
         return url
     # **Every read of `parsed` is inside the guard, and that is the whole shape
     # of this function.** `SplitResult.port` is a *lazy property* that parses on
@@ -528,7 +538,7 @@ def printable_url(url):
         # this function did before and is wrong here for the reason the function
         # exists: it may be the userinfo-bearing one. Nothing about it is
         # printable, so nothing of it is printed.
-        return "(unreadable base_url)"
+        return UNREADABLE_URL
 
 
 

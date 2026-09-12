@@ -90,7 +90,11 @@ the field's own writer refuses exactly those:
   working backend as not an address, with no `error`, on `lx providers`,
   `/api/state`, the backend editor and the first line of every run, and this
   entry claimed no working configuration lost anything. The security-tier
-  re-derivation found it before it shipped; a test holds it.
+  re-derivation found it before it shipped; a test holds it. A `base_url` that
+  is not text at all — a list or a block in a hand-edited file — is not an
+  address either: it printed whole through `lx config get` and
+  `Provider.describe()`, and `providers.build` now refuses it by name where a
+  `str.rstrip` inside the request used to answer `lx models` with a traceback.
 - **`kind`** this build has no backend for: `""` with `error` in the row — the
   shape a non-string `kind` already had — and `<not a backend this build has …>`
   in `lx config get`. The contract's value note is edited and **its version does
@@ -133,9 +137,9 @@ other parameter. The **surface tests** carry the value through `lx` and through
 `providers.build`'s two sentences are compared whole, because "not its length"
 is not something a window can see.
 
-Twenty-eight defects were planted one at a time and all twenty-eight failed a
-test; files were restored from a byte copy and sha1-checked. The first eighteen
-were the coordinating session's: each refusal restored, each display unmasked,
+Thirty-six defects were planted one at a time and all thirty-six failed a test;
+files were restored from a byte copy and sha1-checked. The first eighteen were
+the coordinating session's: each refusal restored, each display unmasked,
 the log restored, and three the sweep cannot reach, two of which only the `ast`
 guard caught — an echo in `_as_number`'s non-finite branch, which no key-shaped
 string reaches, and `str(e)` of a decoder error. The other ten came from the
@@ -147,8 +151,13 @@ added to `providers.build`'s sentence; and the masks in `cli._printable` reachin
 only the field and not a block beneath it, so `lx config get
 providers.p.kind.x` printed a hand-edited block's contents. The guard also could
 not see the table's lambdas or the environment. All of those are held now, the
-last two by the guard alone. It still cannot see a value read back out of `cfg`
-rather than received, or a helper outside `cli.py`.
+last two by the guard alone. The last eight came from the lane that cleared the
+fixes, and three of *those* had survived: a `password`-only userinfo
+(`http://:<key>@host/v1`, a spelling gateways document) that dropping
+`parsed.password` from the check would have printed whole with the suite green;
+an IPv6 literal with no port; and a `base_url` of spaces. Each has a test now.
+The guard still cannot see a value read back out of `cfg` rather than received,
+or a helper outside `cli.py`.
 
 ### Corrections to the record
 
@@ -191,6 +200,13 @@ rather than received, or a helper outside `cli.py`.
 - **A key shaped like a variable name** — upper-case, or short — is still accepted
   by `api_key_env` and shown as a name, the residual `_field_api_key_env`'s
   docstring already records.
+- **Decided, not repaired**: a key sitting in the path, host or port position of
+  an otherwise valid http URL (`http://host:<key>/v1`) is an address by the rule
+  above and is written and shown — the rule is about values that are not
+  addresses, and guessing which segment of an address is a secret is judgement;
+  and a hand-edited `base_url` with leading whitespace is shown without `error`
+  although the transport refuses it, since whether surrounding whitespace is
+  acceptable is the transport's answer and it names the failure when it refuses.
 - **A dangling provider name in `routing.*` or `embedding.provider`** is displayed
   as written, above; and the backend editor's key hint reads "` is not set`" with
   an empty name for a masked `api_key_env`, a frontend sentence that the row's

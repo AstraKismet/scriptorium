@@ -1469,7 +1469,7 @@ def test_a_field_holding_what_it_never_may_is_not_displayed():
     two fields at all.
     """
     from scriptorium.config import NOT_AN_ADDRESS
-    from scriptorium.providers import available
+    from scriptorium.providers import ProviderError, available, build
     specs = {"k": {"kind": KEYLIKE, "model": "m"},
              "e": {"kind": "openai", "api_key_env": KEYLIKE},
              "u": {"kind": "openai", "base_url": KEYLIKE},
@@ -1478,7 +1478,10 @@ def test_a_field_holding_what_it_never_may_is_not_displayed():
              "ok": {"kind": "anthropic", "base_url": "https://api.anthropic.com",
                     "api_key_env": "ANTHROPIC_API_KEY"},
              "bare": {"kind": "anthropic", "model": "m", "api_key_env": "ANTHROPIC_API_KEY"},
-             "blank": {"kind": "openai", "model": "m", "base_url": ""}}
+             "blank": {"kind": "openai", "model": "m", "base_url": ""},
+             "spaces": {"kind": "openai", "model": "m", "base_url": "   "},
+             "unread": {"kind": "openai", "model": "m", "base_url": "http://[::1"},
+             "lst": {"kind": "openai", "model": "m", "base_url": [KEYLIKE]}}
     cfg = {**DEFAULT_CONFIG, "providers": specs}
     rows = {row["name"]: row for row in available(cfg)}
     assert _windows(KEYLIKE, json.dumps(rows)) == [], rows
@@ -1496,7 +1499,20 @@ def test_a_field_holding_what_it_never_may_is_not_displayed():
     # A *present* blank one is not: the class reads `spec.get("base_url", default)`
     # and sends the empty string, which `_request` refuses.
     assert rows["blank"]["base_url"] == "" and "base_url" in rows["blank"]["error"]
-    from scriptorium.providers import build
+    assert rows["spaces"]["base_url"] == "" and "base_url" in rows["spaces"]["error"]
+    # One the parser cannot read is no more usable than one that is not an address.
+    assert rows["unread"]["base_url"] == "(unreadable base_url)"
+    assert "base_url" in rows["unread"]["error"]
+    # A list where the URL belongs — found by the security-tier re-derivation,
+    # printed whole by `lx config get` and a traceback from `lx models`.
+    assert rows["lst"]["base_url"] == "" and "base_url" in rows["lst"]["error"]
+    assert cli.do_config_get(cfg, "providers.lst.base_url") == NOT_AN_ADDRESS
+    assert cli.do_config_value(cfg, "providers.lst")["base_url"] == NOT_AN_ADDRESS
+    with pytest.raises(ProviderError) as caught:
+        build("lst", cfg)
+    assert str(caught.value) == (
+        "providers.lst.base_url is an http:// or https:// address, as text — fix it in "
+        "lx.config.json; `lx providers` names the row.")
     assert NOT_AN_ADDRESS not in build("bare", cfg).describe()
 
     shown = cli.do_config_get(cfg, "providers")
@@ -1524,8 +1540,16 @@ def test_printable_url_prints_nothing_of_what_is_not_an_http_address(url):
     assert printable_url(" https://api.openai.com/v1") == " https://api.openai.com/v1"
     # Nothing is not a non-address: a block with no `base_url` hands this `""`.
     assert printable_url("") == "" and printable_url("  ") == "  "
-    # And an IPv6 literal keeps its brackets when userinfo is taken off it.
+    # And an IPv6 literal keeps its brackets when userinfo is taken off it, with a
+    # port and without one.
     assert printable_url(f"http://u:{KEYLIKE}@[::1]:8080/v1") == "http://[::1]:8080/v1"
+    assert printable_url(f"http://u:{KEYLIKE}@[::1]/v1") == "http://[::1]/v1"
+    # A password with no username is the spelling some gateways document, and a
+    # test for it was missing: dropping `parsed.password` from the check printed
+    # the whole key with the suite green — measured by the security-tier
+    # re-derivation of 2026-09-13.
+    assert printable_url(f"http://:{KEYLIKE}@host/v1") == "http://host/v1"
+    assert printable_url([KEYLIKE]) == NOT_AN_ADDRESS and printable_url(None) == NOT_AN_ADDRESS
 
 
 def test_lx_repeats_no_part_of_a_key_pasted_into_a_box_beside_the_credential_fields(tmp_path):

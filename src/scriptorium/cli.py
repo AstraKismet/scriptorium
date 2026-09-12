@@ -5595,7 +5595,7 @@ def _printable_spec(spec):
         shown["api_key_env"] = _NOT_A_NAME
     if isinstance(shown.get("headers"), dict):
         shown["headers"] = {name: _HIDDEN_HEADER for name in shown["headers"]}
-    if isinstance(shown.get("base_url"), str):
+    if "base_url" in shown:
         shown["base_url"] = printable_url(shown["base_url"])
     if "kind" in shown and not _is_kind(shown["kind"]):
         shown["kind"] = _NOT_A_KIND
@@ -5634,7 +5634,7 @@ def _printable(parts, value):
                 if isinstance(value, dict) else value)
     if field == "api_key_env":
         return value if _is_env_name(value) else _NOT_A_NAME
-    if field == "base_url" and isinstance(value, str):
+    if field == "base_url":
         return printable_url(value)
     if field == "kind" and not _is_kind(value):
         # At any depth, as `api_key_env` above is: a hand-edited `kind` that is a

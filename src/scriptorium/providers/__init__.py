@@ -3,7 +3,7 @@
 import math
 import os
 
-from ..config import NOT_AN_ADDRESS, is_env_name, printable_url
+from ..config import NOT_AN_ADDRESS, UNREADABLE_URL, is_env_name, printable_url
 from .anthropic import AnthropicProvider
 from .base import Provider, ProviderError
 from .openai_compat import OpenAICompatProvider
@@ -74,6 +74,14 @@ def build(name, cfg, model=None):
         raise ProviderError(
             f"providers.{name}.kind is not a backend this build has. Accepted: "
             f"{_accepted_kinds()} — fix it in lx.config.json; `lx providers` names the row.")
+    if "base_url" in spec and not isinstance(spec["base_url"], str):
+        # Refused here rather than by `str.rstrip` inside a request, which raised
+        # `AttributeError` — not in `cli.main`'s tuple, so `lx models` answered a
+        # traceback and `GET /api/models` a 400. `_summary` already calls this row
+        # unreadable; now `build()` agrees with it.
+        raise ProviderError(
+            f"providers.{name}.base_url is an http:// or https:// address, as text — fix "
+            f"it in lx.config.json; `lx providers` names the row.")
     try:
         return KINDS[kind](name, spec)
     except (TypeError, ValueError) as e:
@@ -135,13 +143,13 @@ def _summary(name, spec):
         if field == "kind" and isinstance(value, str) and value not in KINDS:
             problems.append(f"`kind` is one of {_accepted_kinds()}")
         elif field == "base_url" and isinstance(value, str) and field in spec and (
-                not value.strip() or printable_url(value) == NOT_AN_ADDRESS):
+                not value.strip() or printable_url(value) in (NOT_AN_ADDRESS, UNREADABLE_URL)):
             # Named rather than shown as a backend that looks configured:
             # `Provider._request` refuses every request a row like this would
             # make. **An absent `base_url` is not this** — every provider class
             # reads `spec.get("base_url", <its default>)`, so a block without the
             # key works — but a present, blank one is used as written and refused.
-            row[field] = NOT_AN_ADDRESS if value.strip() else ""
+            row[field] = printable_url(value) if value.strip() else ""
             problems.append("`base_url` is an http:// or https:// address")
         elif isinstance(value, str):
             row[field] = printable_url(value) if field == "base_url" else value
