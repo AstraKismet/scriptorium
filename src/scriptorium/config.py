@@ -481,8 +481,15 @@ def printable_url(url):
     one lands in, was refused by `lx config set` and then printed whole by
     `lx providers`, `lx config get` and `/api/state`. The test is
     `cli._field_base_url`'s own, so what may be displayed and what may be
-    written are one answer; `Provider._request` refuses to send such a URL, so
-    no working configuration loses anything it could have shown.
+    written are one answer, and `Provider._request` refuses to send such a URL.
+
+    **An empty value is not a non-address, and comes back as it is.** A provider
+    block with no `base_url` at all is a working configuration — each provider
+    class supplies its own default — and its callers hand this `""`. The first
+    version of the rule above printed the placeholder for it, so a backend that
+    translates perfectly was described as misconfigured on `lx providers`,
+    `/api/state`, the backend editor and the first line of every run. Found by
+    the security-tier re-derivation of 2026-09-13, before it shipped.
 
     It lives here rather than in `cli.py` because `providers.available` is the
     other display surface and feeds both `lx providers` and `/api/state`. One
@@ -490,7 +497,7 @@ def printable_url(url):
     and the disagreement was `lx providers` showing in full what
     `lx config get` had just masked.
     """
-    if not isinstance(url, str):
+    if not isinstance(url, str) or not url.strip():
         return url
     # **Every read of `parsed` is inside the guard, and that is the whole shape
     # of this function.** `SplitResult.port` is a *lazy property* that parses on
@@ -508,6 +515,10 @@ def printable_url(url):
         if not carries:
             return url
         host = parsed.hostname or ""
+        if ":" in host:
+            # `hostname` drops an IPv6 literal's brackets, and without them the
+            # port reads as one more group of the address.
+            host = f"[{host}]"
         if parsed.port:
             host = f"{host}:{parsed.port}"
         return urllib.parse.urlunsplit(

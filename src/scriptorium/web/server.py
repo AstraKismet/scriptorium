@@ -292,8 +292,12 @@ def _loggable(path):
     # already refused a target with whitespace in it, so a name cannot start a
     # second log line. A fragment has no business in a request target and is
     # dropped with the values.
-    names = [part.partition("=")[0] for part in query.partition("#")[0].split("&") if part]
-    return head + "?" + "&".join(f"{name}=…" for name in names)
+    # A token with no `=` is not a name with an empty value to this log: it is
+    # the whole of what the caller sent in that position, so it is dropped with
+    # the values. Found by the security-tier re-derivation, 2026-09-13.
+    parts = [part for part in query.partition("#")[0].split("&") if part]
+    return head + "?" + "&".join(
+        f"{part.partition('=')[0]}=…" if "=" in part else "…" for part in parts)
 
 
 def _flag(body, name, consequence):

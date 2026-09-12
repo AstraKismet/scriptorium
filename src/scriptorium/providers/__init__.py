@@ -3,7 +3,7 @@
 import math
 import os
 
-from ..config import is_env_name, printable_url
+from ..config import NOT_AN_ADDRESS, is_env_name, printable_url
 from .anthropic import AnthropicProvider
 from .base import Provider, ProviderError
 from .openai_compat import OpenAICompatProvider
@@ -59,9 +59,10 @@ def build(name, cfg, model=None):
     # No message here repeats a value. The field is named, and `lx providers`
     # is where the row is read — the reason `_field_api_key_env` gives, applied
     # to the knobs beside it, because a mispasted key lands in whichever box the
-    # hand slipped into. This comment said so for a year while the `kind` refusal
-    # below it quoted the kind and the name refusal above it quoted the name; both
-    # stopped on 2026-09-13. `name` past the check above is a key of the file.
+    # hand slipped into. This comment said so from 2026-09-02 while the `kind`
+    # refusal below it quoted the kind and the name refusal above it quoted the
+    # name; both stopped on 2026-09-13. `name` past the check above is a key of
+    # the file.
     if not isinstance(spec, dict):
         raise ProviderError(
             f"providers.{name} is a block of settings — `kind`, `base_url`, `model` and "
@@ -133,6 +134,15 @@ def _summary(name, spec):
         value = spec.get(field, absent)
         if field == "kind" and isinstance(value, str) and value not in KINDS:
             problems.append(f"`kind` is one of {_accepted_kinds()}")
+        elif field == "base_url" and isinstance(value, str) and field in spec and (
+                not value.strip() or printable_url(value) == NOT_AN_ADDRESS):
+            # Named rather than shown as a backend that looks configured:
+            # `Provider._request` refuses every request a row like this would
+            # make. **An absent `base_url` is not this** — every provider class
+            # reads `spec.get("base_url", <its default>)`, so a block without the
+            # key works — but a present, blank one is used as written and refused.
+            row[field] = NOT_AN_ADDRESS if value.strip() else ""
+            problems.append("`base_url` is an http:// or https:// address")
         elif isinstance(value, str):
             row[field] = printable_url(value) if field == "base_url" else value
         else:

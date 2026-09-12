@@ -5636,7 +5636,9 @@ def _printable(parts, value):
         return value if _is_env_name(value) else _NOT_A_NAME
     if field == "base_url" and isinstance(value, str):
         return printable_url(value)
-    if field == "kind" and len(parts) == 3 and not _is_kind(value):
+    if field == "kind" and not _is_kind(value):
+        # At any depth, as `api_key_env` above is: a hand-edited `kind` that is a
+        # block is read one level down by `lx config get providers.p.kind.x`.
         return _NOT_A_KIND
     return value
 

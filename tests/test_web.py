@@ -2584,13 +2584,15 @@ def test_a_name_asked_for_by_query_is_not_repeated_by_the_refusal_or_the_log(
     root = _config_project(tmp_path, monkeypatch)
     _routed(root, "http://127.0.0.1:9/v1")
     capsys.readouterr()
-    code, body = _get(base, "/api/models?provider=" + KEYLIKE + "&junk=" + KEYLIKE)
+    code, body = _get(base, "/api/models?provider=" + KEYLIKE + "&junk=" + KEYLIKE + "&" + KEYLIKE)
     assert code == 200
     answer = json.loads(body)
     assert answer["error"].startswith("unknown provider"), answer
     assert _windows(KEYLIKE, answer["error"]) == [], answer["error"]
     out = capsys.readouterr().out
-    assert "GET /api/models?provider=…&junk=…" in out, out
+    # A token with no `=` is the whole of what that position sent, so it goes
+    # with the values — the security-tier re-derivation found it printed whole.
+    assert "GET /api/models?provider=…&junk=…&…" in out, out
     assert _windows(KEYLIKE, out) == [], out
 
 

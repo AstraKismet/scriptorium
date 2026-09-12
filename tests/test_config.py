@@ -466,7 +466,10 @@ def test_the_content_of_a_set_variable_is_refused_and_only_its_name_is_printed(t
     env = _project(tmp_path, _env(MY_BACKEND_KEY=secret))
     r = _lx(["config", "set", "providers.openai.api_key_env", secret], tmp_path, env)
     assert r.returncode != 0
-    assert secret not in _both(r)
+    # Every eight-character window, not the whole string: this is the one
+    # refusal holding a real secret, and `held[:8]` passed `secret not in` —
+    # measured by the security-tier re-derivation of 2026-09-13.
+    assert _windows(secret, _both(r)) == [], _both(r)
     assert "MY_BACKEND_KEY" in _err(r)
 
 
@@ -1444,14 +1447,16 @@ def test_build_repeats_neither_the_name_nor_the_kind_it_refuses():
     cfg = _sweep_cfg()
     with pytest.raises(ProviderError) as caught:
         build(KEYLIKE, cfg)
-    assert _windows(KEYLIKE, str(caught.value)) == [], str(caught.value)
-    assert str(caught.value).startswith("unknown provider")
-    assert str(caught.value).endswith("openai, p")     # the configured names are the remedy
+    # The whole sentence, not a window: the rule is "not its length" too, and a
+    # sentence that grew a character count passed every window assertion.
+    assert str(caught.value) == ("unknown provider: nothing is configured under that name. "
+                                 "Configured: claude, llamacpp, lmstudio, local, openai, p")
     for kind in (KEYLIKE, [KEYLIKE], ""):
         with pytest.raises(ProviderError) as caught:
             build("p", {"providers": {"p": {"kind": kind, "model": "m"}}})
-        assert _windows(KEYLIKE, str(caught.value)) == [], str(caught.value)
-        assert "providers.p.kind" in str(caught.value)
+        assert str(caught.value) == (
+            "providers.p.kind is not a backend this build has. Accepted: anthropic, openai, "
+            "openai-compatible — fix it in lx.config.json; `lx providers` names the row.")
 
 
 def test_a_field_holding_what_it_never_may_is_not_displayed():
@@ -1468,23 +1473,45 @@ def test_a_field_holding_what_it_never_may_is_not_displayed():
     specs = {"k": {"kind": KEYLIKE, "model": "m"},
              "e": {"kind": "openai", "api_key_env": KEYLIKE},
              "u": {"kind": "openai", "base_url": KEYLIKE},
+             "kk": {"kind": {"x": KEYLIKE}, "model": "m"},
+             "ee": {"kind": "openai", "api_key_env": {"x": KEYLIKE}},
              "ok": {"kind": "anthropic", "base_url": "https://api.anthropic.com",
-                    "api_key_env": "ANTHROPIC_API_KEY"}}
+                    "api_key_env": "ANTHROPIC_API_KEY"},
+             "bare": {"kind": "anthropic", "model": "m", "api_key_env": "ANTHROPIC_API_KEY"},
+             "blank": {"kind": "openai", "model": "m", "base_url": ""}}
     cfg = {**DEFAULT_CONFIG, "providers": specs}
     rows = {row["name"]: row for row in available(cfg)}
     assert _windows(KEYLIKE, json.dumps(rows)) == [], rows
     assert rows["k"]["kind"] == "" and "kind" in rows["k"]["error"]
     assert rows["e"]["key_env"] == "" and "api_key_env" in rows["e"]["error"]
     assert rows["e"]["needs_key"] is True and rows["e"]["key_present"] is False
-    assert rows["u"]["base_url"] == NOT_AN_ADDRESS and "error" not in rows["u"]
+    assert rows["u"]["base_url"] == NOT_AN_ADDRESS and "base_url" in rows["u"]["error"]
     assert rows["ok"]["kind"] == "anthropic" and "error" not in rows["ok"]
     assert rows["ok"]["key_env"] == "ANTHROPIC_API_KEY"
+    # **No `base_url` at all is a working backend**: the class supplies its
+    # default. The first version of this change described it as not an address,
+    # with no error, on every surface — found by the security-tier
+    # re-derivation of 2026-09-13.
+    assert rows["bare"]["base_url"] == "" and "error" not in rows["bare"], rows["bare"]
+    # A *present* blank one is not: the class reads `spec.get("base_url", default)`
+    # and sends the empty string, which `_request` refuses.
+    assert rows["blank"]["base_url"] == "" and "base_url" in rows["blank"]["error"]
+    from scriptorium.providers import build
+    assert NOT_AN_ADDRESS not in build("bare", cfg).describe()
 
     shown = cli.do_config_get(cfg, "providers")
     assert _windows(KEYLIKE, shown) == [], shown
     assert cli.do_config_get(cfg, "providers.k.kind") == cli._NOT_A_KIND
     assert cli.do_config_value(cfg, "providers.u.base_url") == NOT_AN_ADDRESS
     assert cli.do_config_get(cfg, "providers.ok.kind") == "anthropic"
+    # A block where a single value belongs, read whole and one level down: the
+    # masks answer at every depth under the field, not only at the field.
+    for key, mask in (("providers.kk", None), ("providers.kk.kind", cli._NOT_A_KIND),
+                      ("providers.kk.kind.x", cli._NOT_A_KIND), ("providers.ee", None),
+                      ("providers.ee.api_key_env.x", cli._NOT_A_NAME)):
+        out = cli.do_config_get(cfg, key)
+        assert _windows(KEYLIKE, out) == [], (key, out)
+        assert mask is None or out == mask, (key, out)
 
 
 @pytest.mark.parametrize("url", [KEYLIKE, "file:///x", "ftp://host/v1", "localhost:11434/v1",
@@ -1495,6 +1522,10 @@ def test_printable_url_prints_nothing_of_what_is_not_an_http_address(url):
     assert printable_url(url) == NOT_AN_ADDRESS
     assert printable_url("http://localhost:11434/v1") == "http://localhost:11434/v1"
     assert printable_url(" https://api.openai.com/v1") == " https://api.openai.com/v1"
+    # Nothing is not a non-address: a block with no `base_url` hands this `""`.
+    assert printable_url("") == "" and printable_url("  ") == "  "
+    # And an IPv6 literal keeps its brackets when userinfo is taken off it.
+    assert printable_url(f"http://u:{KEYLIKE}@[::1]:8080/v1") == "http://[::1]:8080/v1"
 
 
 def test_lx_repeats_no_part_of_a_key_pasted_into_a_box_beside_the_credential_fields(tmp_path):
@@ -1554,15 +1585,34 @@ def _refusal_closure():
         seen[name] = defs[name]
         todo += [node.func.id for node in ast.walk(defs[name]) if isinstance(node, ast.Call)
                  and isinstance(node.func, ast.Name) and node.func.id in defs]
-    return seen
+    # The table's own lambdas are functions a value reaches too — a lambda that
+    # handed the value to `_as_text`'s `what` was invisible to the first version
+    # of this guard, and only the sweeps caught it.
+    lambdas = {f"_CONFIG_FIELDS[{key.value}]": entry
+               for key, entry in zip(table.keys, table.values) if isinstance(entry, ast.Lambda)}
+    return seen, lambdas
+
+
+def _is_environment(node):
+    """`os.environ` or `os.getenv(…)`: what the environment holds is a credential here."""
+    import ast
+    if isinstance(node, ast.Attribute) and node.attr == "environ":
+        return getattr(node.value, "id", None) == "os"
+    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "getenv" and getattr(node.func.value, "id", None) == "os")
 
 
 def _tainted_names(fn):
     import ast
-    tainted = {a.arg for a in fn.args.args if a.arg in _VALUE_PARAMS}
+    # `_field_api_key_env` compares a value against every exported variable and
+    # names the one that matched — the one refusal holding a real secret. The
+    # environment is a taint source, so the variable's *content* may not reach a
+    # raise while its name, a key of the mapping, still may.
+    tainted = {a.arg for a in fn.args.args if a.arg in _VALUE_PARAMS} | {"os.environ"}
 
     def names(node):
-        return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+        found = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+        return found | ({"os.environ"} if any(map(_is_environment, ast.walk(node))) else set())
 
     def targets(node):
         return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
@@ -1602,17 +1652,21 @@ def _tainted_names(fn):
 
 def test_a_refusal_in_the_configuration_writer_is_built_from_nothing_it_was_handed():
     import ast
-    closure = _refusal_closure()
+    closure, lambdas = _refusal_closure()
     assert {"_field_kind", "_field_route", "_as_text", "_as_number", "_decode",
-            "_as_block", "_field_tone"} <= set(closure), sorted(closure)
+            "_as_block", "_field_tone", "_field_api_key_env"} <= set(closure), sorted(closure)
+    assert "_CONFIG_FIELDS[providers.*.model]" in lambdas, sorted(lambdas)
     problems = []
-    for name, fn in closure.items():
+    for name, fn in {**closure, **lambdas}.items():
         tainted = _tainted_names(fn)
         parents = {child: node for node in ast.walk(fn) for child in ast.iter_child_nodes(node)}
         for node in ast.walk(fn):
             if isinstance(node, ast.Raise):
                 for part in (node.exc, node.cause):
                     for leak in ast.walk(part) if part is not None else ():
+                        if _is_environment(leak):
+                            problems.append(f"{name}:{node.lineno} raises with the environment")
+                            continue
                         if not (isinstance(leak, ast.Name) and leak.id in tainted):
                             continue
                         up = parents.get(leak)

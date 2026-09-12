@@ -82,16 +82,36 @@ the field's own writer refuses exactly those:
 - **`base_url`** that is not an http(s) address with a host:
   `config.printable_url` returned it verbatim because nothing in it was userinfo
   or a query. It prints `(not an http:// or https:// address)`, by the test
-  `_field_base_url` refuses a write with; `Provider._request` refuses to send such
-  a URL, so no working configuration loses anything it showed.
+  `_field_base_url` refuses a write with, and the row names it in `error`, since
+  `Provider._request` refuses every request such a row would make. **An absent or
+  empty `base_url` is not that** and prints as nothing, as before: a block with no
+  `base_url` is a working backend, because each provider class supplies its own
+  default. The first version of this change got that wrong — it described a
+  working backend as not an address, with no `error`, on `lx providers`,
+  `/api/state`, the backend editor and the first line of every run, and this
+  entry claimed no working configuration lost anything. The security-tier
+  re-derivation found it before it shipped; a test holds it.
 - **`kind`** this build has no backend for: `""` with `error` in the row — the
   shape a non-string `kind` already had — and `<not a backend this build has …>`
   in `lx config get`. The contract's value note is edited and **its version does
   not move**: the documented values were always the three kinds, `""` with
   `error` was already a row this field produced, and a row `build()` refuses was
-  never one a client could use.
+  never one a client could use. **Nor for the other two**, re-derived at the
+  security tier: `key_env` as `""` with `needs_key: true`, `key_present: false`
+  and `error` is exactly the row a non-string `api_key_env` already produced, and
+  the contract had always said "never its value"; `base_url` is documented as a
+  printable form, and `(unreadable base_url)` became a value of it on 2026-09-01
+  with no version move. A new `error` on a row is additive.
+- **Not a dangling reference.** A hand-edited `routing.<stage>` or
+  `embedding.provider` naming a provider nothing is configured under is refused by
+  its writer too, and is still displayed — by `lx routing show`, `lx config get`,
+  `/api/state`'s routing stages. It is a different kind of value: a name that
+  becomes legal the moment its provider is added, where a `kind` this build lacks,
+  a non-name `api_key_env` and a non-address `base_url` are illegal whatever else
+  the file holds. `/api/state`'s routing `provider` is also a frozen field. Left to
+  HANDOFF-080, which owns names.
 - **The `lx web` request log** prints each query parameter's name and `=…`, never
-  its value. `?provider=` is a box a key can be pasted into, and the terminal's
+  its value, and a token with no `=` as `…`. `?provider=` is a box a key can be pasted into, and the terminal's
   scrollback outlives any reply. Spelling the endpoint `POST`, which lost on
   2026-09-01, was a different fix for this; logging names only costs one debug
   detail and no contract field.
@@ -104,21 +124,31 @@ is swept the day it is registered — with ten value shapes in the leaf and the
 block spelling, and pins the set of `(pattern, shape)` pairs that *store* a
 key-shaped value instead of refusing it, so that a rule starting to store one
 fails by default. An **`ast` guard** walks every function in `cli.py` a
-configuration value can reach and asserts that no name flowing from a value
-parameter reaches a `raise` except as `_shape_of`'s argument or a JSON decoder's
-position, and that none is handed to such a function in any other parameter.
-The **surface tests** carry the value through `lx` and through
-`POST /api/config`, `GET /api/models`, `GET /api/state`, a job, and the log.
+configuration value can reach, and the field table's own lambdas, and asserts
+that no name flowing from a value parameter — or from the environment, whose
+contents are credentials here — reaches a `raise` except as `_shape_of`'s argument
+or a JSON decoder's position, and that none is handed to such a function in any
+other parameter. The **surface tests** carry the value through `lx` and through
+`POST /api/config`, `GET /api/models`, `GET /api/state`, a job, and the log;
+`providers.build`'s two sentences are compared whole, because "not its length"
+is not something a window can see.
 
-Eighteen defects were planted one at a time — each refusal restored, each display
-unmasked, the log restored, and three the sweep cannot reach — and all eighteen
-failed a test; files were restored from a byte copy and sha1-checked. Two were
-caught by the `ast` guard alone: an echo in `_as_number`'s non-finite branch, which
-no key-shaped string reaches, and `str(e)` of a decoder error in `_as_list`,
-whose message happens to carry no document text. The guard cannot see a value
-read back out of `cfg` rather than received, a helper outside `cli.py`, or
-`providers.build`, which is outside `cli.py`; its two sentences are read by the
-surface tests instead.
+Twenty-eight defects were planted one at a time and all twenty-eight failed a
+test; files were restored from a byte copy and sha1-checked. The first eighteen
+were the coordinating session's: each refusal restored, each display unmasked,
+the log restored, and three the sweep cannot reach, two of which only the `ast`
+guard caught — an echo in `_as_number`'s non-finite branch, which no key-shaped
+string reaches, and `str(e)` of a decoder error. The other ten came from the
+security-tier re-derivation, which planted its own and found **three that
+survived the first version of the tests**: `_field_api_key_env` printing the
+first eight characters of the matched variable's content — the one refusal that
+holds a real secret, whose test compared the whole string; a character count
+added to `providers.build`'s sentence; and the masks in `cli._printable` reaching
+only the field and not a block beneath it, so `lx config get
+providers.p.kind.x` printed a hand-edited block's contents. The guard also could
+not see the table's lambdas or the environment. All of those are held now, the
+last two by the guard alone. It still cannot see a value read back out of `cfg`
+rather than received, or a helper outside `cli.py`.
 
 ### Corrections to the record
 
@@ -161,6 +191,10 @@ surface tests instead.
 - **A key shaped like a variable name** — upper-case, or short — is still accepted
   by `api_key_env` and shown as a name, the residual `_field_api_key_env`'s
   docstring already records.
+- **A dangling provider name in `routing.*` or `embedding.provider`** is displayed
+  as written, above; and the backend editor's key hint reads "` is not set`" with
+  an empty name for a masked `api_key_env`, a frontend sentence that the row's
+  `error` now explains. Both are in HANDOFF-080.
 
 ## 2026-09-11 · A backend that quotes the credential back gets it redacted, and the provider is where that is decided
 
