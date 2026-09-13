@@ -10,11 +10,13 @@ import json
 import math
 import os
 import random
+import socket
 import sys
 import threading
 import time
 import traceback
 import urllib.error
+import urllib.parse
 import urllib.request
 from array import array
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -24,6 +26,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from scriptorium.config import DEFAULT_CONFIG  # noqa: E402
+from scriptorium.providers import base as base_module  # noqa: E402
 from scriptorium.providers import build  # noqa: E402
 from scriptorium.providers.base import ProviderError  # noqa: E402
 from scriptorium.store import load_doc  # noqa: E402
@@ -237,7 +240,7 @@ def test_a_listing_that_answers_the_wrong_shape_masks_the_url(models_server):
 
     **The credential shape used here was the query string, not userinfo**, and
     that was a measured constraint rather than a preference:
-    `urllib.request.urlopen` cannot reach a URL carrying userinfo at all — it
+    `urllib` cannot reach a URL carrying userinfo at all — it
     fails `getaddrinfo` before a byte goes out — so the `?key=SECRET` proxy
     shape was the only one that reached this branch. `printable_url` strips
     both, and the userinfo half is covered by the `describe()` assertion above.
@@ -1345,7 +1348,12 @@ def test_no_shape_of_userinfo_base_url_prints_the_password(base, pins):
 def test_a_base_url_that_is_not_http_never_leaves_through_the_transport(scheme):
     """`urllib`'s stock opener also speaks `file:`, and one endpoint is now
     reachable by a browser gesture — so a `file:///` base_url turned a dropdown
-    into a local-file read whose content came back in the wrong-shape message."""
+    into a local-file read whose content came back in the wrong-shape message.
+
+    The opener `_request` assembles since 2026-09-13 has no handler for any of
+    these schemes either, but the check pinned here stands in front of the
+    transport's import and refuses before that opener exists — which is what
+    `tests/test_startup_imports.py`'s `models --provider filey` row relies on."""
     cfg = {"providers": {"p": {"kind": "openai", "api_key_env": "", "retries": 0,
                                "base_url": f"{scheme}/etc/passwd"}}}
     with pytest.raises(ProviderError) as e:
@@ -2580,7 +2588,7 @@ def test_a_reason_phrase_that_quotes_the_key_never_reaches_a_traceback(echo, mon
 # provider never sees the value — and a proxy answering 407 quotes it back
 # exactly as a gateway quotes `Authorization`.
 
-PROXY = {"reason": None, "answer": None, "seen": []}
+PROXY = {"reason": None, "answer": None, "extra": {}, "seen": []}
 
 
 class ProxyHandler(BaseHTTPRequestHandler):
@@ -2616,6 +2624,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self.send_response(status, reason)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        for name, value in PROXY["extra"].items():
+            self.send_header(name, value)
         self.end_headers()
         if body:
             self.wfile.write(body)
@@ -2641,12 +2651,15 @@ def _through_proxy(monkeypatch, port, scheme, secret=None):
     monkeypatch.setenv(f"{scheme}_proxy", f"http://{userinfo}127.0.0.1:{port}")
     for name in ("no_proxy", "NO_PROXY"):
         monkeypatch.delenv(name, raising=False)
-    # urllib caches its proxy table in the opener it builds on the first
-    # `urlopen` and never reads the environment again, so without this reset
-    # the variables above are invisible; `monkeypatch` puts the old opener back.
-    monkeypatch.setattr(urllib.request, "_opener", None)
+    # `Provider._request` keeps one opener for the life of the process, and
+    # `ProxyHandler` reads the proxy environment when that opener is built — so
+    # without this reset the variables above are invisible. The stock
+    # `urllib.request._opener` had the same shape and this line used to reset
+    # that one; `monkeypatch` puts the previous opener back afterwards.
+    monkeypatch.setattr(base_module, "_OPENER", None)
     PROXY["reason"] = None
     PROXY["answer"] = None
+    PROXY["extra"] = {}
     PROXY["seen"].clear()
     if secret is None:
         return ""
@@ -2671,7 +2684,7 @@ def test_a_proxy_that_quotes_proxy_authorization_is_redacted(proxy, monkeypatch)
 
     A secret set built from the configuration alone — the key and `headers` —
     has never seen this value, and the body reaches the `HTTPError` branch
-    like any other 4xx. `sent` is read off the request after `urlopen` fails,
+    like any other 4xx. `sent` is read off the request after the open fails,
     where urllib leaves the header it added.
     """
     basic = _through_proxy(monkeypatch, proxy, "http", "proxy-secret-" + "0123456789" * 3)
@@ -2817,10 +2830,10 @@ def test_a_retry_after_that_is_not_a_number_never_raises_inside_the_handler(
 
 @pytest.mark.parametrize("shape", [
     "http-401", "reason-phrase", "not-json", "gate", "masked-invalid-url", "unreachable",
-    "read-timeout", "query-door",
+    "read-timeout", "query-door", "redirect",
 ])
 def test_no_refusal_leaving_request_carries_an_exception_on_its_chain(
-        echo, stalling, monkeypatch, shape):
+        echo, stalling, redirecting, target, monkeypatch, shape):
     """Every refusal shape the suite drives through `_request`: `__cause__` and
     `__context__` both `None`. `raise last from None` gave `__cause__ is None`
     and `__suppress_context__` and still left the `HTTPError` on `__context__`;
@@ -2850,6 +2863,9 @@ def test_no_refusal_leaving_request_carries_an_exception_on_its_chain(
         spec = _keyed("http://127.0.0.1:1/v1", timeout=0.2)
     elif shape == "read-timeout":
         spec = _keyed(stalling, timeout=0.3)
+    elif shape == "redirect":
+        _stage(302, f"{target}/v1/{secret}")
+        spec = _keyed(redirecting)
     else:
         spec = _keyed(echo + "?key=" + secret)
     with pytest.raises(ProviderError) as e:
@@ -3614,6 +3630,485 @@ def test_a_header_value_that_is_a_list_is_refused_by_the_transport_not_by_note_t
     assert p._transport_added == ("Basic added-by-the-transport",)
 
 
+# ── redirects: the transport follows none (HANDOFF-078) ─────────────────────
+#
+# `Provider._request` opens every request through an `OpenerDirector` assembled
+# without `HTTPRedirectHandler` — and without the `ftp:`, `file:` and `data:`
+# handlers — so a 3xx is an `HTTPError` on the first hop whatever its code, the
+# method or the interpreter: 3.9 has no `http_error_308` and 3.12 does, and the
+# two agree about a handler that is not there. Measured on 3725ed6, before the
+# change, on both: 301/302/303 were followed on every door with `Authorization`,
+# `x-api-key` and every `headers.*` value copied to the new host and a POST
+# re-issued as a bodiless GET; 307 was followed on the two listings and 308 on
+# 3.12 only; a `Location` of `ftp://…` opened a connection; an empty or
+# self-pointing one cost five credential-bearing requests; and every 3xx the
+# stock opener did *not* follow had its body excerpted into the refusal,
+# `<a href="LOCATION">` included.
+#
+# The oracle for "not followed" is the far end seeing **no request** — never
+# "no Authorization header", which a policy that follows with the credential
+# stripped satisfies while letting a host nobody configured answer a
+# completion. `docs/decisions.md`, 2026-09-13.
+
+REDIRECT = {"code": 302, "location": None, "body": b"", "reason": None,
+            "extra": {}, "stall": False, "seen": []}
+TARGET = {"seen": []}
+
+#: A configured `headers` value, which the stock opener carried across a
+#: redirect beside the key (measured), and which the sentence must not repeat.
+CUSTOM = "custom-header-value-0123456789"
+
+#: Every door into `_request`, by backend kind and method name.
+DOORS = [("openai", "list_models"), ("openai", "complete"), ("openai", "embed"),
+         ("anthropic", "list_models"), ("anthropic", "complete")]
+
+
+def _stage(code, location, body=b'<html><a href="LOCATION">relocated</a></html>',
+           reason=None, extra=None, stall=False):
+    """Stage the redirecting mock: ``code``, a ``Location`` unless ``None``, a body.
+
+    ``stall`` promises more body than it sends and holds the connection — the
+    shape that made a 4xx's `e.read()` time out inside the handler once — so a
+    3xx arm that read the body would wait the whole timeout on it.
+    """
+    REDIRECT.update(code=code, location=location, body=body, reason=reason,
+                    extra=dict(extra or {}), stall=stall)
+    REDIRECT["seen"].clear()
+    TARGET["seen"].clear()
+
+
+def _without_proxies(monkeypatch):
+    """Clear every `*_proxy` variable: `ProxyHandler` turns each one into an
+    `<scheme>_open` on the opener it is built into, so `NO_PROXY=localhost` on a
+    developer's machine would register a `no_open` and fail an exact comparison
+    of the opener's tables (measured by the security-tier review)."""
+    for name in list(os.environ):
+        if name.lower().endswith("_proxy"):
+            monkeypatch.delenv(name)
+
+
+def _port(url):
+    return urllib.parse.urlsplit(url).port
+
+
+def _redirected(url, kind="openai", **extra):
+    """A keyed provider of ``kind`` against the redirecting mock, carrying a custom header."""
+    base = url if kind == "openai" else _bare(url)
+    return build("p", _keyed(base, kind=kind, headers={"X-Custom-Key": CUSTOM}, **extra))
+
+
+class RedirectingHandler(BaseHTTPRequestHandler):
+    """Answers every request with the staged 3xx, and records what it was sent."""
+
+    def log_message(self, *a):
+        pass
+
+    def _answer(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        if n:
+            self.rfile.read(n)
+        REDIRECT["seen"].append({"method": self.command, "path": self.path,
+                                 "auth": self.headers.get("Authorization"),
+                                 "custom": self.headers.get("X-Custom-Key")})
+        body = REDIRECT["body"]
+        self.send_response(REDIRECT["code"], REDIRECT["reason"])
+        if REDIRECT["location"] is not None:
+            self.send_header("Location", REDIRECT["location"])
+        for name, value in REDIRECT["extra"].items():
+            self.send_header(name, value)
+        self.send_header("Content-Type", "text/html")
+        if REDIRECT["stall"]:
+            # Headers out, body never complete: a reader of it waits until the
+            # client's timeout. Longer than any timeout a stalling test sets,
+            # and a threading server, so nobody else waits on this thread.
+            self.send_header("Content-Length", str(len(body) + 100))
+            self.end_headers()
+            self.wfile.write(body)
+            self.wfile.flush()
+            time.sleep(1.5)
+            return
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if body:
+            self.wfile.write(body)
+
+    do_GET = do_POST = _answer
+
+
+class TargetHandler(BaseHTTPRequestHandler):
+    """The far end a followed redirect reaches: a valid reply of every shape, to any method.
+
+    One body satisfies all three readers — a `data` row that is both a model
+    and an embedding, `choices` for the OpenAI completion, `content` for the
+    Anthropic one — so on 3725ed6 a followed redirect *succeeded* here and the
+    call returned this host's words. `TARGET["seen"] == []` is the assertion
+    against that, and it is stronger than "no credential arrived".
+    """
+
+    def log_message(self, *a):
+        pass
+
+    def _answer(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        if n:
+            self.rfile.read(n)
+        TARGET["seen"].append({"method": self.command, "path": self.path,
+                               "auth": self.headers.get("Authorization"),
+                               "x-api-key": self.headers.get("x-api-key"),
+                               "custom": self.headers.get("X-Custom-Key")})
+        body = json.dumps({
+            "data": [{"id": "from-target", "index": 0, "embedding": [0.5, 0.25]}],
+            "choices": [{"message": {"content": "from-target"}}],
+            "content": [{"type": "text", "text": "from-target"}],
+        }).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    do_GET = do_POST = _answer
+
+
+@pytest.fixture(scope="module")
+def redirecting():
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), RedirectingHandler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{httpd.server_address[1]}/v1"
+    httpd.shutdown()
+
+
+@pytest.fixture(scope="module")
+def target():
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), TargetHandler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{httpd.server_address[1]}"
+    httpd.shutdown()
+
+
+@pytest.mark.parametrize("code", [301, 302, 303, 307, 308])
+@pytest.mark.parametrize("kind,call", DOORS)
+def test_a_redirect_is_never_followed_whatever_its_code_or_door(
+        redirecting, target, monkeypatch, kind, call, code):
+    """Acceptance criterion 3, written as "the second mock records no request".
+
+    On 3725ed6 every row failed, for one of two reasons: the listings and the
+    301/302/303 POSTs were followed — the target recorded a request carrying
+    the key and the custom header, and the call *returned* the target's answer,
+    so nothing was raised — and the 307/308 POSTs, which the stock opener
+    refused on its own, excerpted the body into the message.
+    """
+    monkeypatch.setenv("LX_ECHO_KEY", KEY)
+    _stage(code, f"{target}/v1/elsewhere", reason="Relocated REASONTOKEN",
+           extra={"X-Debug": "HDRTOKEN " + KEY})
+    with pytest.raises(ProviderError) as e:
+        _call(_redirected(redirecting, kind), call)
+    said = str(e.value)
+    assert TARGET["seen"] == [], (kind, call, code, TARGET["seen"])
+    assert len(REDIRECT["seen"]) == 1, REDIRECT["seen"]
+    assert f"HTTP {code}" in said and "redirect" in said, said
+    assert f"127.0.0.1:{_port(redirecting)}" in said, "the configured address is named"
+    for piece in (f":{_port(target)}/", "relocated", "REASONTOKEN", "HDRTOKEN", CUSTOM):
+        assert piece not in said, (piece, said)
+    assert _windows(KEY, said) == [] and MARKER not in said, said
+    assert e.value.__cause__ is None and e.value.__context__ is None
+
+
+@pytest.mark.parametrize("call", ["list_models", "complete"])
+@pytest.mark.parametrize("code", list(range(300, 400)))
+def test_no_3xx_code_is_followed_and_every_one_is_refused_the_same_way(
+        redirecting, target, monkeypatch, code, call):
+    """The policy is held by absence — no `http_error_<code>` handler for any
+    code — so this sweeps the whole class, and reinstating a handler for one
+    code fails exactly that row. 304 and the unassigned codes are in it on
+    purpose: the sentence says "the redirect class" and names no member. On
+    3725ed6, 301/302/303/307 were followed (308 on 3.12 as well) and every
+    other row printed the body.
+
+    A GET door and a POST door, since the security-tier review planted a
+    follower that acted only on `305` with `POST` — inside a subclass of
+    `HTTPDefaultErrorHandler`, which the shape test then read as the default —
+    and the sweep over the listing alone let it through.
+    """
+    monkeypatch.setenv("LX_ECHO_KEY", KEY)
+    _stage(code, f"{target}/v1/models", body=b"")
+    with pytest.raises(ProviderError) as e:
+        _call(_redirected(redirecting), call)
+    said = str(e.value)
+    assert TARGET["seen"] == [] and len(REDIRECT["seen"]) == 1
+    assert f"HTTP {code}" in said and "redirect class" in said, said
+    assert e.value.__cause__ is None and e.value.__context__ is None
+
+
+def test_a_stalled_redirect_body_costs_nothing(redirecting, target, monkeypatch):
+    """The 3xx arm reads nothing, and this is what makes that a property
+    rather than a tidiness: a variant that hoisted the body read above the arm
+    kept every sentence identical and every other test green, and a redirecting
+    backend that dribbled its body then cost the whole `timeout` per request —
+    600 s under the shipped `llamacpp` entry (planted and measured by the
+    security-tier review, both interpreters).
+    """
+    monkeypatch.setenv("LX_ECHO_KEY", KEY)
+    _stage(302, f"{target}/v1/models", stall=True)
+    started = time.monotonic()
+    with pytest.raises(ProviderError) as e:
+        _redirected(redirecting, timeout=3).list_models()
+    elapsed = time.monotonic() - started
+    assert "redirect class" in str(e.value), str(e.value)
+    assert elapsed < 1.0, f"{elapsed:.2f}s: the arm waited on a body it must not read"
+    assert TARGET["seen"] == [] and len(REDIRECT["seen"]) == 1
+
+
+@pytest.mark.parametrize("scheme", ["ftp", "file", "data", "gopher"])
+def test_a_redirect_to_another_scheme_opens_nothing_and_names_nothing_of_it(
+        redirecting, monkeypatch, scheme):
+    """Acceptance criterion 4. A listening socket records whether anything
+    connected. On 3725ed6 the `ftp` row accepted a connection — the stock chain
+    has `FTPHandler` and `http_error_302` allows the scheme — and every row
+    printed the body, `Location` and all. "Names no URL" is read as "names
+    nothing that came from the reply": the configured address is `base_url`'s
+    printable form and is named, as every refusal in `_request` names it.
+    """
+    monkeypatch.setenv("LX_ECHO_KEY", KEY)
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    listener.settimeout(0.5)
+    port = listener.getsockname()[1]
+    location = {"ftp": f"ftp://127.0.0.1:{port}/pub/x",
+                "gopher": f"gopher://127.0.0.1:{port}/1x",
+                "file": "file:///C:/Windows/win.ini",
+                "data": "data:text/plain,LOCTOKEN"}[scheme]
+    _stage(302, location)
+    try:
+        for call in ("list_models", "complete"):
+            with pytest.raises(ProviderError) as e:
+                _call(_redirected(redirecting, timeout=2), call)
+            said = str(e.value)
+            assert "redirect" in said, said
+            for piece in (f":{port}/", "win.ini", "LOCTOKEN", "relocated", f"{scheme}:"):
+                assert piece not in said, (scheme, piece, said)
+        with pytest.raises((socket.timeout, TimeoutError)):
+            listener.accept()
+    finally:
+        listener.close()
+    assert len(REDIRECT["seen"]) == 2
+
+
+@pytest.mark.parametrize("location", [
+    None, "", " ", "/v1/models", "models2", "http://[", "http://[::1",
+    "//{target}/v1/models",
+    "http://user:LOCSECRET-0123456789@{target}/v1/models?token=QTOKEN-0123456789",
+    "\x01x",
+])
+def test_a_location_is_never_parsed_whatever_its_shape(
+        redirecting, target, monkeypatch, location):
+    """One request, one sentence, nothing of the header in it. On 3725ed6 each
+    shape failed its own way: a missing header printed the body; an empty or a
+    relative one re-joined to the origin and cost five requests; `http://[`
+    raised `ValueError` inside `http_error_302` and reached the reader as
+    "could not be requested (ValueError). Check `base_url`" — blaming the one
+    field that was right; the userinfo one died at `getaddrinfo` as "cannot
+    reach"; `\\x01x` was followed.
+    """
+    monkeypatch.setenv("LX_ECHO_KEY", KEY)
+    host = f"127.0.0.1:{_port(target)}"
+    _stage(302, None if location is None else location.replace("{target}", host))
+    with pytest.raises(ProviderError) as e:
+        _redirected(redirecting).list_models()
+    said = str(e.value)
+    assert len(REDIRECT["seen"]) == 1 and TARGET["seen"] == []
+    assert "redirect class" in said, said
+    assert "ValueError" not in said and "cannot reach" not in said, said
+    for piece in ("LOCSECRET", "QTOKEN", "relocated", f":{_port(target)}/"):
+        assert piece not in said, (location, piece, said)
+    assert e.value.__cause__ is None and e.value.__context__ is None
+
+
+@pytest.mark.parametrize("call,code", [("complete", 307), ("list_models", 300), ("embed", 308)])
+def test_a_redirect_refusal_shows_nothing_of_the_reply(
+        redirecting, target, monkeypatch, call, code):
+    """Invariant 6's red line for this package, and the defect that was already
+    live: these three rows are ones the stock opener did not follow either
+    (308 on 3.9), and on 3725ed6 each printed `HTTP 3xx — <html><a
+    href="…BODYTOKEN…">`. Nothing is read now — not the body, not a header,
+    not the reason phrase — so the marker is absent as well: there was nothing
+    to redact.
+    """
+    monkeypatch.setenv("LX_ECHO_KEY", KEY)
+    _stage(code, f"{target}/v1/LOCTOKEN",
+           body=b'<html><a href="http://127.0.0.1:9/secret-path?tok=BODYTOKEN">relocated</a></html>',
+           reason="Relocated REASONTOKEN",
+           extra={"Retry-After": "0", "X-Debug": "HDRTOKEN " + KEY})
+    with pytest.raises(ProviderError) as e:
+        _call(_redirected(redirecting), call)
+    said = str(e.value)
+    formatted = "".join(traceback.format_exception(
+        type(e.value), e.value, e.value.__traceback__))
+    for token in ("LOCTOKEN", "BODYTOKEN", "REASONTOKEN", "HDRTOKEN", "secret-path", "relocated"):
+        assert token not in said and token not in formatted, (token, formatted)
+    assert MARKER not in said and _windows(KEY, formatted) == [], formatted
+    assert TARGET["seen"] == [] and len(REDIRECT["seen"]) == 1
+
+
+def test_a_3xx_is_neither_retried_nor_slept_on(redirecting, target, monkeypatch):
+    """A 3xx is the server's settled answer for this URL, so the same request
+    gets the same answer: one attempt, no sleep, `Retry-After` ignored, and
+    `_RETRYABLE` never holds a member of the class. On 3725ed6 the POST was
+    followed and the target's answer returned.
+    """
+    waits = []
+    monkeypatch.setattr(base_module.time, "sleep", waits.append)
+    monkeypatch.setenv("LX_ECHO_KEY", KEY)
+    _stage(302, f"{target}/v1/chat/completions", extra={"Retry-After": "0"})
+    with pytest.raises(ProviderError):
+        _redirected(redirecting, retries=3).complete("s", "u")
+    assert len(REDIRECT["seen"]) == 1 and waits == [] and TARGET["seen"] == []
+    assert not any(300 <= c < 400 for c in base_module._RETRYABLE)
+
+
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_a_proxy_that_redirects_sends_nothing_where_it_pointed(
+        proxy, target, monkeypatch, scheme):
+    """Two shapes measured on 3725ed6, both closed by there being no second hop.
+
+    `http`: the proxy answers 302 to an origin listed in `no_proxy`, and that
+    origin received `Authorization` *and* the proxy's own `Proxy-Authorization`
+    — `proxy_open` adds it with `add_header`, so `redirect_request` copied it
+    to a host that is not the proxy. `https`: the 302 points at an https
+    address, whose hop goes through `https_proxy` as a `CONNECT` carrying a
+    *second* credential the provider never saw — `_note_transport` reads the
+    first hop's `Request`, and a 407 quoting the second printed fourteen
+    characters of it.
+    """
+    secret_a = "proxy-secret-a-" + "0123456789" * 2
+    secret_b = "proxy-secret-b-" + "9876543210" * 2
+    basic_a = _through_proxy(monkeypatch, proxy, "http", secret_a)
+    basic_b = "Basic " + base64.b64encode(f"user:{secret_b}".encode()).decode("ascii")
+    monkeypatch.setenv("https_proxy", f"http://user:{secret_b}@127.0.0.1:{proxy}")
+    monkeypatch.setenv("no_proxy", f"127.0.0.1:{_port(target)}")
+    pointed = (f"{target}/v1/models" if scheme == "http"
+               else f"https://127.0.0.1:{_port(target)}/v1/models")
+    PROXY["answer"] = lambda h: (302, b"", None)
+    PROXY["extra"] = {"Location": pointed}
+    TARGET["seen"].clear()
+    monkeypatch.setenv("LX_ECHO_KEY", KEY)
+    with pytest.raises(ProviderError) as e:
+        build("p", _keyed("http://127.0.0.1:1/v1")).list_models()
+    said = str(e.value)
+    assert _proxy_saw("GET", "http://127.0.0.1:1/v1/models")["authorized"], (
+        "the first hop must have gone through the proxy carrying its credential")
+    assert TARGET["seen"] == [], TARGET["seen"]
+    assert not any(s["method"] == "CONNECT" for s in PROXY["seen"]), PROXY["seen"]
+    assert "redirect" in said and "HTTP 302" in said, said
+    assert _windows(basic_a, said) == [] and _windows(basic_b, said) == [], said
+    assert secret_b not in said and f":{_port(target)}/" not in said, said
+    assert _windows(KEY, said) == [], said
+
+
+def test_the_opener_is_built_once_per_process_and_has_nothing_to_follow_with(
+        redirecting, target, monkeypatch):
+    """Two properties of `_OPENER`, read at runtime rather than by `ast`.
+
+    Built once: on 3.12 `HTTPSHandler()` loads the system certificate store
+    eagerly — 330 ms on Windows, measured — and a variant that built the
+    opener per request ran this file in 61 s where the cached one took 3 s.
+    Nothing to follow with: no `HTTPRedirectHandler` among its handlers, no
+    `http_error_<code>` registered for any code, and no `ftp`/`file`/`data`
+    opener — the absence the whole policy rests on, checked on the object.
+    """
+    import http.client
+
+    _without_proxies(monkeypatch)
+    monkeypatch.setattr(base_module, "_OPENER", None)
+    monkeypatch.setenv("LX_ECHO_KEY", KEY)
+    _stage(302, f"{target}/v1/models")
+    first = _redirected(redirecting)
+    second = build("p", _keyed(redirecting, env=""))
+    for p in (first, second, first):
+        with pytest.raises(ProviderError):
+            p.list_models()
+    opener = base_module._OPENER
+    assert opener is not None
+    with pytest.raises(ProviderError):
+        second.complete("s", "u")
+    assert base_module._OPENER is opener, "rebuilt — that is 330 ms per request on 3.12"
+    # Exact sets, compared by `type` and never by `isinstance`: the review
+    # planted a follower inside a *subclass* of `HTTPDefaultErrorHandler` that
+    # acted on one code and one method, and a subset test read it as the
+    # default. `<=` was lazy the other way — an opener missing `HTTPSHandler`
+    # satisfied it — so the schemes are an equality too.
+    # No `ProxyHandler` in the set: with no `*_proxy` variable it registers no
+    # `<scheme>_open`, and `add_handler` lists only a handler that registered
+    # something (read, `OpenerDirector.add_handler`). It is constructed all the
+    # same, and the proxy tests above are what show it working.
+    expected = {urllib.request.UnknownHandler, urllib.request.HTTPHandler,
+                urllib.request.HTTPDefaultErrorHandler, urllib.request.HTTPErrorProcessor}
+    schemes = {"http", "unknown"}
+    if hasattr(http.client, "HTTPSConnection"):
+        expected.add(urllib.request.HTTPSHandler)
+        schemes.add("https")
+    assert {type(h) for h in opener.handlers} == expected, opener.handlers
+    assert set(opener.handle_open) == schemes, sorted(opener.handle_open)
+    assert opener.handle_error, "the positive control: the default error handler is registered"
+    for protocol, table in opener.handle_error.items():
+        assert set(table) == {"default"}, (protocol, sorted(table, key=str))
+    for protocol, processors in opener.process_response.items():
+        assert [type(p) for p in processors] == [urllib.request.HTTPErrorProcessor], protocol
+    for protocol, processors in opener.process_request.items():
+        assert {type(p) for p in processors} <= expected, protocol
+
+
+def test_thirty_two_threads_released_into_their_first_request_build_one_opener(
+        redirecting, target, monkeypatch):
+    """The lock around the build is a cost guard and nothing else observable —
+    removing it changes no sentence and no outcome — so it is pinned by
+    counting. Without it, 32 threads released together built 32 openers on
+    3.12 and up to 17 distinct ones were observed in use (measured by the
+    security-tier review, 50 rounds); each is a 330 ms TLS-context build.
+
+    Counted by wrapping `OpenerDirector.__init__`, never by mocking the
+    transport. Only this test's own threads are counted: a job thread another
+    test file leaked (HANDOFF-079) could build the one opener first, in which
+    case these threads build none — so the assertion is "at most one of ours",
+    which the unlocked build still fails by a wide margin.
+    """
+    calls = []
+    original = urllib.request.OpenerDirector.__init__
+
+    def counting(self, *a, **k):
+        calls.append(threading.get_ident())
+        original(self, *a, **k)
+
+    monkeypatch.setattr(urllib.request.OpenerDirector, "__init__", counting)
+    _without_proxies(monkeypatch)
+    monkeypatch.setattr(base_module, "_OPENER", None)
+    monkeypatch.setenv("LX_ECHO_KEY", KEY)
+    _stage(302, f"{target}/v1/models")
+    p = _redirected(redirecting)
+    barrier = threading.Barrier(32)
+    outcomes = []
+
+    def go():
+        barrier.wait()
+        try:
+            p.list_models()
+        except ProviderError as e:
+            outcomes.append("redirect class" in str(e))
+        else:
+            outcomes.append(False)
+
+    threads = [threading.Thread(target=go) for _ in range(32)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    mine = {t.ident for t in threads}
+    assert outcomes == [True] * 32, outcomes
+    assert base_module._OPENER is not None
+    assert len([c for c in calls if c in mine]) <= 1, len(calls)
+
+
 # ── the guards: what the runtime tests cannot see, pinned by `ast` ─────────
 #
 # Parsed, never grepped — a guard that matched literal text was defeated by a
@@ -3786,3 +4281,38 @@ def test_the_transport_is_imported_inside_request_and_nowhere_else():
         f"byte enters through that one function; a second door is a second place "
         f"for a credential to reach a reader.")
     assert {os.path.basename(path) for path, _n, _s in hits} == {"base.py"}
+
+
+#: What `src/` may not name: the stock opener's three entry points, and the four
+#: handlers `_OPENER` leaves out. `CacheFTPHandler` is `FTPHandler`'s subclass.
+_FOLLOWERS = ("urlopen", "build_opener", "install_opener", "HTTPRedirectHandler",
+              "FTPHandler", "CacheFTPHandler", "FileHandler", "DataHandler")
+
+
+def test_nothing_in_src_names_the_stock_opener_or_a_handler_that_follows():
+    """G4 — absence. The redirect policy is held by there being no handler
+    registered under `http_error_<code>`, so the guard pins that no module
+    under `src/scriptorium/` names `urlopen`, `build_opener`, `install_opener`
+    or any of the four handlers `_OPENER` leaves out, and that the one
+    `OpenerDirector` is assembled inside `Provider._request` — the function the
+    transport guard above already confines the imports to.
+
+    What it cannot see: a handler class defined here with an `http_error_302`
+    method of its own, which `test_the_opener_is_built_once_…` catches at
+    runtime by reading `handle_error`; and an opener reached through
+    `importlib`, which the transport guard cannot see either.
+    """
+    named, directors = [], []
+    for path, tree in _package_modules():
+        for node, scope in _scoped(tree):
+            name = (node.id if isinstance(node, ast.Name)
+                    else node.attr if isinstance(node, ast.Attribute) else None)
+            if name in _FOLLOWERS:
+                named.append(_where(path, node))
+            elif name == "OpenerDirector":
+                directors.append((_where(path, node), scope))
+    assert named == [], f"{named} name a way to follow a redirect or to open another scheme"
+    assert directors, "the positive control: `Provider._request` assembles an OpenerDirector"
+    outside = [where for where, scope in directors
+               if not ("Provider" in scope and "_request" in scope)]
+    assert outside == [], outside

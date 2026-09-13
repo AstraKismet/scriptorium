@@ -25,6 +25,29 @@ from .errors import ProviderError
 # what fails if that changes. `urllib.parse` is not the transport — `config`
 # already loads it for `printable_url` — and `_spellings` needs its `quote`.
 
+#: The opener every request goes through, and it is not `urllib`'s stock one.
+#: Assembled inside `Provider._request` — the one place the transport is
+#: imported — from the handlers `build_opener` installs **minus four**:
+#: `HTTPRedirectHandler`, `FTPHandler`, `FileHandler` and `DataHandler`. With
+#: no handler registered under `http_error_<code>`, every 3xx falls to
+#: `HTTPDefaultErrorHandler` and is an `HTTPError` on the first hop, whatever
+#: the code, the method or the interpreter — so a `Location` is never parsed,
+#: never joined, never opened, and the credential the request carried goes to
+#: the address `base_url` names and to no other. That is the redirect policy,
+#: and it is held by absence rather than by a code table: 3.9 and 3.12 disagree
+#: about 308 and agree about a handler that is not there. `docs/decisions.md`,
+#: 2026-09-13.
+#:
+#: Built once per process, like the stock `_opener` it replaces, and for the
+#: same two reasons: `ProxyHandler` reads the proxy environment at construction,
+#: and on 3.12 `HTTPSHandler()` builds its TLS context eagerly — 330 ms on
+#: Windows, measured, which per request would be eight seconds on a batch of
+#: twenty-five. `None` until the first request; a test that changes the proxy
+#: environment sets it back to `None`, which is what it used to do to
+#: `urllib.request._opener`.
+_OPENER = None
+_OPENER_LOCK = threading.Lock()
+
 # Transient by contract: a timeout, a conflict, "too early", a rate limit, and
 # the 5xx family a gateway emits while a local runtime is still loading weights.
 _RETRYABLE = (408, 409, 425, 429, 500, 502, 503, 504)
@@ -1153,7 +1176,7 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
         printed thirty-five windows of it (measured). What is left today is
         exactly `Proxy-authorization`, built from `http_proxy`/`https_proxy`
         userinfo: a proxy answering 407 quoted it back into the `HTTPError`
-        branch, and after `urlopen` fails `req.headers` still carries it.
+        branch, and after the open fails `req.headers` still carries it.
         `req.headers` and not `header_items()`: the unredirected half holds
         `Host` and `Content-length`, which are not secrets, and a test asserts
         the host survives the message.
@@ -1248,6 +1271,14 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
         branch already says "we cannot tell you a status code, only that the URL
         has no version segment", which is true of that reply as much as of a
         connection that never opened.
+
+        **The 3xx arm passes `None` too**, since 2026-09-13, and it is the same
+        case: a redirect says the configured address is not the one that
+        answers, and whether that is a missing version segment is exactly what
+        the hedged sentence offers. It is a second possible cause beside the
+        one the arm's own sentence gives (an http→https upgrade, a moved host),
+        and it stays hedged because the one way to know — reading where the
+        `Location` points — is what the policy refuses to do.
         """
         if code is not None and code != 404:
             return ""
@@ -1346,6 +1377,13 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
         command `docs/windows-setup.md` sells as the quick way to check that the
         server is answering at all. So it is bounded here, and only downward: a
         project that deliberately set a *shorter* timeout keeps it.
+
+        The bound is on the request, which since 2026-09-13 is one hop: the
+        stock opener re-applied `timeout` to every redirect it followed, up to
+        ten, so "bounded" was true of each hop and false of the call (read,
+        `HTTPRedirectHandler.http_error_302`, `parent.open(new,
+        timeout=req.timeout)`). `_OPENER` follows nothing, so it is true of the
+        call.
         """
         return self._request(url, headers, payload=None, method="GET",
                              timeout=min(self.timeout, _LIST_TIMEOUT),
@@ -1395,19 +1433,24 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
     def _request(self, url, headers, payload=None, method="POST",
                  timeout=None, retries=None, max_bytes=None, what=None,
                  advice=None):
-        # **Only http(s) leaves this function on the first hop.** `urllib`'s
-        # stock opener also speaks `file:`, `ftp:` and `data:`, so a hand-edited
-        # `base_url` of `file:///…` made the one endpoint a browser gesture can
-        # reach into a local-file read whose content comes back inside the
-        # wrong-shape error message. No configuration this project writes can
-        # produce one — `_field_base_url` refuses an empty netloc — so this
-        # costs nothing and closes the hand-edited case. A plain prefix test
-        # rather than `urlsplit`, because that parser raises on some of the
-        # inputs this is here to refuse. What it does not close: a backend
-        # answering a redirect, which urllib follows to any scheme it speaks
-        # and with `Authorization` still attached — that is
-        # `docs/contracts/workbench-http.md` divergence (33), open, and its own
-        # package.
+        # **Only http(s) leaves this function.** `urllib`'s stock opener also
+        # speaks `file:`, `ftp:` and `data:`, so a hand-edited `base_url` of
+        # `file:///…` made the one endpoint a browser gesture can reach into a
+        # local-file read whose content comes back inside the wrong-shape error
+        # message. No configuration this project writes can produce one —
+        # `_field_base_url` refuses an empty netloc — so this costs nothing and
+        # closes the hand-edited case. A plain prefix test rather than
+        # `urlsplit`, because that parser raises on some of the inputs this is
+        # here to refuse. It is checked before the transport is imported, so a
+        # refused scheme costs no import either.
+        #
+        # Until 2026-09-13 it held for the first hop only: the stock opener
+        # followed a redirect to any scheme it spoke, with `Authorization`
+        # attached, so a `302` to `ftp://…` opened an FTP connection and a
+        # `302` to another host moved the key there (measured, 3.9 and 3.12;
+        # `docs/contracts/workbench-http.md` divergence (33)). There is no
+        # second hop now — see `_OPENER` — so this check is the whole of the
+        # scheme rule rather than the first half of one.
         if not str(url).lower().startswith(("http://", "https://")):
             raise self._refusal(
                 f"{self.name}: base_url must be an http:// or https:// address. This one "
@@ -1465,6 +1508,30 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
         import urllib.error
         import urllib.request
 
+        # The opener is assembled here and nowhere else — see `_OPENER` for
+        # what is left out of it and why. The five handlers named are
+        # `build_opener`'s own default list with the four it must not have
+        # removed; `HTTPSHandler` is conditional exactly as it is there, on the
+        # interpreter having been built with `ssl`. Double-checked under the
+        # lock so that thirty-two threads released into their first request
+        # build one opener rather than thirty-two.
+        global _OPENER
+        opener = _OPENER
+        if opener is None:
+            with _OPENER_LOCK:
+                opener = _OPENER
+                if opener is None:
+                    opener = urllib.request.OpenerDirector()
+                    for handler in (urllib.request.ProxyHandler(),
+                                    urllib.request.UnknownHandler(),
+                                    urllib.request.HTTPHandler(),
+                                    urllib.request.HTTPDefaultErrorHandler(),
+                                    urllib.request.HTTPErrorProcessor()):
+                        opener.add_handler(handler)
+                    if hasattr(http.client, "HTTPSConnection"):
+                        opener.add_handler(urllib.request.HTTPSHandler())
+                    _OPENER = opener
+
         body = json.dumps(payload).encode("utf-8") if payload is not None else None
         timeout = self.timeout if timeout is None else timeout
         retries = self.retries if retries is None else retries
@@ -1521,10 +1588,14 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
                     req.add_header(k, v)
                 # `_note_transport` in a `finally`, so it runs before any
                 # handler below reads the reply: urllib adds its own headers to
-                # `req` inside `urlopen`, before the connection, and a message
-                # built from the body has to know them by then.
+                # `req` inside `open`, before the connection, and a message
+                # built from the body has to know them by then. One `Request`
+                # per attempt is also what makes that record complete: the
+                # stock opener built a second one for a redirect's next hop,
+                # which this function never saw (measured: a second proxy's
+                # credential, added there, quoted back unredacted).
                 try:
-                    with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    with opener.open(req, timeout=timeout) as resp:
                         # Bounded for a listing, unbounded for a completion. One
                         # extra byte is read so that "exactly at the cap" and
                         # "over it" are distinguishable without a second call.
@@ -1616,18 +1687,46 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
                 # `__context__` (measured). The message says the body could not
                 # be read, and shows nothing of it.
                 code = e.code
-                hdrs = e.headers
-                retry_after = hdrs.get("Retry-After") if hdrs is not None else None
-                try:
-                    text = e.read(_ERROR_BODY_BYTES).decode("utf-8", "replace")
-                    unread = ""
-                except (OSError, http.client.HTTPException):
-                    text, unread = "", "(the body could not be read)"
-                last = self._refusal(
-                    f"{self.name}: HTTP {code} — {self._excerpt(text, 500)}{unread}"
-                    f"{self._url_hint(code, url)}")
-                if code not in _RETRYABLE:
-                    fatal = last
+                if 300 <= code < 400:
+                    # **A redirect is refused whole, and nothing of the reply
+                    # is read: not the body, not a header.** The opener has
+                    # nothing to follow one with (see `_OPENER`), so every 3xx
+                    # arrives here on the first hop; what is decided here is
+                    # only what the reader is told. The `Location` is a
+                    # backend's own text and can carry a token of its own, and
+                    # a 3xx page puts the same address in its body as
+                    # `<a href>` — the branch below excerpted that body, so the
+                    # refusal repeated the address on every code the stock
+                    # opener did not follow (measured on the parent commit,
+                    # 3.9 and 3.12). Nor is a class member named: 304 gets the
+                    # same sentence, because "a reply in the redirect class"
+                    # is true of it and a rule that listed codes would be the
+                    # table this policy exists not to have. Fatal, never
+                    # retried: a 3xx is the server's settled answer for this
+                    # URL, and `_RETRYABLE` has never held one — a test pins
+                    # that it never will.
+                    fatal = self._refusal(
+                        f"{self.name}: {printable_url(url)} answered {what or 'this request'} "
+                        f"with HTTP {code}, a reply in the redirect class. This client "
+                        f"follows none — a redirect would carry the credential to an "
+                        f"address nobody configured — and where it pointed is not "
+                        f"repeated here. Set base_url to the address that answers "
+                        f"directly: the https address if the server upgrades http, or "
+                        f"the host it moved to; a client that shows response headers "
+                        f"shows it as `Location`.{self._url_hint(None, url)}")
+                else:
+                    hdrs = e.headers
+                    retry_after = hdrs.get("Retry-After") if hdrs is not None else None
+                    try:
+                        text = e.read(_ERROR_BODY_BYTES).decode("utf-8", "replace")
+                        unread = ""
+                    except (OSError, http.client.HTTPException):
+                        text, unread = "", "(the body could not be read)"
+                    last = self._refusal(
+                        f"{self.name}: HTTP {code} — {self._excerpt(text, 500)}{unread}"
+                        f"{self._url_hint(code, url)}")
+                    if code not in _RETRYABLE:
+                        fatal = last
             except urllib.error.URLError as e:
                 # `e.reason` can be a remote server's own bytes: on a refused
                 # `CONNECT` through a proxy it is `Tunnel connection failed:

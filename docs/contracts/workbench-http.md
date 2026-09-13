@@ -437,7 +437,9 @@ string.
 
 Side effects: **one outbound HTTP request** to the configured backend, carrying
 the `Authorization` header built from that provider's `api_key_env` when one is
-set. Nothing on disk. The budget is `min(timeout, 30) s` per attempt with at
+set — and one hop: since 2026-09-13 the transport follows no redirect, so the
+request reaches the configured address or is refused there (divergence (33),
+closed). Nothing on disk. The budget is `min(timeout, 30) s` per attempt with at
 most one retry, plus at most 20 s of backoff a slow backend can ask for with
 `Retry-After` — so a hung backend occupies one server thread for up to about 80
 seconds. That bound is on a backend that stops *answering*; one that answers
@@ -1622,7 +1624,8 @@ absence closes.
   that it is. What bounds it: the destination comes only from the project's own
   configuration, because `providers.build` refuses a `?provider=` that is not
   already in the file, so the parameter chooses among configured backends and
-  cannot supply an address; the effect is a bounded read against a backend the
+  cannot supply an address — and since 2026-09-13 the transport follows no
+  redirect, so a backend cannot supply one either (divergence (33), closed); the effect is a bounded read against a backend the
   person configured, costing no tokens; and the reply is unreadable to a
   cross-origin script, because no `Access-Control-Allow-*` header is emitted
   anywhere. What is *not* bounded away is request amplification — a page that
@@ -1649,8 +1652,9 @@ absence closes.
   segment that no longer exists, and does not report the skip among `refused`.
   See `docs/decisions.md`, 2026-09-10.
 - **No credential ever appears on this surface, and that includes free text.** An
-  API key is read from the environment and sent only to its own provider; it is
-  never stored, never logged and never in a response. A `base_url` is shown in
+  API key is read from the environment and sent only to its own provider — and,
+  since 2026-09-13, only to the address configured for it, because the transport
+  follows no redirect; it is never stored, never logged and never in a response. A `base_url` is shown in
   `config.printable_url` form — userinfo stripped, query replaced — everywhere it
   can be seen, which is `providers[].base_url` *and* the `log` and `error` fields
   of `/api/job`, where a provider's own description and its transport failures
@@ -2486,7 +2490,8 @@ change that recorded it.
     the render unmasks it against the map it was written in. The measured cases
     that do write one all carry an id neither map explains.
 
-Appended 2026-09-01 by the package that added `GET /api/models`. Both open.
+Appended 2026-09-01 by the package that added `GET /api/models`. (32) is open;
+(33) closed on 2026-09-13.
 
 32. **The wire degrades where the command exits.** `GET /api/models` answers
     `200` with `error` when a backend cannot be reached, still carrying
@@ -2530,6 +2535,24 @@ Appended 2026-09-01 by the package that added `GET /api/models`. Both open.
     which has no legitimate reason to follow one — and changing what every
     request in the project does is its own package with its own tests. Found by
     the security-tier pass over this endpoint's design, 2026-09-01.
+
+    **Closed 2026-09-13.** `Provider._request` opens every request through an
+    `OpenerDirector` assembled without `HTTPRedirectHandler` — and without the
+    `ftp:`, `file:` and `data:` handlers — so a 3xx is an `HTTPError` on the
+    first hop whatever its code, the method or the interpreter, and the
+    credential goes to the address `base_url` names and to no other. The refusal,
+    which is what this endpoint's `error` carries for a redirecting backend at
+    `200` per (32), names the configured address and the status code and reads
+    nothing of the reply: not the `Location`, and not the body, which the old
+    `HTTPError` branch excerpted — with the same address in its `<a href>` — on
+    every 3xx the stock opener did not follow. No version move: `error` is free
+    text and `models` was already `[]` on a failed listing. Neither repair this
+    entry named was taken. Dropping `Authorization` on a change of host still
+    lets the redirected host answer, and measured, it answered the completion
+    door with a completion that `lx commit` would have banked; and the two
+    sentences above had it backwards — the listing was the one door on which
+    following ever succeeded, and the completions were the half that never did
+    and always leaked. `docs/decisions.md`, 2026-09-13.
 
 34. **`POST /api/extract` now refuses a `src` that collides by identity with
     another tracked document — a `400` the request/response tables above do not

@@ -253,6 +253,24 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    local runtimes — is never redacted, and no message says so.
    `docs/decisions.md`, 2026-09-11.
 
+   **A redirect is refused, on every door, and the transport has nothing to
+   follow one with.** Since 2026-09-13. `urllib`'s stock opener followed a 3xx
+   with `Authorization`, `x-api-key` and every configured `headers` value copied
+   to whatever host the `Location` named — a POST re-issued as a bodiless GET,
+   an `ftp://` target opened, an empty `Location` costing five credential-bearing
+   requests — and 3.9 and 3.12 disagreed about 308. `Provider._request` now opens
+   every request through an `OpenerDirector` assembled once per process without
+   `HTTPRedirectHandler`, `FTPHandler`, `FileHandler` and `DataHandler`, so every
+   3xx is an `HTTPError` on the first hop whatever its code, and the policy is
+   held by absence rather than by a code table. The refusal names the configured
+   address and the status code and reads nothing of the reply — not the body,
+   whose `<a href>` the old branch excerpted on every 3xx the stock opener did
+   not follow, and not a header — because a `Location` is a backend's own text
+   and can carry a token of its own. Following with the credential stripped was
+   rejected on a measurement: a host nobody configured then answers a completion
+   that `lx commit` banks. `docs/contracts/workbench-http.md` divergence (33),
+   closed; `docs/decisions.md`, 2026-09-13.
+
    A rule is enforced where a field **lands**. A key may not be addressed *inside*
    something that holds one value, whether the field table says so or the merged
    configuration's own type does: without that, `providers.new.api_key_env.x`
@@ -391,16 +409,19 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    endpoint and the only **GET** that leaves the machine. Not the only endpoint:
    `POST /api/translate` has always reached a backend and carries the document
    text with the credential, which is a strictly larger exposure. What is new is
-   that a *read* does it. Both are **open** and neither is leaked logic.
+   that a *read* does it. (32) is **open** and (33) **closed on 2026-09-13**;
+   neither is leaked logic.
    (32) is the shape this invariant usually catches, arriving honestly: the wire
    answers `200` with `error` where `lx models` exits 2, because the endpoint
    feeds a control that must degrade rather than block and a terminal has no such
    control — the listing itself is `cli.do_models` on both surfaces, and what
-   lives only in the server is the degradation policy. (33) is not this
-   invariant's at all and is recorded there because that is where a reader will
-   look: `urllib` keeps `Authorization` across a redirect to another host, so a
-   backend answering `302` moves the credential. It predates the endpoint and
-   lands in the transport every completion shares, so it is its own package.
+   lives only in the server is the degradation policy. (33) was not this
+   invariant's at all and was recorded there because that is where a reader would
+   look: `urllib`'s stock opener kept `Authorization` across a redirect to another
+   host, so a backend answering `302` moved the credential. It predated the
+   endpoint and landed in the transport every completion shares, which is why it
+   closed as its own package — see invariant 6's paragraph on redirects, and
+   `docs/decisions.md`, 2026-09-13.
    Two divergences on one endpoint is also the argument for the endpoint's own
    section being written before it shipped rather than after.
    `contract_version` moved to **2** on 2026-08-14, once, carrying five items: the `candidates` → `untracked` rename,
@@ -569,7 +590,7 @@ Node — see the invariant below.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 2559 collected, no network. Four are
+python -m pytest -q                 # 2810 collected, no network. Four are
                                     #   conditional on three different things, so
                                     #   which two skip is a property of the machine
                                     #   AND the account: one is POSIX-only, one
@@ -1593,7 +1614,7 @@ own.
 - Fuzzy matches are advisory. **They are never applied automatically** — a fuzzy
   hit differs in its placeholder set by definition.
 - Tests use no network. Providers are exercised against a mock HTTP server in
-  `tests/test_provider.py` — extend it rather than mocking `urlopen`.
+  `tests/test_provider.py` — extend it rather than mocking the transport.
 - All tracked documentation is in English. `README.zh-TW.md` is the one
   translation, kept in step with `README.md`.
 
