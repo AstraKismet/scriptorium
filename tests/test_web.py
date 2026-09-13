@@ -16,6 +16,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+import jobwait  # noqa: E402
 import scriptorium.cli as cli  # noqa: E402
 import statedb  # noqa: E402
 from scriptorium import translate as translate_mod  # noqa: E402
@@ -908,18 +909,25 @@ def test_the_endpoint_selects_what_the_cli_selects(base, tmp_path, monkeypatch,
     calls the code under test moves with it and passes for a mutant that breaks
     both surfaces at once.
 
-    The run itself never reaches a network — every selected segment is banked or
-    refused inside the job thread against no provider, and this asserts only the
-    number the request answered with.
+    Stubbed and waited for even though only `total` is asserted. `total` is
+    answered before the job thread runs, and that thread does build a provider
+    and send the selected segments to it — this docstring used to say the run
+    never reached a network, and every mode that selects something was measured
+    dialling `localhost:11434` from some later test. Stubbing alone is not
+    enough either: `monkeypatch` undoes the stub when the test returns, before
+    the thread reads it.
     """
+    _no_network(monkeypatch)
     _translate_project(base, tmp_path, monkeypatch)
     code, body = _post(base, "/api/translate", {"src": "d.md", "lang": "zh-TW",
                                                 "mode": mode})
     assert code == 200
     assert json.loads(body)["total"] == len(want)
+    _finish(base, json.loads(body)["id"])
 
 
 def test_ids_outrank_the_mode_on_the_wire_too(base, tmp_path, monkeypatch):
+    _no_network(monkeypatch)
     ids = _translate_project(base, tmp_path, monkeypatch)
     body = json.loads(_post(base, "/api/translate", {
         "src": "d.md", "lang": "zh-TW", "mode": "polish", "ids": [ids[0]]})[1])
@@ -927,12 +935,14 @@ def test_ids_outrank_the_mode_on_the_wire_too(base, tmp_path, monkeypatch):
     # a heading *and* a person's wording. Naming an id is a person pointing at a
     # segment, so it outranks both exclusions; the write still refuses it.
     assert body["total"] == 1
+    assert _finish(base, body["id"])["refused"] == [ids[0]], "the write must still refuse it"
     # An empty array is falsy and falls through to the mode, which the contract
     # states in as many words. `polish` offers nothing on a document written by
     # hand, which is the point of the parametrized test above.
     body = json.loads(_post(base, "/api/translate", {
         "src": "d.md", "lang": "zh-TW", "mode": "polish", "ids": []})[1])
     assert body["total"] == 0
+    _finish(base, body["id"])
 
 
 def test_translate_reports_the_route_it_resolved(base, tmp_path, monkeypatch):
@@ -948,6 +958,7 @@ def test_translate_reports_the_route_it_resolved(base, tmp_path, monkeypatch):
     nowhere = {"src": "d.md", "lang": "zh-TW", "ids": ["no-such-segment"]}
 
     body = json.loads(_post(base, "/api/translate", nowhere)[1])
+    _finish(base, body["id"])
     assert body["total"] == 0
     assert body["route"] == {
         "provider": "local",
@@ -955,15 +966,18 @@ def test_translate_reports_the_route_it_resolved(base, tmp_path, monkeypatch):
 
     # The request's own model outranks the routing entry's and the provider's.
     body = json.loads(_post(base, "/api/translate", {**nowhere, "model": "x:7b"})[1])
+    _finish(base, body["id"])
     assert body["route"] == {"provider": "local", "model": "x:7b"}
 
     # A provider naming a different backend drops the entry's model, because a
     # model id belongs to the backend that serves it — and the caller's own
     # survives, because that one was typed for this run and this provider.
     body = json.loads(_post(base, "/api/translate", {**nowhere, "provider": "openai"})[1])
+    _finish(base, body["id"])
     assert body["route"]["provider"] == "openai"
     body = json.loads(_post(base, "/api/translate",
                             {**nowhere, "provider": "openai", "model": "x:7b"})[1])
+    _finish(base, body["id"])
     assert body["route"] == {"provider": "openai", "model": "x:7b"}
 
 
@@ -983,6 +997,7 @@ def test_a_malformed_routing_block_is_reported_in_the_route_not_raised(
                        {"src": "d.md", "lang": "zh-TW", "ids": ["no-such-segment"]})
     assert code == 200, "a malformed routing entry must not fail the request"
     assert json.loads(body)["route"]["error"]
+    _finish(base, json.loads(body)["id"])
 
 
 # ── the job table ──────────────────────────────────────────────────────────
@@ -1250,17 +1265,19 @@ class _Echoing:
 
 
 def _no_network(monkeypatch):
-    """Every test below starts a real job, so every one of them needs this.
+    """A job that selects anything needs this, and `tests/conftest.py` checks it.
 
     Not a nicety: `POST /api/translate` returns the moment the thread is
     spawned, so a test asserting only on `total` still leaves a run dialling the
-    configured backend. Against a dead port that is a batch failure followed by
-    `translate.retry_one` for **every segment in the batch**, each with its own
-    retries and backoff — minutes of daemon thread per job, holding the SQLite
-    file open under `tmp_path` while pytest tries to remove it. Measured while
-    writing this file: one twenty-segment test did not finish in three minutes.
-    `AGENTS.md` says tests use no network, and this is what that costs when it
-    is forgotten on a surface whose work happens off-thread.
+    configured backend — `localhost:11434` by default. The guard in
+    `tests/conftest.py` refuses that connection and fails the test at teardown;
+    before it existed, three tests here and in `tests/test_optout.py` left jobs
+    dialling that port from inside later tests, so on a machine running a model
+    server the fixture's text went to it.
+    Measured while writing this file, before the guard: against a dead port one
+    twenty-segment test did not finish in three minutes, because a batch failure
+    falls back to `translate.retry_one` for every segment, each with its own
+    retries and backoff.
     """
     monkeypatch.setattr(translate_mod, "build_provider",
                         lambda name, cfg, model=None: _Echoing())
@@ -1270,20 +1287,16 @@ def _finish(base, job_id):
     """Poll one job to a terminal state and hand back its record.
 
     **Every test that starts a job calls this**, including the ones that assert
-    only on the number `POST /api/translate` answered with. A job is a daemon
-    thread holding a relative `src`, and `monkeypatch` undoes both the `chdir`
-    and the stubbed factory the moment the test returns — so an unwaited run
-    resolves its path against the wrong directory and dials the configured
-    backend, then keeps the SQLite file open while pytest tries to remove
-    `tmp_path`. Measured while writing this file: two twenty-segment tests that
-    only read `total` did not finish in sixty seconds each.
+    only on the number `POST /api/translate` answered with and the ones whose
+    job selects nothing — `tests/conftest.py` fails a test that starts a job it
+    never sees finish. A job is a daemon thread holding a relative `src`, and
+    `monkeypatch` undoes both the `chdir` and the stubbed factory the moment the
+    test returns, so an unwaited run resolves its path against the wrong
+    directory and builds the configured provider in the middle of a later test.
+    The loop itself is `tests/jobwait.py`, shared with the other files that
+    start jobs.
     """
-    for _ in range(200):
-        job = json.loads(_post(base, "/api/job", {"id": job_id})[1])
-        if job["done"]:
-            return job
-        time.sleep(0.05)
-    raise AssertionError(f"{job_id} never finished")
+    return jobwait.finish(base, job_id)
 
 
 def _wide_project(base, tmp_path, monkeypatch, paragraphs=20):
@@ -1411,12 +1424,14 @@ def test_a_bound_that_is_not_a_count_is_a_400_and_starts_no_job(
     _wide_project(base, tmp_path, monkeypatch, paragraphs=2)
     nowhere = {"src": "wide.md", "lang": "zh-TW", "ids": ["no-such-segment"]}
     before = json.loads(_post(base, "/api/translate", nowhere)[1])["id"]
+    _finish(base, before)
     code, body = _try_post(base, "/api/translate", {**nowhere, "limit": bad})
     assert code == 400, f"{bad!r} was accepted"
     assert "limit" in json.loads(body)["error"], "the refusal names the field"
     # The id sequence only ever rises, so a refused request that had minted a
     # job would show up as a gap here. `+ 1` and not `+ 2`.
     after = json.loads(_post(base, "/api/translate", nowhere)[1])["id"]
+    _finish(base, after)
     assert int(after[3:]) == int(before[3:]) + 1, "a refused request started a job"
 
 
