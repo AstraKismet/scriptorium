@@ -6,7 +6,6 @@ import os
 import re
 import sys
 import threading
-import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -1232,12 +1231,7 @@ def test_a_job_reports_the_segments_it_left_alone(base, tmp_path, monkeypatch, j
         "src": "d.md", "lang": "zh-TW", "ids": [ids[1]]})[1])
     assert started["total"] == 1, "an explicit id must still reach the segment"
 
-    for _ in range(200):
-        job = json.loads(_post(base, "/api/job", {"id": started["id"]})[1])
-        if job["done"]:
-            break
-        time.sleep(0.05)
-    assert job["done"], "the job never finished"
+    job = _finish(base, started["id"])
     assert job["applied"] == 0
     assert job["refused"] == [ids[1]]
     segs = {s["id"]: s for s in
