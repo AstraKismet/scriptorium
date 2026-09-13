@@ -2150,6 +2150,48 @@ def _models(base, query=""):
     return json.loads(body)
 
 
+class _RedirectingBackend(BaseHTTPRequestHandler):
+    """302 to everything, with the address in the header and in the body."""
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        body = b'<html><a href="http://127.0.0.1:9/LOCTOKEN">relocated</a></html>'
+        self.send_response(302)
+        self.send_header("Location", "http://127.0.0.1:9/LOCTOKEN")
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+@pytest.fixture(scope="module")
+def redirecting_backend():
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), _RedirectingBackend)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{httpd.server_address[1]}/v1"
+    httpd.shutdown()
+
+
+def test_a_backend_that_redirects_degrades_to_an_error_naming_nothing_of_the_reply(
+        base, tmp_path, monkeypatch, redirecting_backend):
+    """Divergence (32)'s degradation over (33)'s closure: the wire answers 200
+    with the redirect sentence in `error`, the route beside it, and neither the
+    `Location` nor the body — the two places the address sits — reaches the
+    browser. On 3725ed6 the listing followed the redirect to port 9, nothing
+    listens there, and `error` said `cannot reach`, naming the wrong cause.
+    """
+    root = _config_project(tmp_path, monkeypatch)
+    _routed(root, redirecting_backend)
+    answer = _models(base)
+    assert answer["provider"] == "live" and answer["configured"] == "live-model", answer
+    assert answer["models"] == [], answer
+    assert "redirect" in answer["error"] and "HTTP 302" in answer["error"], answer
+    for piece in ("LOCTOKEN", "relocated", "127.0.0.1:9/", "cannot reach"):
+        assert piece not in answer["error"], (piece, answer)
+
+
 def test_a_listing_reaches_the_wire_sorted_with_the_configured_model_beside_it(
         base, tmp_path, monkeypatch, backend):
     root = _config_project(tmp_path, monkeypatch)
