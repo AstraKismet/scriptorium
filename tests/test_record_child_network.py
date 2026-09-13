@@ -121,6 +121,17 @@ def test_a_launcher_pid_resolves_to_the_interpreter_it_started():
     assert (answer["spawned_by_top"], answer["installed_below"]) == (1, 1)
 
 
+def test_a_reused_pid_is_still_two_processes():
+    """Windows gives a finished child's pid to the next; a set of pids undercounts."""
+    rows = _rows(("install", TOP, "1", "pytest"), ("install", "200", TOP, "-m scriptorium init"),
+                 ("install", "200", TOP, "-m scriptorium extract"),
+                 ("spawn", TOP, "python -m scriptorium init", ""),
+                 ("spawn", TOP, "python -m scriptorium extract", ""),
+                 ("connect", "200", "127.0.0.1", 5555, "other", "-c"))
+    answer = rcn.analyse(rows, TOP, 5555)
+    assert (answer["spawned_by_top"], answer["installed_below"]) == (2, 2)
+
+
 def test_a_torn_line_is_skipped_rather_than_misread():
     lines = ["install\t1\t2\tpytest\n", "connect\t3\t127.0.0.1\n", "garbage\n",
              "connect\t3\t127.0.0.1\t80\n", "connect\t3\t127.0.0.1\t80\tother\n",
@@ -164,8 +175,24 @@ def test_the_probe_loads_nothing_into_a_dash_S_child_and_writes_what_it_saw(tmp_
     assert "lookup" in kinds
 
 
-def test_a_ref_that_names_no_commit_answers_nothing(capsys):
+def _git(toplevel, verify):
+    """A stand-in for `rcn._git`: the suite also runs from an archive with no `.git`,
+    which is exactly where the recorder runs it, so these tests cannot ask real git."""
+    def run(*args):
+        code, out = toplevel if args[:2] == ("rev-parse", "--show-toplevel") else verify
+        return subprocess.CompletedProcess(["git", *args], code, stdout=out, stderr=b"")
+    return run
+
+
+def test_a_ref_that_names_no_commit_answers_nothing(monkeypatch, capsys):
     """Refused by name, before anything is archived: a later step also exits 2, so the
     exit code alone would pass a build that tried to archive a ref it never checked."""
-    assert rcn.main(["--ref", "refs/heads/no-such-branch-for-the-recorder"]) == 2
+    monkeypatch.setattr(rcn, "_git", _git((0, rcn.ROOT.encode()), (1, b"")))
+    assert rcn.main(["--ref", "refs/heads/no-such-branch"]) == 2
     assert "does not name a commit" in capsys.readouterr().out
+
+
+def test_outside_a_checkout_of_this_repository_nothing_is_measured(monkeypatch, capsys):
+    monkeypatch.setattr(rcn, "_git", _git((128, b""), (0, b"0" * 40)))
+    assert rcn.main([]) == 2
+    assert "not a git checkout of this repository" in capsys.readouterr().out

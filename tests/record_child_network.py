@@ -217,7 +217,10 @@ def analyse(rows, top, control_port):
         started = [pid for pid, parent in parents.items() if parent == top]
         if len(started) == 1:
             top = started[0]
-    installed = set(parents)
+    # Rows, not distinct pids: Windows hands a finished child's pid to the next
+    # one, so a set of pids counted 318 processes where 327 had installed —
+    # measured. The test process runs throughout, so no child can reuse `top`.
+    installed_below = sum(1 for r in rows if r[0] == "install" and r[1] != top)
     spawned_by_top = sum(1 for r in rows if r[0] == "spawn" and r[1] == top)
     spawned_below = sum(1 for r in rows if r[0] == "spawn" and r[1] != top)
     connects, lookups, control_seen = [], [], False
@@ -238,8 +241,8 @@ def analyse(rows, top, control_port):
             if leaves_the_machine(host):
                 lookups.append({"pid": pid, "host": host, "port": port, "argv": argv})
     return {
-        "top_installed": top in installed,
-        "installed_below": len(installed - {top}),
+        "top_installed": top in parents,
+        "installed_below": installed_below,
         "spawned_by_top": spawned_by_top,
         "spawned_below": spawned_below,
         "control_seen": control_seen,

@@ -28,10 +28,11 @@ that one poll happened to see.
 
 `docs/decisions.md`, 2026-09-13, has the measurement and the designs that lost.
 What this cannot see is stated there too: a subprocess (the hook lives in this
-interpreter only), a name lookup (`getaddrinfo` runs before any connect and is
-not refused), a datagram sent without a connect, and a thread a test starts
-itself and leaves running, whose refusal is charged to whichever test is running
-when it dials.
+interpreter only — `tests/record_child_network.py` measures what children dial,
+and `docs/decisions.md`, 2026-09-14, says why that is not a guard), a name
+lookup (`getaddrinfo` runs before any connect and is not refused), a datagram
+sent without a connect, and a thread a test starts itself and leaves running,
+whose refusal is charged to whichever test is running when it dials.
 """
 
 import functools
