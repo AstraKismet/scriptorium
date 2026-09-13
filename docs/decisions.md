@@ -39,12 +39,12 @@ connect by `tests/conftest.py`'s own rule (a weak reference at bind,
   and 2.2 s with `retries: 0` against port 9.
 
 `python tests/record_child_network.py --ref <commit>` is now how this is asked.
-At the branch's last commit before merge, `bee963a`, it answered **exit 0**:
-2937 passed and 2 skipped in the copy, the test process started 1057 processes
-and 1055 of them loaded the recorder, the planted child was seen, and nothing
-reached past the rule. At a scratch commit on top of it that put only the
-endpoint back, **exit 1**: `CONNECT … 127.0.0.1:80` twice, from
-`-m models --provider a.b`, beside that test's own failure.
+At `12b8fcc`, the branch's last commit that changed code, it answered **exit 0**:
+2949 passed and 2 skipped in the copy, the test process started 1063 processes
+and 1055 of them loaded the recorder, the planted child's connection and lookup
+were both seen, and nothing reached past the rule. At a scratch commit on top of
+it that put only the endpoint back, **exit 1**: `CONNECT … 127.0.0.1:80` twice,
+from `-m models --provider a.b`, beside that test's own failure.
 
 ### The rule
 
@@ -81,8 +81,9 @@ with `ast`), and — over a two-file repository it archives for itself — that 
 run reaches exit 1, exit 2 for a deselected control, and exit 2 for a pytest
 that cannot start.
 
-The recorder was wrong four ways before review closed, and none of them moved
-its exit code, which is why each is written down:
+The recorder was wrong four ways before review closed, and none of them showed on
+a run that answered — the first could turn a finding into exit 0 — which is why
+each is written down:
 
 - **It lost rows.** Every process appended to one file, and on Windows an append
   is a seek and a write, not one step: in the review lane's measurement two
@@ -170,7 +171,8 @@ not vary.
 
 - **A process that never imports `scriptorium`**: a shell, a non-Python program,
   a child pytest over files that do not import it. The recorder prints how many
-  processes were started beside how many it recorded — two of 1057 at `bee963a`.
+  processes were started beside how many it recorded — eight of 1063 unseen at
+  `12b8fcc`, seven of them started by the recorder's own tests.
 - **A connection an audit hook registered earlier in the same process refused.**
   A later hook never sees an event an earlier one raised on. That is every
   planted refusal inside `tests/test_conftest_guard.py`'s child pytests — the
@@ -185,8 +187,9 @@ not vary.
 - A datagram, a raw socket call through `ctypes`, and anything a process does
   before `scriptorium` is imported.
 - **The test process's own lookups** are counted and not judged, as
-  `tests/conftest.py` does not refuse them; two credential-masking tests resolve a
-  hostname carrying their fixture's password (HANDOFF-083).
+  `tests/conftest.py` does not refuse them — three at `12b8fcc`, the two
+  credential-masking tests that resolve a hostname carrying their fixture's
+  password (HANDOFF-083).
 - **Proxies.** A child built by `_env` drops every `*_proxy` variable, and on
   Windows urllib then reads the registry proxy, whose `<local>` bypass does not
   cover `127.0.0.1` (read from the 3.9 and 3.12 source). The test process has the
@@ -211,21 +214,23 @@ the suite does not contain, and a guard refusing inside a child never reached
 the parent test. The two red teams are summarised under *What lost*.
 
 Two design-tier lanes then reviewed the branch at `bee963a`, one the recorder and
-one every claim written about it. The first found the four recorder defects
-listed under *The rule* — the lost rows among them — and planted twelve mutants
-of its own, all of which survived because nothing tested the rows the probe
-writes, `_measure`'s gates or the report; the second found eleven sentences here
-and in `AGENTS.md` that were false, overstated or unsourced, and two packages
-that a fresh session could not have executed as written. All were acted on.
-After that, thirty-four mutants of the recorder — the coordinating session's
-thirteen, the review lane's twelve replanted where the rewrite kept their line,
-and eleven more over what the rewrite added — each landed by hash and restored
-from a byte copy: thirty-four caught. The two concurrency mutants, the lock and
-the per-process file, were caught four runs of four. Two were not planted: the
+one every claim written about it. The coordinating session had already found two
+of the four recorder defects listed under *The rule* by running the recorder —
+the pid count and the test that asked real git. The first lane found the other
+two, the lost rows and the lookups it never saw, beside smaller ones, and
+planted twelve mutants of its own, all of which survived because nothing tested
+the rows the probe writes, `_measure`'s gates or the report; the second found
+eleven sentences here and in `AGENTS.md` that were false, overstated or
+unsourced, and two packages that a fresh session could not have executed as
+written. All were acted on. After that, thirty-five mutants of the recorder —
+the coordinating session's thirteen, eleven of the review lane's twelve, and
+eleven more over what the rewrite added — each landed by hash and restored from
+a byte copy: thirty-five caught. The two concurrency mutants, the lock and the
+per-process file, were caught four runs of four. Two were not planted: the
 IPv4-mapped branch of the loopback test, equivalent on both local interpreters
 because their `ipaddress` already calls `::ffff:127.0.0.1` loopback and kept for
-parity with `conftest.py`, and the process-tree kill on `--timeout`, which no
-test reaches.
+parity with `conftest.py`, and the review lane's twelfth, the process-tree kill
+on `--timeout`, which no test reaches.
 
 The first review also found what the recorder does with a credential: a lookup
 of a hostname carrying one is written into its rows file, which `--keep` leaves
