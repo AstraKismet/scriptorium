@@ -590,7 +590,7 @@ Node — see the invariant below.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 2810 collected, no network. Four are
+python -m pytest -q                 # 2812 collected, no network. Four are
                                     #   conditional on three different things, so
                                     #   which two skip is a property of the machine
                                     #   AND the account: one is POSIX-only, one
@@ -1615,6 +1615,19 @@ own.
   hit differs in its placeholder set by definition.
 - Tests use no network. Providers are exercised against a mock HTTP server in
   `tests/test_provider.py` — extend it rather than mocking the transport.
+
+  **Since 2026-09-13 that is checked, not remembered.** `tests/conftest.py`
+  refuses, in the test process, every connection except one to a loopback port
+  a socket in that process bound, or to one of the suite's two dead ends, ports
+  1 and 9 — and fails the test that was running. It also fails a test that starts a job
+  through `POST /api/translate` and never sees `done: true` from
+  `POST /api/job` — stubbing the provider without waiting protects nothing,
+  because `monkeypatch` undoes the stub before the job thread reads it. The wait
+  is `tests/jobwait.py`, and the guard's own behaviour is pinned by
+  `tests/test_conftest_guard.py`, which plants each defect in a child pytest.
+  It does not see a subprocess, a name lookup, or a datagram. Three tests had
+  been leaving jobs that dialled `localhost:11434` from inside later tests and
+  after the session ended; `docs/decisions.md`, 2026-09-13.
 - All tracked documentation is in English. `README.zh-TW.md` is the one
   translation, kept in step with `README.md`.
 
