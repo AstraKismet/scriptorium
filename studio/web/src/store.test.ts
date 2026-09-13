@@ -12,6 +12,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import * as drafts from './drafts'
 import { useStore, visible } from './store'
 import { callsTo, lastCall, otherwise, replies } from './test/wire'
+import { CONTRACT_VERSION } from './contract'
 import type { DocResponse, Segment, StateResponse } from './contract'
 
 const initial = useStore.getState()
@@ -39,7 +40,7 @@ const doc = (segments: Segment[]): DocResponse => ({
 })
 
 const state = (over: Partial<StateResponse> = {}): StateResponse => ({
-  contract_version: 4,
+  contract_version: CONTRACT_VERSION,
   version: '0.4.0',
   cwd: '/books',
   targets: ['zh-TW'],

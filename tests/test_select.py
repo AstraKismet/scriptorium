@@ -132,11 +132,22 @@ def test_polish_takes_translated_prose_and_leaves_a_heading_alone(book):
     assert _picked(doc, CFG, "polish") == [ids["broken"]]
 
 
-def test_an_unknown_mode_selects_what_draft_selects(book):
-    """The contract's own row: anything else is `draft`, and the value is still
-    forwarded as the routing stage."""
+def test_an_unknown_mode_is_refused_before_it_selects_anything(book):
+    """Since `contract_version` 5 the contract's row reads `400`, not "as draft".
+
+    Until 2026-09-13 anything else selected as `draft`, was forwarded as the
+    routing stage, and was written into every segment's `origin` as
+    `llm:<mode>` — a box on the wire that accepted text and stored it, closed
+    by HANDOFF-080. The refusal is `cli.checked_mode`'s, here in `do_select`
+    and again in `do_translate`, so no surface can walk around it; it names
+    the stages and never the value.
+    """
     doc, ids = book
-    assert _picked(doc, CFG, "audit") == ids["pending"]
+    for mode in ("audit", "sk-PASTEDabcdefghijklmnopqrstuv1", 5, None, ["draft"]):
+        with pytest.raises(UnusableTarget) as caught:
+            _picked(doc, CFG, mode)
+        assert "draft, polish, repair" in str(caught.value)
+        assert "audit" not in str(caught.value) and "PASTED" not in str(caught.value)
 
 
 def test_ids_outrank_the_mode_including_the_one_that_used_to_come_first(book):
@@ -150,8 +161,12 @@ def test_ids_outrank_the_mode_including_the_one_that_used_to_come_first(book):
     <id>`" — true whatever state the segment is in.
     """
     doc, ids = book
-    for mode in ("draft", "polish", "repair", "audit"):
+    for mode in ("draft", "polish", "repair"):
         assert _picked(doc, CFG, mode, ids=[ids["heading"]]) == [ids["heading"]]
+    # An id outranks the mode; it does not rescue a mode that is not one. The
+    # shape check runs before `ids` short-circuits, as `limit`'s does.
+    with pytest.raises(UnusableTarget):
+        _picked(doc, CFG, "audit", ids=[ids["heading"]])
 
 
 def test_an_empty_id_list_is_falsy_and_falls_through_to_the_mode(book):
@@ -196,8 +211,9 @@ def test_limit_bounds_every_branch_except_a_named_ids(book):
     assert _picked(doc, CFG, "repair", limit=1) == [ids["broken"]]
     assert _picked(doc, CFG, "repair", limit=2) == [ids["broken"], ids["pending"][0]]
     assert _picked(doc, CFG, "polish", limit=1) == [ids["broken"]]
-    # An unknown mode selects what draft selects, and is bounded with it.
-    assert _picked(doc, CFG, "audit", limit=1) == ids["pending"][:1]
+    # An unknown mode is refused before any bound applies (contract_version 5).
+    with pytest.raises(UnusableTarget):
+        _picked(doc, CFG, "audit", limit=1)
     # A limit at or above the selection changes nothing, and neither does 0.
     assert _picked(doc, CFG, "repair", limit=99) == [ids["broken"], *ids["pending"]]
     assert _picked(doc, CFG, "repair", limit=0) == [ids["broken"], *ids["pending"]]
@@ -214,7 +230,7 @@ def test_a_named_id_is_never_truncated_by_a_limit(book):
     """
     doc, ids = book
     named = [ids["heading"], ids["broken"], *ids["pending"]]
-    for mode in ("draft", "repair", "polish", "audit"):
+    for mode in ("draft", "repair", "polish"):
         assert _picked(doc, CFG, mode, ids=named, limit=1) == named, mode
 
 

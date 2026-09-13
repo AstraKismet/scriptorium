@@ -896,7 +896,6 @@ def _translate_project(base, tmp_path, monkeypatch):
     # reviewed book and applied none of it.
     ("repair", [2, 3]),
     ("polish", []),
-    ("audit", [2, 3]),
 ])
 def test_the_endpoint_selects_what_the_cli_selects(base, tmp_path, monkeypatch,
                                                    mode, want):
@@ -923,6 +922,35 @@ def test_the_endpoint_selects_what_the_cli_selects(base, tmp_path, monkeypatch,
     assert code == 200
     assert json.loads(body)["total"] == len(want)
     _finish(base, json.loads(body)["id"])
+
+
+#: The same 32 characters the credential tests at the end of this file use; a
+#: module constant because the decorator below is evaluated before they are.
+KEYLIKE_MODE = "sk-PASTEDabcdefghijklmnopqrstuv1"
+
+
+@pytest.mark.parametrize("mode", ["audit", KEYLIKE_MODE, 5, None, ["draft"], {"mode": "draft"}])
+def test_a_mode_that_is_not_a_stage_is_refused_before_a_job_is_minted(
+        base, tmp_path, monkeypatch, mode):
+    """`contract_version` 5: `mode` is one of the three stages, and anything else is 400.
+
+    Until then anything else selected as `draft`, was forwarded as the routing
+    stage, and — the part that made it HANDOFF-080's — was written into every
+    segment's `origin` as `llm:<mode>`, where `GET /api/doc` and `lx segments`
+    display it. The refusal is `cli.checked_mode`'s, inside `do_select`, so the
+    terminal's `choices` and the wire cannot disagree; it names the stages and
+    never the value, and no job is minted for it.
+    """
+    _translate_project(base, tmp_path, monkeypatch)
+    before = json.loads(_get(base, "/api/state")[1])
+    code, body = _try_post(base, "/api/translate", {"src": "d.md", "lang": "zh-TW",
+                                                    "mode": mode})
+    assert code == 400, (mode, code, body)
+    answer = json.loads(body)
+    assert set(answer) == {"error"} and "draft, polish, repair" in answer["error"], answer
+    assert _windows(KEYLIKE_MODE, answer["error"]) == [] and "audit" not in answer["error"]
+    # Nothing was minted: the next job id a real request gets is unchanged.
+    assert json.loads(_get(base, "/api/state")[1])["docs"] == before["docs"]
 
 
 def test_ids_outrank_the_mode_on_the_wire_too(base, tmp_path, monkeypatch):
@@ -2591,12 +2619,16 @@ def test_no_admitted_key_repeats_a_value_it_refuses_over_the_wire(base, tmp_path
     was stored, not refused — and only the pinned one may answer it.
     """
     root = _config_project(tmp_path, monkeypatch)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     blank = json.dumps({"providers": {"p": {"kind": "openai", "model": "m"}}})
     stored = set()
     for pattern in cli.HTTP_WRITABLE_KEYS:
         key = pattern.replace("routing.*", "routing.draft").replace("*", "p")
         for label, value in (("text", KEYLIKE), ("list", [KEYLIKE]),
-                             ("block", {"x": KEYLIKE}), ("provider-block", {"provider": KEYLIKE})):
+                             ("block", {"x": KEYLIKE}), ("provider-block", {"provider": KEYLIKE}),
+                             ("model-block", {"provider": "p", "model": KEYLIKE}),
+                             ("provider:text", f"p:{KEYLIKE}")):
             (root / "lx.config.json").write_text(blank, encoding="utf-8")
             body = {"key": key, "value": value}
             if pattern == "providers.*.base_url":
@@ -2607,7 +2639,11 @@ def test_no_admitted_key_repeats_a_value_it_refuses_over_the_wire(base, tmp_path
                 continue
             assert code == 400, (key, label, code, reply)
             assert _windows(KEYLIKE, reply.decode("utf-8")) == [], (key, label, reply)
-    assert stored == {("providers.*.model", "text")}, stored
+    # Stored because nothing declares the value — text is text (HANDOFF-080);
+    # the sweep at the end of this file exports it under the shipped `openai`
+    # name and asserts this set is then empty.
+    assert stored == {("providers.*.model", "text"), ("providers.*.model", "provider:text"),
+                      ("routing.*", "model-block"), ("routing.*", "provider:text")}, stored
 
 
 def test_a_listing_for_a_hand_edited_kind_carries_no_window_of_it(base, tmp_path, monkeypatch):
@@ -2681,3 +2717,268 @@ def test_a_job_asked_for_an_unconfigured_name_does_not_repeat_it(base, tmp_path,
     assert job["error"] and job["error"].startswith("unknown provider"), job
     said = json.dumps({"error": job["error"], "log": job["log"], "failures": job["failures"]})
     assert _windows(KEYLIKE, said) == [], said
+
+
+# ── HANDOFF-080 on the wire: contract_version 5 ────────────────────────────
+#
+# The server thread reads the test process's own `os.environ`, so
+# `monkeypatch.setenv` is how a test declares a credential; each test sets its
+# own, because `base` is shared across the module.
+
+#: The model ids the package lists; `tests/test_config.py` holds the terminal's half.
+MODEL_IDS = ["qwen2.5:14b-instruct", "local-model", "gpt-4o-mini", "claude-sonnet-4-6",
+             "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_M",
+             "mradermacher/translategemma-12b-it-i1-GGUF:Q4_K_M",
+             "ScrambieBambie_Snowpiercer-15B-v2_Q8_0"]
+
+#: A credential every eight-character window of which carries an upper-case letter.
+MIXED = "sk-MiXeDcAsEkEyAbCdEfGhIjKlMnOpQ"
+
+#: The `openai` provider `lx init` scaffolds declares `OPENAI_API_KEY`; the
+#: wire tests write into a fresh project, so it is declared there too.
+_SHIPPED = json.dumps({"providers": {"p": {"kind": "openai", "model": "m"}}})
+
+
+def test_no_admitted_key_stores_a_declared_credential_over_the_wire(base, tmp_path, monkeypatch):
+    """The wire sweep above, with the value exported under the shipped `openai` name.
+
+    Every admitted pattern, every shape, including the two routing shapes the
+    first sweep pins as stored: all `400`, none carries a window, and the file
+    is byte for byte what it was.
+    """
+    root = _config_project(tmp_path, monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", KEYLIKE)
+    stored = set()
+    for pattern in cli.HTTP_WRITABLE_KEYS:
+        key = pattern.replace("routing.*", "routing.draft").replace("*", "p")
+        for label, value in (("text", KEYLIKE), ("padded", f"  {KEYLIKE}\n"), ("list", [KEYLIKE]),
+                             ("block", {"x": KEYLIKE}), ("provider-block", {"provider": KEYLIKE}),
+                             ("model-block", {"provider": "p", "model": KEYLIKE}),
+                             ("provider:text", f"p:{KEYLIKE}"), ("bearer", f"Bearer {KEYLIKE}")):
+            (root / "lx.config.json").write_text(_SHIPPED, encoding="utf-8")
+            body = {"key": key, "value": value}
+            if pattern == "providers.*.base_url":
+                body["confirm_base_url"] = True
+            code, reply = _try_post(base, "/api/config", body)
+            if code == 200:
+                stored.add((pattern, label))
+                continue
+            assert code == 400, (key, label, code, reply)
+            assert set(json.loads(reply)) == {"error"}, reply
+            assert _windows(KEYLIKE, reply.decode("utf-8")) == [], (key, label, reply)
+            assert (root / "lx.config.json").read_text(encoding="utf-8") == _SHIPPED
+    assert stored == set(), stored
+
+
+def test_the_wire_refusal_is_the_terminals_sentence(base, tmp_path, monkeypatch):
+    from test_config import SAYS_DECLARED
+    root = _config_project(tmp_path, monkeypatch)
+    (root / "lx.config.json").write_text(_SHIPPED, encoding="utf-8")
+    monkeypatch.setenv("OPENAI_API_KEY", KEYLIKE)
+    code, reply = _try_post(base, "/api/config", {"key": "providers.p.model", "value": KEYLIKE})
+    assert code == 400 and json.loads(reply)["error"] == SAYS_DECLARED, reply
+    code, reply = _try_post(base, "/api/config",
+                            {"key": "routing.draft", "value": {"provider": "p", "model": KEYLIKE}})
+    assert code == 400
+    assert json.loads(reply)["error"] == SAYS_DECLARED.replace("providers.p.model", "routing.draft", 1)
+
+
+def test_every_listed_model_id_answers_200_whatever_the_environment_holds(base, tmp_path, monkeypatch):
+    """Criterion 3 on the wire: the red line."""
+    root = _config_project(tmp_path, monkeypatch)
+    (root / "lx.config.json").write_text(_SHIPPED, encoding="utf-8")
+    monkeypatch.setenv("OPENAI_API_KEY", KEYLIKE)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", MIXED)
+    for model in MODEL_IDS:
+        code, reply = _try_post(base, "/api/config", {"key": "providers.p.model", "value": model})
+        assert code == 200, (model, reply)
+        answer = json.loads(reply)
+        assert answer["value"] == model and answer["notes"] == [], answer
+        code, reply = _try_post(base, "/api/config",
+                                {"key": "routing.draft", "value": {"provider": "p", "model": model}})
+        assert code == 200 and json.loads(reply)["routing"]["draft"]["model"] == model, reply
+
+
+def test_a_new_provider_named_by_a_declared_credential_is_refused_before_the_key_is_spelled(
+        base, tmp_path, monkeypatch):
+    """Ahead of `writable_key`, whose `403` spells the key — including one it would refuse anyway."""
+    root = _config_project(tmp_path, monkeypatch)
+    (root / "lx.config.json").write_text(_SHIPPED, encoding="utf-8")
+    monkeypatch.setenv("OPENAI_API_KEY", KEYLIKE)
+    for key, value in ((f"providers.{KEYLIKE}.kind", "openai"),
+                       (f"providers.{KEYLIKE}.model", "m"),
+                       (f"providers.{KEYLIKE}.headers", {"a": "b"}),
+                       (f"providers.{KEYLIKE}.api_key_env.x", "y"),
+                       (f"providers.x-{KEYLIKE}.kind", "openai")):
+        code, reply = _try_post(base, "/api/config", {"key": key, "value": value})
+        assert code == 400, (key, code, reply)
+        answer = json.loads(reply)
+        assert set(answer) == {"error"} and _windows(KEYLIKE, reply.decode("utf-8")) == [], answer
+        assert answer["error"].startswith(
+            "a segment of the key being written — one the configuration does not hold yet — "
+            "is the content of OPENAI_API_KEY"), answer
+        assert (root / "lx.config.json").read_text(encoding="utf-8") == _SHIPPED
+    code, reply = _try_post(base, "/api/config", {"key": "providers.gateway.kind", "value": "openai"})
+    assert code == 200, reply
+
+
+def test_extract_refuses_a_declared_credential_as_tone_or_lang_and_writes_no_row(
+        base, tmp_path, monkeypatch):
+    """`POST /api/extract`: the register is lower-cased into `.lx/tm.*.jsonl`, so the oracle folds case.
+
+    `lang` passes `language_tag` first — 32 characters of `[A-Za-z0-9_-]` is a
+    tag by shape — and is then refused as a credential, before `.lx/` exists.
+    """
+    root = _config_project(tmp_path, monkeypatch)
+    (root / "lx.config.json").write_text(_SHIPPED, encoding="utf-8")
+    (root / "d.md").write_bytes(b"The gate stood open when she came down the hill.\n")
+    monkeypatch.setenv("OPENAI_API_KEY", MIXED)
+    for body in ({"tone": MIXED}, {"tone": f"  {MIXED}\n"}, {"tone": MIXED, "reset": True},
+                 {"lang": MIXED}):
+        code, reply = _try_post(base, "/api/extract", {"src": "d.md", "lang": "zh-TW", **body})
+        assert code == 400, (body, code, reply)
+        answer = json.loads(reply)
+        assert set(answer) == {"error"}, answer
+        assert _windows(MIXED.lower(), reply.decode("utf-8").lower()) == [], answer
+        assert "OPENAI_API_KEY" in answer["error"], answer
+    assert not (root / ".lx").exists()
+    assert json.loads(_get(base, "/api/state")[1])["docs"] == []
+
+
+@pytest.mark.parametrize("body, says", [
+    ({"reset": "false"}, "`reset` is true or false — got text. Nothing was written."),
+    ({"reset": 1}, "`reset` is true or false — got a number. Nothing was written."),
+    ({"reset": "yes"}, "`reset` is true or false — got text. Nothing was written."),
+    ({"reset": True, "tone": {"a": 1}},
+     "`tone` is a register name, as text — got a block. Nothing was written."),
+    ({"tone": ["literary"]}, "`tone` is a register name, as text — got a list. Nothing was written."),
+])
+def test_extract_refuses_a_reset_that_is_not_a_boolean_and_a_tone_that_is_not_text(
+        base, tmp_path, monkeypatch, body, says):
+    """Divergence (28), closed at `contract_version` 5: `{"reset": "false"}` discarded a document."""
+    root = _config_project(tmp_path, monkeypatch)
+    (root / "d.md").write_bytes(b"The gate stood open when she came down the hill.\n")
+    assert _post(base, "/api/extract", {"src": "d.md", "lang": "zh-TW"})[0] == 200
+    _apply_one(base, "d.md", "當她走下山丘時，大門敞開著。")
+    code, reply = _try_post(base, "/api/extract", {"src": "d.md", "lang": "zh-TW", **body})
+    assert code == 400 and json.loads(reply) == {"error": says}, (body, reply)
+    doc = json.loads(_get(base, "/api/doc?src=d.md&lang=zh-TW")[1])
+    assert doc["segments"][0]["target"] == "當她走下山丘時，大門敞開著。", doc["segments"][0]
+
+
+def _apply_one(base, src, target):
+    doc = json.loads(_get(base, f"/api/doc?src={src}&lang=zh-TW")[1])
+    sid = doc["segments"][0]["id"]
+    assert _post(base, "/api/save", {"src": src, "lang": "zh-TW", "targets": {sid: target}})[0] == 200
+
+
+def test_a_config_write_carries_the_terminals_notes_and_a_removal_none(base, tmp_path, monkeypatch):
+    root = _config_project(tmp_path, monkeypatch)
+    (root / "lx.config.json").write_text(_SHIPPED, encoding="utf-8")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("GROQ_API_KEY", KEYLIKE)
+    monkeypatch.setenv("MODEL", "gpt-4o-mini")
+    code, reply = _try_post(base, "/api/config", {"key": "providers.p.model", "value": KEYLIKE})
+    assert code == 200, reply
+    answer = json.loads(reply)
+    assert answer["notes"] == [
+        "note: providers.p.model now holds the content of the environment variable GROQ_API_KEY. "
+        "Not an error — but if that is a key, it does not belong in lx.config.json: `lx config "
+        "unset providers.p.model`, and name GROQ_API_KEY in that provider's api_key_env instead."]
+    assert _windows(KEYLIKE, json.dumps(answer["notes"])) == []
+    code, reply = _try_post(base, "/api/config", {"key": "providers.p.api_key_env", "value": "GROQ_API_KEY"})
+    assert code == 200, reply
+    assert json.loads(reply)["notes"] == [
+        "note: providers.p.model already holds the content of GROQ_API_KEY, the variable "
+        "providers.p.api_key_env now names as this backend's key. Not an error — but if that is "
+        "the key, it does not belong in lx.config.json: `lx config unset providers.p.model`."]
+    code, reply = _try_post(base, "/api/config", {"key": "providers.p.model", "value": "gpt-4o-mini"})
+    assert code == 200 and json.loads(reply)["notes"] == [], reply
+    code, reply = _try_post(base, "/api/config", {"key": "providers.p.model", "unset": True})
+    assert code == 200 and json.loads(reply)["notes"] == [], reply
+    # Declared now, so the same paste is a refusal rather than a note.
+    code, reply = _try_post(base, "/api/config", {"key": "providers.p.model", "value": KEYLIKE})
+    assert code == 400 and "GROQ_API_KEY" in json.loads(reply)["error"], reply
+
+
+# ── HANDOFF-080, second round, on the wire ──────────────────────────────────
+
+LONG_KEY = "sk-proj-" + "A1b2C3d4" * 12
+
+
+def test_a_lang_longer_than_a_tag_is_refused_without_being_repeated(base, tmp_path, monkeypatch):
+    """`language_tag` refuses first, on every endpoint that takes `lang`; it used to quote the value."""
+    root = _config_project(tmp_path, monkeypatch)
+    (root / "d.md").write_bytes(b"The gate stood open.\n")
+    for method, path, body in (("POST", "/api/extract", {"src": "d.md", "lang": LONG_KEY}),
+                               ("GET", f"/api/doc?src=d.md&lang={LONG_KEY}", None)):
+        if method == "POST":
+            code, reply = _try_post(base, path, body)
+        else:
+            try:
+                code, reply = _get(base, path)
+            except urllib.error.HTTPError as e:
+                code, reply = e.code, e.read()
+        assert code == 403, (path, code, reply)
+        assert _windows(LONG_KEY, reply.decode("utf-8")) == [], reply
+
+
+def test_a_declared_credential_in_the_stage_position_or_a_malformed_key_is_refused_unspelled(
+        base, tmp_path, monkeypatch):
+    root = _config_project(tmp_path, monkeypatch)
+    (root / "lx.config.json").write_text(_SHIPPED, encoding="utf-8")
+    monkeypatch.setenv("OPENAI_API_KEY", KEYLIKE)
+    for body in ({"key": f"routing.{KEYLIKE}", "value": "p"}, {"key": f"routing.{KEYLIKE}", "unset": True},
+                 {"key": f"providers.{KEYLIKE}.", "value": "x"},
+                 {"key": f"providers.{KEYLIKE}..kind", "value": "openai"},
+                 {"key": f"batch.{KEYLIKE}", "value": 1}, {"key": KEYLIKE, "value": 1}):
+        code, reply = _try_post(base, "/api/config", body)
+        assert code == 400, (body, code, reply)
+        assert _windows(KEYLIKE, reply.decode("utf-8")) == [], (body, reply)
+        assert (root / "lx.config.json").read_text(encoding="utf-8") == _SHIPPED
+
+
+def test_a_new_name_that_is_the_content_of_the_variable_its_own_write_declares_is_refused_on_the_wire(
+        base, tmp_path, monkeypatch):
+    root = _config_project(tmp_path, monkeypatch)
+    (root / "lx.config.json").write_text(_SHIPPED, encoding="utf-8")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("GW_KEY", KEYLIKE)
+    code, reply = _try_post(base, "/api/config", {"key": f"providers.{KEYLIKE}.api_key_env", "value": "GW_KEY"})
+    assert code == 400 and _windows(KEYLIKE, reply.decode("utf-8")) == [], reply
+    assert "GW_KEY" in json.loads(reply)["error"]
+    assert (root / "lx.config.json").read_text(encoding="utf-8") == _SHIPPED
+    code, reply = _try_post(base, "/api/config", {"key": "providers.gw.api_key_env", "value": "GW_KEY"})
+    assert code == 200, reply
+
+
+def test_an_existing_provider_named_like_a_placeholder_is_still_writable_on_the_wire(
+        base, tmp_path, monkeypatch):
+    root = _config_project(tmp_path, monkeypatch)
+    (root / "lx.config.json").write_text(json.dumps(
+        {"providers": {"lm-studio": {"kind": "openai", "model": "m"}}}), encoding="utf-8")
+    monkeypatch.setenv("OPENAI_API_KEY", "lm-studio")
+    code, reply = _try_post(base, "/api/config", {"key": "providers.lm-studio.model", "value": "x"})
+    assert code == 200, reply
+
+
+def test_a_digit_only_credential_sent_as_a_json_number_is_refused(base, tmp_path, monkeypatch):
+    root = _config_project(tmp_path, monkeypatch)
+    (root / "lx.config.json").write_text(_SHIPPED, encoding="utf-8")
+    monkeypatch.setenv("OPENAI_API_KEY", "12345678901234567890")
+    code, reply = _try_post(base, "/api/config", {"key": "providers.p.timeout", "value": 12345678901234567890})
+    assert code == 400 and "12345678" not in reply.decode("utf-8"), reply
+    code, reply = _try_post(base, "/api/config", {"key": "providers.p.timeout", "value": 300})
+    assert code == 200, reply
+
+
+def test_a_run_asked_for_a_declared_credential_as_its_model_is_refused_before_a_job_is_minted(
+        base, tmp_path, monkeypatch):
+    """`route.model`, the job's first log line and the chat body all carried it."""
+    _translate_project(base, tmp_path, monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", KEYLIKE)
+    code, reply = _try_post(base, "/api/translate", {"src": "d.md", "lang": "zh-TW", "model": KEYLIKE})
+    assert code == 400, (code, reply)
+    answer = json.loads(reply)
+    assert set(answer) == {"error"} and _windows(KEYLIKE, reply.decode("utf-8")) == [], answer
+    assert answer["error"].startswith("model was given the content of OPENAI_API_KEY")

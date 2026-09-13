@@ -36,7 +36,7 @@
  * refuses to run against a number it does not know. That refusal is the entire
  * reason the field exists — see the document's *Versioning* section.
  */
-export const CONTRACT_VERSION = 4
+export const CONTRACT_VERSION = 5
 
 // ── shared shapes ──────────────────────────────────────────────────────────
 
@@ -577,6 +577,12 @@ export interface ConfigResponse {
   value: unknown
   providers: Provider[]
   routing: Routing
+  /** The lines `lx config set` prints after the same write — a written value
+   *  that is the content of an exported variable whose name says it holds a
+   *  credential, or a block that already held the content of the variable its
+   *  `api_key_env` now names. Never a refusal, never the value; `[]` when the
+   *  write earned none, and always present. Since `contract_version` 5. */
+  notes: string[]
 }
 
 // ── what may be written over HTTP ──────────────────────────────────────────
@@ -636,7 +642,7 @@ export const RESPONSE_KEYS = {
   'POST /api/job': ['id', 'done', 'total', 'applied', 'log', 'failures', 'refused', 'error', 'usage'],
   'POST /api/render': ['wrote', 'missing'],
   'POST /api/commit': ['committed', 'refused', 'stranded', 'held'],
-  'POST /api/config': ['key', 'value', 'providers', 'routing'],
+  'POST /api/config': ['key', 'value', 'providers', 'routing', 'notes'],
 } as const satisfies Record<string, readonly string[]>
 
 /** Seventeen. A test asserts this against the document's own endpoint headings. */
