@@ -24,6 +24,7 @@ shows the field:
 | `targets`, `source_lang`, any rule-less key | `lx config set` | — (403) | `lx status --json` |
 | a rule-less field under `providers.*` — `api_key`, `token`, … | `lx config set` | — (403) | `lx config get providers.<name>` |
 | `mode` | — (`choices`) | `POST /api/translate` | every written segment's `origin`, as `llm:<mode>` |
+| `model` for a run | `lx translate --model` (the dry run prints it) | `POST /api/translate` | `route.model`, the job's first `log` line, the chat body |
 | a glossary row | `lx glossary set` | — | `config/glossary.csv`, **tracked** |
 
 ### The rule
@@ -93,23 +94,46 @@ machine where that variable holds its own name, as `_field_api_key_env`'s
 docstring has promised since 2026-08-12.
 
 **Where it runs, and the order is the rule.** `config_value` asks three
-questions in a fixed order: a **new provider's name** first — before
-`_addressable`, before any field rule — because every sentence after that
-point spells the key it is about, and a key-shaped segment in the provider
-position was printed by whichever refused first (measured:
-`lx config set providers.<key>.timeout abc` answered the key inside
-`_as_number`'s sentence); then the field's own rule or the descent into a
-block; then the credential comparison, of the raw text and of the value. On the
-wire `cli.credential_name` is asked one line before `writable_key`, whose `403`
-spells the key. `do_extract` asks it of `tone` and `lang` above its first read,
+questions in a fixed order: **every key segment the merged configuration does
+not hold** first — on the naive split, before `split_key` can quote a key with
+an empty segment, before `_addressable`, before any field rule — because every
+sentence after that point spells the key it is about, and a key-shaped segment
+was printed by whichever refused first (measured: `lx config set
+providers.<key>.timeout abc` answered the key inside `_as_number`'s sentence;
+`routing.<key> p` answered it inside `_field_route`'s; a top-level `<key>` was
+stored and printed). A segment already in the file is a key of the file and is
+not re-examined; one the file does not hold is, until it is written, a value
+somebody typed, in whichever position — the provider's, the stage's, the top
+level, a block's key at any depth. Then the field's own rule or the descent
+into a block; then the name question **again, with the value**, because a
+write can declare the very variable whose content names it
+(`providers.<key>.api_key_env GW_KEY` where `GW_KEY` holds the key, in the leaf
+or the block spelling); then the credential comparison, of the raw text and of
+the value. On the wire `cli.credential_name` is asked one line before
+`writable_key`, whose `403` spells the key, and `cmd_config_unset` asks it
+before printing what it removed. A declared name is read through
+`os.environ.get` by the file's own spelling and every name comparison folds
+case on Windows (`cli._fold`): that platform upper-cases every variable,
+`_field_api_key_env` accepts `Groq_Key` there and the transport reads the key
+through it, so a first version that iterated the environment's keys against
+the file's spelling declared nothing and was silently inert on the platform
+the maintainer runs — found by the security-tier re-derivation. `do_translate`
+and `POST /api/translate` ask it of `model`, before the route is resolved and
+read back: a declared credential typed there was echoed in `route.model`,
+written into the job's first `log` line and sent to the backend as the chat
+body's `model`. `do_extract` asks it of `tone` and `lang` above its first read,
 beside the `--reset` guard and for the same guard-fires-once reason: the
 resolution three lines down rebinds `tone` to the stored register. Only the
 *arguments* are examined — a register already frozen on a row is never re-read
 against the rule, because the only way out of a refused stored register is
 `--tone`, which drops every translation the document holds (measured). `lx run`
-reaches the same function. `do_glossary_set` asks it of a row's three fields:
-`config/glossary.csv` is tracked, that command is its editor, and no rendering is
-a declared credential, so the comparison costs nothing. And a rule-less field
+reaches the same function. `do_glossary_set` asks it of a row's three fields
+and its severity: `config/glossary.csv` is tracked and that command is its
+editor. The comparison there carries the one false positive the `headers`
+source carries everywhere — a hand-edited non-secret header equal to a term
+(`X-Title: Ashcombe` beside `lx glossary set Ashcombe 灰岸`) — and the refusal
+names the provider's `headers` block as the thing to change; a lane found the
+first version of this sentence claiming the comparison cost nothing. And a rule-less field
 under `providers.*` whose *name* is a credential's — `api_key`, `apikey`, `key`,
 `token`, `secret`, `password`, `passwd`, `auth`, `authorization`,
 `credential(s)`, or ending `_key`, `_token`, `_secret`, `_password`, `_passwd` —
@@ -123,12 +147,15 @@ stored like any other rule-less key and its value is still compared.
 A key nothing declares is text, and refusing text by any property of its own
 refuses a model id. What the rule cannot reach, a **note** reaches where a
 fact is available: after a write that landed, `cli.config_notes` prints — and
-`POST /api/config` returns as `notes`, additive — one line when a written leaf
-is the content of an exported variable the configuration does not name whose
-own name, split on `_`, contains `KEY`, `APIKEY`, `TOKEN`, `SECRET`,
-`PASSWORD`, `PASSWD`, `PASS`, `AUTH`, `CREDENTIAL(S)` or `PAT`; and one line
-per key when a write lands at `providers.*.api_key_env` and the block it names,
-or a `routing.*` model, already holds that variable's content. The second is the
+`POST /api/config` returns as `notes`, additive — one line, naming the leaf
+that matched rather than the key that was addressed, when a written leaf is
+the content of an exported variable the configuration does not name whose own
+name, split on `_`, contains `KEY`, `APIKEY`, `TOKEN`, `SECRET`, `PASSWORD`,
+`PASSWD`, `PASS`, `CREDENTIAL(S)` or `PAT` (`AUTH` was in the table and is not:
+`SSH_AUTH_SOCK` holds a path on most POSIX machines); and one line per key when
+a write lands at `providers.*.api_key_env` and the block it names, or a
+`routing.*` entry's model, already holds that variable's content. A variable
+whose content is its own name earns no line, as it declares nothing. The second is the
 first paste found one step later, at the moment the name is declared and the
 earlier value becomes comparable — which is the terminal order that writes
 `model` first and the workbench's new-backend form with the key box left
@@ -210,7 +237,8 @@ a new provider's name; `POST /api/extract` refuses such a `tone` or `lang`, a
 `reset` that is not the JSON boolean and a `tone` that is not text or `null`;
 `POST /api/translate` refuses a `mode` that is not a stage — `cli.checked_mode`,
 inside `do_select` and `do_translate`, where until now anything else selected
-as `draft` and was written into every segment's `origin`. Each narrows an
+as `draft` and was written into every segment's `origin` — and a `model` that
+is a declared credential, before the route is read back. Each narrows an
 accepted value set and turns a documented `200` into a `400`; none has an
 additive spelling. The first depends on the server's environment and
 configuration, read when `lx web` started, and the contract says so: the same
@@ -237,6 +265,15 @@ the status. `notes` on `POST /api/config`'s reply is additive and rode along.
   a lossy remedy, since the register is part of the memory key and a committed
   wording does not answer in another one. It names `lx segments … --json`
   before and `lx apply … --file` after, which is what keeps the words.
+- `cli.language_tag` quoted the value it refused — `lang = 'sk-proj-…' is not a
+  language tag` — in a `403` on every endpoint that takes `lang`, and a value
+  longer than the 35 characters a tag may have is every hosted key, refused
+  there before the credential rule could see it. It names the field and the
+  shape now. Found by the security-tier re-derivation, which also found
+  `do_glossary_set`'s severity refusal quoting its value; both say the shape.
+- `_field_route` and `do_routing_set` quoted the stage they refused
+  (`'audit' is not a pipeline stage`) — a `*` segment a caller filled in. The
+  known stages are the whole remedy and are all they say now.
 
 ### How it is held
 
@@ -251,18 +288,50 @@ declared second sweep. One sentence is pinned as a literal on both surfaces —
 `_windows` is blind to a prefix under eight characters and to a length, and
 both have passed it before. The two sources the `ast` guard cannot see, read out
 of `cfg`, are held at runtime in every spelling `Provider._credentials` reads,
-with an upper-case secret beside a long one; the guard itself grew `secret` as
-a value-parameter name, so a helper handed a declared value under any other
-name fails statically, and the new functions are asserted into its closure.
-Every listed model id is written on both surfaces under a declared key; the one
-false positive's remedy is run verbatim; the residual, the block-declared name,
-the three name spellings, the wrapped pastes, the digit-only credential off the
-raw text, the notes' two triggers as exact lines, the credential-named fields,
-the hand-edited shapes `lx config set` must survive, `tone`, `lang`, `reset`
-and `mode` on both surfaces — each has a test, and the register's oracle folds
-case because `canonical_tone` lower-cases it on the way into the memory file.
+with an upper-case secret beside a long one. The guard itself grew `secret` as
+a value-*parameter* name and `print`/`_out`/`_err` as sinks, and the functions
+`config_value` reaches are asserted into its closure — and that is the whole
+of what it sees here: a helper handed a declared value under any other
+parameter name fails statically, while the loop variables over
+`_declared_credentials(cfg)` and everything read out of `cfg` are untainted to
+it, `config_notes`, `do_extract`, `do_glossary_set` and `checked_mode` sit
+outside its closure, and every such defect is held by the pinned sentences and
+the window tests at runtime only (a lane planted each and measured which half
+caught it). Every listed model id is written on both surfaces under a declared
+key; the one false positive's remedy is run verbatim; the residual in both
+spellings, the write's own declaration in three spellings, a declared
+credential in every key position and in a key `split_key` would quote, the
+wrapped pastes, the exact-twenty boundary, a padded short secret where no
+field rule strips, the digit-only credential off the raw text and as a JSON
+number, every authorization scheme, a bare `@` in a password, the notes' two
+triggers as exact lines and the leaf a block write's note names, the
+credential-named fields at any depth, an existing provider named like a
+placeholder, the hand-edited shapes `lx config set` must survive, Windows'
+case folding, `tone`, `lang`, `reset`, `mode` and `model` on both surfaces —
+each has a test, the in-process refusals are asserted to print nothing, and
+the register's oracle folds case because `canonical_tone` lower-cases it on the
+way into the memory file.
 
-MUTANTS_PLACEHOLDER
+**Mutants.** Three security-tier review lanes at `0aec101`, each in its own
+archive of the tree, planted sixty-seven defects between them — the rule's
+floors, arms and sources, every ordering, every refusal's sentence, the notes'
+triggers, the type checks, the guard's blind spots — and sixteen survived the
+tests as first written: `checked_mode` dropped from `do_translate` alone,
+`_printable_url`'s strip, an existing provider re-examined as new (the
+red-line direction), the residual dropped from the block-declared loop (the
+same direction), `Basic`/`Token` schemes, `rpartition` on the netloc, a
+digit-only credential as a JSON number, a padded short secret where no field
+rule strips, the exact-twenty boundary, nested `api_key_env` under `providers`,
+a credential-named field two levels down, and a leak through `print` that only
+the subprocess tests saw. Each has a test now and each was planted back. Three
+orderings are held by exactly one test each — the server's `credential_name`
+before `writable_key`, the name check before `_addressable`, the raw text
+compared beside the value — so a future edit to one of those tests is an edit
+to a guard. The same lanes found the five defects above (Windows' folding, the
+`lang` echo, the write's own declaration as a name, the stage and top-level
+positions, `split_key`'s quote), none of which the coordinating session's own
+tests had reached: a score on mutants the author designed measures the
+author's imagination, for the second package running.
 
 ### Corrections to the record
 
@@ -274,20 +343,34 @@ MUTANTS_PLACEHOLDER
   *reads* as clean. `_summary`'s test is `value != value.strip()` on the raw
   string, not on the printable form.
 - `lx extract --help`'s remedy, above.
+- The first version of this entry, committed at `0aec101`, said the glossary
+  comparison "costs nothing", said the `ast` guard held `secret` wherever it
+  appeared, listed five paste shapes as six in `_matches`' docstring, called
+  the name rule a rule about the provider position, and shipped a literal
+  placeholder where this mutation section now is. All corrected in place by
+  the review that found them.
 
 ### Left open, and where it lives
 
-- **A key is not a value**, still: the name of a provider that *already*
-  exists is a key of the file and is printed wherever names are — every
-  `Configured:` list, `writable_key`'s `403`, `split_key`'s empty-segment
-  refusal, `_addressable`'s two sentences, `do_routing_set`'s `{stage!r}`, and
-  every field rule's `{path}`. A lane counted eight sites. The smallest
-  consistent position is "a `*` segment the merged configuration does not hold
-  is a value", which this package takes for a *declared credential* and no
-  further; a key-shaped name nothing declares is written and shown, as
+- **A key is not a value**, still, for what nothing declares: a key-shaped
+  segment no variable holds is written, and is spelled by `writable_key`'s
+  `403`, `split_key`'s empty-segment refusal, `_addressable`'s two sentences
+  and every field rule's `{path}` — and once written it is a key of the file
+  and is printed wherever names are, every `Configured:` list included. The
+  position this package takes is "a segment the merged configuration does not
+  hold is a value, and one that is a declared credential is refused before
+  anything spells it, in every position"; the undeclared remainder is what
   2026-09-13's first entry recorded.
 - A key in a **hand-edited** file is displayed as the field displays it; no
-  writer ran.
+  writer ran. And a key that landed by the note path — written into `model`
+  before its variable was named, the name declared afterwards — is displayed
+  by `lx providers`, `lx config get` and `/api/state` until the person acts on
+  the note that named it: masking `model` on display would make every
+  projection depend on the environment and hide from `lx providers` a value the
+  file still holds and `git add` still commits. Decided, not repaired.
+- A note prints an environment variable's *name* as a name, as
+  `_field_api_key_env`'s refusal has since 2026-08-12; a name that itself
+  carries a control character or a key is the person's own environment.
 - A key **not exported anywhere** is text; the later `api_key_env` write's note
   is the net, one step later.
 - `lx config unset providers.<p>.api_key_env` un-declares a variable, so the

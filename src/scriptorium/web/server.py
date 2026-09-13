@@ -49,6 +49,7 @@ from ..cli import (
     do_untracked,
     do_waive,
     language_tag,
+    refuse_credential,
     writable_key,
 )
 from ..config import ROUTING_STAGES, ConfigError, load_config, resolve_route
@@ -1060,6 +1061,12 @@ def _translate_job(src, lang, cfg, body):
     # the same `config.resolve_route` every other surface uses — a second site
     # resolving this independently is how the workbench and the CLI come to
     # describe different runs.
+    # Before the route is resolved and read back: a `model` that is a
+    # credential the configuration declares would otherwise be echoed in
+    # `route.model`, written into the job's first log line and sent to
+    # whichever backend the stage routes to. `do_translate` asks the same of
+    # the CLI; this call is what keeps the readback clean (HANDOFF-080).
+    refuse_credential(cfg, "model", body.get("model"))
     route = _stage_route(cfg, mode, body.get("provider"), body.get("model"))
 
     state = _mint_job(len(segments))

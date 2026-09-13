@@ -1502,6 +1502,9 @@ def test_a_field_holding_what_it_never_may_is_not_displayed():
     # the security-tier review of HANDOFF-078; decided under HANDOFF-080.
     assert rows["ws"]["base_url"] == "http://127.0.0.1:9/v1", rows["ws"]
     assert "whitespace" in rows["ws"]["error"], rows["ws"]
+    # And `lx config get` agrees with the row, so the two commands answer one value one way.
+    assert cli.do_config_get(cfg, "providers.ws.base_url") == "http://127.0.0.1:9/v1"
+    assert cli.do_config_value(cfg, "providers.ws")["base_url"] == "http://127.0.0.1:9/v1"
     assert rows["k"]["kind"] == "" and "kind" in rows["k"]["error"]
     assert rows["e"]["key_env"] == "" and "api_key_env" in rows["e"]["error"]
     assert rows["e"]["needs_key"] is True and rows["e"]["key_present"] is False
@@ -1703,7 +1706,7 @@ def test_a_refusal_in_the_configuration_writer_is_built_from_nothing_it_was_hand
             "_as_block", "_field_tone", "_field_api_key_env",
             # HANDOFF-080's credential rule and everything it reads through.
             "refuse_credential", "_refuse_credential_names", "_declared_credentials",
-            "_names_declared_inside", "_new_provider_names", "_matches", "_leaves",
+            "_names_declared_inside", "_new_names", "_matches", "_leaves", "_fold",
             } <= set(closure), sorted(closure)
     assert "_CONFIG_FIELDS[providers.*.model]" in lambdas, sorted(lambdas)
     problems = []
@@ -1726,6 +1729,13 @@ def test_a_refusal_in_the_configuration_writer_is_built_from_nothing_it_was_hand
                                 and up.func.id == "_shape_of"):
                             continue
                         problems.append(f"{name}:{node.lineno} raises with {leak.id}")
+            elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                  and node.func.id in ("print", "_out", "_err")):
+                # A sink beside `raise`: a leak through stdout was caught only
+                # by the subprocess tests until 2026-09-13.
+                if any(isinstance(n, ast.Name) and n.id in tainted
+                       for arg in node.args for n in ast.walk(arg)):
+                    problems.append(f"{name}:{node.lineno} prints a value")
             elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                   and node.func.id in closure):
                 params = [a.arg for a in closure[node.func.id].args.args]
@@ -2021,8 +2031,9 @@ def test_a_new_provider_named_by_a_declared_credential_is_refused_before_anythin
     r = _lx(args, tmp_path, env)
     assert r.returncode == 2, (args, _both(r))
     assert _windows(KEYLIKE, _both(r)) == [], _both(r)
-    assert _err(r).startswith("lx: the name of a new provider under providers is the content of "
-                              "OPENAI_API_KEY, which providers.openai.api_key_env names as a key"), _err(r)
+    assert _err(r).startswith("lx: a segment of the key being written — one the configuration does "
+                              "not hold yet — is the content of OPENAI_API_KEY, which "
+                              "providers.openai.api_key_env names as a key"), _err(r)
     assert (tmp_path / "lx.config.json").read_bytes() == before
 
 
@@ -2081,7 +2092,10 @@ def test_a_key_exported_under_an_undeclared_name_earns_a_note_and_is_stored(tmp_
     assert r.returncode == 0 and "note:" not in _out(r), _out(r)
     r = _lx(["config", "set", "providers.groq.model", KEYLIKE], tmp_path, env)
     r = _lx(["routing", "set", "draft", f"groq:{KEYLIKE}"], tmp_path, env)
-    assert r.returncode == 0 and "note: routing.draft now holds" in _out(r), _out(r)
+    # The leaf that matched, not the key that was addressed: the entry is the
+    # object form here, and `lx config unset routing.draft.model` keeps the
+    # provider half.
+    assert r.returncode == 0 and "note: routing.draft.model now holds" in _out(r), _out(r)
     r = _lx(["config", "set", "providers.groq.api_key_env", "GROQ_API_KEY"], tmp_path, env)
     assert r.returncode == 0, _err(r)
     notes = [line for line in _out(r).splitlines() if line.startswith("note:")]
@@ -2090,10 +2104,10 @@ def test_a_key_exported_under_an_undeclared_name_earns_a_note_and_is_stored(tmp_
         "providers.groq.api_key_env now names as this backend's key. Not an error — but if "
         "that is the key, it does not belong in lx.config.json: `lx config unset "
         "providers.groq.model`.",
-        "note: routing.draft already holds the content of GROQ_API_KEY, the variable "
+        "note: routing.draft.model already holds the content of GROQ_API_KEY, the variable "
         "providers.groq.api_key_env now names as this backend's key. Not an error — but if "
         "that is the key, it does not belong in lx.config.json: `lx config unset "
-        "routing.draft`."], _out(r)
+        "routing.draft.model`."], _out(r)
     assert _windows(KEYLIKE, "\n".join(notes)) == []
     # Declared now: the next paste is refused, and the note is not printed twice.
     r = _lx(["config", "set", "providers.groq.model", KEYLIKE], tmp_path, env)
@@ -2187,3 +2201,262 @@ def test_checked_mode_names_the_stages_and_never_the_value():
             cli.checked_mode(mode)
         assert str(caught.value) == f"`mode` is one of draft, polish, repair — this request sent {shape}."
         assert _windows(KEYLIKE, str(caught.value)) == []
+
+
+# ── HANDOFF-080, second round: what the security-tier re-derivation found ──
+
+#: A key of 104 characters, the shape of a hosted key: too long for a language
+#: tag by shape, so `language_tag` refuses it before the credential rule sees it.
+LONG_KEY = "sk-proj-" + "A1b2C3d4" * 12
+
+#: A 13-character declared secret: under `_ENV_LONG`, so equality is the only
+#: arm that can catch it, and `_leaves`' strip is what makes equality reach a
+#: padded paste on the paths no field rule strips.
+SHORT = "S3CRETVALUE9X"
+
+
+def test_a_declared_name_is_read_by_the_files_spelling_and_folded_on_windows(monkeypatch):
+    """On Windows `os.environ` upper-cases every name, `_field_api_key_env` accepts a
+    mixed-case spelling anyway and the transport reads the key through it — so a rule
+    that iterated the environment's keys and tested the file's spelling declared nothing
+    there, silently. Found by the security-tier re-derivation; held on both platforms.
+    """
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("Groq_Key", KEYLIKE)
+    cfg = {**DEFAULT_CONFIG, "providers": {
+        **DEFAULT_CONFIG["providers"],
+        "groq": {"kind": "openai", "model": KEYLIKE, "api_key_env": "Groq_Key"}}}
+    with pytest.raises(ConfigError) as caught:
+        cli.config_value(cfg, "providers.groq.model", KEYLIKE)
+    assert "Groq_Key" in str(caught.value) and _windows(KEYLIKE, str(caught.value)) == []
+    assert cli.config_notes(cfg, ["providers", "groq", "model"], KEYLIKE) == []
+    # The second trigger folds the same way: naming the variable while the
+    # block already holds its content earns the note, not silence.
+    before = {**cfg, "providers": {**cfg["providers"],
+                                   "groq": {"kind": "openai", "model": KEYLIKE}}}
+    notes = cli.config_notes(before, ["providers", "groq", "api_key_env"], "Groq_Key")
+    assert len(notes) == 1 and "providers.groq.model already holds" in notes[0], notes
+    if os.name == "nt":
+        # The environment's own spelling differs from the file's: one variable here.
+        monkeypatch.setenv("GROQ_KEY2", KEYLIKE)
+        cfg["providers"]["groq"]["api_key_env"] = "groq_key2"
+        with pytest.raises(ConfigError):
+            cli.config_value(cfg, "providers.groq.model", KEYLIKE)
+
+
+def test_language_tag_repeats_nothing_it_refuses():
+    """A key longer than a tag may be was refused here, whole, before the credential rule."""
+    from scriptorium.cli import UnsafePath
+    with pytest.raises(UnsafePath) as caught:
+        cli.language_tag(LONG_KEY)
+    assert _windows(LONG_KEY, str(caught.value)) == [], str(caught.value)
+    assert str(caught.value).startswith("lang is not a language tag — got text.")
+    with pytest.raises(UnsafePath) as caught:
+        cli.language_tag(5, field="lang")
+    assert "got a number" in str(caught.value)
+    assert cli.language_tag("zh-TW") == "zh-TW"
+
+
+@pytest.mark.parametrize("args", [
+    ["config", "set", f"providers.{KEYLIKE}.api_key_env", "GW_KEY"],
+    ["config", "set", f"providers.{KEYLIKE}", json.dumps({"kind": "openai", "api_key_env": "GW_KEY"})],
+    ["config", "set", "providers", json.dumps({KEYLIKE: {"kind": "openai", "api_key_env": "GW_KEY"}})],
+])
+def test_a_new_name_that_is_the_content_of_the_variable_the_same_write_declares_is_refused(
+        tmp_path, args):
+    """The name check reads the write's own declaration, as the value check does."""
+    env = _project(tmp_path, _env(GW_KEY=KEYLIKE))
+    before = (tmp_path / "lx.config.json").read_bytes()
+    r = _lx(args, tmp_path, env)
+    assert r.returncode == 2, (args, _both(r))
+    assert _windows(KEYLIKE, _both(r)) == [] and "GW_KEY" in _err(r), _both(r)
+    assert (tmp_path / "lx.config.json").read_bytes() == before
+    r = _lx(["config", "set", "providers.gw.api_key_env", "GW_KEY"], tmp_path, env)
+    assert r.returncode == 0, _err(r)
+
+
+@pytest.mark.parametrize("args", [
+    ["config", "set", KEYLIKE, "1"],
+    ["config", "set", f"formats.map.{KEYLIKE}", "text"],
+    ["config", "set", f"routing.{KEYLIKE}", "openai"],
+    ["config", "set", f"providers.{KEYLIKE}.", "x"],
+    ["config", "set", f"providers.{KEYLIKE}..kind", "openai"],
+    ["config", "unset", f"routing.{KEYLIKE}"],
+    ["config", "unset", f"providers.{KEYLIKE}.model"],
+])
+def test_a_declared_credential_in_any_key_position_is_refused_before_anything_spells_it(
+        tmp_path, args):
+    """Not the provider position alone: the stage position, the top level, a block's key,
+    and a key `split_key` would otherwise quote whole for its empty segment."""
+    env = _project(tmp_path, _env(OPENAI_API_KEY=KEYLIKE))
+    before = (tmp_path / "lx.config.json").read_bytes()
+    r = _lx(args, tmp_path, env)
+    assert r.returncode == 2, (args, _both(r))
+    assert _windows(KEYLIKE, _both(r)) == [] and "OPENAI_API_KEY" in _err(r), _both(r)
+    assert (tmp_path / "lx.config.json").read_bytes() == before
+
+
+def test_a_stage_that_is_not_one_is_refused_without_being_repeated(tmp_path):
+    env = _project(tmp_path, _env())
+    for args in (["config", "set", "routing.audit", "openai"], ["routing", "set", "draft", "x"]):
+        r = _lx(args, tmp_path, env)
+        assert r.returncode == 2, (args, _both(r))
+    r = _lx(["config", "set", "routing.audit", "openai"], tmp_path, env)
+    assert "audit" not in _err(r) and "draft, polish, repair" in _err(r), _err(r)
+    with pytest.raises(ConfigError) as caught:
+        cli.do_routing_set(DEFAULT_CONFIG, "audit", "openai", str(tmp_path / "lx.config.json"))
+    assert "audit" not in str(caught.value) and "draft, polish, repair" in str(caught.value)
+
+
+def test_do_translate_refuses_a_mode_that_is_not_a_stage_before_it_reads_anything():
+    """`checked_mode` sits in `do_translate` as well as in `do_select`; a mutant that dropped
+    the second survived every test, and the failure signature is a `FileNotFoundError`."""
+    from scriptorium.cli import UnusableTarget
+    with pytest.raises(UnusableTarget):
+        cli.do_translate("nowhere.md", "zh-TW", _sweep_cfg(), [{"id": "s0001"}], "audit")
+
+
+def test_a_declared_credential_is_not_a_model_for_a_run_either(tmp_path, monkeypatch):
+    """`--model` on the terminal and `model` in `do_translate`: the dry run printed it."""
+    monkeypatch.setenv("OPENAI_API_KEY", KEYLIKE)
+    with pytest.raises(ConfigError) as caught:
+        cli.do_translate("nowhere.md", "zh-TW", _sweep_cfg(), [{"id": "s0001"}], "draft",
+                         model=KEYLIKE)
+    assert _windows(KEYLIKE, str(caught.value)) == [] and str(caught.value).startswith("model was given")
+    env = _project(tmp_path, _env(OPENAI_API_KEY=KEYLIKE))
+    (tmp_path / "d.md").write_bytes(b"The gate stood open.\n")
+    assert _lx(["extract", "d.md", "--lang", "zh-TW"], tmp_path, env).returncode == 0
+    r = _lx(["translate", "d.md", "--lang", "zh-TW", "--model", KEYLIKE, "--dry-run"], tmp_path, env)
+    assert r.returncode == 2 and _windows(KEYLIKE, _both(r)) == [], _both(r)
+    r = _lx(["translate", "d.md", "--lang", "zh-TW", "--model", "gpt-4o-mini", "--dry-run"],
+            tmp_path, env)
+    assert r.returncode == 0 and "model=gpt-4o-mini" in _out(r), _both(r)
+
+
+def test_an_existing_provider_named_like_a_placeholder_is_still_writable(tmp_path):
+    """The red-line direction of the name rule: an existing name is a key of the file."""
+    env = _project(tmp_path, _env(OPENAI_API_KEY="lm-studio"))
+    (tmp_path / "lx.config.json").write_text(
+        json.dumps({"providers": {"lm-studio": {"kind": "openai", "model": "m"}}}), encoding="utf-8")
+    for args in (["config", "set", "providers.lm-studio.model", "x"],
+                 ["config", "set", "providers.lm-studio.timeout", "9"],
+                 ["config", "unset", "providers.lm-studio.timeout"]):
+        r = _lx(args, tmp_path, env)
+        assert r.returncode == 0, (args, _both(r))
+
+
+def test_the_residual_holds_in_the_block_spelling_and_earns_no_note(tmp_path):
+    """`MY_GATEWAY_TOKEN=MY_GATEWAY_TOKEN`, sixteen characters: above the floor, and still a name."""
+    env = _project(tmp_path, _env(MY_GATEWAY_TOKEN="MY_GATEWAY_TOKEN"))
+    r = _lx(["config", "set", "providers.gw",
+             json.dumps({"kind": "openai", "api_key_env": "MY_GATEWAY_TOKEN"})], tmp_path, env)
+    assert r.returncode == 0 and "note:" not in _out(r), _both(r)
+    r = _lx(["config", "set", "providers.gw.api_key_env", "MY_GATEWAY_TOKEN"], tmp_path, env)
+    assert r.returncode == 0 and "note:" not in _out(r), _both(r)
+
+
+@pytest.mark.parametrize("scheme", ["Bearer", "Basic", "Token", "bearer"])
+def test_every_authorization_scheme_gives_up_its_token(scheme, monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    cfg = {**DEFAULT_CONFIG, "providers": {
+        **DEFAULT_CONFIG["providers"], "p": {"kind": "openai", "model": "m"},
+        "gw": {"kind": "openai", "headers": {"Authorization": f"{scheme} {SHORT}"}}}}
+    with pytest.raises(ConfigError) as caught:
+        cli.config_value(cfg, "providers.p.model", SHORT)
+    assert "providers.gw.headers" in str(caught.value) and SHORT not in str(caught.value)
+
+
+def test_a_password_holding_a_bare_at_sign_is_declared_whole(monkeypatch):
+    """`rpartition("@")`, as `Provider._userinfo` reads it: the last `@` ends the userinfo."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    cfg = {**DEFAULT_CONFIG, "providers": {
+        **DEFAULT_CONFIG["providers"], "p": {"kind": "openai", "model": "m"},
+        "gw": {"kind": "openai", "base_url": f"http://u:p@ss{SHORT}@127.0.0.1:9/v1"}}}
+    assert len(cli._declared_credentials(cfg)) == 4
+    with pytest.raises(ConfigError) as caught:
+        cli.config_value(cfg, "providers.p.model", f"p@ss{SHORT}")
+    assert SHORT not in str(caught.value)
+
+
+def test_a_padded_paste_of_a_short_declared_secret_is_refused_where_no_rule_strips(monkeypatch):
+    """`_leaves`' own strip decides on a rule-less key, in a list, and at extract."""
+    monkeypatch.setenv("OPENAI_API_KEY", SHORT)
+    cfg = _sweep_cfg()
+    for key, raw in (("targets", f"  {SHORT}  "), ("targets", json.dumps([f"  {SHORT}\n"])),
+                     ("handmade", f"\t{SHORT}")):
+        with pytest.raises(ConfigError) as caught:
+            cli.config_value(cfg, key, raw)
+        assert str(caught.value).startswith(f"{key} was given the content of OPENAI_API_KEY"), (key, raw)
+    for kw in ({"tone": f"  {SHORT}\n"}, {"lang": f" {SHORT}"}):
+        with pytest.raises(ConfigError):
+            cli.do_extract("nowhere.md", kw.get("lang", "zh-TW"), cfg, tone=kw.get("tone"))
+
+
+def test_containment_opens_at_exactly_twenty_characters(monkeypatch):
+    twenty, nineteen = "K" * 20, "K" * 19
+    cfg = _sweep_cfg()
+    monkeypatch.setenv("OPENAI_API_KEY", twenty)
+    with pytest.raises(ConfigError):
+        cli.config_value(cfg, "providers.p.model", f"Bearer {twenty}")
+    monkeypatch.setenv("OPENAI_API_KEY", nineteen)
+    assert cli.config_value(cfg, "providers.p.model", f"Bearer {nineteen}")[1] == f"Bearer {nineteen}"
+    with pytest.raises(ConfigError):
+        cli.config_value(cfg, "providers.p.model", nineteen)
+
+
+def test_a_block_under_providers_declaring_a_nested_api_key_env_is_compared(tmp_path):
+    env = _project(tmp_path, _env(GW_KEY=KEYLIKE))
+    r = _lx(["config", "set", "providers",
+             json.dumps({"gw": {"kind": "openai", "api_key_env": "GW_KEY", "model": KEYLIKE}})],
+            tmp_path, env)
+    assert r.returncode == 2 and _windows(KEYLIKE, _both(r)) == [] and "GW_KEY" in _err(r), _both(r)
+
+
+@pytest.mark.parametrize("key", ["providers.openai.extra.api_key", "providers.openai.extra.token"])
+def test_a_credential_named_field_is_refused_at_any_depth(tmp_path, key):
+    env = _project(tmp_path, _env())
+    r = _lx(["config", "set", key, KEYLIKE], tmp_path, env)
+    assert r.returncode == 2 and _windows(KEYLIKE, _both(r)) == [], (key, _both(r))
+    r = _lx(["config", "set", "providers.openai", json.dumps({"extra": {key.split(".")[-1]: KEYLIKE}})],
+            tmp_path, env)
+    assert r.returncode == 2 and _windows(KEYLIKE, _both(r)) == [], _both(r)
+    r = _lx(["config", "set", "providers.openai.extra.thing", "x"], tmp_path, env)
+    assert r.returncode == 0, _err(r)
+
+
+def test_the_in_process_refusals_print_nothing_either(monkeypatch, capsys):
+    """A leak through stdout beside the raise was seen by subprocess tests only."""
+    monkeypatch.setenv("OPENAI_API_KEY", KEYLIKE)
+    cfg = _sweep_cfg()
+    for key, raw in (("providers.p.model", KEYLIKE), ("tone", KEYLIKE),
+                     ("routing.draft", f"p:{KEYLIKE}"), (f"providers.{KEYLIKE}.kind", "openai")):
+        with pytest.raises(ConfigError):
+            cli.config_value(cfg, key, raw)
+    with pytest.raises(ConfigError):
+        cli.do_extract("nowhere.md", "zh-TW", cfg, tone=KEYLIKE)
+    captured = capsys.readouterr()
+    assert _windows(KEYLIKE, captured.out + captured.err) == [], captured
+
+
+def test_glossary_set_repeats_no_severity_and_refuses_a_credential_there(tmp_path):
+    from scriptorium.config import load_config
+    _project(tmp_path, _env())
+    cwd = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        cfg = load_config()
+        with pytest.raises(ConfigError) as caught:
+            cli.do_glossary_set(cfg, "Hello", "哈囉", severity=KEYLIKE)
+        assert _windows(KEYLIKE, str(caught.value)) == [] and "got text" in str(caught.value)
+    finally:
+        os.chdir(cwd)
+
+
+def test_the_first_note_names_the_leaf_that_matched_on_a_block_write(tmp_path):
+    env = _project(tmp_path, _env(GROQ_API_KEY=KEYLIKE))
+    r = _lx(["config", "set", "providers.gw", json.dumps({"kind": "openai", "model": KEYLIKE})],
+            tmp_path, env)
+    assert r.returncode == 0, _err(r)
+    notes = [line for line in _out(r).splitlines() if line.startswith("note:")]
+    assert len(notes) == 1 and notes[0].startswith("note: providers.gw.model now holds"), _out(r)
+    assert "`lx config unset providers.gw.model`" in notes[0]

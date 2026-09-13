@@ -87,7 +87,10 @@ the declared source, never the value.
    text or `null`.
 3. `POST /api/translate` refuses a `mode` that is not one of the three stages
    with a `400`, before a job is minted. Anything else used to select as
-   `draft` and land in every segment's `origin` as `llm:<mode>`.
+   `draft` and land in every segment's `origin` as `llm:<mode>`. And it
+   refuses a `model` that is a declared credential the same way, before the
+   route is resolved: the value used to come back in `route.model`, in the
+   job's first `log` line and in the chat body sent to the backend.
 
 There is no additive spelling of any of them: each narrows an accepted value
 set and turns a documented `200` into a `400`. What did land additively beside
@@ -698,7 +701,7 @@ optional as soon as `--reset` is present — see the warning below.
 | Key | Required | Type | Default | Notes |
 |---|---|---|---|---|
 | `src` | yes | string | — | confined |
-| `lang` | yes | string | — | whitelisted; and since version 5 not a credential the configuration declares (`400`) — it becomes the *name* of `.lx/tm.<lang>.jsonl`, which is tracked. |
+| `lang` | yes | string | — | whitelisted; and since version 5 not a credential the configuration declares (`400`) — it becomes the *name* of `.lx/tm.<lang>.jsonl`, which is tracked. A value longer than the 35 characters a tag may have — every hosted key — is refused by the whitelist first, as `403`, and since version 5 that refusal names the shape and never the value. |
 | `tone` | **when `reset` is true** | string \| null | the document's frozen register | Required, non-blank, with `reset`. See the warning below. Since version 5 it is **type-checked** — anything but text or `null` is `400`, named by its shape — and refused when it is a credential the configuration declares, because the register lands in the document row, in `lx status --json` and, lower-cased, in `.lx/tm.*.jsonl`. Only the request's own value is examined: a register already frozen on the row is never re-read against the rule, since the only way out of a refused stored register would be `--tone`, which drops every translation. |
 | `reset` | no | boolean | `false` | Discards carryover, the existing state row, **and the frozen register**. **Since version 5 it must be the JSON boolean**: `1`, `"yes"`, `[]`-with-a-member, `{}`-with-a-key and **the string `"false"`** are every one of them a `400` naming the shape, where until version 5 each was a reset that discarded this document's translations, because a non-empty string is truthy. See *Known divergences* (28), closed. |
 
@@ -1080,7 +1083,7 @@ surface invariant 8 calls the product the riskier of the two.
 | `mode` | no | string | `"draft"` | One of `"draft"`, `"polish"`, `"repair"`. Selects segments *and* names the routing stage. See the selection table below. **Anything else is `400` since version 5**, named by its shape or as text that is none of them, and no job is minted — `cli.checked_mode`, inside `do_select`, so the terminal's `--mode` choices and this field cannot disagree. |
 | `ids` | no | array of string | — | **When present and non-empty, overrides `mode`'s selection entirely.** An empty array is falsy and falls through to `mode`. |
 | `provider` | no | string | the routing table's answer | An unknown name fails *inside the job*, not on this request. |
-| `model` | no | string | the routing entry's model, else the provider's own | The model id for this run only. Most specific first, exactly as `lx translate --model`: this value, then the routing entry's, then the provider's. A `provider` naming a **different** backend drops the entry's model, because a model id belongs to the backend that serves it — this field survives that, because it was named for this run and for this provider. |
+| `model` | no | string | the routing entry's model, else the provider's own | The model id for this run only. Most specific first, exactly as `lx translate --model`: this value, then the routing entry's, then the provider's. A `provider` naming a **different** backend drops the entry's model, because a model id belongs to the backend that serves it — this field survives that, because it was named for this run and for this provider. **Since version 5 a value that is a credential the configuration declares is `400`**, before the route is resolved and before a job is minted — it would otherwise be read back in `route.model`, written into the job's first `log` line and sent to the backend as the chat body's `model`. |
 | `batch` | no | integer | `batch.size` from config, else 25 | |
 | `concurrency` | no | integer | `batch.concurrency` from config, else 2 | |
 | `limit` | no | integer ≥ 0 | `0` | **The most segments this run may send to the model.** `0`, `false`, `null` and an absent key are one value and mean the whole selection. Applied after `mode` has chosen and after the held and origin-precedence exclusions have run, so a run of segments nobody may translate cannot eat the bound. It takes the **front** of the selection and does not advance — see the note below the mode table. **Not applied when `ids` is present and non-empty**, because naming ids is a person pointing at segments; the value is still *checked*, so a malformed one is refused even on a request that would not have used it. Every other value — a string, a float, `true`, a negative, an array, an object — is refused with a `400`, and **no job is started**. `true` and `-5` are named because both are silent in Python: `isinstance(True, int)` is true, and `list[:-5]` is *everything except the last five*. |

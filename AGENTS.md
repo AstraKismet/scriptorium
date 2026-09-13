@@ -203,9 +203,12 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    `MODEL=gpt-4o-mini` is an ordinary export, and a rule reading the whole
    environment would refuse `gpt-4o-mini` with no way out. A key nothing
    declares is text; where its variable's name says what it is, a *note* says
-   so and stores it. `contract_version` moved to **5** for it, carrying also
-   the `reset`/`tone` type checks of divergence (28) and a `mode` that is not a
-   stage. `docs/decisions.md`, 2026-09-13.
+   so and stores it. The comparison folds case on Windows, where the
+   environment does; a first version that iterated the environment's keys was
+   silently inert there. `contract_version` moved to **5** for it, carrying
+   also the `reset`/`tone` type checks of divergence (28), a `mode` that is not
+   a stage, and a run's `model` that is a declared credential.
+   `docs/decisions.md`, 2026-09-13.
 
    **Since 2026-09-13 no refusal repeats the value it refused, in any field** —
    not whole, not in part, not the `repr` of a wrong-typed one, and not its
@@ -603,7 +606,7 @@ Node — see the invariant below.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 2869 collected, no network. Four are
+python -m pytest -q                 # 2905 collected, no network. Four are
                                     #   conditional on three different things, so
                                     #   which two skip is a property of the machine
                                     #   AND the account: one is POSIX-only, one

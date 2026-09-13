@@ -440,7 +440,8 @@ declares: a value equal to the content of the variable an `api_key_env` names
 --tone`, `lx glossary set` — with a sentence that names the variable and never
 the value. Nothing wider is compared, so a model id a backend serves is never
 refused; a key exported under a name nothing declares yet is stored with a note
-saying which variable holds it. No `lx` command takes key material on a command line,
+saying which variable holds it, where the variable's own name says it holds a
+key (`GROQ_API_KEY`, not `GW`). No `lx` command takes key material on a command line,
 because argv is visible in a process listing and lands in shell history before
 any refusal can run.
 
@@ -653,7 +654,7 @@ what it refused, whichever box it was typed into. The *model* box, the *Name*
 box and every other field refuse a value that is a key the configuration
 already declares — the content of the variable named beside it — and a key
 exported under a name nothing declares yet is saved with a note naming the
-variable. Changing `base_url` needs an
+variable, where that name says it holds a key. Changing `base_url` needs an
 explicit acknowledgement, because it decides where the document and the
 credential are sent. A backend cannot be deleted from the browser; that is
 `lx config unset` or the file.
@@ -780,7 +781,7 @@ that lost.
 ## Development
 
 ```bash
-python -m pytest -q                # 2869 collected, no network
+python -m pytest -q                # 2905 collected, no network
 python -m ruff check src tests
 ```
 

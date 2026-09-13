@@ -2815,7 +2815,8 @@ def test_a_new_provider_named_by_a_declared_credential_is_refused_before_the_key
         answer = json.loads(reply)
         assert set(answer) == {"error"} and _windows(KEYLIKE, reply.decode("utf-8")) == [], answer
         assert answer["error"].startswith(
-            "the name of a new provider under providers is the content of OPENAI_API_KEY"), answer
+            "a segment of the key being written — one the configuration does not hold yet — "
+            "is the content of OPENAI_API_KEY"), answer
         assert (root / "lx.config.json").read_text(encoding="utf-8") == _SHIPPED
     code, reply = _try_post(base, "/api/config", {"key": "providers.gateway.kind", "value": "openai"})
     assert code == 200, reply
@@ -2898,3 +2899,86 @@ def test_a_config_write_carries_the_terminals_notes_and_a_removal_none(base, tmp
     # Declared now, so the same paste is a refusal rather than a note.
     code, reply = _try_post(base, "/api/config", {"key": "providers.p.model", "value": KEYLIKE})
     assert code == 400 and "GROQ_API_KEY" in json.loads(reply)["error"], reply
+
+
+# ── HANDOFF-080, second round, on the wire ──────────────────────────────────
+
+LONG_KEY = "sk-proj-" + "A1b2C3d4" * 12
+
+
+def test_a_lang_longer_than_a_tag_is_refused_without_being_repeated(base, tmp_path, monkeypatch):
+    """`language_tag` refuses first, on every endpoint that takes `lang`; it used to quote the value."""
+    root = _config_project(tmp_path, monkeypatch)
+    (root / "d.md").write_bytes(b"The gate stood open.\n")
+    for method, path, body in (("POST", "/api/extract", {"src": "d.md", "lang": LONG_KEY}),
+                               ("GET", f"/api/doc?src=d.md&lang={LONG_KEY}", None)):
+        if method == "POST":
+            code, reply = _try_post(base, path, body)
+        else:
+            try:
+                code, reply = _get(base, path)
+            except urllib.error.HTTPError as e:
+                code, reply = e.code, e.read()
+        assert code == 403, (path, code, reply)
+        assert _windows(LONG_KEY, reply.decode("utf-8")) == [], reply
+
+
+def test_a_declared_credential_in_the_stage_position_or_a_malformed_key_is_refused_unspelled(
+        base, tmp_path, monkeypatch):
+    root = _config_project(tmp_path, monkeypatch)
+    (root / "lx.config.json").write_text(_SHIPPED, encoding="utf-8")
+    monkeypatch.setenv("OPENAI_API_KEY", KEYLIKE)
+    for body in ({"key": f"routing.{KEYLIKE}", "value": "p"}, {"key": f"routing.{KEYLIKE}", "unset": True},
+                 {"key": f"providers.{KEYLIKE}.", "value": "x"},
+                 {"key": f"providers.{KEYLIKE}..kind", "value": "openai"},
+                 {"key": f"batch.{KEYLIKE}", "value": 1}, {"key": KEYLIKE, "value": 1}):
+        code, reply = _try_post(base, "/api/config", body)
+        assert code == 400, (body, code, reply)
+        assert _windows(KEYLIKE, reply.decode("utf-8")) == [], (body, reply)
+        assert (root / "lx.config.json").read_text(encoding="utf-8") == _SHIPPED
+
+
+def test_a_new_name_that_is_the_content_of_the_variable_its_own_write_declares_is_refused_on_the_wire(
+        base, tmp_path, monkeypatch):
+    root = _config_project(tmp_path, monkeypatch)
+    (root / "lx.config.json").write_text(_SHIPPED, encoding="utf-8")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("GW_KEY", KEYLIKE)
+    code, reply = _try_post(base, "/api/config", {"key": f"providers.{KEYLIKE}.api_key_env", "value": "GW_KEY"})
+    assert code == 400 and _windows(KEYLIKE, reply.decode("utf-8")) == [], reply
+    assert "GW_KEY" in json.loads(reply)["error"]
+    assert (root / "lx.config.json").read_text(encoding="utf-8") == _SHIPPED
+    code, reply = _try_post(base, "/api/config", {"key": "providers.gw.api_key_env", "value": "GW_KEY"})
+    assert code == 200, reply
+
+
+def test_an_existing_provider_named_like_a_placeholder_is_still_writable_on_the_wire(
+        base, tmp_path, monkeypatch):
+    root = _config_project(tmp_path, monkeypatch)
+    (root / "lx.config.json").write_text(json.dumps(
+        {"providers": {"lm-studio": {"kind": "openai", "model": "m"}}}), encoding="utf-8")
+    monkeypatch.setenv("OPENAI_API_KEY", "lm-studio")
+    code, reply = _try_post(base, "/api/config", {"key": "providers.lm-studio.model", "value": "x"})
+    assert code == 200, reply
+
+
+def test_a_digit_only_credential_sent_as_a_json_number_is_refused(base, tmp_path, monkeypatch):
+    root = _config_project(tmp_path, monkeypatch)
+    (root / "lx.config.json").write_text(_SHIPPED, encoding="utf-8")
+    monkeypatch.setenv("OPENAI_API_KEY", "12345678901234567890")
+    code, reply = _try_post(base, "/api/config", {"key": "providers.p.timeout", "value": 12345678901234567890})
+    assert code == 400 and "12345678" not in reply.decode("utf-8"), reply
+    code, reply = _try_post(base, "/api/config", {"key": "providers.p.timeout", "value": 300})
+    assert code == 200, reply
+
+
+def test_a_run_asked_for_a_declared_credential_as_its_model_is_refused_before_a_job_is_minted(
+        base, tmp_path, monkeypatch):
+    """`route.model`, the job's first log line and the chat body all carried it."""
+    _translate_project(base, tmp_path, monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", KEYLIKE)
+    code, reply = _try_post(base, "/api/translate", {"src": "d.md", "lang": "zh-TW", "model": KEYLIKE})
+    assert code == 400, (code, reply)
+    answer = json.loads(reply)
+    assert set(answer) == {"error"} and _windows(KEYLIKE, reply.decode("utf-8")) == [], answer
+    assert answer["error"].startswith("model was given the content of OPENAI_API_KEY")

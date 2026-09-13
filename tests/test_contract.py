@@ -331,7 +331,10 @@ def test_every_endpoint_confines_src(base, project, method, path):
 def test_every_endpoint_whitelists_lang(base, project, method, path):
     code, body = _call(base, method, path, {"src": "docs/guide.md", "lang": "../../pwn"})
     assert code == 403, f"{method} {path} accepted a lang that is not a language tag"
-    assert "lang =" in json.loads(body)["error"]
+    # The field and the shape, never the value: a key longer than a tag may be
+    # was quoted whole here until 2026-09-13 (HANDOFF-080).
+    assert "lang is not a language tag" in json.loads(body)["error"]
+    assert "pwn" not in json.loads(body)["error"]
 
 
 def test_a_json_null_lang_reaches_the_validator_on_a_post(base, project):
