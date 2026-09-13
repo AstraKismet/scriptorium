@@ -419,8 +419,10 @@ The first-ever request for a model is the outlier and it is worth stating plainl
 API keys are read from the environment variable named in `api_key_env` and are
 never written to config, state or logs. A backend or a proxy that quotes a key
 back in its error has it replaced by `[credential redacted]` before the message
-is shown anywhere, and a reply that quotes one is refused rather than read.
-Local servers usually need no key — leave `api_key_env` empty and no
+is shown anywhere, and a reply that quotes one is refused rather than read. The
+transport follows no redirect: a backend that answers a 3xx is refused on the
+first hop, its body and `Location` unread, so the key goes only to the address
+`base_url` names. Local servers usually need no key — leave `api_key_env` empty and no
 `Authorization` header is sent. `lx providers` shows what is configured and
 whether each key is present.
 
@@ -770,7 +772,7 @@ that lost.
 ## Development
 
 ```bash
-python -m pytest -q                # 2559 collected, no network
+python -m pytest -q                # 2810 collected, no network
 python -m ruff check src tests
 ```
 

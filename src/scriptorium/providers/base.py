@@ -1271,6 +1271,14 @@ TOTALLY-DIFFERENT-MODEL` renders as its second half alone,
         branch already says "we cannot tell you a status code, only that the URL
         has no version segment", which is true of that reply as much as of a
         connection that never opened.
+
+        **The 3xx arm passes `None` too**, since 2026-09-13, and it is the same
+        case: a redirect says the configured address is not the one that
+        answers, and whether that is a missing version segment is exactly what
+        the hedged sentence offers. It is a second possible cause beside the
+        one the arm's own sentence gives (an http→https upgrade, a moved host),
+        and it stays hedged because the one way to know — reading where the
+        `Location` points — is what the policy refuses to do.
         """
         if code is not None and code != 404:
             return ""

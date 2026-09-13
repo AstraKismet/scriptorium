@@ -3,6 +3,235 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-09-13 · A redirect is refused at the transport, which has nothing to follow one with
+
+Closing HANDOFF-078 and `docs/contracts/workbench-http.md` divergence (33).
+`Provider._request` opened every request through `urllib`'s stock opener, whose
+`HTTPRedirectHandler` follows a 3xx with every redirectable header copied onto
+the new `Request` — `Authorization`, `x-api-key`, `anthropic-version`, each
+configured `headers.*` value, and the `Proxy-authorization` the transport itself
+added. Measured on `3725ed6`, on 3.9.25 and 3.12.4, against mocks on 127.0.0.1,
+across all five doors (three OpenAI-compatible, two Anthropic):
+
+```
+$ lx models --provider p           # p's base_url answers 302 → another port
+m1                                 # the other port's listing; the key went there
+$ lx translate doc.md --lang zh-TW # the POST re-issued as a bodiless GET at the
+                                   # other port, its reply taken as the completion
+```
+
+- 301/302/303 were followed on every door, a POST re-issued as a bodiless `GET`
+  with `Content-Type` dropped and every credential kept; 307 on the two GET
+  listings; 308 on them on 3.12 only — 3.9 has no `http_error_308`, so one
+  configuration behaved differently on the two CI legs.
+- Every followed case delivered a normal-looking result — a listing, a
+  completion, a vector — with nothing recording that a redirect happened. Against
+  a mock answering a valid reply to any method, a `302` on the completion door
+  returned another host's words as the translation.
+- A `Location` of `ftp://…` opened a TCP connection: the stock chain has
+  `FTPHandler`, and `http_error_302` allows `ftp`. `file:` and `data:` were
+  refused by `urllib` itself, with an `HTTPError` whose `.msg` and `.url` quote
+  the `Location` verbatim.
+- An empty or self-pointing `Location` cost **five** credential-bearing requests
+  before the loop guard fired, and `_get`'s "bounded" timeout applied per hop,
+  up to ten hops.
+- Under `http_proxy`, a `302` to an origin in `no_proxy` delivered
+  `Proxy-Authorization` to that origin; a `302` to an https address opened a
+  `CONNECT` through `https_proxy` carrying a second credential the provider never
+  saw, so a 407 quoting it printed fourteen characters of it — `_note_transport`
+  reads the first hop's `Request`, and the second was `urllib`'s own.
+- **And every 3xx the stock opener did *not* follow had its body excerpted into
+  the refusal**: `HTTP 307 — <html><a href="http://…/secret-path?tok=…">`. A 3xx
+  page carries its `Location` in its body, so this package's own red line — no
+  refusal repeats the `Location` — was already broken on the parent, on a path
+  no opener could reach.
+
+### The rule
+
+**Every redirect is refused, on every door, and the transport has nothing to
+follow one with.** `_request` assembles an `OpenerDirector` once per process
+from `build_opener`'s default handlers minus `HTTPRedirectHandler`,
+`FTPHandler`, `FileHandler` and `DataHandler`. With no handler registered under
+`http_error_<code>`, every 3xx falls to `HTTPDefaultErrorHandler` and is an
+`HTTPError` on the first hop, whatever the code, the method or the interpreter;
+a `Location` is never parsed, joined or opened; the credential goes to the
+address `base_url` names and to no other. The policy is held by absence rather
+than by a code table, which is what makes it identical on 3.9 and 3.12 — 800
+mock cases per interpreter, zero differences, where every mechanism that keeps a
+redirect handler in the chain inherits the 308 split.
+
+The `HTTPError` branch reports a 3xx **without reading the body or a header**:
+the configured address in its printable form, the status code, and what to do —
+set `base_url` to the address that answers directly. Not the `Location`, not the
+reason phrase, not the body, and no hint derived from the `Location` ("it points
+at https") either: deriving one means parsing a backend's own text, and that
+value may be the one carrying a token. 304 gets the same sentence — "a reply in
+the redirect class" is true of it, and a rule that named members would be the
+table this policy exists not to have. Fatal, never retried: a 3xx is the
+server's settled answer for this URL, `_RETRYABLE` has never held one, and a
+test now pins that it never will.
+
+Built once per process for the two reasons the stock `_opener` was:
+`ProxyHandler` reads the proxy environment at construction, and on 3.12
+`HTTPSHandler()` builds its TLS context eagerly — 330 ms on Windows, measured; a
+variant that built the opener per request ran `tests/test_provider.py` in 61 s
+where the cached one took 3 s. The cache is a module global under a lock, reset
+by the two proxy tests where they used to reset `urllib.request._opener`.
+
+What it costs, and the verdict on each. `lx models` and `GET /api/models`
+against a `base_url` that answers a 3xx are refused where they used to succeed —
+accepted: the listing is advisory and gates nothing (invariant 7), the sentence
+names the remedy, and the same `base_url`'s completions never worked through a
+redirect. A same-origin redirect, trailing-slash canonicalization included, is
+refused too — accepted: this client's paths are fixed literals with no trailing
+slash, and every same-origin redirect measured was one a mock made. An
+http→https upgrade is refused — accepted, and wanted: following it would have
+made a configuration that sends the key in cleartext on every first hop *work*,
+and the refusal is the one answer that gets `base_url` changed to https. Six
+public handler class names replace one `urlopen` — accepted: they are
+`build_opener`'s own list, an `ast` guard pins that `src/` names none of the four
+left out, and a runtime test reads the built opener's `handle_error` and
+`handle_open` tables for anything that could follow.
+
+### What lost
+
+Decided with the maintainer, from an option set two independent security-tier
+design lanes produced — one starting from the person configuring a backend, one
+from the credential — beside a lane attacking the package's premises and a lane
+inventorying which real backends answer a 3xx at all. The two design lanes
+recommended the same option for the same reasons.
+
+- **Following same-origin redirects only, credentials kept.** Saves only the
+  advisory listing behind a trailing-slash front; a same-origin 301/302/303
+  still turns a completion POST into a bodiless GET, so the two doors that matter
+  gain nothing. "Same origin" is a comparison rule to maintain — default ports,
+  case, IDNA — and `urllib` still parses the `Location` before a subclass is
+  asked, so a malformed one reaches the reader as a `ValueError` blaming
+  `base_url`. Eight cases differ between 3.9 and 3.12.
+- **Following with credentials stripped across origins** — the curl, requests
+  and Fetch model, and the repair (33) named first. It stops the leak and not the
+  injection: measured, a host nobody configured answered a `GET` to the
+  completion path with a completion, `complete()` returned its words, and
+  `translate.accept` → `lx commit` would have banked them into the tracked
+  memory. The set of headers to strip is an enumeration — `headers.*`, and the
+  `Proxy-authorization` a second hop's `Request` gets from `proxy_open` — and
+  thirteen cases differ by interpreter.
+- **Following http→https upgrades on the same host only.** Makes the cleartext
+  first hop permanent.
+- **A per-backend switch.** Gives the policy a home it can be turned off in,
+  adds a writable key, a contract entry and a settings field, and a LiteLLM
+  gateway serving both kinds gets two behaviours. The package asked why the
+  policy is not per-backend: a redirect is a property of the transport, not of
+  the backend behind it.
+- **Refusing on the listing only** — the repair (33) named second. The
+  measurement reversed it: the listing was the one door where following ever
+  *succeeded*, and the completions were the half that never did and always
+  leaked.
+- **A follow loop of `_request`'s own**, same-origin 307/308 with the method and
+  body preserved: fifty lines re-implementing `urllib`, `url` changing inside the
+  loop so every `printable_url(url)` sentence prints an address derived from a
+  `Location`, to save a same-origin POST 307/308 no known backend sends to these
+  paths.
+- **Relying on backends never to send one.** The inventory (read from
+  documentation and source; nothing was contacted): Starlette's
+  `redirect_slashes` — vLLM, LiteLLM, text-generation-webui — answers 307 on a
+  slash mismatch, Gin (Ollama) 301 or 307, OpenAI's edge was observed answering
+  307 to an `http://` address, CloudFront in front of DeepSeek upgrades http, and
+  Cloudflare Access and oauth2-proxy answer 302 to a login page. Every one is a
+  misconfiguration or a wall; none is a redirect a working configuration needs
+  followed. llama-server, LocalAI, Jan and Anthropic send none.
+- **Mechanisms**, each measured wrong. A subclass overriding `http_error_302`:
+  the aliases bind the function object at class creation, so 301/303/307/308
+  still followed. `max_redirections = 0`: the first hop has no `redirect_dict`,
+  so the check is skipped. `install_opener`: process-global, and it would replace
+  the opener `tests/test_web.py` uses for its own requests. A subclass whose
+  `redirect_request` returns `None`: the same policy, but `urllib` parses and
+  quotes the `Location` before asking, `FTPHandler`, `FileHandler` and
+  `DataHandler` stay in the chain, and 3.9 never routes 308 through it.
+  `build_opener()` per request: 330 ms each on 3.12.
+
+### What review found
+
+Two security-tier lanes re-derived the rule at `cd9713f` — one blind to the
+diff until it had written a rule of its own, then planting nineteen defects;
+one asking what still reaches an address `base_url` does not name and what of a
+reply still reaches a reader — and a mid-tier lane ran the coordinating
+session's seventeen. Verdict: **cleared**, no code defect. The blind derivation
+reached the same mechanism for the same reasons, and the three request bodies
+are byte-identical to the parent's on every door. Forty-four defects were
+planted in all; six survived the first version of the tests, and they were four
+gaps, each closed and each planted back:
+
+- **A follower hidden in a subclass of `HTTPDefaultErrorHandler`**, or in a
+  `*_response` processor, acting on one code and one method — `305` with
+  `POST` — passed the whole suite. The sweep over 300–399 ran on the listing
+  alone, and the shape test compared `handle_error`'s keys and
+  `isinstance(h, HTTPRedirectHandler)`, both of which such a subclass satisfies.
+  The sweep now runs on a POST door as well, and the shape test compares the
+  handlers' `type`s as an exact set — no subclass — and reads
+  `process_response` too.
+- **"Reads nothing" had no test.** Hoisting the body read above the 3xx arm left
+  every sentence identical and the suite green, and a redirecting backend that
+  dribbled its body then cost the whole `timeout` per request — 600 s under the
+  shipped `llamacpp` entry, measured on both interpreters. A stalled-3xx fixture
+  pins the refusal under one second.
+- **The lock around the build was unobservable.** Without it, 32 threads
+  released together built 32 openers on 3.12, seventeen distinct ones observed
+  in use, each a 330 ms TLS context. A barrier test counts constructions.
+- **`set(opener.handle_open) <= {…}` was lazy** for a missing handler — an opener
+  without `HTTPSHandler` satisfied it — and false-red under
+  `NO_PROXY=localhost`, since `ProxyHandler` registers a `no_open` for it. An
+  equality now, with the proxy environment cleared first.
+
+What the `ast` guard cannot see is stated in it and covered at runtime: a
+follower spelled without a forbidden name, a `getattr` over a concatenated
+string, an entry added to `handle_error` after construction — each is caught by
+the staged request the runtime tests send, and that is the guard doing the work.
+
+Also from the review, and none of it this package's: `https_proxy=socks5://…`
+makes `urllib` open a plaintext `CONNECT` to the SOCKS address for an https
+`base_url` and time out — no credential leaves, and the sentence names no cause;
+`http_proxy=ftp://A` beside `ftp_proxy=http://B` recurses out of `_request` as a
+`RecursionError` rather than a `ProviderError`; a hand-edited `headers.Host`
+sends the key under another `Host` to `base_url`'s own host; and a proxy
+answering a `CONNECT` with a 3xx puts its reason phrase into the `URLError`
+branch, redacted and tamed like every other proxy phrase. Proxies are
+HANDOFF-076's scope.
+
+### Corrections to the record
+
+- The package said 307/308 on a POST raise and 301/302/303 are followed as a
+  GET — true on 3.12, where it was read. **3.9 refuses 308 on a GET as well**, so
+  a test pinning 308 would have passed on the parent's 3.9 leg for a different
+  reason than on 3.12.
+- The package said an FTP server's reply "lands in `URLError.reason`". On 3.12
+  the reason is an empty string when the connection ends at EOF; on 3.9 it is
+  `ftp error: …`. Both were retried, which opened the FTP connection twice.
+- Acceptance criterion 3 — "the second mock records no `Authorization` and no
+  `x-api-key`" — cannot tell refusing from following-with-credentials-stripped;
+  the tests assert the second mock records **no request**. Criterion 4 — "the
+  refusal names no URL" — conflicts with every refusal in `_request` naming
+  `printable_url(url)`; it is read as "nothing that came from the reply", which
+  is what the tests assert.
+- Criterion 5 listed "refusing every redirect" among examples of what would be
+  rejected. It is what was chosen.
+- Divergence (33) called "refusing redirects on a listing, which has no
+  legitimate reason to follow one" a candidate repair. The listing was the one
+  door with a reason.
+- The package's "measure whether [the second hop's headers] matter": they did —
+  fourteen characters of a second proxy credential reached a message — and the
+  gap closes by there being no second hop, not by widening `_note_transport`.
+- `_get`'s docstring said its timeout was "bounded here". It was bounded per hop.
+
+### Left open, and where it lives
+
+- Proxies and their credentials on the first hop, and the Windows registry proxy
+  path `getproxies_registry` takes when no environment variable is set:
+  HANDOFF-076's scope, unchanged by this.
+- A `base_url` with leading whitespace is refused by the scheme check with the
+  sentence "names another scheme" — true of the bytes and unhelpful about the
+  cause. Not this package's; a display question for the work HANDOFF-080 owns.
+
 ## 2026-09-13 · No refusal repeats the value it refused, in any field, and no field shows a value it can never hold
 
 Closing HANDOFF-077, and the *repeated back* half of
