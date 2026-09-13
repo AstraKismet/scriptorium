@@ -260,7 +260,7 @@ def test_the_contract_names_every_validator_rule_the_code_can_emit():
         f"{sorted(emitted)}. A new rule is additive and still has to be written down.")
 
 
-def test_the_contract_version_is_four_and_moving_it_is_a_scheduled_act():
+def test_the_contract_version_is_five_and_moving_it_is_a_scheduled_act():
     """The literal, which the three tests below deliberately cannot see.
 
     Each of those asserts that the document, the module constant and the live
@@ -275,9 +275,13 @@ def test_the_contract_version_is_four_and_moving_it_is_a_scheduled_act():
     first one through that gate, on 2026-08-19, and carried exactly one item.
     Version 4 was the second, on 2026-09-03, and carried two: what `missing`
     counts and when `from` reports each of its three values, both moved by the
-    render gate that closed divergence (31).
+    render gate that closed divergence (31). Version 5 was the third, on
+    2026-09-13 under HANDOFF-080, and carried the narrowings that stop a box
+    which accepts text from storing a credential the configuration declares —
+    on `POST /api/config`, `POST /api/extract` and `POST /api/translate`'s
+    `mode` — and closed divergence (28) on the way.
     """
-    assert CONTRACT_VERSION == 4, (
+    assert CONTRACT_VERSION == 5, (
         "the contract version moved. That is a work package with a decision entry, "
         "not a commit — see AGENTS.md invariant 8 and the contract's own Versioning "
         "section. If this is that package, move the number here too.")

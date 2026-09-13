@@ -25,7 +25,9 @@ from ..cli import (
     UnsafePath,
     UnusableTarget,
     UnwritableKey,
+    config_notes,
     confined_path,
+    credential_name,
     default_output,
     do_apply,
     do_blocks,
@@ -88,7 +90,20 @@ STATIC = os.path.join(os.path.dirname(__file__), "static")
 #:     three arrays that landed beside it — `kept`, `ambiguous`, `replaced` — are
 #:     new response keys and did not need the move; they rode along because the
 #:     same section was being rewritten. See `docs/decisions.md`, 2026-08-19.
-CONTRACT_VERSION = 4
+#: 4 — the render refuses a stored wording it cannot substitute without
+#:     malforming the file, so `missing` counts a segment with no *usable*
+#:     target and `from` reports the branch that ran. See `docs/decisions.md`,
+#:     2026-09-03.
+#: 5 — a box that accepts text no longer stores a key the configuration itself
+#:     declares: `POST /api/config` refuses, in every admitted field and for a
+#:     new provider's name, a value that is the content of a variable some
+#:     `api_key_env` names, a `headers` value or a `base_url` userinfo;
+#:     `POST /api/extract` refuses such a `tone` or `lang`, and — closing
+#:     divergence (28) — a `reset` that is not the JSON boolean and a `tone`
+#:     that is not text; `POST /api/translate` refuses a `mode` that is not a
+#:     stage. Every one narrows an accepted value set, and the first depends on
+#:     the server's own environment. See `docs/decisions.md`, 2026-09-13.
+CONTRACT_VERSION = 5
 
 #: The three spellings of loopback. `serve()` binds one and the browser may be
 #: pointed at any of them, so the bound literal alone is not the answer.
@@ -846,8 +861,11 @@ def _config_write(body):
     prints — so a `base_url` a hand-edited file carries a `?key=` in is masked
     here as it is there. For a key that accepts any text — a `model`, a routing
     entry's model — the effective value *is* what was sent, and a key pasted
-    into that box comes straight back. That is the half of divergence (29)
-    HANDOFF-080 owns; a refusal on this endpoint repeats nothing since 2026-09-13. `providers` and `routing` are `/api/state`'s own
+    into that box came straight back until 2026-09-13: since `contract_version`
+    5 a value that is a credential the configuration declares is refused in
+    every field, and a new provider's name is asked about before `writable_key`
+    spells it (`cli.refuse_credential`, `cli.credential_name`). A refusal on
+    this endpoint repeats nothing. `providers` and `routing` are `/api/state`'s own
     projections, and they are here rather than left to a second request because
     `/api/state` loads every segment of every document in the project to answer,
     which is a strange price for redrawing one form.
@@ -859,6 +877,11 @@ def _config_write(body):
                     "translation is sent, and the key that goes with it")
     with _CONFIG_LOCK:
         cfg = load_config()
+        # Before `writable_key`, whose refusals spell the key they are about:
+        # a new provider's name that is a credential the configuration
+        # declares is refused here without being spelled (HANDOFF-080). The
+        # rule is `cli.credential_name`; this line only asks it first.
+        credential_name(cfg, body["key"])
         parts = writable_key(body["key"], confirm_base_url=confirm)
         key = ".".join(parts)
         if unset:
@@ -881,12 +904,17 @@ def _config_write(body):
             # function and both surfaces inherit it. `parts[1]` is a single
             # segment by construction: the allowlist admits `routing.*` and
             # nothing longer.
-            do_routing_set(cfg, parts[1], body["value"])
+            _, written = do_routing_set(cfg, parts[1], body["value"])
         else:
-            do_config_set(cfg, key, body["value"])
+            _, written = do_config_set(cfg, key, body["value"])
+        # The same lines `lx config set` prints after a write, decided against
+        # the configuration the write was checked against. Always present, so a
+        # client reads one shape; empty on a removal, which earns none.
+        notes = [] if unset else config_notes(cfg, parts, written)
         fresh = load_config()
         return {"key": key, "value": do_config_value(fresh, key),
-                "providers": available(fresh), "routing": _routing_state(fresh)}
+                "providers": available(fresh), "routing": _routing_state(fresh),
+                "notes": notes}
 
 
 # ── background translation jobs ────────────────────────────────────────────

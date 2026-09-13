@@ -1,7 +1,7 @@
 # The workbench HTTP contract
 
 ```text
-contract_version = 4
+contract_version = 5
 ```
 
 The request and response surface `lx web` speaks. It is frozen here so that a
@@ -66,6 +66,37 @@ which branch produced them.
 What the package deliberately did **not** carry, so the next reader does not
 look for it: refusing to render a document whose `lx check` fails, divergence
 (26), and divergence (28). See `docs/decisions.md`, 2026-09-03.
+
+**Version 5** is the third bump through the gate, scheduled as HANDOFF-080, and
+it carries one rule seen on three endpoints, plus the two type checks divergence
+(28) had been waiting on. The rule: **a box that accepts text does not store a
+credential the configuration itself declares** — the content of the environment
+variable any `providers.*.api_key_env` names, a `providers.*.headers` value, or
+the userinfo of a `providers.*.base_url` — and the refusal names the field and
+the declared source, never the value.
+
+1. `POST /api/config` refuses such a value in **every** admitted field, and a
+   **new provider's name** that is one, with a `400`. The accepted set of
+   `providers.*.model`, of a `routing.*` entry's model half and of every knob
+   therefore depends on the server's own configuration and environment, read
+   when `lx web` started: the same request is `200` on one machine and `400`
+   on another, and a client distinguishes the cause by the status alone, as
+   *Errors* says.
+2. `POST /api/extract` refuses such a `tone` or `lang` with a `400`; and,
+   closing (28), a `reset` that is not the JSON boolean and a `tone` that is not
+   text or `null`.
+3. `POST /api/translate` refuses a `mode` that is not one of the three stages
+   with a `400`, before a job is minted. Anything else used to select as
+   `draft` and land in every segment's `origin` as `llm:<mode>`.
+
+There is no additive spelling of any of them: each narrows an accepted value
+set and turns a documented `200` into a `400`. What did land additively beside
+them — the `notes` array on `POST /api/config`'s reply — did not need the move
+and rides here because the same section was being rewritten. Everything a
+person types at a terminal is refused by the same functions, so `lx config
+set`, `lx routing set`, `lx extract --tone`, `lx run --tone` and
+`lx glossary set` answer exit 2 where the wire answers `400`. See
+`docs/decisions.md`, 2026-09-13.
 
 > **Provenance.** *Request admission*, *Path and language confinement* and the
 > security half of *Deliberately not in the contract* state a trust boundary,
@@ -276,7 +307,7 @@ then discarded.
 
 | Key | Type | Meaning |
 |---|---|---|
-| `contract_version` | integer | The version of *this document*. `4`. |
+| `contract_version` | integer | The version of *this document*. `5`. |
 | `version` | string | Package version. Not the contract version. |
 | `cwd` | string | `os.getcwd()`. The confinement root is `os.path.realpath` of it, which is **not always the same string** — under a junction or an 8.3 short name they differ. Treat `cwd` as a label to show a person, never as an input to a path comparison. |
 | `targets` | array of string | Configured target language tags. |
@@ -667,9 +698,9 @@ optional as soon as `--reset` is present — see the warning below.
 | Key | Required | Type | Default | Notes |
 |---|---|---|---|---|
 | `src` | yes | string | — | confined |
-| `lang` | yes | string | — | whitelisted |
-| `tone` | **when `reset` is true** | string \| null | the document's frozen register | Required, non-blank, with `reset`. See the warning below. |
-| `reset` | no | boolean | `false` | Discards carryover, the existing state row, **and the frozen register**. ⚠️ **Any truthy JSON value is a reset** — not only `true`. That is the rule, and the examples below it are not the definition: `1`, `"yes"`, `[]`-with-a-member, `{}`-with-a-key **and the string `"false"`** are every one of them a reset that discards this document's translations, because a non-empty string is truthy. Only `false`, `null`, `0` and the empty string, array and object are not. See *Known divergences* (28). |
+| `lang` | yes | string | — | whitelisted; and since version 5 not a credential the configuration declares (`400`) — it becomes the *name* of `.lx/tm.<lang>.jsonl`, which is tracked. |
+| `tone` | **when `reset` is true** | string \| null | the document's frozen register | Required, non-blank, with `reset`. See the warning below. Since version 5 it is **type-checked** — anything but text or `null` is `400`, named by its shape — and refused when it is a credential the configuration declares, because the register lands in the document row, in `lx status --json` and, lower-cased, in `.lx/tm.*.jsonl`. Only the request's own value is examined: a register already frozen on the row is never re-read against the rule, since the only way out of a refused stored register would be `--tone`, which drops every translation. |
+| `reset` | no | boolean | `false` | Discards carryover, the existing state row, **and the frozen register**. **Since version 5 it must be the JSON boolean**: `1`, `"yes"`, `[]`-with-a-member, `{}`-with-a-key and **the string `"false"`** are every one of them a `400` naming the shape, where until version 5 each was a reset that discarded this document's translations, because a non-empty string is truthy. See *Known divergences* (28), closed. |
 
 ⚠️ **`reset: true` with no `tone` is refused with a `400`, and that refusal is the
 whole of version 3.** A re-extract that names no `tone` keeps the register frozen
@@ -1046,7 +1077,7 @@ surface invariant 8 calls the product the riskier of the two.
 |---|---|---|---|---|
 | `src` | yes | string | — | confined |
 | `lang` | yes | string | — | whitelisted |
-| `mode` | no | string | `"draft"` | Selects segments *and* names the routing stage. See the selection table below. |
+| `mode` | no | string | `"draft"` | One of `"draft"`, `"polish"`, `"repair"`. Selects segments *and* names the routing stage. See the selection table below. **Anything else is `400` since version 5**, named by its shape or as text that is none of them, and no job is minted — `cli.checked_mode`, inside `do_select`, so the terminal's `--mode` choices and this field cannot disagree. |
 | `ids` | no | array of string | — | **When present and non-empty, overrides `mode`'s selection entirely.** An empty array is falsy and falls through to `mode`. |
 | `provider` | no | string | the routing table's answer | An unknown name fails *inside the job*, not on this request. |
 | `model` | no | string | the routing entry's model, else the provider's own | The model id for this run only. Most specific first, exactly as `lx translate --model`: this value, then the routing entry's, then the provider's. A `provider` naming a **different** backend drops the entry's model, because a model id belongs to the backend that serves it — this field survives that, because it was named for this run and for this provider. |
@@ -1062,7 +1093,7 @@ What each `mode` selects, which the response's `total` is a count of:
 | `"draft"` | Segments whose `status` is `pending`. |
 | `"polish"` | Segments that have a target **and** whose `kind` is `para`, `quote` or `list`. A translated `heading` or `cell` is silently excluded. |
 | `"repair"` | Segments a fresh check rejects with at least one **error**-severity issue. Warnings do not qualify. |
-| anything else | As `"draft"`. The value is still forwarded as the routing stage, where an unconfigured stage name falls back to the `draft` entry. |
+| anything else | `400`, since version 5. Until then it selected as `"draft"`, was forwarded as the routing stage, and was written into every segment's `origin` as `llm:<mode>` — a box that accepted text and stored it, closed by HANDOFF-080. |
 
 `limit` bounds **every row of this table**, and it did not before 2026-09-02:
 until then it reached only the `draft`/pending branch, so a bound was silently
@@ -1295,9 +1326,27 @@ writes every key and this writes thirteen patterns.
 | `value` | any \| null | The **effective** value afterwards — the merged configuration, not the file — through the same projection `lx config get` prints. `null` means the key now has no value at all. **For a `routing.*` key this is the raw entry**, which is a provider name *or* `{"provider", "model"}`; render `routing` below instead, which is resolved. |
 | `providers` | array of *provider* | As `GET /api/state`. |
 | `routing` | object | As `GET /api/state`: every stage **resolved**. |
+| `notes` | array of string | The lines `lx config set` prints after the same write, since version 5 (additive): the written value is the content of an exported variable the configuration does not name whose own name says it holds a credential, or the block whose `api_key_env` this write names already holds that variable's content. Each names a key and a variable and says it is not an error; none carries the value. `[]` when the write earned none, and on a removal. Free text, for a person — a client renders it and never parses it. |
 
 Side effects: rewrites `lx.config.json` in the directory `lx web` was started in.
 A refused request writes nothing and leaves the file byte for byte.
+
+**A credential the configuration declares is refused in every field, since
+version 5.** Before the key is even looked up on the list below, a *new*
+provider's name — the `*` segment of a key naming a provider nothing is
+configured under — is compared, and then the value, in every admitted field, of
+the raw text and of what would be written: a routing entry's parsed model, a
+knob's raw digits. What is compared against is what the configuration itself
+says is a credential — the content of the variable each `providers.*.api_key_env`
+names, as the **server's** environment holds it; each `providers.*.headers`
+value, whole and after an authorization scheme; the userinfo of each
+`providers.*.base_url`, raw, unquoted and its password alone — equal at eight
+characters, contained at twenty. Nothing else: not a shape, not a prefix table,
+not a variable the configuration does not name, so no model id a backend serves
+is ever refused unless a declared variable holds exactly that id, which the
+refusal names. The `400` says the field and the declared source and never the
+value; it is the same `400` every other refused field answers, so a client
+switches on the status and shows the sentence.
 
 **What may be written.** Thirteen patterns, where `*` stands for exactly one
 segment:
@@ -1365,10 +1414,15 @@ a key is `400`. **No refusal on this endpoint repeats the value it refused**, in
 any field — since 2026-09-13, and before that only in `api_key_env` and
 `base_url` (divergence (29)); a non-string is named by its shape, `a list` or
 `a block`. `providers[].key_env` and `key_present` are how a client shows what is
-configured and whether the variable is set. What is *not* true is that nothing
-here can store a key: `providers.*.model`, and the model half of a `routing.*`
-entry, accept any text, so a key typed into that box is written and read back in
-`value` — the open half of (29), which HANDOFF-080 owns.
+configured and whether the variable is set. Until version 5 it was *not* true
+that nothing here could store a key: `providers.*.model`, and the model half of a
+`routing.*` entry, accepted any text, so a key typed into that box was written
+and read back in `value` — the written-down half of (29), closed by HANDOFF-080
+for every credential the configuration declares (the paragraph above). What
+still stores is text nothing declares: a key exported under a name no
+`api_key_env` names yet arrives in `notes` if its variable's name says what it
+is, and a key that is not in the server's environment at all is text like any
+other.
 
 **There is no `GET /api/config`.** `/api/state` already projects what a settings
 screen draws — `providers` and the resolved `routing` — and a second read
@@ -2307,10 +2361,16 @@ pass over it. Neither was a regression: (26) is what position cannot reach and
     front of a good banked one for no gain, since the draft is regenerable.
     *Lost:* keeping today's ordering, which is the defect.
 
-Appended 2026-08-19 by the adversarial pass over `contract_version = 3`. Open,
-and older than that change — both halves are identical at its parent commit.
+Appended 2026-08-19 by the adversarial pass over `contract_version = 3`. Open
+until 2026-09-13, and older than that change — both halves were identical at
+its parent commit.
 
-28. **`POST /api/extract` type-checks neither `reset` nor `tone`, and one of
+28. **Closed 2026-09-13**, at `contract_version` 5, by HANDOFF-080: `do_extract`
+    refuses a `reset` that is not the JSON boolean and a `tone` that is not text
+    or `null`, each named by its shape, above every read — the placement the
+    last paragraph below asked for, and the same guard that now refuses a
+    credential in either field. *As recorded:* **`POST /api/extract`
+    type-checks neither `reset` nor `tone`, and one of
     them destroys work.** `reset` is read for truthiness, so **`{"reset":
     "false"}` is a reset**: a non-empty string is truthy, the document's
     translations go, and nothing in the request looked wrong. `{"reset": 1}` and
@@ -2337,11 +2397,15 @@ and older than that change — both halves are identical at its parent commit.
     and a `tone` that is not a string or `null`, in `do_extract` rather than at
     the endpoint, for the reason the version 3 refusal lives there.
 
-Appended 2026-08-20 by the security-tier pass over `POST /api/config`. Open, and
-older than that endpoint — every path below is reachable from `lx config set`
-today. What the endpoint changes is who can reach them.
+Appended 2026-08-20 by the security-tier pass over `POST /api/config`. Open
+until 2026-09-13, in two halves, and older than that endpoint — every path below
+was reachable from `lx config set`. What the endpoint changed is who could reach
+them.
 
-29. **Outside `api_key_env` and `base_url`, a mispasted credential is repeated
+29. **Closed 2026-09-13**, both halves — *repeated back* by HANDOFF-077, and
+    *written down* by HANDOFF-080 at `contract_version` 5, for every credential
+    the configuration declares; see the end of this entry for what that leaves.
+    *As recorded:* **Outside `api_key_env` and `base_url`, a mispasted credential is repeated
     back or written down.** This project's no-echo doctrine is scoped, in writing
     and on purpose, to the two fields a key lands in — `_field_base_url`'s own
     docstring says "this field sits directly above `api_key_env` in every
@@ -2415,6 +2479,28 @@ today. What the endpoint changes is who can reach them.
     `POST /api/translate`'s `route.provider` read back a name nobody configured,
     to the caller that sent it, and the toolbar's model id still opens the job
     log. `docs/decisions.md`, 2026-09-13.
+
+    **The written-down half closed on 2026-09-13, by HANDOFF-080, at
+    `contract_version` 5.** `providers.*.model`, the model half of a `routing.*`
+    entry, `tone`, a new provider's name, `lang` and `tone` at `POST /api/extract`,
+    every knob and every rule-less key refuse a value that is a credential the
+    configuration itself declares — the *Version 5* paragraph and
+    `POST /api/config` above say what that means — and a rule-less field under
+    `providers.*` whose *name* is a credential's (`api_key`, `token`, …) is
+    refused from the terminal by name, as `headers` is. What the rule leaves,
+    by decision rather than by omission: a key nothing declares is text — a
+    prefix table, a length-and-case shape and the whole environment were each
+    scored and each refuses a value a backend serves; a key exported under a
+    name no `api_key_env` names yet arrives as a `notes` line where the
+    variable's name says what it is; a key already in a hand-edited file is
+    displayed as the field displays it; the **name** of a provider that
+    already exists is a key of the file and is printed wherever names are —
+    `Configured:` lists, `writable_key`'s `403`, `_addressable`'s two
+    sentences, every field rule's `{path}` — which is the "a key is not a
+    value" residual `docs/decisions.md`, 2026-09-13 records as open; and
+    `lx apply --origin`, a terminal argument landing untracked, and
+    `lx glossary set`'s fields, which the same rule now reaches, are named in
+    that entry.
 
 Appended 2026-08-21 by the adversarial pass over the block map and the sentence
 rule. Open.

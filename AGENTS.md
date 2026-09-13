@@ -191,8 +191,21 @@ an entry in `docs/decisions.md`, not a drive-by refactor.
    *refusals* are the other half — the two fields a mispasted key lands in still
    never repeat what they refused, and the gate in front of them is handed no
    value at all, so it has none to leak. What the fields *beside* those two do
-   with one is `docs/contracts/workbench-http.md` divergence (29) — half closed
-   on 2026-09-13, below, and the half that stores one is HANDOFF-080.
+   with one was `docs/contracts/workbench-http.md` divergence (29), closed in
+   two halves on 2026-09-13: no refusal repeats a value, below, and **no box
+   stores a credential the configuration itself declares** —
+   `cli.refuse_credential`, asked of every `lx config set` and
+   `POST /api/config` write, of `lx extract`'s register and language, and of
+   `lx glossary set`. It compares against the configuration side of
+   `Provider._credentials`' list — the content of the variable each
+   `api_key_env` names, a `headers` value, a `base_url` userinfo — and nothing
+   wider, which is what keeps every model id a backend serves writable:
+   `MODEL=gpt-4o-mini` is an ordinary export, and a rule reading the whole
+   environment would refuse `gpt-4o-mini` with no way out. A key nothing
+   declares is text; where its variable's name says what it is, a *note* says
+   so and stores it. `contract_version` moved to **5** for it, carrying also
+   the `reset`/`tone` type checks of divergence (28) and a `mode` that is not a
+   stage. `docs/decisions.md`, 2026-09-13.
 
    **Since 2026-09-13 no refusal repeats the value it refused, in any field** —
    not whole, not in part, not the `repr` of a wrong-typed one, and not its
@@ -590,7 +603,7 @@ Node — see the invariant below.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 2812 collected, no network. Four are
+python -m pytest -q                 # 2869 collected, no network. Four are
                                     #   conditional on three different things, so
                                     #   which two skip is a property of the machine
                                     #   AND the account: one is POSIX-only, one

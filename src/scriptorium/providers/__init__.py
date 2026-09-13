@@ -151,6 +151,20 @@ def _summary(name, spec):
             # key works — but a present, blank one is used as written and refused.
             row[field] = printable_url(value) if value.strip() else ""
             problems.append("`base_url` is an http:// or https:// address")
+        elif field == "base_url" and isinstance(value, str) and value != value.strip():
+            # Surrounding whitespace, which only a hand-edited file carries —
+            # `cli._field_base_url` strips before it writes. `Provider._request`
+            # tests the raw string's prefix and refuses the row as "names another
+            # scheme", while `urlsplit` reads past the blank, so this row showed a
+            # clean address with no `error` on `lx providers` and `/api/state`:
+            # a backend every request would refuse, described as working.
+            # Measured by the security-tier review of HANDOFF-078; decided under
+            # HANDOFF-080, 2026-09-13. The address is shown stripped, which is
+            # what the writer would have written, and the row says why it is not
+            # usable as it stands.
+            row[field] = printable_url(value.strip())
+            problems.append("`base_url` carries surrounding whitespace, which the "
+                            "transport refuses — remove it")
         elif isinstance(value, str):
             row[field] = printable_url(value) if field == "base_url" else value
         else:

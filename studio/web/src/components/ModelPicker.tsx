@@ -75,7 +75,10 @@ export function ModelPicker() {
           const blocked = p.needs_key && !p.key_present
           return (
             <option key={p.name} value={p.name} disabled={blocked}>
-              {blocked ? `${p.name} — ${p.key_env} not set` : p.name}
+              {/* An empty `key_env` with `needs_key` is a stored value the server
+                  does not show because it is not a variable name (2026-09-13);
+                  the label says so rather than reading "`name —  not set`". */}
+              {blocked ? `${p.name} — ${p.key_env ? `${p.key_env} not set` : 'key variable unreadable'}` : p.name}
             </option>
           )
         })}

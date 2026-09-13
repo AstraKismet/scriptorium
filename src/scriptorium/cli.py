@@ -540,6 +540,28 @@ def do_extract(src, lang, cfg, tone=None, reset=False, carry_from=None):
     # two sentences would form a loop with no exit. And the command is one word
     # short of runnable on purpose — a paste-ready `--tone technical` makes
     # reproducing this defect the path of least resistance.
+    # Two shapes and two values, refused above the register guard for its own
+    # reason — nothing is read or written yet — and each is what the wire can
+    # hand this that the terminal cannot. The shapes closed divergence (28) on
+    # 2026-09-13: `reset` is the JSON boolean, because the string `"false"` was
+    # a reset that discarded a document's translations; `tone` is text or
+    # `null`, because a block was frozen onto the document verbatim. The values
+    # are HANDOFF-080's: a register or a language that is a credential this
+    # configuration declares lands in the document row, in `lx status --json`
+    # and — the register lower-cased, the language as a file *name* — in
+    # `.lx/tm.<lang>.jsonl`, which is tracked. Only the arguments are asked; a
+    # register already frozen on the row is never re-examined, because the
+    # only way out of a refused stored register is `--tone`, which drops every
+    # translation the document holds.
+    if not isinstance(reset, bool):
+        raise ConfigError(
+            f"`reset` is true or false — got {_shape_of(reset)}. Nothing was written.")
+    if tone is not None and not isinstance(tone, str):
+        raise ConfigError(
+            f"`tone` is a register name, as text — got {_shape_of(tone)}. Nothing was "
+            f"written.")
+    refuse_credential(cfg, "the register (tone)", tone)
+    refuse_credential(cfg, "lang", lang)
     if reset and not str(tone or "").strip():
         raise UnnamedRegister(
             f"--reset discards the register frozen on {src} [{lang}] along with the "
@@ -2150,6 +2172,12 @@ def do_glossary_set(cfg, source, target=None, forbidden=None, severity=None):
     tracked file gets no diff and no mtime for a change nobody made.
     """
     path = cfg.get("glossary", "config/glossary.csv")
+    # `config/glossary.csv` is tracked and this is its editor, so it is a box
+    # in HANDOFF-080's sense: a rendering is never a declared credential, so
+    # the comparison costs no false positive and closes the paste.
+    refuse_credential(cfg, "the term", source)
+    refuse_credential(cfg, "the rendering", target)
+    refuse_credential(cfg, "the forbidden rendering", forbidden)
     source = glossary_value("term", source)
     if not source:
         raise ConfigError("the term is empty.")
@@ -4925,6 +4953,398 @@ _ENV_LOOKS_LIKE_KEY_ADVICE = (
 )
 
 
+_CREDENTIAL_ADVICE = (
+    "{field} was given {where} — the value is not repeated here, because that is what "
+    "it is. A key belongs in the environment, named by a provider's api_key_env, and "
+    "nowhere in lx.config.json. {remedy}")
+
+#: A rule-less leaf under `providers.*` with one of these names, or ending in
+#: one of the suffixes below, is refused from the command line the way
+#: `headers` is: by name, whatever the value. Nothing in this build reads a
+#: field called any of them, so the one thing such a box can hold is the key a
+#: hand typed into the field that sounded right — measured 2026-09-13,
+#: `lx config set providers.openai.api_key <key>` wrote it at exit 0 and
+#: `lx config get providers.openai` printed it back. A closed list read as a
+#: list, not as a definition: a name outside it is stored like any other
+#: rule-less key, and `refuse_credential` still compares its value.
+_CREDENTIAL_FIELD_NAMES = frozenset([
+    "api_key", "apikey", "key", "token", "secret", "password", "passwd",
+    "auth", "authorization", "credential", "credentials"])
+_CREDENTIAL_FIELD_SUFFIXES = ("_key", "_token", "_secret", "_password", "_passwd")
+
+#: The words of an exported variable's name — split on `_` — that make a
+#: *note* worth printing when a written value is that variable's content and no
+#: `api_key_env` names it. A table that decides whether to state a fact, and
+#: never whether to refuse one: `MODEL=gpt-4o-mini` is an ordinary export and a
+#: line about it would be noise with a wrong remedy attached, where
+#: `GROQ_API_KEY` holding the value just written into a model box is the one
+#: fact the person needs before `git add`.
+_CREDENTIAL_NAME_WORDS = frozenset([
+    "KEY", "APIKEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "PASS", "AUTH",
+    "CREDENTIAL", "CREDENTIALS", "PAT"])
+
+
+def _leaves(value):
+    """Every string a value carries, stripped, and every number as its text.
+
+    What the credential comparison reads: the strings of a block or a list at
+    any depth, and a number's decimal — a digit-only credential typed into a
+    number field has become an `int` by the time its rule returns, and the raw
+    text is compared as well because `float()` has lost a long one's precision
+    by then. Keys of a block are not values, which is the contract's rule; a
+    new provider's *name* is the one key asked about, by `_new_provider_names`.
+    """
+    if isinstance(value, bool) or value is None:
+        return
+    if isinstance(value, (int, float)):
+        yield str(value)
+    elif isinstance(value, str):
+        yield value.strip()
+    elif isinstance(value, list):
+        for item in value:
+            yield from _leaves(item)
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _leaves(item)
+
+
+def _matches(value, secret):
+    """Whether a written leaf *is* a credential, or carries one long enough to be sure of.
+
+    Equality at `_ENV_CONTENT_FLOOR`, and containment only from `_ENV_LONG`:
+    the six ways a key is really pasted — bare, quoted, `Bearer …`, the whole
+    `NAME=…` line, the whole `export NAME=…` line — are caught by containment,
+    and the population that would make containment a false positive is the
+    placeholder keys of local runtimes, which are short English words:
+    `lm-studio` sits inside `lm-studio-community/…`. Measured 2026-09-13 —
+    at eight, two false positives on that population; at twenty, none.
+    """
+    return value == secret or (len(secret) >= _ENV_LONG and secret in value)
+
+
+def _declared_credentials(cfg):
+    """Every value this configuration itself says is a credential: ``[(secret, where, remedy)]``.
+
+    **The configuration side of `Provider._credentials`' closed list**, and not
+    a list of its own — the transport redacts exactly these from a backend's
+    text, and a writer that refused fewer of them would let the display side
+    print what the transport hides. Three sources, in that list's order:
+
+    * the content of the variable each `providers.*.api_key_env` names, where
+      the name has a name's shape (`config.is_env_name`), is exported, and its
+      content is at least `_ENV_CONTENT_FLOOR` — both as held and stripped, as
+      `_field_api_key_env`'s own content rule reads it. **A variable whose
+      content is its own name declares nothing**: that is the `docker run -e
+      $TOKEN` residual `_field_api_key_env` keeps open on purpose, and a rule
+      here that closed it would refuse `lx config set providers.openai.api_key_env
+      OPENAI_API_KEY` on such a machine with no escape;
+    * every `providers.*.headers` value that is text, whole, and where it opens
+      with an authorization scheme, the token after it — a hand-edited
+      `Authorization: Bearer …` is how a gateway key travels, and the box it is
+      pasted into next holds the bare token;
+    * the userinfo of every `providers.*.base_url`, raw and unquoted, and its
+      password on its own — `Provider._userinfo`'s four forms.
+
+    What the transport adds on its own has no configuration to be read from.
+    Every shape a hand-edited file can hold is tolerated here rather than
+    raised on — a `providers` that is a list, a spec that is a string, an
+    `api_key_env` that is a block — because this runs on the way to every
+    `lx config set`, which is the command a person reaches for to repair one.
+    """
+    found = []
+    specs = cfg.get("providers")
+    if not isinstance(specs, dict):
+        return found
+    wanted = {}
+    for name, spec in specs.items():
+        if isinstance(spec, dict) and is_env_name(spec.get("api_key_env")):
+            wanted.setdefault(spec["api_key_env"], name)
+    # Iterated as keys of the environment, so the name a refusal prints is a
+    # key of that mapping — the spelling `tests/test_config.py`'s guard reads
+    # as a name rather than as a value.
+    for env in os.environ.keys():
+        if env not in wanted:
+            continue
+        held = os.environ.get(env, "")
+        if held.strip() == env:
+            continue
+        owner = wanted[env]
+        where = f"the content of {env}, which providers.{owner}.api_key_env names as a key"
+        remedy = (f"If {env} holds a placeholder rather than a key, change what it holds "
+                  f"(a running lx web read it at start — restart it), or stop naming it: "
+                  f"`lx config set providers.{owner}.api_key_env \"\"` — in PowerShell 5.1, "
+                  f"'\"\"'. Never `unset`, which puts a shipped provider's default name back.")
+        for form in (held, held.strip()):
+            if len(form) >= _ENV_CONTENT_FLOOR:
+                found.append((form, where, remedy))
+    for name, spec in specs.items():
+        if not isinstance(spec, dict):
+            continue
+        headers = spec.get("headers")
+        if isinstance(headers, dict):
+            for value in headers.values():
+                if isinstance(value, int) and not isinstance(value, bool):
+                    value = str(value)
+                if not isinstance(value, str):
+                    continue
+                forms = [value.strip()]
+                scheme, _, token = value.strip().partition(" ")
+                if scheme.lower() in ("bearer", "basic", "token") and token.strip():
+                    forms.append(token.strip())
+                for form in forms:
+                    if len(form) >= _ENV_CONTENT_FLOOR:
+                        found.append((form, f"a header value of providers.{name}.headers",
+                                      f"A header value is sent to the backend verbatim; if "
+                                      f"providers.{name}.headers holds a placeholder, edit "
+                                      f"lx.config.json — nothing here writes that block."))
+        base = spec.get("base_url")
+        if not isinstance(base, str):
+            continue
+        try:
+            netloc = urllib.parse.urlsplit(base.strip()).netloc
+        except ValueError:
+            continue
+        if "@" not in netloc:
+            continue
+        userinfo = netloc.rpartition("@")[0]
+        forms = [userinfo, urllib.parse.unquote(userinfo)]
+        if ":" in userinfo:
+            password = userinfo.partition(":")[2]
+            forms += [password, urllib.parse.unquote(password)]
+        for form in forms:
+            if len(form) >= _ENV_CONTENT_FLOOR:
+                found.append((form, f"the userinfo of providers.{name}.base_url",
+                              f"If providers.{name}.base_url carries a placeholder before "
+                              f"its `@`, edit lx.config.json — the writer refuses to put "
+                              f"one there."))
+    return found
+
+
+def _names_declared_inside(value):
+    """The `api_key_env` names a block being written declares, at any depth.
+
+    `lx config set providers.gw '{"api_key_env": "GW_KEY", "model": …}'` declares
+    a name the merged configuration does not hold yet, and the model beside it
+    is compared against that variable's content too — measured 2026-09-13, the
+    block spelling stored the content at exit 0 while the leaf spelling refused
+    it, because the declared set was read from the configuration alone.
+    """
+    if isinstance(value, dict):
+        env = value.get("api_key_env")
+        yield from ([env] if is_env_name(env) else [])
+        for item in value.values():
+            yield from _names_declared_inside(item)
+
+
+def refuse_credential(cfg, field, value):
+    """Refuse `value` where it is, or carries, a credential this configuration declares.
+
+    The rule of HANDOFF-080, and the one home for it: `config_value` asks it of
+    every write from either surface, `do_extract` of the register and the
+    language it is handed, `do_glossary_set` of a row's fields. It reads what
+    the configuration *declares* — `_declared_credentials` — and nothing wider,
+    which is what keeps it from ever refusing a model id a backend serves: a
+    match proves the value is a key only because the configuration says that
+    variable holds one. `MODEL=gpt-4o-mini` is an ordinary export, and a rule
+    that compared against the whole environment would refuse `gpt-4o-mini` with
+    no escape but unsetting the variable. The one false-positive shape left is a
+    declared variable holding a model id, and the refusal names the variable so
+    the misconfiguration is the thing that gets fixed.
+
+    On the wire the environment read is the server's, fixed when `lx web`
+    started, exactly as `key_present` is; a variable exported afterwards is
+    invisible to both until a restart.
+
+    Not one sentence of a refusal carries the value, a part of it, or its
+    length: `field` and the `where` of the declared source are the whole of
+    what it may say, and `tests/test_config.py` holds that at runtime for the
+    two sources the `ast` guard cannot see, which are read out of `cfg`.
+    """
+    for secret, where, remedy in _declared_credentials(cfg):
+        for leaf in _leaves(value):
+            if _matches(leaf, secret):
+                raise ConfigError(_CREDENTIAL_ADVICE.format(field=field, where=where,
+                                                            remedy=remedy))
+    inside = set(_names_declared_inside(value))
+    for env in os.environ.keys():
+        if env not in inside:
+            continue
+        held = os.environ.get(env, "")
+        if held.strip() == env:
+            continue
+        for form in (held, held.strip()):
+            if len(form) < _ENV_CONTENT_FLOOR:
+                continue
+            for leaf in _leaves(value):
+                if _matches(leaf, form):
+                    raise ConfigError(_CREDENTIAL_ADVICE.format(
+                        field=field,
+                        where=f"the content of {env}, which the api_key_env in this "
+                              f"same block names as a key",
+                        remedy=f"Give the field beside it the model id, or whatever "
+                               f"it takes, rather than the key {env} holds."))
+
+
+def _new_provider_names(cfg, parts, raw):
+    """The provider names this write would introduce, in each spelling that can.
+
+    Three on the terminal — `providers.<name>.<field>`, `providers.<name>
+    '{…}'`, and `providers '{"<name>": {…}}'` — and the first on the wire. A
+    name the merged configuration already holds is a key of the file and is not
+    re-examined: the contract has said a key name is not a value since
+    2026-08-13, and `Configured: …` lists print those names as the remedy.
+    """
+    specs = cfg.get("providers")
+    specs = specs if isinstance(specs, dict) else {}
+    if not parts or parts[0] != "providers":
+        return []
+    if len(parts) >= 2:
+        return [parts[1]] if parts[1] not in specs else []
+    block = raw
+    if isinstance(raw, str) and raw.strip().startswith("{"):
+        try:
+            block = json.loads(raw)
+        except ValueError:
+            return []
+    if not isinstance(block, dict):
+        return []
+    return [name for name in block if isinstance(name, str) and name not in specs]
+
+
+def _refuse_credential_names(cfg, parts, raw):
+    """A new provider's name that is a declared credential is refused before anything spells it.
+
+    **First in `config_value`, and on the wire before `writable_key`**, because
+    every sentence after that point spells the key it is about — `_addressable`,
+    every field rule's `{path}`, `writable_key`'s `403` — and a key-shaped
+    segment in the provider position would be printed by whichever of them
+    refused first. Measured 2026-09-13 at `6e6395a`: `lx config set
+    providers.<key>.timeout abc` answered the key inside `_as_number`'s
+    sentence, and `providers.<key>.model m` wrote a provider by that name that
+    every `Configured:` list then repeated. The one predictable false positive
+    is a placeholder — `OPENAI_API_KEY=lm-studio` beside a backend named
+    `lm-studio` — and the sentence gives the same three ways out the value rule
+    does; `lmstudio` is already a shipped name.
+    """
+    for name in _new_provider_names(cfg, parts, raw):
+        for secret, where, remedy in _declared_credentials(cfg):
+            if _matches(name.strip(), secret):
+                raise ConfigError(
+                    f"the name of a new provider under providers is {where} — it is not "
+                    f"repeated here, because that is what it is. Name the backend something "
+                    f"that is not a key. {remedy}")
+
+
+def credential_name(cfg, key):
+    """`key`'s segments, or a refusal — for the surface that receives a key, before it spells one.
+
+    Called by `web/server.py` ahead of `writable_key`, whose refusals print the
+    key they are about: the rule lives here (invariant 8) and the server only
+    asks it one line earlier than `do_config_set` would. `split_key`'s own
+    refusal of an empty segment still quotes the key, which is the "a key is
+    not a value" residual `docs/decisions.md`, 2026-09-13 records as open.
+    """
+    parts = split_key(key)
+    _refuse_credential_names(cfg, parts, None)
+    return parts
+
+
+def _credential_named(parts):
+    """Whether a rule-less key under `providers.*` is called what a key is called."""
+    if len(parts) < 3 or parts[0] != "providers":
+        return False
+    return any(seg.lower() in _CREDENTIAL_FIELD_NAMES
+               or seg.lower().endswith(_CREDENTIAL_FIELD_SUFFIXES) for seg in parts[2:])
+
+
+def _credential_word(name):
+    """Whether an environment variable's name says it holds a credential."""
+    return bool(_CREDENTIAL_NAME_WORDS & set(name.upper().split("_")))
+
+
+def config_notes(cfg, parts, value):
+    """The notes a write earns, decided before it lands and printed after: never a refusal.
+
+    Two facts worth a line, and both are about a key the value rule cannot
+    reach because nothing declares it *yet*:
+
+    * a written leaf is the content of an exported variable the configuration
+      does not name, whose own name says it holds a credential — the key a
+      person exported as `GROQ_API_KEY` and then pasted into a model box before
+      naming the variable anywhere;
+    * the write lands at `providers.*.api_key_env` and names a variable whose
+      content the same provider's block, or a `routing.*` model, already holds —
+      the same paste, found one step later, at the moment the name is declared
+      and the earlier value becomes comparable.
+
+    A note and not a refusal, because in the first case the fact proves
+    nothing on its own — invariant 4's line: "equals some variable's content"
+    is decidable, "is therefore a key" is judgement unless the configuration
+    declares it — and in the second the field being written is the right one.
+    It names the key and the variable, never the value, and says it is not an
+    error. `cmd_config_set` and `cmd_routing_set` print it; `POST /api/config`
+    carries it as `notes`, so the backend editor can show the same line.
+    """
+    notes = []
+    specs = cfg.get("providers")
+    specs = specs if isinstance(specs, dict) else {}
+    declared = {spec.get("api_key_env") for spec in specs.values()
+                if isinstance(spec, dict) and isinstance(spec.get("api_key_env"), str)}
+    landed = _landed_at("providers.*.api_key_env", parts, value)
+    for name, held in os.environ.items():
+        forms = [form for form in (held, held.strip()) if len(form) >= _ENV_CONTENT_FLOOR]
+        if not forms:
+            continue
+        if name not in declared and _credential_word(name):
+            for leaf in _leaves(value):
+                if any(_matches(leaf, form) for form in forms):
+                    notes.append(
+                        f"note: {'.'.join(parts)} now holds the content of the environment "
+                        f"variable {name}. Not an error — but if that is a key, it does not "
+                        f"belong in lx.config.json: `lx config unset {'.'.join(parts)}`, and "
+                        f"name {name} in that provider's api_key_env instead.")
+                    break
+        for path, env in landed:
+            if env != name:
+                continue
+            provider = path[1]
+            spec = specs.get(provider)
+            stored = {k: v for k, v in spec.items() if k not in ("api_key_env", "headers")} \
+                if isinstance(spec, dict) else {}
+            held_at = [f"providers.{provider}.{k}" for k, v in stored.items()
+                       if any(_matches(leaf, form) for leaf in _leaves(v) for form in forms)]
+            routing = cfg.get("routing")
+            for stage, entry in (routing.items() if isinstance(routing, dict) else ()):
+                model = entry.get("model") if isinstance(entry, dict) else None
+                if isinstance(model, str) and any(_matches(model.strip(), form) for form in forms):
+                    held_at.append(f"routing.{stage}")
+            for key in held_at:
+                notes.append(
+                    f"note: {key} already holds the content of {name}, the variable "
+                    f"{'.'.join(path)} now names as this backend's key. Not an error — but "
+                    f"if that is the key, it does not belong in lx.config.json: "
+                    f"`lx config unset {key}`.")
+    return notes
+
+
+def checked_mode(mode):
+    """``mode`` as one of the pipeline stages, or a refusal that names them and not it.
+
+    `checked_limit`'s shape for the other field a run takes from a request.
+    `--mode` has had argparse `choices` since it existed, so the terminal never
+    reached this; the wire accepted any text, selected as `draft`, and wrote
+    `llm:<mode>` into every segment's `origin`, where `GET /api/doc` and
+    `lx segments` display it — a box that accepts text and stores it, in the
+    class HANDOFF-080 closed. A `ValueError` subclass so both surfaces refuse
+    with one sentence: exit 2 and the documented `400`, before a job is minted.
+    """
+    if not isinstance(mode, str) or mode not in ROUTING_STAGES:
+        raise UnusableTarget(
+            f"`mode` is one of {', '.join(ROUTING_STAGES)} — this request sent "
+            f"{'text that is none of them' if isinstance(mode, str) else _shape_of(mode)}.")
+    return mode
+
+
 def _shape_of(value):
     """What arrived, in words that carry none of it: the one describer a refusal may use.
 
@@ -5122,6 +5542,15 @@ def _field_api_key_env(cfg, path, value):
     *The last rule compares against what is actually exported*, which is what
     catches an upper-case or short token that the length rule lets by. It names
     the matched variable by name only; a name is not a secret.
+
+    Since 2026-09-13 every *other* field compares too, and against less: only
+    the variables this configuration names here — `refuse_credential`, which
+    reads `_declared_credentials`. This field's rule is wider on purpose: here
+    "equals some variable's content" proves the value is content and not a
+    name, which is decidable; in a model box it proves nothing unless the
+    configuration says that variable holds a key. The residual above holds on
+    both sides — `_declared_credentials` skips a variable whose content is its
+    own name.
     """
     if value is None or value == "":
         return ""      # the shipped default for a local runtime: no key needed
@@ -5430,6 +5859,17 @@ def _validated(cfg, parts, value):
     rule = _field_rule(parts)
     if rule:
         return rule(cfg, ".".join(parts), value)
+    if _credential_named(parts):
+        # By name, like `headers`, and for the same reason: nothing reads a
+        # field called this, so the value can only be the key the name asked
+        # for. `path[1]` is a key of the file here — `_refuse_credential_names`
+        # has already run in `config_value` — or the residual it records.
+        provider = ".".join(parts[:2])
+        raise ConfigError(
+            f"{'.'.join(parts)} is not writable from the command line. Nothing in this "
+            f"build reads a field by that name, and a field called that is where a key "
+            f"ends up inside a file meant to be committed — keys belong in the "
+            f"environment, named by {provider}.api_key_env. Nothing was written.")
     if isinstance(value, dict):
         return {name: _validated(cfg, parts + [name], below)
                 for name, below in value.items()}
@@ -5437,13 +5877,26 @@ def _validated(cfg, parts, value):
 
 
 def config_value(cfg, key, raw):
-    """What `lx config set key raw` will write: `(parts, value)`, decoded then checked."""
+    """What `lx config set key raw` will write: `(parts, value)`, decoded then checked.
+
+    Three questions in a fixed order, and the order is the rule. A new
+    provider's name is asked about **first**, before any sentence that would
+    spell the key; then the field's own rule, or the descent into a block; then
+    — of the raw text and of what will be written, so a number field's raw
+    digits and a routing entry's parsed model are both read — whether any of it
+    is a credential this configuration declares. `refuse_credential` runs after
+    the field rule on purpose: `api_key_env`'s own refusals are the sentences
+    the person should see for that field, and every other rule has already
+    reduced the value to the shape the comparison reads.
+    """
     parts = split_key(key)
+    _refuse_credential_names(cfg, parts, raw)
     _addressable(cfg, parts)
     rule = _field_rule(parts)
-    if rule:
-        return parts, rule(cfg, key, raw)
-    return parts, _validated(cfg, parts, _decode(cfg, parts, raw))
+    value = rule(cfg, key, raw) if rule else _validated(cfg, parts, _decode(cfg, parts, raw))
+    refuse_credential(cfg, key, raw)
+    refuse_credential(cfg, key, value)
+    return parts, value
 
 
 # -- what an untrusted caller may write ------------------------------------
@@ -5596,10 +6049,22 @@ def _printable_spec(spec):
     if isinstance(shown.get("headers"), dict):
         shown["headers"] = {name: _HIDDEN_HEADER for name in shown["headers"]}
     if "base_url" in shown:
-        shown["base_url"] = printable_url(shown["base_url"])
+        shown["base_url"] = _printable_url(shown["base_url"])
     if "kind" in shown and not _is_kind(shown["kind"]):
         shown["kind"] = _NOT_A_KIND
     return shown
+
+
+def _printable_url(value):
+    """`printable_url` of what the writer would have written: surrounding blanks off.
+
+    A hand-edited `base_url` wrapped in whitespace is refused by the transport
+    as written, and `providers._summary` says so in the row's `error` since
+    2026-09-13; `lx config get` printed the string blanks and all, which read as
+    a clean address, so the two commands answered one value differently. The
+    stripped address is what `_field_base_url` writes, so it is what is shown.
+    """
+    return printable_url(value.strip()) if isinstance(value, str) else printable_url(value)
 
 
 def _printable(parts, value):
@@ -5614,10 +6079,17 @@ def _printable(parts, value):
     **A field whose value is one it can never legally hold is not shown** — an
     `api_key_env` that is not a name, a `base_url` that is not an http(s)
     address, a `kind` this build has no backend for. Each of those is what the
-    field's own writer refuses, so what is printable and what is writable are one
-    answer, and a key pasted into the box by hand is not printed back by the
-    command a person runs to see what went wrong. `kind` joined on 2026-09-13;
-    `providers._summary` answers the same for `lx providers` and `/api/state`.
+    field's own writer refuses **whatever else the file holds**, so what is
+    printable and what is writable are one answer, and a key pasted into the box
+    by hand is not printed back by the command a person runs to see what went
+    wrong. `kind` joined on 2026-09-13; `providers._summary` answers the same
+    for `lx providers` and `/api/state`. A `routing.*` or `embedding.provider`
+    naming a provider nothing is configured under is *not* that, and stays
+    shown: its writer refuses it too, but against the file rather than the
+    build — it is legal the moment the provider is added — and the name beside
+    `← not configured` is the whole of the remedy. Decided under HANDOFF-080,
+    `docs/decisions.md`, 2026-09-13, against masking it with the routing shape's
+    own `""` + `error`.
     """
     if not parts or parts[0] != "providers":
         return value
@@ -5635,7 +6107,7 @@ def _printable(parts, value):
     if field == "api_key_env":
         return value if _is_env_name(value) else _NOT_A_NAME
     if field == "base_url":
-        return printable_url(value)
+        return _printable_url(value)
     if field == "kind" and not _is_kind(value):
         # At any depth, as `api_key_env` above is: a hand-edited `kind` that is a
         # block is read one level down by `lx config get providers.p.kind.x`.
@@ -5808,6 +6280,11 @@ def cmd_config_set(args, cfg):
     parts = split_key(args.key)
     was = "unset" if old is MISSING else _rendered(parts, old)
     _out(f"{args.key}: {was} → {_rendered(parts, new)}")
+    # Decided against the configuration as it was before the write — the
+    # second note is about what the block *already* held — and printed after
+    # it, because a note is about a write that happened.
+    for note in config_notes(cfg, parts, new):
+        _out(note)
     for path, url in _landed_at("providers.*.base_url", parts, new):
         # `path[1]`, never `key.split(".")[1]`. A provider may be named with a
         # dot in it — `lx config set providers '{"a.b": {…}}'` writes one — and
@@ -5885,6 +6362,8 @@ def cmd_routing_set(args, cfg):
     was = "unset" if old is MISSING else json.dumps(old, ensure_ascii=False)
     _out(f"routing.{args.stage}: {was} → {json.dumps(new, ensure_ascii=False)}")
     _out(_route_line(load_config(args.config), args.stage))
+    for note in config_notes(cfg, ["routing", args.stage], new):
+        _out(note)
 
 
 # ── translate / repair / run ───────────────────────────────────────────────
@@ -6080,6 +6559,7 @@ def do_select(doc, cfg, mode, ids=None, include_all=False, limit=0, over_human=F
     # means the mistake surfaces on the day they stop sending `ids` — as a run
     # that translates a whole book. Shape and precedence are two questions.
     limit = checked_limit(limit)
+    mode = checked_mode(mode)
     if ids:
         # Naming ids is a person pointing at segments, so the bound is not
         # applied to them: truncating would silently drop work they asked for.
@@ -6133,6 +6613,7 @@ def do_translate(src, lang, cfg, segments, mode, provider=None, model=None,
     nothing.
     """
     from .translate import Progress, translate_segments
+    mode = checked_mode(mode)
     doc = load_doc(src, lang)
     if not segments:
         return 0, [], []
@@ -6558,7 +7039,9 @@ def build_parser():
     e.add_argument("--tone", help="register for this document: technical (default) or "
                                   "literary. Frozen on the document and kept by later "
                                   "extracts; changing it leaves the existing translations "
-                                  "behind, so run `lx commit` first")
+                                  "behind, and `lx commit` does not carry them across (the "
+                                  "register is part of the memory key) — `lx segments … "
+                                  "--json` before and `lx apply … --file` after is what does")
     e.add_argument("--reset", action="store_true",
                    help="discard the existing state instead of carrying its translations "
                         "over. It does not read the old state at all, which is why it "

@@ -3,6 +3,307 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-09-13 · A box that accepts text does not store a credential the configuration declares, and `contract_version` is 5
+
+Closing HANDOFF-080, the *written down* half of
+`docs/contracts/workbench-http.md` divergence (29), and — because the same
+function is the right home for it — divergence (28). Since HANDOFF-077 no
+refusal repeats the value it refused; what was left was the boxes that do not
+refuse at all. Measured on `6e6395a`, every one of these took a 32-character
+key-shaped string at exit 0 or `200` and read it back on every surface that
+shows the field:
+
+| box | terminal | wire | lands in |
+|---|---|---|---|
+| `providers.*.model` | `lx config set` | `POST /api/config` | `lx.config.json`, every provider row, every resolved route |
+| the model half of `routing.*` | `lx routing set`, `lx config set` | `POST /api/config` | the same |
+| `tone` | `lx config set` | — | the document row, `lx status --json`, and lower-cased into `.lx/tm.*.jsonl`, which is **tracked** |
+| the register at extract | `lx extract --tone`, `lx run --tone` | `POST /api/extract` | the same |
+| `lang` at extract | `lx extract --lang` (unvalidated on the terminal) | `POST /api/extract` (a tag by shape at 35 characters or fewer) | the **name** of `.lx/tm.<lang>.jsonl` |
+| a new provider's name | `lx config set providers.<name>.kind` | `POST /api/config` | every `Configured:` list, `lx providers`, `/api/state` |
+| `targets`, `source_lang`, any rule-less key | `lx config set` | — (403) | `lx status --json` |
+| a rule-less field under `providers.*` — `api_key`, `token`, … | `lx config set` | — (403) | `lx config get providers.<name>` |
+| `mode` | — (`choices`) | `POST /api/translate` | every written segment's `origin`, as `llm:<mode>` |
+| a glossary row | `lx glossary set` | — | `config/glossary.csv`, **tracked** |
+
+### The rule
+
+**A value that is a credential the configuration itself declares is refused in
+every field, on both surfaces, by one function.** `cli.refuse_credential` reads
+`cli._declared_credentials`, which is the configuration side of
+`Provider._credentials`' closed list and not a list of its own:
+
+- the content of the environment variable each `providers.*.api_key_env` names
+  — where the name has a name's shape, is exported, and holds at least
+  `_ENV_CONTENT_FLOOR` (8) characters, compared as held and stripped, the way
+  `_field_api_key_env`'s own content rule reads it; plus every `api_key_env`
+  the block being written declares itself, because
+  `lx config set providers.gw '{"api_key_env": "GW_KEY", "model": …}'` names
+  a variable the merged configuration does not hold yet;
+- every `providers.*.headers` value that is text, whole and after a `Bearer`,
+  `Basic` or `Token` scheme — a hand-edited `Authorization` is how a gateway
+  key travels and the box beside it gets the bare token;
+- the userinfo of every `providers.*.base_url`, raw, unquoted, and its
+  password alone — `Provider._userinfo`'s four forms.
+
+A leaf matches when it **equals** a declared value, or **contains** one of at
+least `_ENV_LONG` (20) characters. Both the raw text and the value the field
+rule produced are read — a knob's raw digits, because `float()` has lost a
+leading zero and any precision past seventeen digits by the time `_as_number`
+returns; a routing entry's parsed model, because `p:<key>` is not equal to the
+key. The refusal names the field and the declared source — the variable, the
+provider whose `headers` or `base_url` — and gives three ways out that were each
+run in the state they are printed in: change what the variable holds (and
+restart `lx web`, which read it at start), stop naming it with
+`lx config set providers.<p>.api_key_env ""` (PowerShell 5.1: `'""'`; never
+`unset`, which puts a shipped provider's default name back — measured), or give
+the field something else. It never carries the value, a part of it, or its
+length.
+
+**Why declared variables only, and not the whole environment.** For
+`api_key_env`, "equals some exported variable's content" proves the value is
+*content and not a name*, which is what that field forbids — decidable without
+judgement. For a model box the same match proves nothing: `OPENAI_MODEL`,
+`OLLAMA_MODEL` and `MODEL=gpt-4o-mini` are ordinary exports, and a rule that
+read them would refuse `gpt-4o-mini` with no way out but unsetting the variable.
+What makes the comparison decidable is that the configuration *says* the
+variable holds a key. This is also why every model id the package lists —
+`qwen2.5:14b-instruct`, `local-model`, `gpt-4o-mini`, `claude-sonnet-4-6`,
+`unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_M`,
+`mradermacher/translategemma-12b-it-i1-GGUF:Q4_K_M`,
+`ScrambieBambie_Snowpiercer-15B-v2_Q8_0` — is written on both surfaces under a
+test, whatever the environment holds; the one shape that can refuse one is a
+declared variable holding exactly that id, which the sentence names.
+
+**Why equality at eight and containment at twenty.** Equality alone catches two
+of the six ways a key is really pasted — bare and padded — and misses the quoted
+one, `Bearer …`, the `.env` line and the `export` line. Containment at eight
+catches all six and has two false positives on the population that matters,
+the placeholder keys of local runtimes, which are short English words:
+`lm-studio` inside `lm-studio-community/…`, `not-needed` inside
+`not-needed-model`. At twenty, none. A lane surveyed the placeholders the
+OpenAI-compatible world documents — `lm-studio`, `not-needed`,
+`sk-no-key-required`, `EMPTY`, `ollama`, `token-abc123`, `sk-1234`, `anything`,
+`sk-111…1` — from its own knowledge, stated as such: none equals a model id
+anybody serves, and `sk-1234`, `EMPTY` and `ollama` sit under the floor and are
+deliberate misses. The floor also makes the `docker run -e $TOKEN` residual hold
+on both sides: a variable whose content is its own name declares nothing, so
+`lx config set providers.openai.api_key_env OPENAI_API_KEY` still writes on a
+machine where that variable holds its own name, as `_field_api_key_env`'s
+docstring has promised since 2026-08-12.
+
+**Where it runs, and the order is the rule.** `config_value` asks three
+questions in a fixed order: a **new provider's name** first — before
+`_addressable`, before any field rule — because every sentence after that
+point spells the key it is about, and a key-shaped segment in the provider
+position was printed by whichever refused first (measured:
+`lx config set providers.<key>.timeout abc` answered the key inside
+`_as_number`'s sentence); then the field's own rule or the descent into a
+block; then the credential comparison, of the raw text and of the value. On the
+wire `cli.credential_name` is asked one line before `writable_key`, whose `403`
+spells the key. `do_extract` asks it of `tone` and `lang` above its first read,
+beside the `--reset` guard and for the same guard-fires-once reason: the
+resolution three lines down rebinds `tone` to the stored register. Only the
+*arguments* are examined — a register already frozen on a row is never re-read
+against the rule, because the only way out of a refused stored register is
+`--tone`, which drops every translation the document holds (measured). `lx run`
+reaches the same function. `do_glossary_set` asks it of a row's three fields:
+`config/glossary.csv` is tracked, that command is its editor, and no rendering is
+a declared credential, so the comparison costs nothing. And a rule-less field
+under `providers.*` whose *name* is a credential's — `api_key`, `apikey`, `key`,
+`token`, `secret`, `password`, `passwd`, `auth`, `authorization`,
+`credential(s)`, or ending `_key`, `_token`, `_secret`, `_password`, `_passwd` —
+is refused from the terminal by name, as `headers` is: nothing in this build
+reads a field called any of those, so the one thing such a box can hold is the
+key the name asked for. A closed list read as a list; a name outside it is
+stored like any other rule-less key and its value is still compared.
+
+### The note
+
+A key nothing declares is text, and refusing text by any property of its own
+refuses a model id. What the rule cannot reach, a **note** reaches where a
+fact is available: after a write that landed, `cli.config_notes` prints — and
+`POST /api/config` returns as `notes`, additive — one line when a written leaf
+is the content of an exported variable the configuration does not name whose
+own name, split on `_`, contains `KEY`, `APIKEY`, `TOKEN`, `SECRET`,
+`PASSWORD`, `PASSWD`, `PASS`, `AUTH`, `CREDENTIAL(S)` or `PAT`; and one line
+per key when a write lands at `providers.*.api_key_env` and the block it names,
+or a `routing.*` model, already holds that variable's content. The second is the
+first paste found one step later, at the moment the name is declared and the
+earlier value becomes comparable — which is the terminal order that writes
+`model` first and the workbench's new-backend form with the key box left
+blank, the two sequences the rule alone cannot see. Each line names the key and
+the variable, says "Not an error", and gives `lx config unset <key>`; none
+carries the value. A note and not a refusal because in the first case the fact
+proves nothing on its own — invariant 4's line: "equals some variable's
+content" is decidable, "is therefore a key" is judgement unless the
+configuration declares it — and in the second the field being written is the
+right one. The name-word table decides whether to *state* a fact and never
+whether to refuse one, which is why it is tolerable where a prefix table is not.
+
+### Coverage, honestly
+
+Scored by an attacking lane on four realistic sequences, then re-scored on the
+shipped rule: a key already exported and named by some `api_key_env` pasted
+into any box — caught, both surfaces, including through the workbench's editor
+whose write order puts `api_key_env` before `model`; a key exported under a name
+nothing declares — stored with the note where the name says what it is, and
+refused the moment the name is declared if the box is rewritten, noted if it is
+not; a key pasted before it is exported anywhere — text, stored, and found only
+at the later `api_key_env` write; a key in a hand-edited file — never seen by a
+writer, displayed as the field displays it. The `.lx/tm.*.jsonl` rows written
+before this rule keep a lower-cased copy in git history that no rule reaches.
+
+### What lost
+
+- **A prefix table** — `sk-`, `sk-ant-`, `sk-proj-`, `xai-`, `hf_`, `ghp_`,
+  `gho_`, `github_pat_`, `gsk_`, `r8_`, `AKIA`, `xoxb-`, where the value holds
+  no `/` — as a refusal, and as a note. A lane scored it as a note at zero false
+  positives over twenty-four ids, registers and names (the one hit was a
+  made-up `hf_model_test.gguf` file stem), and it is the only instrument that
+  sees a key not yet exported. Declined even so: as a refusal it is a claim that
+  no backend serves such an id, which is not decidable; as a note it is a
+  vendor list in the engine that goes stale toward silence and invites the next
+  reader to promote it into a rule — this project has measured an enumeration
+  read as a definition six times. The later `api_key_env` write's note is what
+  catches that sequence instead, one step later.
+- **The whole environment**, as `_field_api_key_env` compares. `MODEL=…`.
+- **A length-and-case shape** for model ids or provider names — refuses
+  `my-openai-compatible-gateway` and every long lower-case GGUF stem.
+- **Containment at eight** — the two placeholder false positives above.
+- **Comparing the stored register** at extract — turns a document frozen in a
+  key-shaped register before this rule into one every `lx run` refuses, with
+  `--tone` as the only exit and every translation the cost.
+- **`headers` left out** of the declared set, the first draft's choice on the
+  argument that a header value can be a non-secret (`X-Title`, an API version)
+  and could equal a model id. It lost to the definition: `Provider._credentials`
+  already treats every header value as one the transport hides, and a writer
+  refusing fewer than the display masks would let a box print what the
+  transport redacts; a header whose value is a model id is contrived enough to
+  carry the false positive.
+- **Masking a dangling provider name** in `routing.*` or `embedding.provider`
+  — a name nothing is configured under, displayed by `lx routing show`,
+  `lx config get`, `lx translate --dry-run`, `lx status --json` and
+  `/api/state`. A lane argued the display rule's own criterion ("what the
+  field's writer refuses") reaches it, since `_field_route` refuses an
+  unconfigured name, and that `""` with `error` is a documented routing shape
+  so no version would move. Kept displayed, and the rule's sentence refined
+  rather than its exception carved: a `kind` this build lacks, a non-name
+  `api_key_env` and a non-address `base_url` are illegal *whatever else the
+  file holds*, while a dangling name is legal the moment its provider is added
+  — a property of the file, not of the build — and `lx routing show`'s
+  `← not configured` beside the typo is the remedy's whole content. `cli._printable`'s
+  docstring and `AGENTS.md` say it that way now.
+- **Refusing on the terminal and only noting on the wire** — two rules for one
+  refusal, invariant 8's shape; and the wire is where the paste is a click.
+- **The note unnarrowed**, over every exported variable — `OPENAI_MODEL`,
+  `OLLAMA_MODEL`, `AIDER_MODEL` are common exports whose content *is* a model
+  id, and the line's remedy ("name it in `api_key_env`") would then be the
+  instruction that manufactures the rule's one false positive.
+
+### Version 5
+
+`contract_version` moved to **5**, the third bump through the gate, carrying
+one rule on three endpoints and the two type checks (28) had been waiting on:
+`POST /api/config` refuses a declared credential in every admitted field and as
+a new provider's name; `POST /api/extract` refuses such a `tone` or `lang`, a
+`reset` that is not the JSON boolean and a `tone` that is not text or `null`;
+`POST /api/translate` refuses a `mode` that is not a stage — `cli.checked_mode`,
+inside `do_select` and `do_translate`, where until now anything else selected
+as `draft` and was written into every segment's `origin`. Each narrows an
+accepted value set and turns a documented `200` into a `400`; none has an
+additive spelling. The first depends on the server's environment and
+configuration, read when `lx web` started, and the contract says so: the same
+request is `200` on one machine and `400` on another, and a client switches on
+the status. `notes` on `POST /api/config`'s reply is additive and rode along.
+
+### Display, beside it
+
+- A `base_url` wrapped in whitespace — only a hand-edited file holds one —
+  was shown as a working address with no `error` by `lx providers`,
+  `/api/state` and `lx config get`, while `Provider._request` refuses it as
+  written (a prefix test on the raw string; and `http.client` refuses trailing
+  whitespace or a newline as `InvalidURL`). `providers._summary` marks the row
+  and shows the stripped address, which is what the writer would have written;
+  `cli._printable` shows the same, so the two commands agree. The transport's
+  own sentence is `providers/base.py`'s and stays.
+- The backend editor's key hint lost its subject on 2026-09-13, when a non-name
+  `api_key_env` started projecting as `key_env: ""`: "` NOT set`" in the list,
+  "` is not set in the environment…`" in the editor, "`name —  not set`" in the
+  toolbar. Each says "key variable unreadable" now, and the editor's hint names
+  its own box as the remedy. `studio/web/src/components/Backends.test.tsx`
+  holds it; the build is committed.
+- `lx extract --help` said "run `lx commit` first" before changing a register —
+  a lossy remedy, since the register is part of the memory key and a committed
+  wording does not answer in another one. It names `lx segments … --json`
+  before and `lx apply … --file` after, which is what keeps the words.
+
+### How it is held
+
+The first sweep in `tests/test_config.py` now removes the two shipped names
+from the environment, so "nothing declares the value" is the test's premise;
+`STORES_A_KEY` keeps its fourteen pairs, each allowed because text nothing
+declares is text, and a second sweep exports the value under the shipped
+`openai` name and asserts the set is empty, that every refusal is windowless,
+and that the pairs which used to store are the ones now naming the variable.
+The wire sweep gained the two routing shapes it had never sent and its own
+declared second sweep. One sentence is pinned as a literal on both surfaces —
+`_windows` is blind to a prefix under eight characters and to a length, and
+both have passed it before. The two sources the `ast` guard cannot see, read out
+of `cfg`, are held at runtime in every spelling `Provider._credentials` reads,
+with an upper-case secret beside a long one; the guard itself grew `secret` as
+a value-parameter name, so a helper handed a declared value under any other
+name fails statically, and the new functions are asserted into its closure.
+Every listed model id is written on both surfaces under a declared key; the one
+false positive's remedy is run verbatim; the residual, the block-declared name,
+the three name spellings, the wrapped pastes, the digit-only credential off the
+raw text, the notes' two triggers as exact lines, the credential-named fields,
+the hand-edited shapes `lx config set` must survive, `tone`, `lang`, `reset`
+and `mode` on both surfaces — each has a test, and the register's oracle folds
+case because `canonical_tone` lower-cases it on the way into the memory file.
+
+MUTANTS_PLACEHOLDER
+
+### Corrections to the record
+
+- (29) said the *written down* half had "no such tension"; HANDOFF-077 had
+  already inverted that, and this entry confirms the tension is `model`'s and is
+  resolved by comparing against declared values rather than shapes.
+- The design brief for this package said a whitespace-wrapped `base_url`
+  "shows as a clean address"; `printable_url` returns it blanks and all — it
+  *reads* as clean. `_summary`'s test is `value != value.strip()` on the raw
+  string, not on the printable form.
+- `lx extract --help`'s remedy, above.
+
+### Left open, and where it lives
+
+- **A key is not a value**, still: the name of a provider that *already*
+  exists is a key of the file and is printed wherever names are — every
+  `Configured:` list, `writable_key`'s `403`, `split_key`'s empty-segment
+  refusal, `_addressable`'s two sentences, `do_routing_set`'s `{stage!r}`, and
+  every field rule's `{path}`. A lane counted eight sites. The smallest
+  consistent position is "a `*` segment the merged configuration does not hold
+  is a value", which this package takes for a *declared credential* and no
+  further; a key-shaped name nothing declares is written and shown, as
+  2026-09-13's first entry recorded.
+- A key in a **hand-edited** file is displayed as the field displays it; no
+  writer ran.
+- A key **not exported anywhere** is text; the later `api_key_env` write's note
+  is the net, one step later.
+- `lx config unset providers.<p>.api_key_env` un-declares a variable, so the
+  same content pasted afterwards is text again — the escape, and its cost.
+- `--lang` on the terminal is validated by nothing; `docs/contracts/status-json.md`
+  documents `lang` as not validated, so applying `language_tag` there is a
+  contract edit and is not taken here.
+- `lx apply --origin` is a free-text terminal argument landing untracked in a
+  segment's body, displayed by `lx segments` and `GET /api/doc`; a
+  person-typed argument, and one predicate call away if wanted.
+- `do_extract`'s `--from` refusal prints `canonical_tone(tone)` — a register
+  name, displayed everywhere by design; a declared credential never reaches it
+  now, and a key-shaped register nothing declares is text there as elsewhere.
+- Rows already banked with a key-shaped register keep it, lower-cased, in git
+  history.
+
 ## 2026-09-13 · A test waits for the job it starts, and the test process connects to nothing it did not bind
 
 Closing HANDOFF-079. `AGENTS.md` said tests use no network, and two helper

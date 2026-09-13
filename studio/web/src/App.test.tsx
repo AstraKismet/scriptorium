@@ -16,12 +16,15 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { App } from './App'
 import { useStore } from './store'
 import { callsTo, otherwise, replies } from './test/wire'
+import { CONTRACT_VERSION } from './contract'
 import type { DocResponse, StateResponse } from './contract'
 
 const initial = useStore.getState()
 
+// The pin itself, never a copy of its number: a fixture holding `4` was a
+// second source of a value `contract.ts` owns, and moved one bump late.
 const state: StateResponse = {
-  contract_version: 4,
+  contract_version: CONTRACT_VERSION,
   version: '0.4.0',
   cwd: '/books',
   targets: ['zh-TW'],

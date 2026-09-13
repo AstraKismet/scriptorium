@@ -433,7 +433,14 @@ wire verbatim — is not writable from the command line at all. No refusal, in a
 field, repeats the value it refused, and a value a field can never hold — a
 `kind` this build has no backend for, an `api_key_env` that is not a name, a
 `base_url` that is not an http(s) address — is not shown back by `lx providers`
-or `lx config get` either. No `lx` command takes key material on a command line,
+or `lx config get` either. And no box stores a key the configuration itself
+declares: a value equal to the content of the variable an `api_key_env` names
+(or to a `headers` value, or a `base_url` userinfo) is refused in every field —
+`model`, a routing entry's model, `tone`, a new backend's name, `lx extract
+--tone`, `lx glossary set` — with a sentence that names the variable and never
+the value. Nothing wider is compared, so a model id a backend serves is never
+refused; a key exported under a name nothing declares yet is stored with a note
+saying which variable holds it. No `lx` command takes key material on a command line,
 because argv is visible in a process listing and lands in shell history before
 any refusal can run.
 
@@ -642,10 +649,11 @@ renders whatever `lx config set` would have said, so the two surfaces cannot
 disagree about what is writable — and **no field is meant to hold an API key**:
 `api_key_env` takes the *name* of an environment variable, and a value shaped
 like a key is refused there and in `base_url`, and no refusal on the page repeats
-what it refused, whichever box it was typed into. The
-honest caveat is that the *model* box stores whatever you type, a key pasted into
-the wrong field included; `docs/contracts/workbench-http.md` records that as a
-known divergence rather than pretending otherwise. Changing `base_url` needs an
+what it refused, whichever box it was typed into. The *model* box, the *Name*
+box and every other field refuse a value that is a key the configuration
+already declares — the content of the variable named beside it — and a key
+exported under a name nothing declares yet is saved with a note naming the
+variable. Changing `base_url` needs an
 explicit acknowledgement, because it decides where the document and the
 credential are sent. A backend cannot be deleted from the browser; that is
 `lx config unset` or the file.
@@ -772,7 +780,7 @@ that lost.
 ## Development
 
 ```bash
-python -m pytest -q                # 2812 collected, no network
+python -m pytest -q                # 2869 collected, no network
 python -m ruff check src tests
 ```
 

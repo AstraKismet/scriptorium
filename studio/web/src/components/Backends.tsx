@@ -85,7 +85,13 @@ export function Backends() {
               <small>
                 {p.kind} · {p.base_url || 'no base_url'}
                 {p.model ? ` · ${p.model}` : ''}
-                {p.needs_key ? (p.key_present ? ` · ${p.key_env} set` : ` · ${p.key_env} NOT set`) : ' · no key needed'}
+                {/* `key_env` is `""` with `needs_key` when the stored value is not a
+                    variable name — the server does not show one it can never hold
+                    (2026-09-13) — so the sentence needs a subject of its own there,
+                    or it reads "` NOT set`". The row's `error` says what is wrong. */}
+                {p.needs_key
+                  ? (p.key_present ? ` · ${p.key_env} set` : p.key_env ? ` · ${p.key_env} NOT set` : ' · key variable unreadable')
+                  : ' · no key needed'}
               </small>
               {p.error && <small style={{ color: 'var(--rubric)' }}>{p.error}</small>}
             </button>
@@ -182,6 +188,11 @@ function Profile({ provider, onWrote }: {
 
     setBusy(true)
     const wrote: string[] = []
+    // The server's own advisory lines, carried back as `notes` since
+    // `contract_version` 5 — a written value that is the content of an exported
+    // variable whose name says it holds a key. Rendered as text, never parsed,
+    // and never echoed into a field: the sentence names a key and a variable.
+    const notes: string[] = []
     try {
       for (const field of order) {
         const value = want.get(field) ?? ''
@@ -211,11 +222,14 @@ function Profile({ provider, onWrote }: {
 
         const reply = await api.postConfig(body)
         wrote.push(field)
+        notes.push(...reply.notes)
         onWrote(reply.providers, reply.routing, name)
       }
       setNote(
         wrote.length
-          ? { text: `Saved: ${wrote.join(', ')}.`, level: 'good' }
+          ? (notes.length
+            ? { text: `Saved: ${wrote.join(', ')}. ${notes.join(' ')}`, level: 'warn' }
+            : { text: `Saved: ${wrote.join(', ')}.`, level: 'good' })
           : { text: 'Nothing had changed.', level: 'warn' },
       )
     } catch (err) {
@@ -279,10 +293,16 @@ function Profile({ provider, onWrote }: {
           ? 'Empty means this backend needs no key. The name of a variable is stored; a value shaped like a key is refused.'
           : provider.key_present
             ? `${provider.key_env} is set in this workbench’s environment.`
-            // `key_present` is read from **this server process's** environment,
-            // fixed when `lx web` started. "(no key)" would read as "you have not
-            // configured this" when the real next step is a restart.
-            : `${provider.key_env} is not set in the environment this workbench was started in. Export it and restart lx web — a running process cannot re-read it.`}
+            // An empty `key_env` beside `needs_key` is the masked case: the file
+            // holds something that is not a variable name, which the server does
+            // not show (2026-09-13). The remedy is this very box — `api_key_env`
+            // is writable — so the sentence names it rather than the file alone.
+            : !provider.key_env
+              ? 'The API key variable stored for this backend is not a variable name, so it is not shown — the error below says so. Type the variable’s name here and save, or fix lx.config.json.'
+              // `key_present` is read from **this server process's** environment,
+              // fixed when `lx web` started. "(no key)" would read as "you have not
+              // configured this" when the real next step is a restart.
+              : `${provider.key_env} is not set in the environment this workbench was started in. Export it and restart lx web — a running process cannot re-read it.`}
       </p>
 
       <label>
