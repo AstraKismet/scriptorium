@@ -168,7 +168,14 @@ export function Toolbar() {
           type="button"
           disabled={!settled()}
           title="Read the chapter as it renders, continuously"
-          onClick={async () => { await save(); routes.go(routes.read(doc.source, doc.lang)) }}
+          // The paragraph goes with it, so the reading view opens where the
+          // reviewer is and its Back button returns there. Before HANDOFF-084 the
+          // return trip was repaired by the effect that copied the store's focus
+          // into the address — the effect whose other half blanked the page.
+          onClick={async () => {
+            await save()
+            routes.go(routes.read(doc.source, doc.lang, routes.placeIn(doc.source, doc.lang)))
+          }}
         >
           Read
         </button>

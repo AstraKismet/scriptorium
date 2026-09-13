@@ -18,6 +18,18 @@ if (!('ResizeObserver' in globalThis)) {
   Object.defineProperty(globalThis, 'ResizeObserver', { value: Stub, writable: true })
 }
 
+// jsdom scrolls nothing and has no `Element.prototype.scrollTo`, which `virtua`
+// calls when the ledger lands on the paragraph an address names. Without this a
+// test that opens a document with a segment in its address ends in an unhandled
+// rejection that has nothing to do with what it asserts.
+if (typeof Element.prototype.scrollTo !== 'function') {
+  Element.prototype.scrollTo = function scrollTo(): void { /* jsdom lays nothing out */ }
+}
+// The same gap, reached by the reading view landing on the paragraph it opened on.
+if (typeof Element.prototype.scrollIntoView !== 'function') {
+  Element.prototype.scrollIntoView = function scrollIntoView(): void { /* as above */ }
+}
+
 // `drafts` is module state on purpose — it is what keeps a keystroke out of the
 // store — so it is also state a test leaks into the next one. Cleared here
 // rather than in each file, because the one that forgets is the one that

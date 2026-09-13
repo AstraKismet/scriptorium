@@ -70,8 +70,10 @@ interface Store {
 
   log: LogLine[]
   filter: Filter
-  /** The segment the margin is about. */
-  focused: string | null
+  // **No `focused` here, on purpose.** Which segment a reviewer is on lives in
+  // the address and nowhere else — `routes.useFocused`, `routes.focus`. A copy
+  // here, reconciled with the address by effects, is what blanked the page on a
+  // second click (HANDOFF-084).
 
   /** `''` means each stage's own backend. */
   provider: string
@@ -87,7 +89,6 @@ interface Store {
   say: (text: string, level?: Level, head?: boolean) => void
   clearLog: () => void
   setFilter: (f: Filter) => void
-  setFocused: (id: string | null) => void
   setLimit: (n: number) => void
   setModel: (m: string) => void
   chooseProvider: (name: string) => void
@@ -377,7 +378,6 @@ export const useStore = create<Store>()((set, get) => ({
 
   log: [],
   filter: 'all',
-  focused: null,
 
   provider: '',
   model: '',
@@ -395,7 +395,6 @@ export const useStore = create<Store>()((set, get) => ({
 
   clearLog: () => set({ log: [] }),
   setFilter: filter => set({ filter }),
-  setFocused: focused => set({ focused }),
   setLimit: limit => set({ limit }),
   setModel: model => set({ model }),
 
@@ -496,7 +495,7 @@ export const useStore = create<Store>()((set, get) => ({
     // success path the two spellings are indistinguishable; on a failed fetch
     // the old one leaves exactly that cross-document write armed.
     drafts.clear()
-    set({ at: { src, lang }, docLoading: true, docError: '', focused: null })
+    set({ at: { src, lang }, docLoading: true, docError: '' })
     try {
       const doc = await api.getDoc({ src, lang })
       // Someone may have opened another document while this was in flight.

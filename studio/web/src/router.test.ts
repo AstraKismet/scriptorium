@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 
 import * as routes from './router'
 
@@ -27,5 +27,35 @@ describe('the address', () => {
     expect(routes.parse('#/doc/zh-TW/%E0%A4%A')).toEqual({ name: 'home' })
     expect(routes.parse('#/nonsense')).toEqual({ name: 'home' })
     expect(routes.parse('')).toEqual({ name: 'home' })
+  })
+})
+
+describe('moving the segment', () => {
+  afterEach(() => { window.history.replaceState(null, '', '#') })
+
+  it('writes the segment into the address of the document it names, keeping its kind', () => {
+    window.history.replaceState(null, '', routes.read('a.md', 'zh-TW', 's0001'))
+    routes.focus('a.md', 'zh-TW', 's0004')
+    expect(window.location.hash).toBe(routes.read('a.md', 'zh-TW', 's0004'))
+  })
+
+  /**
+   * `go` moves `location.hash` at once and `hashchange` arrives a task later, so
+   * a row of the document being left can still take focus in between. Its id
+   * would be a paragraph of the next document that nobody chose — ids restart
+   * at `s0001` in every one.
+   */
+  it('writes nothing into the address of another document', () => {
+    window.history.replaceState(null, '', routes.doc('b.md', 'zh-TW'))
+    routes.focus('a.md', 'zh-TW', 's0003')
+    expect(window.location.hash).toBe(routes.doc('b.md', 'zh-TW'))
+    routes.focus('b.md', 'en', 's0003')
+    expect(window.location.hash).toBe(routes.doc('b.md', 'zh-TW'))
+  })
+
+  it('writes nothing where the address names no document', () => {
+    window.history.replaceState(null, '', routes.backends())
+    routes.focus('a.md', 'zh-TW', 's0003')
+    expect(window.location.hash).toBe(routes.backends())
   })
 })

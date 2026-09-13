@@ -28,12 +28,13 @@ import { useEffect, useMemo, useRef } from 'react'
 import { VList, type VListHandle } from 'virtua'
 
 import { SegmentRow } from './SegmentRow'
+import * as routes from '../router'
 import { useStore, visible } from '../store'
 
 export function Ledger() {
   const doc = useStore(s => s.doc)
   const filter = useStore(s => s.filter)
-  const focused = useStore(s => s.focused)
+  const focused = routes.useFocused()
   const list = useRef<VListHandle>(null)
   const landed = useRef('')
 

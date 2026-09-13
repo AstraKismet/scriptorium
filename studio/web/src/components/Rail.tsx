@@ -74,7 +74,10 @@ export function Rail() {
               type="button"
               className="doc"
               aria-current={current(d.source, d.lang)}
-              onClick={() => { routes.go(routes.doc(d.source, d.lang)) }}
+              // Back to the paragraph the address last named in *this* document,
+              // if it has named one — never the one on screen, which belongs to
+              // another document whose ids restart at `s0001` too.
+              onClick={() => { routes.go(routes.doc(d.source, d.lang, routes.placeIn(d.source, d.lang))) }}
             >
               <b>{d.source}</b>
               <small>{d.lang} · {done}/{total}</small>

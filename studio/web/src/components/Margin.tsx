@@ -30,6 +30,7 @@
 import { useEffect, useState } from 'react'
 
 import * as api from '../api'
+import * as routes from '../router'
 import { useStore } from '../store'
 import { isError, type StyleResponse, type SuggestResponse } from '../contract'
 
@@ -66,7 +67,7 @@ const EMPTY: Margin = { style: null, suggest: null, loading: false, error: '' }
 
 export function Margin() {
   const doc = useStore(s => s.doc)
-  const focused = useStore(s => s.focused)
+  const focused = routes.useFocused()
   const [margin, setMargin] = useState<Margin>(EMPTY)
   const [asked, setAsked] = useState(0)
 

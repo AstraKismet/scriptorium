@@ -19,6 +19,7 @@ import { ask } from './Confirm'
 import { Marked, sameSlots } from '../marks'
 import * as drafts from '../drafts'
 import { isError, type Segment } from '../contract'
+import * as routes from '../router'
 import { useStore } from '../store'
 
 const grow = (el: HTMLTextAreaElement): void => {
@@ -28,8 +29,7 @@ const grow = (el: HTMLTextAreaElement): void => {
 
 export const SegmentRow = memo(function SegmentRow({ seg }: { seg: Segment }) {
   const running = useStore(s => s.running)
-  const focused = useStore(s => s.focused)
-  const setFocused = useStore(s => s.setFocused)
+  const isFocused = routes.useIsFocused(seg.id)
   const save = useStore(s => s.save)
   const runJob = useStore(s => s.runJob)
   const setHold = useStore(s => s.setHold)
@@ -78,8 +78,18 @@ export const SegmentRow = memo(function SegmentRow({ seg }: { seg: Segment }) {
   useEffect(() => { if (box.current) grow(box.current) }, [])
 
   const bad = seg.issues.some(isError)
-  const isFocused = focused === seg.id
   const held = seg.review === 'held'
+
+  /**
+   * Take the address to this row. The address is the only record of which
+   * segment a reviewer is on, so moving it *is* moving the focus — see
+   * `router.ts`. Named with the document this row was drawn from, which
+   * `routes.focus` refuses to write into any other document's address.
+   */
+  const point = () => {
+    const where = useStore.getState().shown()
+    if (where) routes.focus(where.src, where.lang, seg.id)
+  }
 
   const touched = () => {
     const el = box.current
@@ -173,7 +183,7 @@ export const SegmentRow = memo(function SegmentRow({ seg }: { seg: Segment }) {
         dirty ? 'dirty' : '',
       ].filter(Boolean).join(' ')}
       aria-selected={isFocused}
-      onClick={() => { setFocused(seg.id) }}
+      onClick={point}
     >
       <div className="gutter">
         {seg.id}
@@ -203,7 +213,7 @@ export const SegmentRow = memo(function SegmentRow({ seg }: { seg: Segment }) {
           placeholder="untranslated"
           defaultValue={drafts.get(seg.id) ?? seg.target}
           onInput={() => { const el = box.current; if (el) { grow(el); touched() } }}
-          onFocus={() => { setFocused(seg.id) }}
+          onFocus={point}
           onBlur={() => { void save() }}
           onKeyDown={e => {
             // **Never while the IME is composing.** Enter is the candidate-
