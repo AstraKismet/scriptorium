@@ -91,6 +91,13 @@ the body's outcome and the teardown's separately, and what each message names.
 No planted defect can leave the machine against a broken guard: the child's
 backend is a loopback port it bound and closed.
 
+What it costs, measured back to back on 3.12, full suite, the parent and this
+branch alternating twice: pytest reported 215.43 s and 187.70 s for the parent,
+212.95 s and 202.45 s for the branch, which includes the guard's own child runs —
+inside the machine's noise. The wall clock is the other way round: 283 s and
+258 s for the parent against 214 s and 203 s, because the parent's process
+outlived its own summary by more than a minute, waiting on the strays.
+
 ### What lost
 
 - **A thread-liveness check at teardown**, the package's own first example. A
