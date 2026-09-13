@@ -123,6 +123,7 @@ def test_a_launcher_pid_resolves_to_the_interpreter_it_started():
 
 def test_a_torn_line_is_skipped_rather_than_misread():
     lines = ["install\t1\t2\tpytest\n", "connect\t3\t127.0.0.1\n", "garbage\n",
+             "connect\t3\t127.0.0.1\t80\n", "connect\t3\t127.0.0.1\t80\tother\n",
              "lookup\t3\texample.com\t443\t-c\n"]
     assert [r[0] for r in rcn.parse(lines)] == ["install", "lookup"]
 
@@ -164,5 +165,7 @@ def test_the_probe_loads_nothing_into_a_dash_S_child_and_writes_what_it_saw(tmp_
 
 
 def test_a_ref_that_names_no_commit_answers_nothing(capsys):
+    """Refused by name, before anything is archived: a later step also exits 2, so the
+    exit code alone would pass a build that tried to archive a ref it never checked."""
     assert rcn.main(["--ref", "refs/heads/no-such-branch-for-the-recorder"]) == 2
-    assert "nothing measured" in capsys.readouterr().out
+    assert "does not name a commit" in capsys.readouterr().out
