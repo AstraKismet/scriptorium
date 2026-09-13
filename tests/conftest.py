@@ -28,10 +28,11 @@ that one poll happened to see.
 
 `docs/decisions.md`, 2026-09-13, has the measurement and the designs that lost.
 What this cannot see is stated there too: a subprocess (the hook lives in this
-interpreter only), a name lookup (`getaddrinfo` runs before any connect and is
-not refused), a datagram sent without a connect, and a thread a test starts
-itself and leaves running, whose refusal is charged to whichever test is running
-when it dials.
+interpreter only — `tests/record_child_network.py` measures what children dial,
+and `docs/decisions.md`, 2026-09-14, says why that is not a guard), a name
+lookup (`getaddrinfo` runs before any connect and is not refused), a datagram
+sent without a connect, and a thread a test starts itself and leaves running,
+whose refusal is charged to whichever test is running when it dials.
 """
 
 import functools
@@ -45,8 +46,9 @@ import pytest
 
 #: Loopback ports a test may dial because nothing listens there. The refusal is
 #: the operating system's, untouched, since the tests that use them assert on
-#: what the provider makes of a real one — on Windows port 1 times out rather
-#: than refusing, and a synthetic refusal would reach a different branch.
+#: what the provider makes of a real one — on Windows a refused loopback connect
+#: takes about two seconds, ports 1 and 9 alike, so a test with a shorter timeout
+#: sees a timeout — and a synthetic refusal would reach a different branch.
 DEAD_PORTS = frozenset({1, 9})
 
 #: How long teardown waits for a job the test did not wait for. Never a

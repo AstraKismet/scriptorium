@@ -3,6 +3,263 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-09-14 · A process a test starts is measured, not guarded, and the one that dialled out dials a dead end
+
+Closing HANDOFF-082. `tests/conftest.py` refuses a connection in the test
+process only. HANDOFF-079's recorder had found one child that connected, at
+`91b5c04`: `lx models --provider a.b` in
+`tests/test_config.py::test_the_note_addresses_a_provider_whose_name_contains_a_dot`,
+against a provider whose `base_url` was `http://127.0.0.1`, dialled
+`127.0.0.1:80` twice — on a machine serving anything there, the request reached
+it. The package asked for that test to reach nothing, and for a decision, by
+measurement, between a guard for children and a recorded limit.
+
+### What was measured
+
+Windows, Anaconda 3.12, full suite, in `git archive` copies with a recording
+audit hook appended to `src/scriptorium/__init__.py` — so that it reached
+children built with `tests/test_config.py::_env`'s minimal environment and
+`tests/test_startup_imports.py`'s `-S` — plus a second hook judging each
+connect by `tests/conftest.py`'s own rule (a weak reference at bind,
+`getsockname` at connect, because a bind to port 0 records port 0):
+
+- **At `61da61c`, the test fixed:** 2903 passed, 2 skipped; 1055
+  `subprocess.Popen` calls from the test process, from 16 call sites in 13
+  files. The fixed test's child dialled `127.0.0.1:9` once. The only other
+  descendant connections the recorder saw were 29 from the child pytest
+  `tests/test_conftest_guard.py` starts, every one to a port bound in that same
+  child, plus one to `127.0.0.1:9`. Outside the dead ends and a port the
+  connecting process bound: **0**.
+- **The same commit with only the test's endpoint put back:** 1 failed — that
+  test, through its new assertion — 2902 passed, and its child dialled
+  `127.0.0.1:80` twice.
+- The listing retries once (`_LIST_RETRIES`), which is why two. On Windows every
+  refused loopback attempt costs about 2 s — ports 1 and 9 alike, on 3.9 and
+  3.12 — and the retry waits another 1–2 s: the test took 6.2 s dialling port 80
+  and 2.2 s with `retries: 0` against port 9.
+
+`python tests/record_child_network.py --ref <commit>` is now how this is asked.
+At `12b8fcc`, the branch's last commit that changed code, it answered **exit 0**:
+2949 passed and 2 skipped in the copy, the test process started 1063 processes
+and 1055 of them loaded the recorder, the planted child's connection and lookup
+were both seen, and nothing reached past the rule. At a scratch commit on top of
+it that put only the endpoint back, **exit 1**: `CONNECT … 127.0.0.1:80` twice,
+from `-m models --provider a.b`, beside that test's own failure.
+
+### The rule
+
+**A test whose child runs a command that can send a request points it at
+`127.0.0.1:1` or `:9`, asks once, and asserts on the sentence the child printed
+about that address.** The test's old last assertion — `unknown provider` absent
+from the output — passes for a refusal made anywhere, including one made before
+the name it exists to test was looked up. `a.b: cannot reach
+http://127.0.0.1:9/models` is written by a provider built under `a.b`, after it
+asked the transport, so it proves the lookup and names where the request went;
+putting the endpoint back fails the test by itself.
+
+**Children are measured, not guarded.** `tests/record_child_network.py` archives
+a commit — never the working tree, so nothing it injects can be committed —
+appends the recorder to the copy's package, plants one test whose child, from a
+minimal environment, dials a closed loopback port and looks up a name its own
+hook then refuses, and runs the suite there. Exit 0: no process the suite
+started connected past a dead end or a port it had bound, and none looked up a
+name — forward or reverse — that can leave the machine. That second half is
+wider than `tests/conftest.py`, which does not refuse lookups at all. Exit 1:
+one did, printed with its arguments. Exit 2: not answered — not a checkout of
+this repository, a ref that names no commit, a failed archive, no pytest, a
+pytest that did not run the suite or ran past `--timeout`, a planted control a
+selection deselected, a test process that never loaded the recorder, anything
+raised on the way, or **the recorder did not see its own planted child's
+connection and lookup**. That last one is what keeps a broken instrument from
+reading as a clean suite. A suite that ran and failed still answers 0 or 1, with
+a line saying what was not measured. The recorder loads nothing a `-S`
+interpreter has not already loaded — not `os`, which under `-S` brings seven
+modules on 3.9 and eight on 3.12, measured — so `test_startup_imports` counts
+the same modules with it present; `tests/test_record_child_network.py` asserts
+that, that the recorder's dead ends and loopback test are `conftest.py`'s (read
+with `ast`), and — over a two-file repository it archives for itself — that one
+run reaches exit 1, exit 2 for a deselected control, and exit 2 for a pytest
+that cannot start.
+
+The recorder was wrong four ways before review closed, and none of them showed on
+a run that answered — the first could turn a finding into exit 0 — which is why
+each is written down:
+
+- **It lost rows.** Every process appended to one file, and on Windows an append
+  is a seek and a write, not one step: in the review lane's measurement two
+  processes writing 3000 rows each lost 655, and four threads in one process
+  lost 341 of 12000. A lost row is a false exit 0. One file per process now, and
+  a lock per file; a test writes 2000 rows from four threads and 3000 from two
+  processes and counts them.
+- **It counted processes by distinct pid**, and Windows hands a finished child's
+  pid to the next: 318 counted where 327 had installed, in a run over
+  `tests/test_import_boundary.py`, `tests/test_startup_imports.py`,
+  `tests/test_config.py` and `tests/test_provider.py` at `3891988`. Rows now.
+- **It saw only `getaddrinfo`.** `gethostbyname` and `gethostbyaddr` —
+  `HTTPServer.server_bind` reaches the second through `getfqdn` — raised events
+  it did not record, and its control proved the connection branch alone. Both
+  are recorded now, `getnameinfo` too, and the control must be seen on both.
+- **Its own test of a ref that names no commit asked real git**, which an archive
+  has none of, so the suite was red in exactly the copy the recorder runs it in,
+  and in any source tarball. The refusals are tested against a stand-in for git.
+
+Mutants of the recorder, each landed by hash and restored from a byte copy: see
+*What review found* for the count.
+
+### What lost
+
+Both guards were built by design-tier lanes in worktrees on `61da61c` with the
+full suite green, then handed to an independent red team pinned to the commit.
+The numbers in the two bullets below are those lanes' own — each red team re-ran
+its build's suite, harm table and mutants and matched them — except where a
+sentence says the coordinating session measured it. That session measured the
+two diff sizes, and one leak per build: a raw-socket child spawned through the
+proxy guard's environment builder reached a listener the test bound and the
+test passed; a `.cmd` file with the inherited environment did the same under the
+child hook; each build refused the other's case.
+
+- **A proxy pinned in every child's environment, and a spawn gate that refuses a
+  child without it.** 15 files, +574/−62. `lx` requests went only to port 9 —
+  the default route and an `https` host included, with no name lookup — but its
+  own harm table showed five of eight cells still reaching the listener through
+  the builder (raw sockets, `-S`, `-I`, a grandchild, a child that unset the
+  variables), with the test passing. It hides the defect this package found
+  rather than reporting it: the dotted test with its endpoint put back and its
+  assertion removed passed. That is the half of 2026-09-13's reasons for
+  "pointing `DEFAULT_CONFIG` at a dead end under test" that applies here — the
+  other was scope. It also left no legal way to test a CLI child against a mock
+  server, changed the branch a userinfo `base_url` takes, read the `os.exec`
+  audit event's arguments at the wrong index — the guard's own self-test failed
+  on Linux, measured under 3.14 — refused the shell `platform.*` runs on Windows
+  3.9 (so `pytest --junitxml` crashed there), and eight of thirteen mutants the
+  red team planted survived.
+- **The connect rule carried into every child through `sitecustomize`, a report
+  file the parent reads, and a spawn gate.** 18 files, +1124/−29. It fails the
+  test rather than hiding, and caught all seventeen of its own harm cells. Those
+  cells varied only whether the builder was used; the red team varied the rest,
+  and fourteen of twenty-five shapes reached the listener with the test passing —
+  ten by how the child was launched (a `.cmd` file, a console-script `lx`, a
+  renamed interpreter, an unquoted path with a space, Windows `multiprocessing`,
+  `_winapi.CreateProcess` among them), two by changing the environment after the
+  gate judged it, and two by a UDP bind on the target's port number, one of which
+  goes through the committed `tests/conftest.py` as well. The gate recognised a
+  Python child by its program's name — an enumeration read as a definition.
+  Every Python child started loading `sitecustomize`; `-I -m` had no spelling
+  that passed; a `from __future__` line after the `-S` prefix became a silent
+  `SyntaxError`; eleven of fourteen red-team mutants survived.
+- **A guard inside the product package, switched on by an environment
+  variable.** Product code carrying a test rule, and the minimal environment
+  drops the variable.
+- **An `ast` tripwire over `base_url` literals in `tests/`.** Blind through
+  helpers and through `DEFAULT_CONFIG`'s route; the helper half is why a
+  different `ast` lint — for a missing wait — lost on 2026-09-13.
+- **Recording from `tests/conftest.py`**, so the recorder registers before the
+  guard in child pytests. `tests/test_conftest_guard.py`'s children dial closed
+  ports on purpose, and each would become a finding; what it would add are
+  connections that never reached the operating system.
+- **Running the recorder in CI.** Not decided against so much as not taken: it is
+  detection only, CI has no model server for a child to reach, and it adds a
+  suite run. The command exists for whoever wants it there.
+
+The package's own acceptable answer was a written limit if the measurement
+supported it. After the fix the measurement is 0 in 1055, one call site in
+sixteen had ever sent a request, and both guards let through connections: the
+proxy guard in its own harm table, the child hook on shapes its own table did
+not vary.
+
+### What it cannot see
+
+- **A process that never imports `scriptorium`**: a shell, a non-Python program,
+  a child pytest over files that do not import it. The recorder prints how many
+  processes were started beside how many it recorded — eight of 1063 unseen at
+  `12b8fcc`, seven of them started by the recorder's own tests.
+- **A connection an audit hook registered earlier in the same process refused.**
+  A later hook never sees an event an earlier one raised on. That is every
+  planted refusal inside `tests/test_conftest_guard.py`'s child pytests — the
+  first recorder's record had eight lookups in that child with no connection
+  beside them, six of them of its closed port — and none of them reached the
+  operating system.
+- **A port shared across socket types.** A process holding any socket bound to a
+  port number passes for having bound the listener on it, so a UDP bind on another
+  process's TCP port lets a connection to that process through — measured by the
+  red team, and true of `tests/conftest.py`'s own `_bound_here`, whose rule the
+  recorder copies.
+- A datagram, a raw socket call through `ctypes`, and anything a process does
+  before `scriptorium` is imported.
+- **The test process's own lookups** are counted and not judged, as
+  `tests/conftest.py` does not refuse them — three at `12b8fcc`, the two
+  credential-masking tests that resolve a hostname carrying their fixture's
+  password (HANDOFF-083).
+- **Proxies.** A child built by `_env` drops every `*_proxy` variable, and on
+  Windows urllib then reads the registry proxy, whose `<local>` bypass does not
+  cover `127.0.0.1` (read from the 3.9 and 3.12 source). The test process has the
+  same exposure: with `HTTP_PROXY`/`HTTPS_PROXY=http://127.0.0.1:9` exported,
+  `tests/test_provider.py` failed at its first mock-backend test, and it,
+  `tests/test_web.py` and `tests/test_audit.py` were still running when a 580 s
+  `timeout` stopped them, against 716 passed in 33.55 s without. HANDOFF-085 and
+  HANDOFF-086.
+- POSIX was not run by this package except for the red team's Linux probe of the
+  proxy guard.
+
+### What review found
+
+A premise-attack lane, before any design, found the option the brief did not
+list (pin the proxy), that the audit-hook order hid refused connections from the
+recorder — so the first report's "no other connection" was a claim about what
+the recorder saw rather than about the children — and the proxy axis above. An
+inventory lane mapped the sixteen call sites; none has a child dial a server the
+parent bound, none starts a grandchild, none uses `-I`. The frozen oracle of six
+catch and three allow cases was itself found wanting: four catch cases are shapes
+the suite does not contain, and a guard refusing inside a child never reached
+the parent test. The two red teams are summarised under *What lost*.
+
+Two design-tier lanes then reviewed the branch at `bee963a`, one the recorder and
+one every claim written about it. The coordinating session had already found two
+of the four recorder defects listed under *The rule* by running the recorder —
+the pid count and the test that asked real git. The first lane found the other
+two, the lost rows and the lookups it never saw, beside smaller ones, and
+planted twelve mutants of its own, all of which survived because nothing tested
+the rows the probe writes, `_measure`'s gates or the report; the second found
+eleven sentences here and in `AGENTS.md` that were false, overstated or
+unsourced, and two packages that a fresh session could not have executed as
+written. All were acted on. After that, thirty-five mutants of the recorder —
+the coordinating session's thirteen, eleven of the review lane's twelve, and
+eleven more over what the rewrite added — each landed by hash and restored from
+a byte copy: thirty-five caught. The two concurrency mutants, the lock and the
+per-process file, were caught four runs of four. Two were not planted: the
+IPv4-mapped branch of the loopback test, equivalent on both local interpreters
+because their `ipaddress` already calls `::ffff:127.0.0.1` loopback and kept for
+parity with `conftest.py`, and the review lane's twelfth, the process-tree kill
+on `--timeout`, which no test reaches.
+
+The first review also found what the recorder does with a credential: a lookup
+of a hostname carrying one is written into its rows file, which `--keep` leaves
+on disk, and a child's finding prints the host and the arguments. Only fixture
+values were seen. Whether and how the recorder masks what it prints is a
+credential display question and security-tier work, found below that tier; it is
+HANDOFF-083's, beside the lookups it already owns.
+
+### Corrections to the record
+
+- The package measured 877 spawns at `91b5c04` with a wrapper around
+  `subprocess.Popen`; at `61da61c` the audit event counts 1055. Tests were added
+  in between (HANDOFF-079 and HANDOFF-080), and the two counters are not the
+  same instrument, so the difference is not attributed.
+- Acceptance criterion 3 — no `socket.connect` from a child to a port other than
+  1 or 9 — rests on a measurement at `91b5c04`, which predates
+  `tests/test_conftest_guard.py`. Read literally it is 29 rows at `61da61c`, all
+  that file's child pytest dialling ports it bound itself; the recorder applies
+  `conftest.py`'s rule, under which it is 0.
+- `tests/conftest.py` said "on Windows port 1 times out rather than refusing".
+  Ports 1 and 9 both refuse there, after about 2 s; the tests that dial port 1
+  give up sooner, so to them it looks like a timeout. The comment says that now.
+- 2026-09-13's redirect entry left "proxies and their credentials on the first
+  hop, and the Windows registry proxy path" to "HANDOFF-076's scope". HANDOFF-076
+  closed on 2026-09-11 and its own *Left open* list has no proxy item, so that
+  deferral lived nowhere. It lives in HANDOFF-085 now, together with the one item
+  of that paragraph that is not about proxies — a hand-edited `headers.Host`
+  sends the key under another `Host` to `base_url`'s own host.
+
 ## 2026-09-13 · A box that accepts text does not store a credential the configuration declares, and `contract_version` is 5
 
 Closing HANDOFF-080, the *written down* half of

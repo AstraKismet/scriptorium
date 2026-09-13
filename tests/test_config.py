@@ -1030,17 +1030,28 @@ def test_the_note_addresses_a_provider_whose_name_contains_a_dot(tmp_path):
     `lx config set providers '{"a.b": {…}}'` writes one, and splitting the joined
     dotted key back apart pointed the advice at `--provider a`, which does not
     exist. Found by the adversarial pass, 2026-08-20.
+
+    **The endpoint is a dead end, and the listing asks once.** This runs in a
+    child process, which `tests/conftest.py`'s guard cannot see, and with a bare
+    `http://127.0.0.1` the child dialled port 80 twice — on a machine serving
+    anything there, the request reached it. Measured 2026-09-13 (HANDOFF-082).
+    Port 9 carries no version segment either, so the note under test still fires.
     """
     env = _project(tmp_path)
-    block = json.dumps({"a.b": {"kind": "openai", "base_url": "http://127.0.0.1",
-                                "model": "m", "api_key_env": ""}})
+    block = json.dumps({"a.b": {"kind": "openai", "base_url": "http://127.0.0.1:9",
+                                "model": "m", "api_key_env": "", "retries": 0}})
     result = _lx(["config", "set", "providers", block], tmp_path, env)
     assert result.returncode == 0
     assert "lx models --provider a.b" in _out(result)
     assert "--provider a`" not in _out(result)
     # And the name it printed is one `lx models` actually resolves.
-    assert "unknown provider" not in _both(
-        _lx(["models", "--provider", "a.b"], tmp_path, env))
+    listing = _lx(["models", "--provider", "a.b"], tmp_path, env)
+    assert "unknown provider" not in _both(listing)
+    # The absence above passes for any refusal at all, including one made before
+    # the name was looked up. This sentence is written by a provider built under
+    # `a.b`, after it asked the transport — so the lookup happened, and the
+    # request went to the dead end and nowhere else.
+    assert "a.b: cannot reach http://127.0.0.1:9/models" in _err(listing), _both(listing)
 
 
 def test_a_note_never_appears_where_no_base_url_landed(tmp_path):
