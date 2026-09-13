@@ -83,7 +83,7 @@ export const SegmentRow = memo(function SegmentRow({ seg }: { seg: Segment }) {
   /**
    * Take the address to this row. The address is the only record of which
    * segment a reviewer is on, so moving it *is* moving the focus — see
-   * `router.ts`. Named with the document this row was drawn from, which
+   * `router.ts`. Named with the document on screen when the event fires, which
    * `routes.focus` refuses to write into any other document's address.
    */
   const point = () => {

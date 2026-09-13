@@ -30,10 +30,10 @@
  * effects kept each in step with the other, so the moment both named a segment
  * and the two differed, each effect wrote its own side over the other in the
  * same commit, the next commit found them swapped, and React stopped the loop
- * with error #185 and unmounted the page. A second click did it, and so did
- * Back, a link naming another paragraph, and switching documents — which also
- * carried the old document's segment into the new one. One copy cannot disagree
- * with itself, which is the whole of the repair.
+ * with error #185 and unmounted the page. A click on a second segment did it,
+ * and so did Back or a link naming another paragraph. Switching documents did
+ * not blank the page; it carried the old document's segment into the new one.
+ * One copy cannot disagree with itself, which is the whole of the repair.
  */
 import { useSyncExternalStore } from 'react'
 
@@ -89,7 +89,8 @@ let current = window.location.hash
 
 /**
  * The paragraph the address last named in each document, for the links that
- * address a document without naming one — the rail's.
+ * address a document without knowing the paragraph — the rail's, and the
+ * toolbar's Read.
  *
  * Without it, opening the chapter that is already open, or coming back to it
  * from the backend screens, would land a five-thousand-segment novel at its top.
@@ -99,8 +100,9 @@ let current = window.location.hash
  * paragraph remembered under one document can only be offered for that document.
  */
 const places = new Map<string, string | null>()
-// A language tag never contains `/`, so the first one separates the two.
-const placeKey = (src: string, lang: string): string => `${lang}/${src}`
+// Not `lang + '/' + src`: `parse` does not validate a language tag, so a
+// hand-typed `zh%2FTW` decodes to one containing the separator.
+const placeKey = (src: string, lang: string): string => JSON.stringify([lang, src])
 
 const note = (hash: string): void => {
   const r = parse(hash)
@@ -109,6 +111,9 @@ const note = (hash: string): void => {
 
 note(current)
 
+// Reads the live `location.hash`, never an event's `newURL`: a `hashchange`
+// arrives a task after the assignment that caused it, by which time a later
+// write may have moved the address again, and announcing twice is harmless.
 const announce = (): void => {
   current = window.location.hash
   note(current)
@@ -193,9 +198,9 @@ export const go = (to: string): void => { window.location.hash = to }
 /**
  * Move the address without adding a history entry.
  *
- * For view state a person did not navigate to: which paragraph they are on,
- * which filter is showing. `hashchange` does not fire for `replaceState`, so the
- * subscribers have to be told — and **not on this tick**.
+ * For view state a person did not navigate to: which paragraph they are on.
+ * `hashchange` does not fire for `replaceState`, so the subscribers have to be
+ * told — and **not on this tick**.
  *
  * Every caller is an event handler now; until HANDOFF-084 one was an effect,
  * where announcing synchronously would have forced React to re-render the whole

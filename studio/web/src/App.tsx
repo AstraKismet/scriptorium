@@ -135,11 +135,12 @@ function Main() {
 
   // **There is no effect here for the segment, and one must not be added.** The
   // paragraph a reviewer is on is the address's `?seg=` and nothing else: a row
-  // writes it with `routes.focus`, and every reader takes it from
-  // `routes.useFocused`. Two effects used to keep a copy in the store in step
-  // with it, one in each direction, and the first time both named a segment and
-  // the two differed they overwrote each other until React unmounted the page —
-  // on the second click of every session (HANDOFF-084).
+  // or a paragraph writes it with `routes.focus`, and every reader takes it from
+  // the address, through `routes.useFocused` or `routes.useIsFocused`. Two
+  // effects used to keep a copy in the store in step with it, one in each
+  // direction, and the first time both named a segment and the two differed
+  // they overwrote each other until React unmounted the page — on the first
+  // click that moved to a different segment (HANDOFF-084).
 
   if (route.name === 'backends') return <main><Backends /></main>
   if (route.name === 'routing') return <main><RoutingScreen /></main>
@@ -183,7 +184,7 @@ function Main() {
   if (route.name === 'read') {
     return (
       <main>
-        <Reading seg={route.seg} />
+        <Reading />
         <LogDrawer />
       </main>
     )

@@ -56,15 +56,22 @@ export function Ledger() {
    * the top has lost the reviewer's place. It fires once per document rather
    * than whenever the focus moves, because scrolling the list under the click
    * that moved the focus is how a page fights the person using it.
+   *
+   * **The document counts as landed on its first run whether or not the address
+   * named a segment.** Marked only once a focused row was found, a document
+   * opened with no segment in its address stayed unlanded until the first click
+   * gave it one — and then scrolled the list under that click, which is the
+   * exact case the sentence above rules out. Measured on HANDOFF-084: a row near
+   * the bottom of the window, clicked, moved 624 px to the centre. A segment the
+   * filter hides on arrival is therefore not scrolled to later either.
    */
   useEffect(() => {
-    if (!doc || !focused) return
+    if (!doc) return
     const key = `${doc.source} ${doc.lang}`
     if (landed.current === key) return
-    const i = rows.findIndex(s => s.id === focused)
-    if (i < 0) return
     landed.current = key
-    list.current?.scrollToIndex(i, { align: 'center' })
+    const i = focused ? rows.findIndex(s => s.id === focused) : -1
+    if (i >= 0) list.current?.scrollToIndex(i, { align: 'center' })
   }, [doc, rows, focused])
 
   if (!doc) return null
