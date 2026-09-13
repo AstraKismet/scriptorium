@@ -33,6 +33,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+import jobwait  # noqa: E402
 import scriptorium  # noqa: E402
 import scriptorium.cli as cli  # noqa: E402
 from scriptorium.web.server import CONTRACT_VERSION, _Handler  # noqa: E402
@@ -463,6 +464,10 @@ def test_every_endpoint_returns_exactly_the_keys_the_contract_documents(base, pr
     record("POST", "/api/commit")
     job = record("POST", "/api/translate", {"ids": ["no-such-segment"]})
     assert job["total"] == 0, "the run must select nothing, or this test needs a network"
+    # Waited for before its key set is recorded. One poll saw `done` only
+    # because a job that selects nothing is usually over by then, and
+    # `tests/conftest.py` fails a test that starts a job it never sees finish.
+    jobwait.finish(base, job["id"])
     record("POST", "/api/job", {"id": job["id"]})
     # `batch.size` because it is the shortest admitted key that needs no provider
     # to exist first, and because the payload `record` builds carries `src` and

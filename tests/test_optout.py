@@ -28,6 +28,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+import jobwait  # noqa: E402
 from scriptorium import cli  # noqa: E402
 from scriptorium import translate as translate_mod  # noqa: E402
 from scriptorium.cli import do_apply, do_extract, do_select, do_translate  # noqa: E402
@@ -211,14 +212,26 @@ def test_the_wire_flag_is_validated_rather_than_coerced(base, reviewed):
     code, body = _post(base, "/api/translate", {
         "src": "d.md", "lang": "zh-TW", "ids": ["nope"], "overwrite_human": True})
     assert code == 200 and body["total"] == 0
+    jobwait.finish(base, body["id"])
 
 
-def test_the_wire_flag_reaches_selection(base, reviewed):
+def test_the_wire_flag_reaches_selection(base, reviewed, monkeypatch):
     """`total` is fixed at creation and is the endpoint's own answer to "which
-    segments", so it shows the flag reaching selection without a model."""
+    segments", so it shows the flag reaching selection without asking about the
+    run.
+
+    The run still happens, so the provider is stubbed and both jobs are waited
+    for: `total` is answered before the job thread builds a provider, and this
+    test used to leave a two-segment run dialling `localhost:11434` from inside
+    later test files. `tests/conftest.py` fails a test that does either.
+    """
+    _stub(monkeypatch)
     _c, without = _post(base, "/api/translate",
                         {"src": "d.md", "lang": "zh-TW", "mode": "polish"})
     assert without["total"] == 0
+    jobwait.finish(base, without["id"])
     _c, with_flag = _post(base, "/api/translate", {
         "src": "d.md", "lang": "zh-TW", "mode": "polish", "overwrite_human": True})
     assert with_flag["total"] == 2
+    assert jobwait.finish(base, with_flag["id"])["applied"] == 2, (
+        "the wire flag reached selection and not the write")

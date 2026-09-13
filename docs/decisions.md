@@ -3,6 +3,213 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-09-13 · A test waits for the job it starts, and the test process connects to nothing it did not bind
+
+Closing HANDOFF-079. `AGENTS.md` said tests use no network, and two helper
+docstrings in `tests/test_web.py` said every test that starts a job stubs the
+provider and waits for it. Nothing checked either, and three tests did neither.
+Measured at `91b5c04` — Windows, Anaconda 3.12, pytest 7.4.4, the full suite —
+with a plugin wrapping `socket.socket.connect`, `socket.getaddrinfo`,
+`subprocess.Popen`, `threading.Thread.start` (each thread tagged with the test
+that started it, a job's executor workers inheriting the job's tag) and the job
+functions in `web/server.py`:
+
+- **112 connections to `localhost:11434`** — `DEFAULT_CONFIG`'s route, and
+  Ollama's default port — 56 to `::1` and 56 to `127.0.0.1`, every one from a
+  job thread or its executor workers, started by
+  `test_web.py::test_the_endpoint_selects_what_the_cli_selects` (draft, repair
+  and audit; polish selects nothing), `test_ids_outrank_the_mode_on_the_wire_too`
+  or `test_optout.py::test_the_wire_flag_reaches_selection`. The first of those
+  carried a docstring saying the run never reached a network.
+- **Only 2 of them were made inside the test that started the job.** 38 were
+  made while a different test was running, in seven files, and **72 after
+  `pytest_sessionfinish`**: `ThreadPoolExecutor` workers are joined at
+  interpreter exit, so the process waited on the strays' retries after pytest
+  had printed its summary. On a machine running a model server on that port,
+  that is where the fixtures' text went.
+- **15 node ids started a job through `POST /api/translate` and never saw it
+  finish** — the three tests' six, and nine more whose jobs selected nothing.
+  `test_contract.py` polled once and saw `done` because a job that selects
+  nothing is usually over by then.
+- **Stubbing without waiting protects nothing.** With `_no_network(monkeypatch)`
+  added to the parametrized test and no wait, each parameter that selects
+  something still made 24 connections to 11434, 4 during later tests and 20
+  after the session: `monkeypatch` undoes the stub when the test returns, before
+  the job thread reads `translate.build_provider`. The package's criterion — the
+  guard fails when a test loses its stub *or* its wait — treated them as two
+  independent halves; one is useless without the other.
+
+### The rule
+
+Two rules in `tests/conftest.py`, each decided by something no scheduler can
+change.
+
+**A test sees every job it starts finish.** Wrappers around `_translate_job`,
+`_job_status` and `_finish_job` — the names the request handler and the job
+thread look up at call time — record a job as started, and as seen when the
+test's own poll answers `done: true`. An autouse fixture fails the test at
+teardown for every started job it never saw done. `_translate_job` and not
+`_mint_job`, because the job table's own tests mint states with no thread. The
+ledger is replaced when a test *starts*, in `pytest_runtest_logstart`, so a job a
+module-scoped fixture starts is counted; a reset in the fixture forgot it. The
+fixture requests `monkeypatch`, so its teardown runs before the test's patches
+are undone, and a job the test forgot is waited for there — cleanup after the
+verdict, bounded at 120 s — under the stub and in the directory it was started
+with, rather than dialling from inside the next test.
+
+**The test process connects to nothing it did not bind.** One
+`sys.addaudithook` keeps a weak reference to every socket `socket.bind` sees
+and, on `socket.connect` over IPv4 or IPv6, allows a destination only when the
+host is loopback and the port is held by a still-open socket this process bound,
+or is one of the suite's two dead ends, 1 and 9, which tests dial in order to be
+refused. Anything else is recorded against the running test and refused before
+the operating system sees it, with `NetworkRefused`, a plain `Exception` — not an
+`OSError`, which the provider retries with backoff and one request per segment:
+the stub-less parametrized test took **79.63 s** to fail under an `OSError`
+refusal and **2.66 s** under this one, and a job that keeps retrying is a job
+whose refusals land in someone else's test. A refusal no test's teardown
+consumed — one made in a wider-scoped fixture's teardown, which runs after the
+test's own check — fails the session and is listed in the terminal summary; it
+is never charged to the next test.
+
+The three tests stub and wait; the nine other node ids wait for jobs that select
+nothing; `test_contract.py` polls to done. `tests/jobwait.py` is the one wait, with a
+60 s monotonic deadline — the only timeout left in a run that follows the rules,
+and generous because a stubbed job finishes in milliseconds and a refused one at
+once. Two assertions came with the waits, where a finished job made them free:
+`test_ids_outrank_the_mode_on_the_wire_too` asserts the write refused the
+heading, and `test_the_wire_flag_reaches_selection` asserts the flag reached the
+write as well as the selection.
+
+`tests/test_conftest_guard.py` pins the guard. It runs a child pytest over a copy
+of `conftest.py` with test files that break each rule on purpose — forget the
+wait, forget the stub, forget both, poll once while the job runs, leave a slow
+job, start a job in a module-scoped fixture, swallow a refusal at a closed
+loopback port and at `0.0.0.0` on a held one, refuse in a fixture's teardown
+before an innocent test in another module — and asserts, for each child test,
+the body's outcome and the teardown's separately, and what each message names.
+No planted defect can leave the machine against a broken guard: the child's
+backend is a loopback port it bound and closed.
+
+What it costs, measured back to back on 3.12, full suite, the parent and this
+branch alternating twice: pytest reported 215.43 s and 187.70 s for the parent,
+212.95 s and 202.45 s for the branch, which includes the guard's own child runs —
+inside the machine's noise. The wall clock is the other way round: 283 s and
+258 s for the parent against 214 s and 203 s, because the parent's process
+outlived its own summary by more than a minute, waiting on the strays.
+
+### What lost
+
+- **A thread-liveness check at teardown**, the package's own first example. A
+  job that selects nothing is over before its request answers, and a stubbed one
+  within milliseconds, so the check passes a deleted wait on almost every run and
+  could fail a correct test on a loaded machine. Reading `state["done"]` at
+  teardown is the same check.
+- **Joining every job at teardown as the rule.** It does the test's waiting for
+  it, so a deleted wait passes. It is kept as cleanup, after the verdict.
+- **A connection guard alone.** Blind to a missing wait whenever the stub is
+  present, and the job it lets outlive the test is the harm.
+- **Charging a refusal to whichever test is running, with an `OSError`
+  refusal.** The red-team lane measured a planted twenty-segment stub-less job
+  outliving a 30 s join while ten unrelated tests errored, a different set on
+  each interpreter. The fast refusal and the containment wait together keep a
+  job's refusals inside the test that started it.
+- **Monkeypatching `socket.socket.connect`.** A test's own `monkeypatch` of the
+  attribute undoes it, and a caller of `_socket` goes around it; the audit event
+  is raised by the C method both reach.
+- **A port a mock in *this test* opened.** Module-scoped servers bind during an
+  earlier test's setup; ownership is decidable per process and not per test.
+- **Refusing ports 1 and 9 in the hook.** The tests dialling them assert on what
+  the provider makes of a real refusal — on Windows port 1 times out — and a
+  synthetic one reaches a different branch.
+- **Exempting jobs that select nothing.** Five fewer test functions to edit, and
+  a predicate that encodes what `web/server.py`'s zero-segment branch happens to
+  do today.
+- **An `ast` lint** for "posts `/api/translate`, calls a wait". Blind through
+  helpers such as `test_contract.py`'s `record`.
+- **`pytest-socket`.** A dependency that blocks loopback mocks and has no notion
+  of a thread outliving its test.
+- **Hookwrappers.** pluggy is 1.0.0 locally, and CI resolves pytest 8.4.2 on 3.9
+  and 9.1.1 on 3.12. Plain hooks and one fixture work on all three.
+- **Pointing `DEFAULT_CONFIG` at a dead end under test.** Out of scope, and it
+  hides the rule instead of checking it.
+
+### What review found
+
+Design, before a line was written: three independent design-tier lanes —
+smallest mechanism, attribution under failure, portability and cost — converged
+on the two rules and the audit hook. A lane attacking the package's premises
+found that stubbing alone protects nothing, that `test_contract.py`'s single
+poll was a race, and that a child process dials. A red team on the coordinator's
+draft found the misattribution above, a `WeakSet` iterated while another thread
+bound, the missing-wait message named ahead of the refusal that caused it, and
+refusals after a test's check dropped with exit 0.
+
+Verification at `71d771d`, three lanes. A mutation lane took the stub and the
+wait out of every node id that selects something, on 3.9 and 3.12, and each was
+caught by the guard's teardown. A version lane ran the guard, its tests and
+`test_web`, `test_optout`, `test_contract` and `test_provider` green under pytest
+8.4.2 on 3.9 and 9.1.1 and 8.4.2 on 3.12, with no warning. An adversarial lane
+found no false positive reordered, isolated or under CPU load. What they found,
+all acted on:
+
+- A job started by a module-scoped fixture escaped the ledger, which was reset in
+  the fixture; a stub-less one had its refusal charged to the next test.
+- `FORCE_COLOR` or `PY_COLORS` broke the self-test's parser with the guard
+  correct; the child now runs `--color=no`.
+- Against a broken guard, the self-test's own child dialled `localhost:11434` —
+  the harm this package exists to remove. It now routes to a closed port.
+- The `WeakSet`'s removal callback ran outside the lock, and a snapshot raised
+  `RuntimeError` out of `socket.connect` on 3.9 under a stress probe; a
+  `bytearray` host raised `TypeError` with no refusal recorded.
+- Guard mutants survived the first self-test: any poll counting as seen, no
+  cleanup wait, an `OSError` refusal, instrumenting only an already-imported
+  server, a refusal left unconsumed, every refusal consumed instead of this
+  test's, the missing wait named first, and `localhost` not read as loopback.
+  Each now has a child case. Two lines were dead and are gone.
+
+After those changes the coordinating session planted twenty guard mutants of its
+own in an archived copy, checked each landed by hash, and ran
+`tests/test_conftest_guard.py` on 3.12: **all twenty caught**, the file restored
+byte for byte. Two need saying. Removing the `_finish_job` wrapper leaves the
+cleanup waiting for an event nothing sets, and is caught only by the child's
+100 s bound, which sits below `CLEANUP_SECONDS` for that reason. And the cleanup
+wait's own child case caught nothing at first: a stubbed slow job whose test
+returned had its stub undone before the job read it, so it ended in a quick
+refusal instead of running on. The case now returns only once the job holds
+the stub, and caught the mutant three runs of three. Not pinned, on purpose: the
+session status is left alone over a run that already failed or was interrupted.
+- The remedy text named `tests/test_web.py`'s helpers when the failing test was
+  in `tests/test_optout.py`, and `test_a_job_reports_the_segments_it_left_alone`
+  still had a poll loop of its own beside the claim that there was one.
+
+### What it cannot see
+
+- **A subprocess.** Measured at `91b5c04` with a recorder inside
+  `scriptorium/__init__.py` of an archived copy, so that it reached children
+  built with a minimal environment or `-S`: of 877 spawns, one connected —
+  `lx models --provider a.b` in
+  `test_config.py::test_the_note_addresses_a_provider_whose_name_contains_a_dot`,
+  twice to `127.0.0.1:80`. HANDOFF-082.
+- **A name lookup.** `getaddrinfo` runs before any connect and is not refused.
+  Two credential-masking tests in `test_provider.py` resolve a hostname that
+  carries their fixture's password, three lookups in all. Refusing lookups would
+  change those tests' path without the review they need. HANDOFF-083.
+- **A datagram sent without a connect.** Nothing in the project uses UDP.
+- **A thread a test starts itself and leaves running.** Its refusals are charged
+  to whichever test is running when it dials.
+- **A test that polls once** is judged by what that one poll saw.
+
+### Corrections to the record
+
+- The package counted 9 connections at `736b58f`. Counting each address
+  `create_connection` tries, and following the process past
+  `pytest_sessionfinish`, the same three tests made 112 at `91b5c04`.
+- `_no_network` and `_finish` said a stray job holds the SQLite file open while
+  pytest removes `tmp_path`. What was measured is connections from inside later
+  tests and after the session; both docstrings now say that and point at the
+  guard.
+
 ## 2026-09-13 · A redirect is refused at the transport, which has nothing to follow one with
 
 Closing HANDOFF-078 and `docs/contracts/workbench-http.md` divergence (33).
