@@ -170,15 +170,26 @@ def test_polls_once_while_the_job_runs(base, started, monkeypatch):
     release.set()
 
 
+SLOW_JOB_ENTERED = threading.Event()
+SLOW_JOB_OVER = threading.Event()
+
+
+def _slow():
+    SLOW_JOB_ENTERED.set()
+    time.sleep(3)
+    SLOW_JOB_OVER.set()
+
+
 def test_leaves_a_slow_job_running(base, started, monkeypatch):
-    _stub(monkeypatch, before=lambda: time.sleep(1))
+    _stub(monkeypatch, before=_slow)
     started()
+    # Returned only once the job holds the stub, so undoing `monkeypatch` cannot
+    # take it away and turn the slow job into a quick refusal.
+    assert SLOW_JOB_ENTERED.wait(30)
 
 
-def test_finds_nothing_left_running_by_the_test_before():
-    from scriptorium.web import server
-    running = [job_id for job_id, state in server._JOBS.items() if not state["done"]]
-    assert running == []
+def test_finds_the_slow_job_over_before_it_starts():
+    assert SLOW_JOB_OVER.is_set(), "a job the test before forgot ran on into this test"
 
 
 def test_swallows_a_refusal_on_a_loopback_port_nobody_holds():
@@ -349,7 +360,7 @@ def test_the_guard_fails_exactly_the_tests_that_break_a_rule(tmp_path):
         "test_forgets_the_wait_on_a_job_that_selects_nothing": "PASSED+ERROR",
         "test_polls_once_while_the_job_runs": "PASSED+ERROR",
         "test_leaves_a_slow_job_running": "PASSED+ERROR",
-        "test_finds_nothing_left_running_by_the_test_before": "PASSED",
+        "test_finds_the_slow_job_over_before_it_starts": "PASSED",
         "test_swallows_a_refusal_on_a_loopback_port_nobody_holds": "PASSED+ERROR",
         "test_swallows_a_refusal_on_a_port_this_process_holds_at_another_host": "PASSED+ERROR",
         "test_dials_a_dead_end": "PASSED",
