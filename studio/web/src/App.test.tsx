@@ -356,6 +356,10 @@ describe('moving between segments', () => {
 
     // A click in the reading view moves the address, and the page stays where
     // the pointer left it: the view scrolls on arrival and never under a click.
+    // It replaces the address like a row does — a paragraph per history entry
+    // is the back button walking a chapter one paragraph at a time.
+    const entries = window.history.length
+    const before = writes
     await user.click(document.getElementById('b-s0001')!)
     await waitFor(() => {
       expect(window.location.hash).toBe(reading(doc.source, 's0001'))
@@ -363,6 +367,8 @@ describe('moving between segments', () => {
     })
     await settle()
     expect(landed).toHaveBeenCalledTimes(1)
+    expect(writes - before).toBe(1)
+    expect(window.history.length).toBe(entries)
 
     await user.click(screen.getByRole('button', { name: /Back to the ledger/ }))
     await waitFor(() => {

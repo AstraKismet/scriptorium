@@ -612,9 +612,11 @@ text drops it.
 
 **Reading is a page, not a dialog.** *Read* shows the chapter as it renders —
 continuous prose, in a reading measure, with untranslated paragraphs marked and
-failing ones ruled in red down the margin. Clicking a paragraph takes you to it
-in the ledger, and coming back lands on the same paragraph; the address carries
-it, so a reload does too. Sentence boundaries come from Python, so what you see
+failing ones ruled in red down the margin. It opens at the paragraph you were on
+in the ledger; clicking a paragraph there moves to it, double-clicking it or
+pressing Enter takes you to it in the ledger, and *Back to the ledger* lands on
+whichever paragraph you were reading. The address carries it, so a reload does
+too. Sentence boundaries come from Python, so what you see
 here is the same rule `lx sentences` and CI see.
 
 **One paragraph at a time, and a source that changed under you.** Each row
