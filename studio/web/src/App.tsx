@@ -121,8 +121,6 @@ function Main() {
   const docLoading = useStore(s => s.docLoading)
   const docError = useStore(s => s.docError)
   const open = useStore(s => s.open)
-  const focused = useStore(s => s.focused)
-  const setFocused = useStore(s => s.setFocused)
 
   const addressed = route.name === 'doc' || route.name === 'read' ? route : null
 
@@ -135,20 +133,14 @@ function Main() {
     void open(addressed.src, addressed.lang)
   }, [addressed?.src, addressed?.lang, at, open, addressed])
 
-  // The paragraph rides in the address so a reload lands where the reviewer was
-  // and the ledger↔reading round trip comes back to the same place. Written with
-  // `replace`, because a history entry per row would make the back button walk a
-  // chapter one paragraph at a time.
-  useEffect(() => {
-    if (!addressed) return
-    if (addressed.seg && addressed.seg !== focused) setFocused(addressed.seg)
-  }, [addressed?.seg, addressed, focused, setFocused])
-
-  useEffect(() => {
-    if (route.name !== 'doc') return
-    if (focused === route.seg) return
-    routes.replace(routes.doc(route.src, route.lang, focused))
-  }, [route, focused])
+  // **There is no effect here for the segment, and one must not be added.** The
+  // paragraph a reviewer is on is the address's `?seg=` and nothing else: a row
+  // or a paragraph writes it with `routes.focus`, and every reader takes it from
+  // the address, through `routes.useFocused` or `routes.useIsFocused`. Two
+  // effects used to keep a copy in the store in step with it, one in each
+  // direction, and the first time both named a segment and the two differed
+  // they overwrote each other until React unmounted the page — on the first
+  // click that moved to a different segment (HANDOFF-084).
 
   if (route.name === 'backends') return <main><Backends /></main>
   if (route.name === 'routing') return <main><RoutingScreen /></main>
@@ -192,7 +184,7 @@ function Main() {
   if (route.name === 'read') {
     return (
       <main>
-        <Reading seg={route.seg} />
+        <Reading />
         <LogDrawer />
       </main>
     )

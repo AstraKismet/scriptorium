@@ -3,6 +3,160 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-09-14 · The paragraph a reviewer is on lives in the address, and a second copy of it blanked the page
+
+Closing HANDOFF-084. The workbench worked for one click of a session. The
+second click on a different segment left the page blank — background painted,
+nothing drawn — with the address still on the first segment, the back button
+dead, and a reload recovering at that stale address.
+
+### What was measured
+
+In Chrome 153, against the committed build, on a 5000-segment document:
+
+- **First click:** one `history.replaceState`, the address becomes `?seg=s0001`,
+  the margin says `s0001`. Correct.
+- **Second click, on another segment:** **27** `replaceState` calls alternating
+  `?seg=s0003` and `?seg=s0001`, ending on the first segment's, then
+  `Minified React error #185` — *Maximum update depth exceeded* — and `#root`
+  emptied. Every symptom the maintainer reported, including the blank page,
+  follows from React unmounting the root over an uncaught error.
+- **An address naming another segment while one is focused** — the back button,
+  a hand-typed link, the reading view's Enter — is the same loop through a
+  different door: 26 alternating writes, #185, `#root` emptied.
+- **Switching documents from the rail did not crash, and carried the segment:**
+  `five-thousand.txt?seg=s0003` → the rail's `second.txt` gave
+  `second.txt?seg=s0003`, and the margin showed `s0003` — a paragraph of the new
+  chapter nobody had chosen. Ids restart at `s0001` in every document, so a
+  carried id almost always resolves to something.
+
+### The mechanism
+
+The store held `focused` beside the address's `?seg=`, and `App.tsx` kept each
+in step with the other with one effect per direction: address → focus, and
+focus → address. Both ran on every render. While one side was null the pair was
+stable, because the address → focus effect skips a null segment — which is why
+the first click of a session worked and only the first click of a session.
+
+Once both named a segment and the two differed, the two effects wrote in
+opposite directions **in the same commit**: focus was set back to the address's
+segment while the address was replaced with the focus's. The next commit found
+them swapped and swapped them again. Zustand notifies through
+`useSyncExternalStore`, so each write is a sync-lane update, and the router's
+`announce` is a microtask — the loop never yields to a task, so nothing else in
+the page could run. React's nested-update limit ended it.
+
+The carried segment was the same seam read at the wrong moment: `open()` clears
+the focus synchronously, but the focus → address effect still held the render's
+own value of it, and wrote a document's segment into another document's address.
+
+### The repair, and what it cost
+
+**The address is the only place the segment is kept.** `focused` and
+`setFocused` are gone from the store, both effects are gone from `App.tsx`, and
+the router answers the question instead: `useFocused`, `useIsFocused(id)` and
+`focus(src, lang, id)`. A row moves the address; every reader reads the address.
+A state that disagrees with itself cannot be expressed, so the loop is
+unreachable by construction rather than guarded against — and the carried
+segment needs no rule at all, because nothing writes a focus into an address a
+document did not come from. `focus` is given the document it belongs to and
+refuses to write into any other, which closes the same defect through the one
+window that remains: `go` moves `location.hash` at once and `hashchange` arrives
+a task later, so a row of the document being left can still take focus in
+between.
+
+*Lost:* keeping the store's copy and reconciling more carefully. Three shapes
+were designed and rejected. **Edge-triggering** — each effect acting only when
+its own side changed, with refs remembering the last value — needs a tie-break
+when both change in one commit, and leaves two authorities, so every later
+writer has to prove itself against it again. **A navigation counter** — adopt
+the address only when a navigation has happened since the last adoption — is the
+same, with a counter as the thing that must not drift. **Two module-level
+listeners** — a `hashchange` handler writing the store and a store subscription
+writing the address — moves the loop out of React but keeps both copies, makes
+the store import `history`, and leaks between tests. All three answer the loop
+with a check; this one removes the second copy.
+
+*Also lost:* nothing about the two-tier state rule. The text being typed still
+lives outside React in `drafts`, the field is still uncontrolled, and a focus
+change now re-renders the row that lost it and the row that gained it rather
+than every mounted row, because `useIsFocused` hands each row a boolean.
+
+### What the removed effect had also been doing
+
+It put a paragraph back into an address that had lost one, and three ordinary
+trips relied on that. Each carries the paragraph itself now:
+
+- the toolbar's **Read** opens the reading view at the paragraph the ledger was
+  on, which it never did before — the effect had only repaired the way back;
+- the **rail** carries the paragraph the address last named *in that document*,
+  from `routes.placeIn`. That is a record of where the address has been, written
+  only from the address and read only when a person follows a link, so it is not
+  a second answer to where the address is now; and a paragraph remembered under
+  one document can only ever be offered for that document;
+- the **reading view** reads the address like everything else. It had kept its
+  own copy, seeded on mount, which its Back button and its highlight both read —
+  so a `?seg=` edited by hand in the reading view moved nothing. The first
+  version of this change left that copy in place and claimed in `router.ts` that
+  no copy remained; the claim was false when it was written, and an independent
+  review pass is what caught it.
+
+### Two landing scrolls that fired under the click that caused them
+
+Both were found while reading this seam, both contradicted their own comments,
+and both are measured rather than argued:
+
+- the **ledger** marked a document as landed only once a focused row was found,
+  so a document opened with no segment in its address stayed unlanded until the
+  first click gave it one — and then scrolled that row to the centre under the
+  pointer. Measured: 624 px. It now counts as landed on its first run for the
+  document, whether or not the address named a paragraph;
+- the **reading view** scrolled on every dependency change, and a click changes
+  the address it depends on: every paragraph clicked re-centred the page.
+  Measured: 517 px. It now lands once per document, in a ref, like the ledger.
+
+### How it is tested, and what the tests cannot reach
+
+`studio/web/src/App.test.tsx` grew a block that moves between segments seven
+times through the real handlers — a row's text, its field, and a keyboard focus
+with no click — and asserts after each move that the margin names the segment,
+that the address does, that the row is marked, that the address was written
+**exactly once**, and that `history.length` did not move. The rows are rendered
+beside the application rather than inside the ledger, because the virtualized
+ledger mounts none for its range in jsdom; measurement is not mocked to get them
+into the list, which would leave a test passing over a list that shows nothing.
+
+Five of the six new tests fail against `dd2e3dd`; the sixth — the rail opening
+the document already open — passes there, and is in the suite for the repair
+rather than for the defect. **A cap on `replaceState` is what makes them fail
+rather than hang**, and that is measured too: React's nested-update limit ended
+the loop when the address moved, but not when a click driven by `user-event`
+did, and that run spun for five minutes with no test timeout able to fire.
+
+Twelve mutants were planted against the finished tests in a copy of the tree,
+each proved to have landed and restored by hash afterwards; eleven died. The
+survivor — the reading view writing the address with `go` rather than through
+`focus` — reached the right address while adding a history entry per paragraph
+clicked, which is the back button walking a chapter one paragraph at a time. It
+dies against the assertion added for it.
+
+What jsdom cannot answer is left in the open: the browser's rate limit on
+`replaceState` (about 200 in 10 s; Chrome ignores the rest, Firefox and Safari
+throw), which held Ctrl+Enter could reach, and what a page does when the window
+gives focus back to a field whose row is no longer the addressed one. Both are
+new *shapes* rather than regressions — the build they replace crashed in the
+same situations — and both are recorded in `handoff/00-inbox/HANDOFF-089`.
+
+### Neighbouring defects this found and did not fix
+
+Measured in the same session, each now its own package, because none of them is
+this seam: an unsaved edit is discarded without a save when the address moves to
+another document (`HANDOFF-087`, and it loses a reviewer's words); the rail's
+*Not yet extracted* entry re-extracts **the document that is open** instead, with
+the toolbar's confirmation bypassed and the log naming the file that was clicked
+(`HANDOFF-088`); and `App.tsx`'s claim that nothing else calls `open` is false,
+which is what hides it.
+
 ## 2026-09-14 · A process a test starts is measured, not guarded, and the one that dialled out dials a dead end
 
 Closing HANDOFF-082. `tests/conftest.py` refuses a connection in the test

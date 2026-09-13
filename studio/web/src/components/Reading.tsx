@@ -24,20 +24,24 @@
  * working as specified: Chinese dialogue attribution over-splits, so
  * `「站住！」他喊。沒有人停下。` shows `他喊。` as a piece of its own.
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 import * as api from '../api'
 import * as routes from '../router'
 import { isError, type Block, type PreviewResponse } from '../contract'
 import { useStore } from '../store'
 
-export function Reading({ seg }: { seg: string | null }) {
+export function Reading() {
   const doc = useStore(s => s.doc)
   const say = useStore(s => s.say)
   const [preview, setPreview] = useState<PreviewResponse | null>(null)
   const [error, setError] = useState('')
-  const [current, setCurrent] = useState<string | null>(seg)
   const [pieces, setPieces] = useState<string[] | null>(null)
+  // The paragraph the reviewer is on is the address's, here as in the ledger —
+  // never a copy seeded from it on mount. A copy is what let this view keep
+  // highlighting, and send Back to, a paragraph the address no longer named.
+  const current = routes.useFocused()
+  const landed = useRef('')
 
   const src = doc?.source ?? ''
   const lang = doc?.lang ?? ''
@@ -74,11 +78,18 @@ export function Reading({ seg }: { seg: string | null }) {
 
   // A deep link lands on a paragraph. Scrolled once, on arrival, rather than
   // whenever `current` moves — a click should not yank the page under the
-  // pointer that made it.
+  // pointer that made it. **Once per document, remembered in a ref**, because a
+  // click moves the address and the address is a dependency here: keyed on it
+  // alone, every click re-centred the page, which is what this view did until
+  // HANDOFF-084 measured it (a paragraph near the bottom of the window, clicked,
+  // moved 517 px).
   useEffect(() => {
-    if (!seg || !preview) return
-    document.getElementById(`b-${seg}`)?.scrollIntoView({ block: 'center' })
-  }, [seg, preview])
+    if (!preview) return
+    const key = `${src} ${lang}`
+    if (landed.current === key) return
+    landed.current = key
+    if (current) document.getElementById(`b-${current}`)?.scrollIntoView({ block: 'center' })
+  }, [preview, current, src, lang])
 
   if (!doc) return null
 
@@ -120,8 +131,7 @@ export function Reading({ seg }: { seg: string | null }) {
                 pieces={block.id != null && block.id === current ? pieces : null}
                 onPick={() => {
                   if (block.id == null) return
-                  setCurrent(block.id)
-                  routes.replace(routes.read(src, lang, block.id))
+                  routes.focus(src, lang, block.id)
                 }}
                 onOpen={() => {
                   if (block.id == null) return
