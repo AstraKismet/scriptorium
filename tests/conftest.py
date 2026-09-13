@@ -46,8 +46,9 @@ import pytest
 
 #: Loopback ports a test may dial because nothing listens there. The refusal is
 #: the operating system's, untouched, since the tests that use them assert on
-#: what the provider makes of a real one — on Windows port 1 times out rather
-#: than refusing, and a synthetic refusal would reach a different branch.
+#: what the provider makes of a real one — on Windows a refused loopback connect
+#: takes about two seconds, ports 1 and 9 alike, so a test with a shorter timeout
+#: sees a timeout — and a synthetic refusal would reach a different branch.
 DEAD_PORTS = frozenset({1, 9})
 
 #: How long teardown waits for a job the test did not wait for. Never a

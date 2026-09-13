@@ -606,7 +606,7 @@ Node — see the invariant below.
 ## Commands
 
 ```bash
-python -m pytest -q                 # 2938 collected, no network. Four are
+python -m pytest -q                 # 2950 collected, no network. Four are
                                     #   conditional on three different things, so
                                     #   which two skip is a property of the machine
                                     #   AND the account: one is POSIX-only, one
@@ -1643,21 +1643,24 @@ own.
   because `monkeypatch` undoes the stub before the job thread reads it. The wait
   is `tests/jobwait.py`, and the guard's own behaviour is pinned by
   `tests/test_conftest_guard.py`, which plants each defect in a child pytest.
-  It does not see a name lookup or a datagram. Three tests had
+  It does not see a subprocess, a name lookup, or a datagram. Three tests had
   been leaving jobs that dialled `localhost:11434` from inside later tests and
   after the session ended; `docs/decisions.md`, 2026-09-13.
 
-  **A process a test starts is measured, not guarded.** The hook lives in the
-  test process only, and two guards for children were built and red-teamed on
-  2026-09-14: each let through a connection the other caught, and each broke
-  something that works today. `python tests/record_child_network.py` archives a
-  commit, runs the suite with a recorder in every process that imports
-  `scriptorium`, and exits 0, 1 or 2 by the same rule `tests/conftest.py`
-  applies — with a planted child of its own, so a broken recorder answers 2
-  rather than 0. A test whose child runs a command that can send a request
-  points it at 127.0.0.1:1 or :9, asks once, and asserts on the sentence the
-  child printed about that address: the absence of some other refusal passes for
-  a refusal made anywhere. `docs/decisions.md`, 2026-09-14.
+  **A process a test starts is measured, not guarded.** Two guards for children
+  were built and red-teamed on 2026-09-14: each let through a connection the
+  other caught, and each broke something that works today.
+  `python tests/record_child_network.py` archives a commit, runs the suite with a
+  recorder in every process that imports `scriptorium`, and exits 1 when a
+  process the suite started connected past a dead end or a port it bound itself
+  — `tests/conftest.py`'s connection rule — or looked up a name that can leave
+  the machine, which `conftest.py` does not refuse; 0 when none did; and 2 when
+  it could not answer, including when it did not see the connection and lookup
+  of a child it plants itself, so a broken recorder cannot read as a clean suite.
+  A test whose child runs a command that can send a request points it at
+  127.0.0.1:1 or :9, asks once, and asserts on the sentence the child printed
+  about that address: the absence of some other refusal passes for a refusal made
+  anywhere. `docs/decisions.md`, 2026-09-14.
 - All tracked documentation is in English. `README.zh-TW.md` is the one
   translation, kept in step with `README.md`.
 
