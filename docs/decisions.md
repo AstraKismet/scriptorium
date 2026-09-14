@@ -157,6 +157,20 @@ the toolbar's confirmation bypassed and the log naming the file that was clicked
 (`HANDOFF-088`); and `App.tsx`'s claim that nothing else calls `open` is false,
 which is what hides it.
 
+And one the acceptance run itself found, which is the cost of the trip rather
+than its correctness: on the 5000-segment document, *Read → click a paragraph →
+Back to the ledger* returns to the right paragraph and then locks the **whole
+browser for about ten seconds**, measured by the maintainer in a foregrounded
+tab. In an automated tab that paints nothing the same sequence blocks the main
+thread for 473 ms, 502 ms and not at all, measured with a `Worker` ticking every
+50 ms — so the ten seconds are layout and paint, and the candidate is
+structural: the reading view builds the whole chapter in one pass, 9999 block
+elements and 10046 DOM nodes for that document, where the ledger beside it is
+virtualized. Nothing here changed that rendering; what changed is that the trip
+can now be completed at all, and that *Read* arrives scrolled into the middle of
+it. Attribution against `dd2e3dd`'s own bundle, and the fix, are
+`handoff/00-inbox/HANDOFF-090`.
+
 ## 2026-09-14 · A process a test starts is measured, not guarded, and the one that dialled out dials a dead end
 
 Closing HANDOFF-082. `tests/conftest.py` refuses a connection in the test
