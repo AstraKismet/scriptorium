@@ -231,6 +231,20 @@ maintainer's check in a painted browser — an IME composition, and the row bein
 typed in staying mounted, which in jsdom is not mounted at all once the address
 names another document; the ledger itself is what is asserted.
 
+The history half was pre-checked on 2026-09-21 in Chrome 153, driven by
+automation against `lx web` on this branch, with a screenshot forcing each paint
+(the tab was `hidden`). A history Back with the caret still in a field sent
+`POST /api/save` and then the next document's `GET /api/doc`, and nothing else.
+With `lx web` stopped, the same move drew the refusal — naming the segment and
+the chapter to go back to — with the address where Back had put it and
+`history.length` unchanged at 4; with the server restarted, Back to the chapter
+wrote the words, and `lx segments` read both back as `human`. One cost showed up
+that the suite does not count: that return trip reads the chapter twice, once in
+`save()`'s own re-read — `at` names it again — and once in `open()`'s fetch. It
+is confined to coming back after a refusal. The synthetic Alt+← the automation
+can press does not reach the browser's own shortcut at all, so the keyboard Back
+itself — and an IME — are the maintainer's run to make.
+
 ### Left open, each with a package
 
 - A **lost-update conflict** forgets the reviewer's text and names only the
