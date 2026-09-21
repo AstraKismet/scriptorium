@@ -525,6 +525,37 @@ describe('leaving a document with words that were never written', () => {
     })
     expect(calls.indexOf(saves[0]!)).toBeLessThan(readOf(ninth.source))
     expect(drafts.size()).toBe(0)
+    // And the document being left is not read again: `save()` re-reads only the
+    // document this page is still on, so a flush on the way out costs one round
+    // trip rather than a second `GET /api/doc` of every segment it had.
+    expect(calls.filter(c => c.path.startsWith('/api/doc') && c.path.includes(encodeURIComponent(doc.source))))
+      .toHaveLength(1)
+  }, 15000)
+
+  it('keeps the ledger on screen while it writes the words', async () => {
+    // `docLoading` goes up only once the words are written. Raised together with
+    // `at` it would swap the ledger for the loading page — unmounting the
+    // textarea with it — before the flush had read the field, which takes an IME
+    // composition that has not yet produced an `input` event. jsdom has no IME;
+    // what it can see is the ledger leaving while the words are in flight.
+    //
+    // **It asserts on the ledger and not on the field**, and that is jsdom
+    // rather than a choice: the virtualized list mounts only the row the
+    // address names here, and the address has already moved to another
+    // document, so no row of this one is mounted whatever the code does. In a
+    // browser the row being typed in is in the visible range and stays.
+    let release: () => void = () => undefined
+    serve({ body: wrote, after: new Promise<void>(r => { release = r }) })
+    await typed()
+
+    window.location.hash = address(ninth.source)
+    await waitFor(() => { expect(callsTo('/api/save')).toHaveLength(1) })
+    expect(document.querySelector('.ledger')).not.toBeNull()
+    expect(screen.getByText('/3 translated')).toBeTruthy()
+    expect(screen.queryByText(/reading book\/ch9\.md/)).toBeNull()
+
+    release()
+    await waitFor(() => { expect(screen.getByText('/1 translated')).toBeTruthy() }, { timeout: 4000 })
   }, 15000)
 
   it('does not leave while it holds wording it could not write, and writes no address', async () => {
@@ -562,15 +593,23 @@ describe('leaving a document with words that were never written', () => {
       expect(screen.getByText(/could not be written to book\/ch1\.md/)).toBeTruthy()
     }, { timeout: 4000 })
 
-    // The server comes back, and the reviewer goes back to their chapter.
-    serve()
+    // Back to the chapter **while the server is still refusing**. That is the
+    // case that decides whether this is a trap: nothing is being left, so
+    // nothing is refused, and the words are back in their own field.
     window.location.hash = address(doc.source, 's0003')
     await waitFor(() => { expect(screen.getByText('/3 translated')).toBeTruthy() }, { timeout: 4000 })
     await settle()
+    expect(screen.queryByText(/could not be written/)).toBeNull()
+    expect(drafts.get('s0003')).toBe('燈還亮著。')
+    expect(field().value).toBe('燈還亮著。')
 
-    // Nothing was refused, and the words went where they were typed.
-    expect((callsTo('/api/save').at(-1)!.body as { targets: Record<string, string> }).targets)
-      .toEqual({ s0003: '燈還亮著。' })
+    // The server comes back, and the next move writes them where they were typed.
+    serve()
+    window.location.hash = address(ninth.source)
+    await waitFor(() => { expect(screen.getByText('/1 translated')).toBeTruthy() }, { timeout: 4000 })
+    await settle()
+    expect((callsTo('/api/save').at(-1)!.body as { src: string; targets: Record<string, string> }))
+      .toMatchObject({ src: doc.source, targets: { s0003: '燈還亮著。' } })
     expect(drafts.size()).toBe(0)
   }, 15000)
 

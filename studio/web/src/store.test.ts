@@ -271,6 +271,8 @@ describe('a re-parse voids every unsaved edit, at the moment the server accepts 
     await useStore.getState().startOver('literary')
     expect(callsTo('/api/save')).toHaveLength(0)
     expect(drafts.size()).toBe(0)
+    // Gone, and said to be gone. Before this they vanished without a line.
+    expect(useStore.getState().log.some(l => l.level === 'bad' && l.text.includes('s0001'))).toBe(true)
   })
 
   it('holds across the reload, because the ledger is mounted for two more round trips', async () => {

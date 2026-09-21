@@ -17,6 +17,9 @@ export interface Call {
 export interface Answer {
   status?: number
   body: unknown
+  /** Hold the reply until this settles, so a test can look at the page while
+   *  the request is still in flight. Everything else here answers at once. */
+  after?: Promise<void>
 }
 
 let queued: Answer[] = []
@@ -67,11 +70,12 @@ export function install(): void {
     calls.push(call)
     const answer = byPath?.(call) ?? queued.shift() ?? fallback
     const status = answer.status ?? 200
-    return Promise.resolve({
+    const reply = {
       ok: status >= 200 && status < 300,
       status,
       json: () => Promise.resolve(answer.body),
-    } as Response)
+    } as Response
+    return answer.after ? answer.after.then(() => reply) : Promise.resolve(reply)
   }) as typeof fetch
 }
 
