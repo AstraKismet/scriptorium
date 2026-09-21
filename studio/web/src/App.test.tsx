@@ -419,7 +419,8 @@ describe('moving between segments', () => {
 /**
  * Leaving a document with words that were never written.
  *
- * Measured 2026-09-20 against `e6fc06d`, here and in Chrome before it: open
+ * Measured 2026-09-20 against `e6fc06d` in this runner, and on 2026-09-14 in
+ * Chrome 153 against `lx web` on `f34298b`, whose code path is the same: open
  * `book/ch1.md`, type into a row's field without blurring it, then move the
  * address to another document. The whole request sequence was
  * `GET /api/state`, `GET /api/models`, `GET /api/doc`, `GET /api/doc` — **no
@@ -463,7 +464,17 @@ describe('leaving a document with words that were never written', () => {
       ...state,
       docs: [...state.docs, { source: ninth.source, lang: 'zh-TW', total: 1, done: 0 }],
     }
+    // **A cap, so that a loop fails instead of hanging.** Two measured shapes of
+    // this change re-enter `open()` from `App.tsx`'s effect on every render —
+    // `at` assigned after the flush, and `at` put back on a refusal — and each
+    // one hung this file: every lap is a request answered in the same microtask
+    // chain, so no timer, and with it no test timeout, could ever fire. Past the
+    // cap a request is simply never answered, which ends the chain and lets the
+    // assertions below fail where they stand. No test here comes near it.
+    let requests = 0
     answering(call => {
+      requests += 1
+      if (requests > 150) return { body: {}, after: new Promise<void>(() => undefined) }
       const path = call.path
       if (path.startsWith('/api/state')) return { body: project }
       if (path.startsWith('/api/models')) return { body: { provider: 'local', configured: 'qwen', models: [], error: null } }
@@ -568,6 +579,12 @@ describe('leaving a document with words that were never written', () => {
       expect(screen.getByText(/could not be written to book\/ch1\.md/)).toBeTruthy()
     }, { timeout: 4000 })
     await settle()
+    // The remedy names the document to go back to — not the one that was just
+    // declined, which would send the reviewer round the same loop.
+    expect(screen.getByText(/Open book\/ch1\.md again to get back to it/)).toBeTruthy()
+
+    // One attempt, and then a stop — not a page that keeps trying on every render.
+    expect(callsTo('/api/save')).toHaveLength(1)
 
     // The document the words belong to is still the one this page holds, and
     // the words are still in it.
@@ -628,6 +645,40 @@ describe('leaving a document with words that were never written', () => {
     const closing = new Event('beforeunload', { cancelable: true })
     window.dispatchEvent(closing)
     expect(closing.defaultPrevented).toBe(true)
+  }, 15000)
+
+  it('lets the tab close once the words are written', async () => {
+    // The other side of the same guard. One that asked on every close after the
+    // first keystroke would teach a reviewer to click through the one that
+    // matters.
+    serve()
+    await typed()
+    window.location.hash = address(ninth.source)
+    await waitFor(() => { expect(screen.getByText('/1 translated')).toBeTruthy() }, { timeout: 4000 })
+    await settle()
+
+    const closing = new Event('beforeunload', { cancelable: true })
+    window.dispatchEvent(closing)
+    expect(closing.defaultPrevented).toBe(false)
+  }, 15000)
+
+  it('does not refuse over a field of spaces, which is not wording either', async () => {
+    // `save()` holds whitespace back exactly as it holds an empty field back, so
+    // the question "is there anything left to lose" must be the same predicate —
+    // a second spelling of it that counted spaces as words would decline to
+    // leave over something the server will never store.
+    serve()
+    startAt(address(doc.source, 's0003'))
+    render(<App />)
+    await waitFor(() => { expect(screen.getByText('/3 translated')).toBeTruthy() }, { timeout: 4000 })
+    await userEvent.setup().type(field(), '   ')
+    expect(drafts.get('s0003')).toBe('   ')
+
+    window.location.hash = address(ninth.source)
+    await waitFor(() => { expect(screen.getByText('/1 translated')).toBeTruthy() }, { timeout: 4000 })
+    await settle()
+    expect(screen.queryByText(/could not be written/)).toBeNull()
+    expect(callsTo('/api/save')).toHaveLength(0)
   }, 15000)
 
   it('does not refuse over an emptied field, which is not wording', async () => {

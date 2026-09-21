@@ -123,6 +123,22 @@ describe('saving', () => {
     expect(drafts.has('s0002')).toBe(false)
   })
 
+  it('re-reads the document it stays on, so the next edit carries a fresh token', async () => {
+    // `save()` skips the re-read only when the page is leaving the document. On
+    // the ordinary path — a blur, Ctrl+Enter — it must still happen, or every
+    // token on screen is one generation stale and the reviewer's next edit of
+    // the same row conflicts with their own write.
+    await openWith([segment({ id: 's0001', token: 'tok1' })])
+    drafts.set('s0001', '她一夜沒睡。', '她沒有睡。')
+    replies(
+      { body: { applied: 1, unknown: [], stored: {}, conflicts: {} } },
+      { body: doc([segment({ id: 's0001', target: '她一夜沒睡。', token: 'tok2' })]) },
+    )
+    await useStore.getState().save()
+    expect(callsTo('/api/doc')).toHaveLength(2)
+    expect(useStore.getState().doc?.segments[0]?.token).toBe('tok2')
+  })
+
   it('keeps every edit when the request is refused', async () => {
     await openWith([segment({ id: 's0001' })])
     drafts.set('s0001', '改過的句子。', '她沒有睡。')
@@ -292,6 +308,92 @@ describe('a re-parse voids every unsaved edit, at the moment the server accepts 
     await useStore.getState().extract()
     expect(callsTo('/api/save')).toHaveLength(0)
     expect(drafts.size()).toBe(0)
+  })
+
+  it('refuses a blur that lands in the same window, not only the re-open', async () => {
+    // The field is still mounted and still saves on blur. The mark used to be
+    // read only by `open()`, so a keystroke and a blur during the reload posted
+    // the sentence under the renumbered id — found by an adversarial pass over
+    // this change, and failing on its first commit. `save()` reads it now.
+    await openWith([segment({ id: 's0001' })])
+    answering(call => {
+      if (call.path.startsWith('/api/state')) {
+        drafts.set('s0001', '打在重編號之後。', '她沒有睡。')
+        void useStore.getState().save()
+      }
+      return null
+    })
+    replies({ body: extracted })
+    otherwise({ body: doc([segment({ id: 's0001' })]) })
+
+    await useStore.getState().extract()
+    expect(callsTo('/api/save')).toHaveLength(0)
+  })
+
+  it('leaves later edits writable after a re-extract that had nothing to void', async () => {
+    // The mark is lowered by `clear()`, and it must be lowered even when the map
+    // is already empty — otherwise the next edit after an ordinary re-extract is
+    // never written by anything, and leaving the document names it as a casualty
+    // of a re-parse that happened before it was typed.
+    await openWith([segment({ id: 's0001' })])
+    replies({ body: extracted })
+    otherwise({ body: doc([segment({ id: 's0001' })]) })
+    await useStore.getState().extract()
+
+    drafts.set('s0001', '重新抽取之後才打的。', '她沒有睡。')
+    otherwise({ body: { applied: 1, unknown: [], stored: {}, conflicts: {} } })
+    replies({ body: { applied: 1, unknown: [], stored: {}, conflicts: {} } }, { body: doc([segment()]) })
+    await useStore.getState().open('book/ch2.md', 'zh-TW')
+    expect((lastCall('/api/save')?.body as { targets: unknown }).targets)
+      .toEqual({ s0001: '重新抽取之後才打的。' })
+  })
+
+  it('addresses the re-extract to the document on screen, not the one asked for', async () => {
+    // `at` and `shown()` now differ for a whole round trip while a flush is in
+    // flight, with the ledger still mounted. The re-parse belongs to the
+    // document the reviewer is looking at — which is also the one whose ids the
+    // stranded mark voids.
+    await openWith([segment({ id: 's0001' })])
+    useStore.setState({ at: { src: 'book/ch9.md', lang: 'zh-TW' } })
+    replies({ body: extracted })
+    otherwise({ body: doc([segment()]) })
+    await useStore.getState().extract()
+    expect(callsTo('/api/extract')[0]?.body).toMatchObject({ src: 'book/ch1.md' })
+  })
+
+  it('does not keep a reviewer on a document over words nothing can write', async () => {
+    // Stranded words are unwritable anywhere, so declining to leave over them
+    // would hold the reviewer for nothing. They go, and they are named.
+    await openWith([segment({ id: 's0001' })])
+    drafts.set('s0001', '改過的句子。', '她沒有睡。')
+    drafts.strand()
+    replies({ body: doc([segment()]) })
+    await useStore.getState().open('book/ch2.md', 'zh-TW')
+
+    expect(useStore.getState().docError).toBe('')
+    expect(useStore.getState().doc).not.toBeNull()
+    expect(callsTo('/api/save')).toHaveLength(0)
+    expect(drafts.size()).toBe(0)
+    expect(useStore.getState().log.some(l => l.level === 'bad' && l.text.includes('s0001'))).toBe(true)
+  })
+})
+
+describe('opening a document', () => {
+  it('does not paint a superseded open\'s failure over the document that won', async () => {
+    // Two opens in flight, the first one failing after the second has been
+    // asked for. `App.tsx` draws `docError` before anything else, so a stale
+    // failure would put an error screen over a chapter the reviewer is on.
+    answering(call =>
+      call.path.startsWith('/api/doc') && new URLSearchParams(call.path.split('?')[1]).get('src') === 'book/ch9.md'
+        ? { status: 404, body: { error: 'no such document' } }
+        : null)
+    otherwise({ body: doc([segment()]) })
+    await Promise.all([
+      useStore.getState().open('book/ch9.md', 'zh-TW'),
+      useStore.getState().open('book/ch1.md', 'zh-TW'),
+    ])
+    expect(useStore.getState().doc?.source).toBe('book/ch1.md')
+    expect(useStore.getState().docError).toBe('')
   })
 })
 

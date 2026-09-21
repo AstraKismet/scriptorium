@@ -548,7 +548,8 @@ export const useStore = create<Store>()((set, get) => ({
     // log. Nothing here asks which document is being opened, and it does not
     // need to: the flush is addressed to `shown()`, which is still the document
     // the words were typed in, so it is correctly addressed whoever called.
-    if (drafts.size() && !drafts.stranded()) await get().save()
+    const writable = !drafts.stranded()
+    if (drafts.size() && writable) await get().save()
 
     // **What the save could not write, this will not discard.** The rule the
     // toolbar's Re-extract already follows, applied to a navigation: this page
@@ -565,8 +566,11 @@ export const useStore = create<Store>()((set, get) => ({
     //
     // Opening the document the words belong to is therefore never refused —
     // nothing is being left, so nothing can be lost — which is what keeps this
-    // from being a trap rather than an escape hatch bolted onto one.
-    const held = unwritten()
+    // from being a trap rather than an escape hatch bolted onto one. Nor are
+    // stranded words a reason to stay: a re-parse has made them unwritable
+    // anywhere, so staying would keep the reviewer for nothing. They go, and the
+    // clear below names them.
+    const held = writable ? unwritten() : []
     if (held.length && leaving && !same(leaving, want)) {
       // `docError` is the field `App.tsx` already renders as "here is the
       // document you asked for, and why you do not have it". That is exactly
@@ -630,6 +634,15 @@ export const useStore = create<Store>()((set, get) => ({
    * refused, so a caller about to do something destructive can stop.
    */
   save: async () => {
+    // **Nothing stranded is written, by anyone.** A re-extract this page asked
+    // for has renumbered the ids every entry is keyed on, and until the new
+    // parse is on screen `doc` still carries the old one's tokens — so a blur in
+    // that window would post a sentence onto whatever paragraph now holds the
+    // id. The mark is checked here because every write goes through here: it
+    // was first checked only in `open()`, and a blur during the re-extract's own
+    // reload walked straight past it (found by an adversarial pass, 2026-09-21).
+    // `false`, because something is being held back; `open()` names what goes.
+    if (drafts.stranded()) return false
     const where = get().shown()
     if (!where || !drafts.size()) return true
     const doc = get().doc
