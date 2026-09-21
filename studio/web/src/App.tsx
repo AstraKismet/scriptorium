@@ -18,6 +18,7 @@ import { Reading } from './components/Reading'
 import { RoutingScreen } from './components/RoutingScreen'
 import { Toolbar } from './components/Toolbar'
 import { CONTRACT_VERSION } from './contract'
+import * as drafts from './drafts'
 import * as routes from './router'
 import { useStore } from './store'
 
@@ -26,6 +27,22 @@ export function App() {
   const bootstrap = useStore(s => s.bootstrap)
 
   useEffect(() => { void bootstrap() }, [bootstrap])
+
+  // The unsaved-work guard, and it lives in the shell rather than in the toolbar
+  // because the toolbar is not on every screen. The reading view, both backend
+  // screens and the refusal `Main` draws when it will not leave a document are
+  // all rendered without it — and a draft that failed to save survives into
+  // every one of them, so the guard it was relying on simply was not there.
+  // `beforeunload` is the browser's only hook and it cannot say what is
+  // unsaved, but it is the difference between closing a tab and losing an
+  // afternoon's wording. It is deliberately not the fragment navigations this
+  // page does to itself: `beforeunload` does not fire for those at all, and
+  // `store.open()` is where those are answered.
+  useEffect(() => {
+    const guard = (e: BeforeUnloadEvent) => { if (drafts.size()) e.preventDefault() }
+    window.addEventListener('beforeunload', guard)
+    return () => { window.removeEventListener('beforeunload', guard) }
+  }, [])
 
   if (boot === 'loading') {
     return <div className="empty-page"><p>reading the project…</p></div>
@@ -124,9 +141,15 @@ function Main() {
 
   const addressed = route.name === 'doc' || route.name === 'read' ? route : null
 
-  // The address is what decides which document is open. Nothing else calls
-  // `open`, so the back button, a deep link and a click in the rail are one
-  // path rather than three.
+  // The address is what decides which document is open, so the back button, a
+  // deep link and a click in the rail are one path rather than three.
+  //
+  // It is not the only caller of `open`, and a comment here used to say it was:
+  // `Rail`'s *Not yet extracted* button calls it without moving the address,
+  // which is `HANDOFF-088`, and `store.reExtract` calls it to re-read the
+  // document it has just had re-parsed. Both are why `open()` writes unsaved
+  // words out itself rather than leaving that to this effect — a flush here
+  // would leave the rail's button losing them exactly as before.
   useEffect(() => {
     if (!addressed) return
     if (at && at.src === addressed.src && at.lang === addressed.lang) return

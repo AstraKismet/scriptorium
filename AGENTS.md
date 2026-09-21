@@ -621,7 +621,7 @@ python -m scriptorium --help        # or `lx` after `pip install -e .`
 
 cd studio/web && npm ci             # only to CHANGE the workbench; `lx web`
 npm run typecheck                   #   needs none of this, because the build
-npm test                            #   is committed. 39 tests, jsdom, no network
+npm test                            #   is committed. 59 tests, jsdom, no network
 npm run build                       # writes src/scriptorium/web/static/ — commit it
 
 lx run docs/guide.md --lang zh-TW   # extract -> translate -> check -> repair -> render
@@ -832,6 +832,25 @@ own.
   exists to write Chinese. The one place that writes `node.value` is the effect
   that adopts a stored target, and it is guarded three ways — an unsaved edit
   wins, a focused field is never written into, and identical text is left alone.
+
+- **Unsaved words are written before they are discarded, and a page that cannot
+  write them does not leave.** `store.open()` flushes `drafts` before it fetches,
+  for every caller, because `save()` addresses `shown()` and that is still the
+  document the words were typed in — a flush in `App.tsx`'s effect instead would
+  miss every caller that reaches `open()` without moving the address. While
+  wording is left unwritten it declines to open another document: `doc` stays,
+  `docError` says why, and **no address is written**, because every way of
+  putting one back rewrites the reviewer's history. Opening the document the
+  words belong to is never declined, and a blank is not wording. The map is
+  emptied when `doc` is replaced, not before; the only other thing that voids
+  it is a re-parse, which the act that asks for one declares with
+  `drafts.strand()` the moment the server accepts it — and `save()` reads that
+  mark, because every write goes through `save()` and a blur during the
+  re-extract's own reload is a write. Stranded words never keep a reviewer on a
+  document. A new caller of `open()`, or anything else that replaces `doc`,
+  answers to this rule. Before 2026-09-20 a
+  Back press threw the words away with no request at all. `docs/decisions.md`,
+  2026-09-20.
 
 - **The frontend reads `contract_version` at startup and refuses a number it does
   not know.** That refusal is the entire reason the field exists. `contract.ts`

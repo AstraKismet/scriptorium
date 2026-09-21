@@ -103,6 +103,13 @@ interface Store {
    *  dropdown. */
   absorb: (providers: Provider[], routing: Routing) => void
   loadModels: () => Promise<void>
+  /**
+   * Show a document, writing out whatever is unsaved in the one on screen first.
+   *
+   * It may decline: while it still holds wording it could not write, it leaves
+   * `doc` where it is and says why in `docError` rather than discarding the
+   * words. Opening the document those words belong to is never declined.
+   */
   open: (src: string, lang: string) => Promise<void>
   refresh: () => Promise<void>
   /** True when the ledger is showing the document `at` names. */
@@ -150,6 +157,21 @@ const same = (a: DocAddress | null, b: DocAddress | null): boolean =>
 
 const reason = (e: unknown): string =>
   e instanceof Error ? e.message : String(e)
+
+/**
+ * Whether an edit holds wording at all.
+ *
+ * One predicate and not two spellings of it: `save()` sends these and holds the
+ * rest back, because the server refuses an empty target for the **whole**
+ * request, and `open()` asks the same question to decide whether leaving would
+ * cost anybody a sentence. A cleared field is a gesture the server will not
+ * store; it is not something somebody wrote.
+ */
+const wording = (text: string): boolean => text.trim() !== ''
+
+/** The ids whose words exist nowhere but in this page. */
+const unwritten = (): string[] =>
+  drafts.entries().filter(([, text]) => wording(text)).map(([id]) => id)
 
 /**
  * Name a list of segment ids in a log line, bounded.
@@ -308,6 +330,20 @@ async function reExtract(
     const r = await api.postExtract(
       tone === null ? { ...where } : { ...where, reset: true, tone },
     )
+    // **The ids every unsaved edit is keyed on have just stopped existing**, and
+    // this is said here rather than left for the re-open below to notice: what
+    // follows is `reloadState()` and then a fetch, two round trips with the
+    // ledger still mounted, so a keystroke arriving after the re-parse would be
+    // indistinguishable from one typed against the parse that is gone. Emptying
+    // the map would not hold for that reason; the mark does, until a parse the
+    // entries were typed against is on screen.
+    //
+    // The toolbar's plain Re-extract never gets here holding anything — it saves
+    // first and refuses the act while anything is left. Start over does: it asks
+    // no such question, and its reviewer has confirmed discarding the document's
+    // translations, not the sentence they were part-way through typing. So the
+    // ids are named when they go rather than vanishing without a line.
+    drafts.strand()
     get().say(
       `  ${r.segments} segments, ${r.reused} reused` +
       (r.rejected ? `, ${r.rejected} stale proposal(s) refused` : ''),
@@ -489,20 +525,90 @@ export const useStore = create<Store>()((set, get) => ({
   },
 
   open: async (src, lang) => {
-    // **Cleared before the fetch, not after.** `at` is already the new document
-    // by this line, so an edit left in `drafts` is keyed on ids belonging to the
-    // old one and the next save would post them under the new address. On the
-    // success path the two spellings are indistinguishable; on a failed fetch
-    // the old one leaves exactly that cross-document write armed.
-    drafts.clear()
-    set({ at: { src, lang }, docLoading: true, docError: '' })
+    const want = { src, lang }
+    // The document the unsaved edits were typed in, read before anything moves.
+    // It is `shown()` rather than `at` for the reason `save()` uses `shown()`:
+    // `doc` is what the ledger drew, and the ids in `drafts` are that parse's.
+    const leaving = get().shown()
+
+    // **`at` is assigned before the first await — and `docLoading` is not.**
+    // `App.tsx`'s effect re-runs on every render, because `addressed` is a fresh
+    // object out of `routes.parse()`, and its comparison against `at` is the one
+    // thing stopping it re-entering here; `save()` below sets state several
+    // times. Raising `docLoading` with it would unmount the ledger, and the
+    // textarea with it, before the flush has read the field — taking an IME
+    // composition that has not yet produced an `input` event, in a workbench
+    // that exists for writing Chinese.
+    set({ at: want, docError: '' })
+
+    // **Written before it is discarded.** A navigation that moves no DOM focus —
+    // Back, Forward, a mouse side button, a hand-typed link — blurs no field, so
+    // nothing had saved, and `beforeunload` does not fire for a fragment
+    // navigation either: the words used to go with no request and no line in the
+    // log. Nothing here asks which document is being opened, and it does not
+    // need to: the flush is addressed to `shown()`, which is still the document
+    // the words were typed in, so it is correctly addressed whoever called.
+    const writable = !drafts.stranded()
+    if (drafts.size() && writable) await get().save()
+
+    // **What the save could not write, this will not discard.** The rule the
+    // toolbar's Re-extract already follows, applied to a navigation: this page
+    // holds the only copy, so the act stops instead.
+    //
+    // It refuses by **not leaving**, and writes no address. Putting one back was
+    // designed and measured: `location.hash = old` pushes an entry per refusal,
+    // so every Back press is answered by a forward push; `replaceState` rewrites
+    // the entry the reviewer just arrived at, so the next Back lands on an
+    // identical URL, fires no `hashchange` at all, and the press after that
+    // escapes past the guard and overwrites *that* entry too — a reviewer
+    // walking backwards eats their own history. Both also write the address from
+    // an effect, which `router.ts` forbids in as many words.
+    //
+    // Opening the document the words belong to is therefore never refused —
+    // nothing is being left, so nothing can be lost — which is what keeps this
+    // from being a trap rather than an escape hatch bolted onto one. Nor are
+    // stranded words a reason to stay: a re-parse has made them unwritable
+    // anywhere, so staying would keep the reviewer for nothing. They go, and the
+    // clear below names them.
+    const held = writable ? unwritten() : []
+    if (held.length && leaving && !same(leaving, want)) {
+      // `docError` is the field `App.tsx` already renders as "here is the
+      // document you asked for, and why you do not have it". That is exactly
+      // what this is.
+      set({ docError:
+        `${names(held)} could not be written to ${leaving.src}, and this page holds the ` +
+        `only copy of that wording — the log says why. Open ${leaving.src} again to get ` +
+        `back to it, or copy the wording out and empty the field.` })
+      return
+    }
+
+    set({ docLoading: true })
     try {
-      const doc = await api.getDoc({ src, lang })
+      const doc = await api.getDoc(want)
       // Someone may have opened another document while this was in flight.
-      if (!same(get().at, { src, lang })) return
+      if (!same(get().at, want)) return
+      // **Discarded here, and not a statement earlier.** `SegmentRow` reads
+      // `drafts.get(seg.id)` by id alone and ids restart at `s0001` in every
+      // document, so what the clear prevents is one document's words drawn in
+      // another's rows — which becomes possible exactly when the rows change. A
+      // fetch that failed leaves the old document on screen, where the entries
+      // still mean what they said.
+      if (!same(leaving, want) || drafts.stranded()) {
+        // Only a re-parse reaches this holding anything: the refusal above has
+        // already stopped a document change that would have cost wording.
+        const gone = drafts.stranded() ? unwritten() : []
+        drafts.clear()
+        if (gone.length) {
+          get().say(
+            `  ${names(gone)}: the re-parse renumbered the segments, so these unsaved ` +
+            `edits could not be written anywhere and are gone`,
+            'bad',
+          )
+        }
+      }
       set({ doc, docLoading: false })
     } catch (e) {
-      if (!same(get().at, { src, lang })) return
+      if (!same(get().at, want)) return
       set({ docLoading: false, docError: reason(e) })
       get().say(reason(e), 'bad')
     }
@@ -528,6 +634,15 @@ export const useStore = create<Store>()((set, get) => ({
    * refused, so a caller about to do something destructive can stop.
    */
   save: async () => {
+    // **Nothing stranded is written, by anyone.** A re-extract this page asked
+    // for has renumbered the ids every entry is keyed on, and until the new
+    // parse is on screen `doc` still carries the old one's tokens — so a blur in
+    // that window would post a sentence onto whatever paragraph now holds the
+    // id. The mark is checked here because every write goes through here: it
+    // was first checked only in `open()`, and a blur during the re-extract's own
+    // reload walked straight past it (found by an adversarial pass, 2026-09-21).
+    // `false`, because something is being held back; `open()` names what goes.
+    if (drafts.stranded()) return false
     const where = get().shown()
     if (!where || !drafts.size()) return true
     const doc = get().doc
@@ -541,7 +656,7 @@ export const useStore = create<Store>()((set, get) => ({
     const held: string[] = []
     const targets: Record<string, string> = {}
     for (const [id, text] of drafts.entries()) {
-      if (text.trim()) targets[id] = text
+      if (wording(text)) targets[id] = text
       else held.push(id)
     }
     for (const id of held) {
@@ -580,7 +695,14 @@ export const useStore = create<Store>()((set, get) => ({
       if (r.unknown.length) {
         get().say(`  ${names(r.unknown)} name no segment and were ignored`, 'warn')
       }
-      await get().refresh()
+      // **Re-read only the document this page is still on.** A flush that ran
+      // because the address moved is followed by the arriving document's own
+      // fetch, so re-reading the one being left is a second full `GET /api/doc`
+      // — every segment of it — thrown away under the loading screen. Decided
+      // from state rather than from an argument the caller passes: a re-read a
+      // caller can turn off is two spellings of one rule, and the reviewer who
+      // goes straight back re-reads it in that fetch anyway.
+      if (same(get().at, where)) await get().refresh()
       return !held.length && !lost.length
     } catch (e) {
       // Cleared only on success: an empty target is a 400, and clearing first

@@ -17,10 +17,14 @@ export interface Call {
 export interface Answer {
   status?: number
   body: unknown
+  /** Hold the reply until this settles, so a test can look at the page while
+   *  the request is still in flight. Everything else here answers at once. */
+  after?: Promise<void>
 }
 
 let queued: Answer[] = []
 let fallback: Answer = { body: {} }
+let byPath: ((call: Call) => Answer | null) | null = null
 
 export const calls: Call[] = []
 
@@ -34,26 +38,44 @@ export function otherwise(answer: Answer): void {
   fallback = answer
 }
 
+/**
+ * Answer by looking at the request, and outrank the queue while doing it.
+ *
+ * A whole-application test cannot use `replies`: the margin and the model list
+ * fetch on timers of their own, so a queue sooner or later hands a document to a
+ * style request. The alternative a test file reaches for is its own
+ * `globalThis.fetch`, and that is what this exists to stop — a second stub is a
+ * second record of what was sent, `calls` no longer sees it, and `callsTo` /
+ * `lastCall` silently answer about nothing. Returning `null` falls through to
+ * the queue and then the fallback.
+ */
+export function answering(fn: (call: Call) => Answer | null): void {
+  byPath = fn
+}
+
 export function install(): void {
   calls.length = 0
   queued = []
   fallback = { body: {} }
+  byPath = null
   globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input)
     const method = init?.method ?? 'GET'
     const raw = init?.body
-    calls.push({
+    const call: Call = {
       path,
       method,
       body: typeof raw === 'string' ? JSON.parse(raw) : null,
-    })
-    const answer = queued.shift() ?? fallback
+    }
+    calls.push(call)
+    const answer = byPath?.(call) ?? queued.shift() ?? fallback
     const status = answer.status ?? 200
-    return Promise.resolve({
+    const reply = {
       ok: status >= 200 && status < 300,
       status,
       json: () => Promise.resolve(answer.body),
-    } as Response)
+    } as Response
+    return answer.after ? answer.after.then(() => reply) : Promise.resolve(reply)
   }) as typeof fetch
 }
 

@@ -17,8 +17,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { App } from './App'
 import { SegmentRow } from './components/SegmentRow'
+import * as drafts from './drafts'
 import { useStore } from './store'
-import { callsTo, otherwise, replies } from './test/wire'
+import { answering, calls, callsTo, otherwise, replies } from './test/wire'
+import type { Answer } from './test/wire'
 import { CONTRACT_VERSION } from './contract'
 import type { DocResponse, StateResponse } from './contract'
 
@@ -152,6 +154,11 @@ describe('moving between segments', () => {
    * Answer by path. The margin fetches on a timer of its own, so a queue would
    * sooner or later hand a document to a style request and take the margin
    * down for a reason that has nothing to do with navigation.
+   *
+   * It goes through `wire.answering` rather than replacing `globalThis.fetch`,
+   * which is what it used to do: a second stub is a second record of what was
+   * sent, and `calls` — the vocabulary every other test in this repository
+   * speaks — could not see any of it.
    */
   const serve = (): void => {
     const project: StateResponse = {
@@ -176,11 +183,7 @@ describe('moving between segments', () => {
       // `/api/style` and `/api/suggest`, answered empty in one shape both read.
       return { source: '', lang: 'zh-TW', tone: null, ids: [], voice: '', voice_notes: [], algorithm: 'none', cutoff: 0, records: 0, segments: [] }
     }
-    globalThis.fetch = ((input: RequestInfo | URL) => Promise.resolve({
-      ok: true,
-      status: 200,
-      json: () => Promise.resolve(answer(String(input))),
-    } as Response)) as typeof fetch
+    answering(call => ({ body: answer(call.path) }))
   }
 
   /**
@@ -410,5 +413,289 @@ describe('moving between segments', () => {
       expect(window.location.hash).toBe(address(third.source, 's0001'))
       expect(screen.getByRole('heading', { name: 's0001' })).toBeTruthy()
     }, { timeout: 4000 })
+  }, 15000)
+})
+
+/**
+ * Leaving a document with words that were never written.
+ *
+ * Measured 2026-09-20 against `e6fc06d` in this runner, and on 2026-09-14 in
+ * Chrome 153 against `lx web` on `f34298b`, whose code path is the same: open
+ * `book/ch1.md`, type into a row's field without blurring it, then move the
+ * address to another document. The whole request sequence was
+ * `GET /api/state`, `GET /api/models`, `GET /api/doc`, `GET /api/doc` — **no
+ * `POST /api/save` at all** — and the typed words were gone, with no prompt and
+ * no line in the log.
+ *
+ * A click in the rail does not lose them, and that is luck rather than care: a
+ * click takes DOM focus out of the textarea first, `onBlur` runs `save()`, and
+ * `save()` reads `drafts` into a snapshot before its first `await`. Back,
+ * Forward, a mouse side button and a hand-typed link move no focus, so nothing
+ * blurs — and `beforeunload` does not fire for a fragment navigation. The luck
+ * runs out anyway the moment that save fails, because `onBlur` neither awaits
+ * it nor reads what it returned.
+ *
+ * **The field here is the ledger's own**, reached with `querySelector` rather
+ * than a role query: `virtua` draws the row the address names inside a
+ * `visibility: hidden` wrapper, so it is not in the accessibility tree and
+ * `getByRole('textbox')` cannot see it.
+ */
+describe('leaving a document with words that were never written', () => {
+  const ninth: DocResponse = {
+    ...doc,
+    source: 'book/ch9.md',
+    report: { segments: 1, translated: 0, errors: 0, warnings: 0, by_rule: {} },
+    segments: [
+      { ...doc.segments[2]!, id: 's0001', source: 'Morning came late.', target: '', token: 'u1', issues: [] },
+    ],
+  }
+  const wrote = { applied: 1, unknown: [], stored: {}, conflicts: {} }
+
+  /**
+   * As the block above's, plus `POST /api/save`, whose answer each test picks.
+   *
+   * A fixture answering that endpoint with `{}` would not be neutral: `save()`
+   * reads `r.conflicts` **after** `drafts.forget(ids)`, so the `TypeError` that
+   * follows leaves the map empty, its own `catch` swallows it, and every
+   * assertion about words surviving would read as a pass.
+   */
+  const serve = (save: Answer = { body: wrote }): void => {
+    const project: StateResponse = {
+      ...state,
+      docs: [...state.docs, { source: ninth.source, lang: 'zh-TW', total: 1, done: 0 }],
+    }
+    // **A cap, so that a loop fails instead of hanging.** Two measured shapes of
+    // this change re-enter `open()` from `App.tsx`'s effect on every render —
+    // `at` assigned after the flush, and `at` put back on a refusal — and each
+    // one hung this file: every lap is a request answered in the same microtask
+    // chain, so no timer, and with it no test timeout, could ever fire. Past the
+    // cap a request is simply never answered, which ends the chain and lets the
+    // assertions below fail where they stand. No test here comes near it.
+    let requests = 0
+    answering(call => {
+      requests += 1
+      if (requests > 150) return { body: {}, after: new Promise<void>(() => undefined) }
+      const path = call.path
+      if (path.startsWith('/api/state')) return { body: project }
+      if (path.startsWith('/api/models')) return { body: { provider: 'local', configured: 'qwen', models: [], error: null } }
+      if (path.startsWith('/api/save')) return save
+      if (path.startsWith('/api/doc')) {
+        const src = new URLSearchParams(path.split('?')[1]).get('src')
+        return { body: src === ninth.source ? ninth : doc }
+      }
+      if (path.startsWith('/api/sentences')) return { body: { sentences: [] } }
+      return { body: { source: '', lang: 'zh-TW', tone: null, ids: [], voice: '', voice_notes: [], algorithm: 'none', cutoff: 0, records: 0, segments: [] } }
+    })
+  }
+
+  const address = (src: string, seg?: string): string =>
+    `#/doc/zh-TW/${encodeURIComponent(src)}` + (seg ? `?seg=${seg}` : '')
+
+  const startAt = (hash: string): void => {
+    window.location.hash = hash
+    window.dispatchEvent(new HashChangeEvent('hashchange'))
+  }
+
+  const settle = (): Promise<void> => new Promise(r => { setTimeout(r, 50) })
+
+  const field = (): HTMLTextAreaElement => {
+    const el = document.querySelector<HTMLTextAreaElement>('.ledger textarea')
+    if (!el) throw new Error('the ledger mounted no row for the segment in the address')
+    return el
+  }
+
+  /** Open `book/ch1.md` at `s0003` and leave five characters in its field. */
+  const typed = async (): Promise<void> => {
+    startAt(address(doc.source, 's0003'))
+    render(<App />)
+    await waitFor(() => { expect(screen.getByText('/3 translated')).toBeTruthy() }, { timeout: 4000 })
+    await userEvent.setup().type(field(), '燈還亮著。')
+    expect(drafts.get('s0003')).toBe('燈還亮著。')
+  }
+
+  const readOf = (src: string): number =>
+    calls.findIndex(c => c.path.startsWith('/api/doc') && c.path.includes(encodeURIComponent(src)))
+
+  it('writes them to the document being left, before the next one is read', async () => {
+    serve()
+    await typed()
+
+    // No blur and no click — the address simply moves, which is what Back,
+    // Forward, a mouse side button and a hand-typed link all do.
+    window.location.hash = address(ninth.source)
+    await waitFor(() => { expect(screen.getByText('/1 translated')).toBeTruthy() }, { timeout: 4000 })
+    await settle()
+
+    const saves = callsTo('/api/save')
+    expect(saves).toHaveLength(1)
+    // **The body, never the path.** `postSave` posts to a fixed `/api/save` and
+    // carries the document in its JSON, so an assertion on the path would hold
+    // whatever the page had done.
+    expect(saves[0]!.body).toMatchObject({
+      src: doc.source, lang: 'zh-TW', targets: { s0003: '燈還亮著。' },
+    })
+    expect(calls.indexOf(saves[0]!)).toBeLessThan(readOf(ninth.source))
+    expect(drafts.size()).toBe(0)
+    // And the document being left is not read again: `save()` re-reads only the
+    // document this page is still on, so a flush on the way out costs one round
+    // trip rather than a second `GET /api/doc` of every segment it had.
+    expect(calls.filter(c => c.path.startsWith('/api/doc') && c.path.includes(encodeURIComponent(doc.source))))
+      .toHaveLength(1)
+  }, 15000)
+
+  it('keeps the ledger on screen while it writes the words', async () => {
+    // `docLoading` goes up only once the words are written. Raised together with
+    // `at` it would swap the ledger for the loading page — unmounting the
+    // textarea with it — before the flush had read the field, which takes an IME
+    // composition that has not yet produced an `input` event. jsdom has no IME;
+    // what it can see is the ledger leaving while the words are in flight.
+    //
+    // **It asserts on the ledger and not on the field**, and that is jsdom
+    // rather than a choice: the virtualized list mounts only the row the
+    // address names here, and the address has already moved to another
+    // document, so no row of this one is mounted whatever the code does. In a
+    // browser the row being typed in is in the visible range and stays.
+    let release: () => void = () => undefined
+    serve({ body: wrote, after: new Promise<void>(r => { release = r }) })
+    await typed()
+
+    window.location.hash = address(ninth.source)
+    await waitFor(() => { expect(callsTo('/api/save')).toHaveLength(1) })
+    expect(document.querySelector('.ledger')).not.toBeNull()
+    expect(screen.getByText('/3 translated')).toBeTruthy()
+    expect(screen.queryByText(/reading book\/ch9\.md/)).toBeNull()
+
+    release()
+    await waitFor(() => { expect(screen.getByText('/1 translated')).toBeTruthy() }, { timeout: 4000 })
+  }, 15000)
+
+  it('does not leave while it holds wording it could not write, and writes no address', async () => {
+    serve({ status: 400, body: { error: 'nothing is listening on 8787' } })
+    await typed()
+    const entries = window.history.length
+
+    window.location.hash = address(ninth.source)
+    await waitFor(() => {
+      expect(screen.getByText(/could not be written to book\/ch1\.md/)).toBeTruthy()
+    }, { timeout: 4000 })
+    await settle()
+    // The remedy names the document to go back to — not the one that was just
+    // declined, which would send the reviewer round the same loop.
+    expect(screen.getByText(/Open book\/ch1\.md again to get back to it/)).toBeTruthy()
+
+    // One attempt, and then a stop — not a page that keeps trying on every render.
+    expect(callsTo('/api/save')).toHaveLength(1)
+
+    // The document the words belong to is still the one this page holds, and
+    // the words are still in it.
+    expect(useStore.getState().doc?.source).toBe(doc.source)
+    expect(drafts.get('s0003')).toBe('燈還亮著。')
+    expect(readOf(ninth.source)).toBe(-1)
+
+    // **The address is left exactly where the reviewer put it.** Putting it back
+    // is what this refusal will not do: a pushed entry is walked into by the
+    // next Back press and pushed again, and a `replaceState` rewrites the entry
+    // they just arrived at — so the Back after that fires no `hashchange` at
+    // all, and the one after that eats another entry of their own history.
+    // One entry, and it is the reviewer's own — the page added none.
+    expect(window.location.hash).toBe(address(ninth.source))
+    expect(window.history.length).toBe(entries + 1)
+  }, 15000)
+
+  it('never refuses to open the document the words belong to, so the refusal is not a trap', async () => {
+    serve({ status: 400, body: { error: 'nothing is listening on 8787' } })
+    await typed()
+    window.location.hash = address(ninth.source)
+    await waitFor(() => {
+      expect(screen.getByText(/could not be written to book\/ch1\.md/)).toBeTruthy()
+    }, { timeout: 4000 })
+
+    // Back to the chapter **while the server is still refusing**. That is the
+    // case that decides whether this is a trap: nothing is being left, so
+    // nothing is refused, and the words are back in their own field.
+    window.location.hash = address(doc.source, 's0003')
+    await waitFor(() => { expect(screen.getByText('/3 translated')).toBeTruthy() }, { timeout: 4000 })
+    await settle()
+    expect(screen.queryByText(/could not be written/)).toBeNull()
+    expect(drafts.get('s0003')).toBe('燈還亮著。')
+    expect(field().value).toBe('燈還亮著。')
+
+    // The server comes back, and the next move writes them where they were typed.
+    serve()
+    window.location.hash = address(ninth.source)
+    await waitFor(() => { expect(screen.getByText('/1 translated')).toBeTruthy() }, { timeout: 4000 })
+    await settle()
+    expect((callsTo('/api/save').at(-1)!.body as { src: string; targets: Record<string, string> }))
+      .toMatchObject({ src: doc.source, targets: { s0003: '燈還亮著。' } })
+    expect(drafts.size()).toBe(0)
+  }, 15000)
+
+  it('still guards the tab close on the screen the refusal draws, which has no toolbar', async () => {
+    // The guard used to live in the toolbar. The refusal does not draw one —
+    // and neither do the reading view or either backend screen, so a draft that
+    // failed to save has been walking into all three without it.
+    serve({ status: 400, body: { error: 'nothing is listening on 8787' } })
+    await typed()
+    window.location.hash = address(ninth.source)
+    await waitFor(() => {
+      expect(screen.getByText(/could not be written to book\/ch1\.md/)).toBeTruthy()
+    }, { timeout: 4000 })
+    expect(screen.queryByRole('button', { name: 'Re-extract' })).toBeNull()
+
+    const closing = new Event('beforeunload', { cancelable: true })
+    window.dispatchEvent(closing)
+    expect(closing.defaultPrevented).toBe(true)
+  }, 15000)
+
+  it('lets the tab close once the words are written', async () => {
+    // The other side of the same guard. One that asked on every close after the
+    // first keystroke would teach a reviewer to click through the one that
+    // matters.
+    serve()
+    await typed()
+    window.location.hash = address(ninth.source)
+    await waitFor(() => { expect(screen.getByText('/1 translated')).toBeTruthy() }, { timeout: 4000 })
+    await settle()
+
+    const closing = new Event('beforeunload', { cancelable: true })
+    window.dispatchEvent(closing)
+    expect(closing.defaultPrevented).toBe(false)
+  }, 15000)
+
+  it('does not refuse over a field of spaces, which is not wording either', async () => {
+    // `save()` holds whitespace back exactly as it holds an empty field back, so
+    // the question "is there anything left to lose" must be the same predicate —
+    // a second spelling of it that counted spaces as words would decline to
+    // leave over something the server will never store.
+    serve()
+    startAt(address(doc.source, 's0003'))
+    render(<App />)
+    await waitFor(() => { expect(screen.getByText('/3 translated')).toBeTruthy() }, { timeout: 4000 })
+    await userEvent.setup().type(field(), '   ')
+    expect(drafts.get('s0003')).toBe('   ')
+
+    window.location.hash = address(ninth.source)
+    await waitFor(() => { expect(screen.getByText('/1 translated')).toBeTruthy() }, { timeout: 4000 })
+    await settle()
+    expect(screen.queryByText(/could not be written/)).toBeNull()
+    expect(callsTo('/api/save')).toHaveLength(0)
+  }, 15000)
+
+  it('does not refuse over an emptied field, which is not wording', async () => {
+    // The server refuses an empty target for the whole request, so `save()`
+    // holds one back for ever. Refusing to leave over one would trap a reviewer
+    // who had merely cleared a field, with nothing on the page to undo it.
+    serve()
+    startAt(address(doc.source, 's0002'))
+    render(<App />)
+    await waitFor(() => { expect(screen.getByText('/3 translated')).toBeTruthy() }, { timeout: 4000 })
+    await userEvent.setup().clear(field())
+    expect(drafts.get('s0002')).toBe('')
+
+    window.location.hash = address(ninth.source)
+    await waitFor(() => { expect(screen.getByText('/1 translated')).toBeTruthy() }, { timeout: 4000 })
+    await settle()
+    expect(callsTo('/api/save')).toHaveLength(0)
+    expect(drafts.size()).toBe(0)
   }, 15000)
 })

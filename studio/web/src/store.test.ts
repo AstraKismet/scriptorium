@@ -11,7 +11,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 
 import * as drafts from './drafts'
 import { useStore, visible } from './store'
-import { callsTo, lastCall, otherwise, replies } from './test/wire'
+import { answering, callsTo, lastCall, otherwise, replies } from './test/wire'
 import { CONTRACT_VERSION } from './contract'
 import type { DocResponse, Segment, StateResponse } from './contract'
 
@@ -123,6 +123,22 @@ describe('saving', () => {
     expect(drafts.has('s0002')).toBe(false)
   })
 
+  it('re-reads the document it stays on, so the next edit carries a fresh token', async () => {
+    // `save()` skips the re-read only when the page is leaving the document. On
+    // the ordinary path — a blur, Ctrl+Enter — it must still happen, or every
+    // token on screen is one generation stale and the reviewer's next edit of
+    // the same row conflicts with their own write.
+    await openWith([segment({ id: 's0001', token: 'tok1' })])
+    drafts.set('s0001', '她一夜沒睡。', '她沒有睡。')
+    replies(
+      { body: { applied: 1, unknown: [], stored: {}, conflicts: {} } },
+      { body: doc([segment({ id: 's0001', target: '她一夜沒睡。', token: 'tok2' })]) },
+    )
+    await useStore.getState().save()
+    expect(callsTo('/api/doc')).toHaveLength(2)
+    expect(useStore.getState().doc?.segments[0]?.token).toBe('tok2')
+  })
+
   it('keeps every edit when the request is refused', async () => {
     await openWith([segment({ id: 's0001' })])
     drafts.set('s0001', '改過的句子。', '她沒有睡。')
@@ -223,5 +239,196 @@ describe('the filter', () => {
     expect(visible(d, 'failing').map(s => s.id)).toEqual(['s2'])
     expect(visible(d, 'held').map(s => s.id)).toEqual(['s3'])
     expect(visible(d, 'waived').map(s => s.id)).toEqual(['s4'])
+  })
+})
+
+/**
+ * The other half of "written before it is discarded": the act that makes
+ * writing impossible.
+ *
+ * A parse reassigns ids from `s0001`, so the moment the server accepts a
+ * re-extract every unsaved edit is keyed on a number that now names some other
+ * paragraph. Flushing one there would write a reviewer's sentence onto a
+ * paragraph nobody chose, with matching placeholders and a green `lx check` —
+ * and the lost-update token cannot catch it, because `sha1("")` hashes an
+ * absent target and an empty one alike and a re-parse leaves runs of
+ * untranslated segments.
+ *
+ * These pass against `e6fc06d` too, because nothing there flushed at all. They
+ * are the guard for the shape that now does.
+ */
+describe('a re-parse voids every unsaved edit, at the moment the server accepts it', () => {
+  const extracted = {
+    segments: 1, reused: 0, rejected: 0,
+    kept: [], ambiguous: [], replaced: [], waived_source: [],
+  }
+
+  it('never writes an edit into the numbering a re-extract has just replaced', async () => {
+    await openWith([segment({ id: 's0001' })])
+    drafts.set('s0001', '改過的句子。', '她沒有睡。')
+    replies({ body: extracted })
+    otherwise({ body: doc([segment({ id: 's0001' })]) })
+
+    await useStore.getState().extract()
+    expect(callsTo('/api/save')).toHaveLength(0)
+    expect(drafts.size()).toBe(0)
+  })
+
+  it('does not post the words a start-over was told to discard', async () => {
+    // The path with no save in front of it: the toolbar's plain Re-extract
+    // saves first and refuses the act while anything is left over, and Start
+    // over asks no such question. Its reviewer confirmed discarding the
+    // document's translations, not the sentence they were part-way through.
+    await openWith([segment({ id: 's0001' })])
+    drafts.set('s0001', '改過的句子。', '她沒有睡。')
+    replies({ body: extracted })
+    otherwise({ body: doc([segment({ id: 's0001', target: '', status: 'pending' })]) })
+
+    await useStore.getState().startOver('literary')
+    expect(callsTo('/api/save')).toHaveLength(0)
+    expect(drafts.size()).toBe(0)
+    // Gone, and said to be gone. Before this they vanished without a line.
+    expect(useStore.getState().log.some(l => l.level === 'bad' && l.text.includes('s0001'))).toBe(true)
+  })
+
+  it('holds across the reload, because the ledger is mounted for two more round trips', async () => {
+    // Emptying the map after the re-parse is not enough, and this is why: what
+    // follows is `GET /api/state` and then the document's own fetch, with the
+    // ledger still on screen the whole time. A keystroke arriving in that
+    // window is keyed on the parse that has just gone, and looks exactly like
+    // one that arrived before it.
+    await openWith([segment({ id: 's0001' })])
+    answering(call => {
+      if (call.path.startsWith('/api/state')) drafts.set('s0001', '打在重編號之後。', '她沒有睡。')
+      return null
+    })
+    replies({ body: extracted })
+    otherwise({ body: doc([segment({ id: 's0001' })]) })
+
+    await useStore.getState().extract()
+    expect(callsTo('/api/save')).toHaveLength(0)
+    expect(drafts.size()).toBe(0)
+  })
+
+  it('refuses a blur that lands in the same window, not only the re-open', async () => {
+    // The field is still mounted and still saves on blur. The mark used to be
+    // read only by `open()`, so a keystroke and a blur during the reload posted
+    // the sentence under the renumbered id — found by an adversarial pass over
+    // this change, and failing on its first commit. `save()` reads it now.
+    await openWith([segment({ id: 's0001' })])
+    answering(call => {
+      if (call.path.startsWith('/api/state')) {
+        drafts.set('s0001', '打在重編號之後。', '她沒有睡。')
+        void useStore.getState().save()
+      }
+      return null
+    })
+    replies({ body: extracted })
+    otherwise({ body: doc([segment({ id: 's0001' })]) })
+
+    await useStore.getState().extract()
+    expect(callsTo('/api/save')).toHaveLength(0)
+  })
+
+  it('leaves later edits writable after a re-extract that had nothing to void', async () => {
+    // The mark is lowered by `clear()`, and it must be lowered even when the map
+    // is already empty — otherwise the next edit after an ordinary re-extract is
+    // never written by anything, and leaving the document names it as a casualty
+    // of a re-parse that happened before it was typed.
+    await openWith([segment({ id: 's0001' })])
+    replies({ body: extracted })
+    otherwise({ body: doc([segment({ id: 's0001' })]) })
+    await useStore.getState().extract()
+
+    drafts.set('s0001', '重新抽取之後才打的。', '她沒有睡。')
+    otherwise({ body: { applied: 1, unknown: [], stored: {}, conflicts: {} } })
+    replies({ body: { applied: 1, unknown: [], stored: {}, conflicts: {} } }, { body: doc([segment()]) })
+    await useStore.getState().open('book/ch2.md', 'zh-TW')
+    expect((lastCall('/api/save')?.body as { targets: unknown }).targets)
+      .toEqual({ s0001: '重新抽取之後才打的。' })
+  })
+
+  it('addresses the re-extract to the document on screen, not the one asked for', async () => {
+    // `at` and `shown()` now differ for a whole round trip while a flush is in
+    // flight, with the ledger still mounted. The re-parse belongs to the
+    // document the reviewer is looking at — which is also the one whose ids the
+    // stranded mark voids.
+    await openWith([segment({ id: 's0001' })])
+    useStore.setState({ at: { src: 'book/ch9.md', lang: 'zh-TW' } })
+    replies({ body: extracted })
+    otherwise({ body: doc([segment()]) })
+    await useStore.getState().extract()
+    expect(callsTo('/api/extract')[0]?.body).toMatchObject({ src: 'book/ch1.md' })
+  })
+
+  it('does not keep a reviewer on a document over words nothing can write', async () => {
+    // Stranded words are unwritable anywhere, so declining to leave over them
+    // would hold the reviewer for nothing. They go, and they are named.
+    await openWith([segment({ id: 's0001' })])
+    drafts.set('s0001', '改過的句子。', '她沒有睡。')
+    drafts.strand()
+    replies({ body: doc([segment()]) })
+    await useStore.getState().open('book/ch2.md', 'zh-TW')
+
+    expect(useStore.getState().docError).toBe('')
+    expect(useStore.getState().doc).not.toBeNull()
+    expect(callsTo('/api/save')).toHaveLength(0)
+    expect(drafts.size()).toBe(0)
+    expect(useStore.getState().log.some(l => l.level === 'bad' && l.text.includes('s0001'))).toBe(true)
+  })
+})
+
+describe('opening a document', () => {
+  it('does not paint a superseded open\'s failure over the document that won', async () => {
+    // Two opens in flight, the first one failing after the second has been
+    // asked for. `App.tsx` draws `docError` before anything else, so a stale
+    // failure would put an error screen over a chapter the reviewer is on.
+    answering(call =>
+      call.path.startsWith('/api/doc') && new URLSearchParams(call.path.split('?')[1]).get('src') === 'book/ch9.md'
+        ? { status: 404, body: { error: 'no such document' } }
+        : null)
+    otherwise({ body: doc([segment()]) })
+    await Promise.all([
+      useStore.getState().open('book/ch9.md', 'zh-TW'),
+      useStore.getState().open('book/ch1.md', 'zh-TW'),
+    ])
+    expect(useStore.getState().doc?.source).toBe('book/ch1.md')
+    expect(useStore.getState().docError).toBe('')
+  })
+})
+
+/**
+ * Where an unsaved edit may be destroyed at all.
+ *
+ * Every test above is about the *conditions* under which the discard fires,
+ * and a set of conditions is an enumeration of today's callers: `open()` has
+ * three, `HANDOFF-088` will make a fourth, and a test set written against three
+ * goes quietly wrong on the day of the fourth. This one is about *where* the
+ * destruction lives instead, which is the half that survives a call site
+ * nobody has written yet.
+ *
+ * It is a text scan and it says so: it cannot tell a call inside `open()` from
+ * one anywhere else in the same file. What it can say is that there is one.
+ */
+describe('where an unsaved edit may be destroyed', () => {
+  // Read through Vite's own module graph rather than through `node:fs`: this
+  // package's `types` deliberately carries no node declarations, and a scan
+  // that made it carry them would let the application itself reach for node
+  // APIs and still typecheck.
+  const tree = import.meta.glob('./**/*.{ts,tsx}', {
+    query: '?raw', import: 'default', eager: true,
+  }) as Record<string, string>
+
+  const production = Object.entries(tree).filter(([path]) =>
+    !/\.test\.tsx?$/.test(path) && !path.startsWith('./test/') && path !== './drafts.ts')
+
+  const sites = (call: string): [string, number][] =>
+    production
+      .map(([path, text]) => [path, text.split(call).length - 1] as [string, number])
+      .filter(([, n]) => n > 0)
+
+  it('empties the map in exactly one place, and marks it void in exactly one other', () => {
+    expect(sites('drafts.clear(')).toEqual([['./store.ts', 1]])
+    expect(sites('drafts.strand(')).toEqual([['./store.ts', 1]])
   })
 })
