@@ -3,6 +3,254 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-09-20 · Unsaved words are written before they are discarded, and a page that cannot write them does not leave
+
+Closing HANDOFF-087. A reviewer's unsaved edit was thrown away whenever the
+address moved to another document without moving DOM focus first — Back,
+Forward, a mouse side button, a hand-typed link — with no save, no prompt and no
+line in the log.
+
+### What was measured
+
+Against `e6fc06d`, in vitest: open `book/ch1.md`, type into a row's field
+without blurring it, assign `location.hash` to another document. The whole
+request sequence was `GET /api/state`, `GET /api/models`, `GET /api/doc`,
+`GET /api/doc` — **no `POST /api/save`** — and the words were gone. The same
+sequence had been measured on 2026-09-14 in Chrome 153 against `lx web` on
+`f34298b`, whose code path is the same.
+
+The discard was `store.open()`'s `drafts.clear()`, the first statement of the
+function. A rail click did not lose the words, and that was luck: the click
+takes focus out of the textarea, `onBlur` runs `save()`, and `save()` snapshots
+`drafts` before its first `await`. `onBlur` neither awaits that save nor reads
+what it returns, so even the rail loses the words whenever the save fails.
+`beforeunload` does not fire for a fragment navigation at all.
+
+### The rule, and where it lives
+
+**Unsaved words are written before they are discarded, and the only thing that
+discards them unwritten is the act that made writing them impossible.** Two
+arms, each a property rather than a list of callers:
+
+- `open()` flushes before it fetches, and asks nothing about who called it. It
+  does not need to: `save()` addresses `shown()`, which reads `doc`, and `doc`
+  is still the document the words were typed in until the fetch lands — so the
+  flush is correctly addressed by construction.
+- The discard happens where the ids stop meaning what the reviewer typed into.
+  `drafts.clear()` moved from the top of `open()` to the moment `doc` is
+  replaced, and a re-extract marks the map **stranded** — `drafts.strand()` —
+  the instant the server accepts the re-parse. `clear()` lowers the mark.
+
+The flush lives in `open()` and **not in `App.tsx`'s effect**, and that is
+decided by a door rather than by taste: `Rail`'s *Not yet extracted* button
+reaches `open()` without moving the address (`HANDOFF-088`), so a flush in the
+effect passes every acceptance criterion this package had and leaves that button
+destroying words exactly as before. The comment in `App.tsx` that said nothing
+else calls `open` was false and is corrected.
+
+**The old comment on the clear gave a reason that was not true.** It said a
+leftover entry would be posted "under the new address" after a failed fetch. It
+would not: `save()` addresses `shown()`, and `open()` never touched `doc` before
+its fetch returned, so a failed fetch left the entries pointing at the document
+still on screen, where they were right. What the early clear really bought was
+the display — `SegmentRow` reads `drafts.get(seg.id)` by id alone and ids
+restart at `s0001` in every document — and that becomes possible exactly when
+`doc` changes, which is where the clear is now.
+
+### What a failed flush does: the page does not leave, and writes no address
+
+When wording is still unwritten after the flush, and a different document is
+being opened, `open()` sets `docError` and returns. `doc` stays on the document
+the words belong to; `App.tsx` already renders `docError` as the document that
+was asked for and why it is not here; the words stay in `drafts`, one click away
+in the rail. This is the rule the toolbar's Re-extract already follows — it
+saves first and refuses the act while anything is left — applied to a
+navigation.
+
+- **A blank is not wording.** `save()` holds an empty target back for good,
+  because the server refuses one for the whole request, so refusing over one
+  would trap a reviewer who had cleared a field. One predicate, `wording()`, is
+  read by both `save()` and `open()`.
+- **Opening the document the words belong to is never refused**, because nothing
+  is being left. That, and not an escape hatch, is what keeps the refusal from
+  being a trap: the reviewer returns to the chapter while the server is still
+  failing and finds the words in their field.
+
+*Lost:* putting the address back. It was designed three ways and all three were
+worse than not moving. `location.hash = old` pushes an entry per refusal, so
+every Back press is answered by a forward push. `history.replaceState` rewrites
+the entry the reviewer just arrived at, so the next Back lands on an identical
+URL, **fires no `hashchange`**, and does visibly nothing — and the press after
+that escapes past the guard to an older entry, which is refused and rewritten in
+turn, so a reviewer walking backwards eats their own history. `history.back()`
+assumes the move was forward. All three also write the address from an effect,
+which `router.ts` forbids, and bring back the second authority over the address
+that HANDOFF-084 spent a package removing. The cost of not writing it is that
+the address names a document the page is declining to show until the reviewer
+goes back; the screen says so in as many words.
+
+*Lost:* **leaving, and printing what could not be written into the log**, which
+three of four independent design lanes proposed. The reviewer's only copy would
+then live in a 4000-line drawer with a *Clear* button beside it, gone on reload
+— and `.log` in `theme.css` sets no `white-space`, so a paragraph's interior
+line breaks and indentation, which are inside the segment (see *The model never
+sees markup*, invariant 3), collapse in the text a reviewer would copy. Paying
+for that is `pre-wrap` on every line the drawer has ever drawn, and nothing in
+the suite could verify it, because jsdom loads no stylesheet.
+
+*Lost:* **re-keying `drafts` by document**, so nothing is discarded at all and a
+reviewer who comes back finds their words. It scored best on this project's own
+rules and it lost on what it would need: parked entries are never evicted, so
+the window in which an id comes to name a different paragraph grows from "while
+you are looking at it" to "the life of the page", and closing that window means
+the frontend inferring a server fact — which parse an id belongs to — from
+source text, which is invariant 8's line. Its own lane put it at five modules;
+it moves the toolbar's unsaved count and `beforeunload` onto two different
+numbers, and it does not survive a reload, which is the ordinary recovery from
+the failure it exists for. The refusal recovers without one: fix the cause, move
+again, and the flush writes the words.
+
+### The re-parse arm, and the window a plain clear cannot close
+
+`reExtract` is `postExtract` → `reloadState()` (a `GET /api/state` that loads
+every segment of every document) → `open(same document)`, with the ledger
+mounted the whole time. A keystroke in that window is keyed on the parse that
+has just gone, and emptying the map after `postExtract` does not stop it
+arriving; a mark that stays raised until a parse the entries were typed against
+is on screen does. Found by the adversarial pass over the designs, and fatal to
+three of the four.
+
+**The mark is read by `save()`, not only by `open()`.** The first version
+checked it only where `open()` flushes, and a blur in the same window — the
+field is still mounted and still saves on blur — posted the sentence under the
+renumbered id with the old parse's token. Two mutation lanes working
+independently of each other found it on the commit as first written, each with a
+probe that failed there; every write goes through `save()`, so that is where the
+mark is honoured. And **stranded words never keep a reviewer on a document**: a
+re-parse has made them unwritable anywhere, so declining to leave over them
+would hold the reviewer for nothing. They go, and they are named. `clear()`
+lowers the mark even when the map is already empty: left up after an ordinary
+re-extract with nothing unsaved, it would have stopped every later edit in the
+session from being written by anything.
+
+The toolbar's plain Re-extract never reaches this holding anything. *Start
+over* can: `StartOver.go()` never calls `save()`. Clicking its button blurs the
+field and `onBlur` saves, so in practice it arrives holding words only when that
+save failed or is still in flight — traced from the code, not measured in a
+browser. Those words cannot be written anywhere, so they go, and since this
+change they are named in the log when they go; before it they vanished without a
+line.
+
+### Order inside `open()`, and two costs
+
+`at` is assigned before the first `await`, because `App.tsx`'s effect re-runs on
+every render — `addressed` is a fresh `routes.parse()` object — and the
+comparison against `at` is the one thing stopping it re-entering. `docLoading`
+is **not** raised with it: that would swap the ledger for the loading page, and
+the textarea with it, before the flush had read the field, taking an IME
+composition that has not yet produced an `input` event — in a workbench that
+exists to write Chinese. It goes up once the words are written.
+
+`save()` re-reads a document only while `at` still names it. Without that, a
+flush on the way out is `POST` + a `GET /api/doc` of the document being left,
+thrown away under the loading screen, + the `GET` of the one arriving. It is
+decided from state, not from an argument, so the refresh rule keeps one
+spelling.
+
+The cost that remains is the one `onBlur` always had: a navigation now
+banks whatever was in the field, a half-typed sentence included, as `human`, and
+origin precedence then keeps unattended runs off it until somebody looks.
+
+### `beforeunload` moved to the shell
+
+It lived in `Toolbar`, which the refusal screen does not draw — and neither do
+`#/read/…`, `#/backends` or `#/routing`. A draft that failed to save has been
+walking into all three with no tab-close guard since the rebuild. It is in `App`
+now, found by the pass that attacked this package's own brief.
+
+### How it is tested, and what the tests cannot reach
+
+Twenty new tests; `npm test` goes from 39 to 59, in seven files. In
+`App.test.tsx` the field is the ledger's own row, reached with `querySelector`
+because `virtua` draws it inside a `visibility: hidden` wrapper that the
+accessibility tree does not contain. Assertions are on the request **body** —
+`postSave` posts to a fixed path, so an assertion on the path holds whatever the
+page did — and on its position in `calls` relative to the next document's read.
+`test/wire.ts` gained `answering`, so a whole-application test answers by path
+through the same recorder, and the older navigation block's own
+`globalThis.fetch` stub went with it; and `after`, so a test can look at the
+page while a request is in flight. The harness's own two promises — `install()`
+forgets an `answering` function, and `answering` outranks the queue — are pinned
+in `test/wire.test.ts`.
+
+Ten of the twenty fail against `e6fc06d`, and one of them is a defect the parent
+already had: a blur during a re-extract's reload posted the sentence onto the
+renumbered id. The other ten pass there because nothing there flushed, refused
+or stranded anything, and they pin the edges of the shape that now does — blanks
+and spaces are not wording, the tab closes freely once the words are written, a
+save that stays on its document still re-reads it, a superseded open's failure
+stays out of sight, a re-extract addresses the document on screen. One is a
+source scan: production code empties `drafts` in exactly one place and marks it
+stranded in exactly one other. It reads through `import.meta.glob` rather than
+`node:fs`, because the package's `types` carries no node declarations and should
+not start to, and it says in its own docstring that it cannot see ordering.
+
+Sixteen mutants were planted by hand first, each proved to have landed and
+restored from bytes held in memory with a sha1 check. That round left three
+survivors — the document being left re-read after the flush, `docLoading` raised
+with `at`, and a re-parse discarding silently — and one kill by accident:
+refusing to return to the document the words belong to was caught only by the
+re-parse tests, because the not-a-trap test returned after the server had come
+back. Each got the assertion it was missing.
+
+Then two lanes, each in its own worktree at the change's first commit and
+choosing its own mutants, planted sixteen and twenty-one and were left with
+thirteen and sixteen survivors, overlapping heavily, several already closed by
+the round above. They also found the `save()` defect described earlier, each
+with its own probe, and a harness gap: both ways of re-entering `open()` from
+the effect — `at` assigned after the flush, and `at` put back on a refusal —
+**hung the test file** rather than failing it, because every lap is answered in
+one microtask chain and no timer, so no test timeout, can fire. The navigation
+block's server now stops answering past 150 requests, which ends the chain, and
+the refusal test asserts a single attempt. Every survivor judged a real gap got
+a test. Eighteen mutants were replanted over two further rounds and every one
+dies against the test aimed at it — one of them, `at` assigned after the flush,
+only once the cap was in, having hung the first of the two rounds until its
+runner was killed. Two survivors were judged equivalent and left: a flush guard
+that skips a save of blanks only, and a clear condition that differs only when
+two opens of one document land inside a single fetch.
+
+A lane saw one file-level error on its very first run after `npm ci`, while its
+sibling was running vitest in the next worktree over. Seven fresh runs here —
+five with the vite cache removed, two after a complete reinstall — did not
+reproduce it; CI, which runs exactly that sequence, is where it would show.
+
+What jsdom cannot answer: real session history — that a refused navigation adds
+no entry is asserted through `history.length`, and what Back does next is the
+maintainer's check in a painted browser — an IME composition, and the row being
+typed in staying mounted, which in jsdom is not mounted at all once the address
+names another document; the ledger itself is what is asserted.
+
+### Left open, each with a package
+
+- A **lost-update conflict** forgets the reviewer's text and names only the
+  ids — on every save, not only a navigation's, and a live run makes it likely.
+  This package makes it more reachable by saving on navigations too.
+  `HANDOFF-091`.
+- **Callers that ignore what `save()` returns**: `onBlur` and Ctrl+Enter neither
+  await it nor read it, the run controls, Check, Render, Commit and *Read* await
+  it and discard it, and *Start over* asks nothing at all. With them, how long
+  typed words may live only in memory — a `pagehide` flush or a debounced save
+  would answer "no longer than N". `HANDOFF-092`.
+- **A re-parse this page did not make.** `lx run` re-extracts on every
+  invocation, so a terminal run against the open document renumbers the ids
+  with no signal here, and `seg_hash(target or "")` makes the lost-update token
+  blind between two untranslated segments. The flush now reaches that hazard on
+  a navigation where the old code only discarded. The complete answer is a
+  parse identity on `GET /api/doc` that `POST /api/save` echoes and the server
+  refuses when it is stale — a `contract_version` bump, which is why it is its
+  own package. `HANDOFF-093`.
+
 ## 2026-09-14 · The paragraph a reviewer is on lives in the address, and a second copy of it blanked the page
 
 Closing HANDOFF-084. The workbench worked for one click of a session. The
