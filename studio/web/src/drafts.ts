@@ -14,18 +14,54 @@
  * without anything subscribing to the text.
  *
  * The map is keyed by segment id, and **segment ids are reassigned from `s0001`
- * on every parse**. Anything that re-parses — a re-extract, opening another
- * document — calls `clear()`, and does it *before* the fetch rather than after:
- * on a failed fetch the old entries would otherwise stay armed against ids that
- * now name different text, and `token`'s `sha1("")` hashes an absent target and
- * an empty one alike, so between two untranslated segments the lost-update token
- * cannot catch it either.
+ * on every parse** — so an entry means something only while the parse it was
+ * typed against is the one on screen. Two things end that, and they are not the
+ * same thing: the page shows a different document, which `clear()` answers at
+ * the moment `doc` is replaced and not a statement earlier, and the server
+ * re-parses the document, which `strand()` answers at the moment the reply
+ * lands.
+ *
+ * It used to be one thing, cleared before the fetch, and the reason written here
+ * was that the next save would otherwise post the old ids "under the new
+ * address". That was not true: `save()` addresses `shown()`, which reads `doc`,
+ * and `open()` does not touch `doc` until its fetch returns — so a fetch that
+ * failed left the old entries pointing at the document still on screen, where
+ * they were correct. What the early clear really bought was the display, and it
+ * bought it a round trip too soon: `SegmentRow` reads `drafts.get(seg.id)` by id
+ * alone, so what must not happen is one document's words appearing in another's
+ * rows, and that becomes possible exactly when the rows change.
+ *
+ * Whoever leaves the document writes what is here out first — `store.open()` —
+ * so nothing is discarded that could still have been written. See
+ * `docs/decisions.md`, 2026-09-20.
  */
 
 const drafts = new Map<string, string>()
 const listeners = new Set<() => void>()
 
 let stamp = 0
+
+/**
+ * Whether the ids in this map still name the paragraphs they were typed into.
+ *
+ * A parse reassigns ids from `s0001`, so the instant the server accepts a
+ * re-extract every entry here is keyed on a number that now names some other
+ * paragraph — and the lost-update token cannot catch it, because `sha1("")`
+ * hashes an absent target and an empty one alike and a re-parse leaves runs of
+ * untranslated segments between which the token agrees.
+ *
+ * The act that asked for the re-parse says so, and it stays said until the new
+ * parse is on screen: a re-extract reloads the whole project and *then* re-opens
+ * the document, two round trips with the ledger still mounted, and a keystroke
+ * arriving in between would otherwise be indistinguishable from one typed
+ * against the parse that is gone. Emptying the map is not enough for the same
+ * reason.
+ *
+ * It is a fact about this page's own re-parse and says nothing about anybody
+ * else's: `lx extract` in a terminal renumbers with no signal here at all. See
+ * `docs/decisions.md`, 2026-09-20.
+ */
+let orphaned = false
 
 function changed(): void {
   stamp += 1
@@ -63,7 +99,24 @@ export function forget(written: Iterable<string>): void {
   if (touched) changed()
 }
 
+/**
+ * Say that a re-parse has landed, so nothing here can be written any more.
+ *
+ * Named by the act that causes it rather than inferred by the act that would
+ * suffer from it: `open()` cannot tell a document it is re-reading after a
+ * re-extract from one it is re-reading for any other reason, and guessing from
+ * the address is the enumeration this project has been caught reading as a
+ * definition six times over.
+ */
+export const strand = (): void => { orphaned = true }
+
+export const stranded = (): boolean => orphaned
+
+/** Forget everything, and with it the fact that a re-parse had voided it — the
+ *  two go together, because what makes the map writable again is a parse on
+ *  screen that the entries in it were typed against. */
 export function clear(): void {
+  orphaned = false
   if (!drafts.size) return
   drafts.clear()
   changed()

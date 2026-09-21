@@ -12,7 +12,7 @@
  * change mid-run repainted a ledger full of freshly enabled per-row controls.
  * A flag every control reads cannot be short by one.
  */
-import { useEffect, useState, useSyncExternalStore } from 'react'
+import { useState, useSyncExternalStore } from 'react'
 
 import { ask } from './Confirm'
 import { ModelPicker } from './ModelPicker'
@@ -42,15 +42,6 @@ export function Toolbar() {
 
   const dirty = useSyncExternalStore(drafts.subscribe, drafts.version)
   const [startingOver, setStartingOver] = useState(false)
-
-  // The unsaved-work guard. `beforeUnload` is the browser's only hook and it
-  // cannot say what is unsaved — but it is the difference between closing a tab
-  // and losing an afternoon's wording.
-  useEffect(() => {
-    const guard = (e: BeforeUnloadEvent) => { if (drafts.size()) e.preventDefault() }
-    window.addEventListener('beforeunload', guard)
-    return () => { window.removeEventListener('beforeunload', guard) }
-  }, [])
 
   if (!doc) return null
 

@@ -11,7 +11,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 
 import * as drafts from './drafts'
 import { useStore, visible } from './store'
-import { callsTo, lastCall, otherwise, replies } from './test/wire'
+import { answering, callsTo, lastCall, otherwise, replies } from './test/wire'
 import { CONTRACT_VERSION } from './contract'
 import type { DocResponse, Segment, StateResponse } from './contract'
 
@@ -223,5 +223,108 @@ describe('the filter', () => {
     expect(visible(d, 'failing').map(s => s.id)).toEqual(['s2'])
     expect(visible(d, 'held').map(s => s.id)).toEqual(['s3'])
     expect(visible(d, 'waived').map(s => s.id)).toEqual(['s4'])
+  })
+})
+
+/**
+ * The other half of "written before it is discarded": the act that makes
+ * writing impossible.
+ *
+ * A parse reassigns ids from `s0001`, so the moment the server accepts a
+ * re-extract every unsaved edit is keyed on a number that now names some other
+ * paragraph. Flushing one there would write a reviewer's sentence onto a
+ * paragraph nobody chose, with matching placeholders and a green `lx check` —
+ * and the lost-update token cannot catch it, because `sha1("")` hashes an
+ * absent target and an empty one alike and a re-parse leaves runs of
+ * untranslated segments.
+ *
+ * These pass against `e6fc06d` too, because nothing there flushed at all. They
+ * are the guard for the shape that now does.
+ */
+describe('a re-parse voids every unsaved edit, at the moment the server accepts it', () => {
+  const extracted = {
+    segments: 1, reused: 0, rejected: 0,
+    kept: [], ambiguous: [], replaced: [], waived_source: [],
+  }
+
+  it('never writes an edit into the numbering a re-extract has just replaced', async () => {
+    await openWith([segment({ id: 's0001' })])
+    drafts.set('s0001', '改過的句子。', '她沒有睡。')
+    replies({ body: extracted })
+    otherwise({ body: doc([segment({ id: 's0001' })]) })
+
+    await useStore.getState().extract()
+    expect(callsTo('/api/save')).toHaveLength(0)
+    expect(drafts.size()).toBe(0)
+  })
+
+  it('does not post the words a start-over was told to discard', async () => {
+    // The path with no save in front of it: the toolbar's plain Re-extract
+    // saves first and refuses the act while anything is left over, and Start
+    // over asks no such question. Its reviewer confirmed discarding the
+    // document's translations, not the sentence they were part-way through.
+    await openWith([segment({ id: 's0001' })])
+    drafts.set('s0001', '改過的句子。', '她沒有睡。')
+    replies({ body: extracted })
+    otherwise({ body: doc([segment({ id: 's0001', target: '', status: 'pending' })]) })
+
+    await useStore.getState().startOver('literary')
+    expect(callsTo('/api/save')).toHaveLength(0)
+    expect(drafts.size()).toBe(0)
+  })
+
+  it('holds across the reload, because the ledger is mounted for two more round trips', async () => {
+    // Emptying the map after the re-parse is not enough, and this is why: what
+    // follows is `GET /api/state` and then the document's own fetch, with the
+    // ledger still on screen the whole time. A keystroke arriving in that
+    // window is keyed on the parse that has just gone, and looks exactly like
+    // one that arrived before it.
+    await openWith([segment({ id: 's0001' })])
+    answering(call => {
+      if (call.path.startsWith('/api/state')) drafts.set('s0001', '打在重編號之後。', '她沒有睡。')
+      return null
+    })
+    replies({ body: extracted })
+    otherwise({ body: doc([segment({ id: 's0001' })]) })
+
+    await useStore.getState().extract()
+    expect(callsTo('/api/save')).toHaveLength(0)
+    expect(drafts.size()).toBe(0)
+  })
+})
+
+/**
+ * Where an unsaved edit may be destroyed at all.
+ *
+ * Every test above is about the *conditions* under which the discard fires,
+ * and a set of conditions is an enumeration of today's callers: `open()` has
+ * three, `HANDOFF-088` will make a fourth, and a test set written against three
+ * goes quietly wrong on the day of the fourth. This one is about *where* the
+ * destruction lives instead, which is the half that survives a call site
+ * nobody has written yet.
+ *
+ * It is a text scan and it says so: it cannot tell a call inside `open()` from
+ * one anywhere else in the same file. What it can say is that there is one.
+ */
+describe('where an unsaved edit may be destroyed', () => {
+  // Read through Vite's own module graph rather than through `node:fs`: this
+  // package's `types` deliberately carries no node declarations, and a scan
+  // that made it carry them would let the application itself reach for node
+  // APIs and still typecheck.
+  const tree = import.meta.glob('./**/*.{ts,tsx}', {
+    query: '?raw', import: 'default', eager: true,
+  }) as Record<string, string>
+
+  const production = Object.entries(tree).filter(([path]) =>
+    !/\.test\.tsx?$/.test(path) && !path.startsWith('./test/') && path !== './drafts.ts')
+
+  const sites = (call: string): [string, number][] =>
+    production
+      .map(([path, text]) => [path, text.split(call).length - 1] as [string, number])
+      .filter(([, n]) => n > 0)
+
+  it('empties the map in exactly one place, and marks it void in exactly one other', () => {
+    expect(sites('drafts.clear(')).toEqual([['./store.ts', 1]])
+    expect(sites('drafts.strand(')).toEqual([['./store.ts', 1]])
   })
 })
