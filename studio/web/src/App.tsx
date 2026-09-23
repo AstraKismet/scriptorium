@@ -17,10 +17,10 @@ import { Rail } from './components/Rail'
 import { Reading } from './components/Reading'
 import { RoutingScreen } from './components/RoutingScreen'
 import { Toolbar } from './components/Toolbar'
-import { CONTRACT_VERSION } from './contract'
+import { CONTRACT_VERSION, type DocAddress } from './contract'
 import * as drafts from './drafts'
 import * as routes from './router'
-import { useStore } from './store'
+import { notExtracted, useStore } from './store'
 
 export function App() {
   const boot = useStore(s => s.boot)
@@ -137,6 +137,8 @@ function Main() {
   const doc = useStore(s => s.doc)
   const docLoading = useStore(s => s.docLoading)
   const docError = useStore(s => s.docError)
+  const readFailed = useStore(s => s.readFailed)
+  const state = useStore(s => s.state)
   const open = useStore(s => s.open)
 
   const addressed = route.name === 'doc' || route.name === 'read' ? route : null
@@ -144,16 +146,23 @@ function Main() {
   // The address is what decides which document is open, so the back button, a
   // deep link and every entry in the rail are one path rather than several.
   //
-  // This is the only thing that opens a document. `store.reExtract` calls
-  // `open` too, and only to re-read the one `at` already names, once its
-  // re-parse has landed — never one the address does not name. That sentence
-  // was false twice before it was true: a comment here said nothing else called
-  // `open` while `Rail`'s *Not yet extracted* entry did, beside the address,
-  // and lost its document to this effect a render later; since HANDOFF-088 that
-  // entry navigates like every other link. `open()` still writes unsaved words
-  // out itself rather than leaving it to this effect, because leaving a
-  // document is what costs them and not who asked — the rule holds for a
-  // caller nobody has written yet.
+  // This effect turns the address into `at`, and nothing else writes `at`:
+  // `open()` is its only writer, and its one other caller, `store.reExtract`,
+  // calls it only for the document `at` already names, once a re-parse has
+  // landed. That is a re-read after the toolbar's Re-extract, and the first
+  // successful read on the page for a file nobody had extracted, where `at`
+  // named the file while `doc` stayed on the document before it. `at` outlives
+  // a document route — on `#/backends` this returns early and `at` keeps the
+  // last document — which is harmless and is why the sentence is about `at`
+  // rather than the address.
+  //
+  // It was false twice before it was this: a comment here said nothing else
+  // called `open` while `Rail`'s *Not yet extracted* entry did, beside the
+  // address, and lost its document to this effect a render later. Since
+  // HANDOFF-088 that entry is a link like every other. `open()` still writes
+  // unsaved words out itself rather than leaving it to this effect, because
+  // leaving a document is what costs them and not who asked — the rule holds
+  // for a caller nobody has written yet.
   useEffect(() => {
     if (!addressed) return
     if (at && at.src === addressed.src && at.lang === addressed.lang) return
@@ -193,6 +202,18 @@ function Main() {
         <div className="empty-page">
           <h3>{addressed.src}</h3>
           <p>{docError}</p>
+          {/*
+            Two facts, and both are needed. The read has just failed — fresh,
+            and about this one file — and the project lists the file as not yet
+            extracted, which is a snapshot a terminal can have made stale. A
+            stale entry for a file somebody has since extracted never gets here:
+            its read succeeds and the document opens. And a page that declined
+            to leave another document over words it could not write is not a
+            failed read, so it offers nothing.
+          */}
+          {readFailed && notExtracted(state, addressed) && (
+            <NotExtracted src={addressed.src} lang={addressed.lang} />
+          )}
         </div>
         <LogDrawer />
       </main>
@@ -226,5 +247,55 @@ function Main() {
       </div>
       <LogDrawer />
     </main>
+  )
+}
+
+/**
+ * The extract, offered on the page of the file it is about.
+ *
+ * The rail's *Not yet extracted* entry leads here and does nothing else, and so
+ * does a hand-typed link to such a file — one page, whichever way a reviewer
+ * arrived. The request names the file this page is about and nothing on the
+ * screen, and `reExtract` then opens it, because `at` names it.
+ *
+ * **No confirmation, and that is decided rather than inherited.** The toolbar's
+ * asks only when a re-parse could discard a translation, and this is drawn only
+ * after a read of this very file has just failed while the project lists it as
+ * never extracted — so there is no translation, hold or waiver to discard, and
+ * the document on screen before this one is not touched. What is left is the
+ * interval between that read and the click, which a terminal could fill; the
+ * click would then be a plain re-extract, which keeps every translation whose
+ * paragraph is unchanged — the act `lx run` performs on every invocation.
+ */
+function NotExtracted({ src, lang }: DocAddress) {
+  const running = useStore(s => s.running)
+  const extract = useStore(s => s.extract)
+  const say = useStore(s => s.say)
+  return (
+    <>
+      <p>
+        This file matches the project&rsquo;s <code>sources</code> and has not been extracted into{' '}
+        {lang}. Extracting reads it and parses it into segments; wording already banked in the
+        translation memory is offered to them, and nothing that is tracked is touched.
+      </p>
+      <p>
+        <button
+          type="button"
+          className="key"
+          disabled={running}
+          title={running ? 'Waits for the run in flight: one act at a time.' : undefined}
+          onClick={() => {
+            // Read now rather than from the render: a click in the same frame as
+            // the one that started a run would otherwise log a header over a
+            // request `reExtract` then declines to send.
+            if (useStore.getState().running) return
+            say(`— extract ${src} [${lang}] —`, 'plain', true)
+            void extract({ src, lang })
+          }}
+        >
+          Extract {src}
+        </button>
+      </p>
+    </>
   )
 }

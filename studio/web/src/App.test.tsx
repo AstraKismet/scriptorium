@@ -18,6 +18,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { App } from './App'
 import { SegmentRow } from './components/SegmentRow'
 import * as drafts from './drafts'
+import * as routes from './router'
 import { useStore } from './store'
 import { answering, calls, callsTo, otherwise, replies } from './test/wire'
 import type { Answer } from './test/wire'
@@ -711,8 +712,10 @@ describe('leaving a document with words that were never written', () => {
  * address, `App.tsx`'s effect put the addressed document back a render later,
  * and the extract read `shown()` — still the open document.
  *
- * The fixture answers as the server does: `GET /api/doc` for a file with no
- * state is a 400 carrying `no state for …`, until an extract has made one.
+ * The entry is a link now, like every other in the rail, and the extract is
+ * offered on the page it lands on. The fixture answers as the server does:
+ * `GET /api/doc` for a file with no state is a 400 carrying `no state for …`,
+ * until an extract has made one.
  */
 describe('the rail\'s Not yet extracted entry', () => {
   const fresh: DocResponse = {
@@ -739,8 +742,14 @@ describe('the rail\'s Not yet extracted entry', () => {
    *  server accepts for it, and read by every later answer. */
   let made = false
 
-  const serve = (over: { extract?: Answer; save?: Answer } = {}): void => {
-    made = false
+  /**
+   * `listed` is what `GET /api/state` says about the file, `made` what the
+   * server really holds — two facts a terminal can pull apart, and one test here
+   * is about exactly that.
+   */
+  const serve = (over: { extract?: Answer; save?: Answer; made?: boolean; listed?: () => boolean } = {}): void => {
+    made = over.made ?? false
+    const listed = over.listed ?? (() => !made)
     let requests = 0
     answering(call => {
       requests += 1
@@ -753,9 +762,9 @@ describe('the rail\'s Not yet extracted entry', () => {
           docs: [
             ...state.docs,
             { source: second.source, lang: 'zh-TW', total: 2, done: 0 },
-            ...(made ? [{ source: fresh.source, lang: 'zh-TW', total: 4, done: 0 }] : []),
+            ...(listed() ? [] : [{ source: fresh.source, lang: 'zh-TW', total: 4, done: 0 }]),
           ],
-          untracked: made ? [] : [{ source: fresh.source, lang: 'zh-TW' }],
+          untracked: listed() ? [{ source: fresh.source, lang: 'zh-TW' }] : [],
         }
         return { body: project }
       }
@@ -801,55 +810,43 @@ describe('the rail\'s Not yet extracted entry', () => {
     await waitFor(() => { expect(screen.getByText('/3 translated')).toBeTruthy() }, { timeout: 4000 })
   }
 
+  // Matches the entry under either label, `extract` before HANDOFF-088 and `not
+  // extracted` after, so a run against the parent fails on what the click did
+  // rather than on how the button was spelled. A tracked entry's label is a count.
   const entry = (): HTMLElement => screen.getByRole('button', { name: /docs\/untracked\.md.*extract/ })
+  const offer = (): HTMLButtonElement => screen.getByRole('button', { name: `Extract ${fresh.source}` })
+  const offered = (): boolean => screen.queryByRole('button', { name: `Extract ${fresh.source}` }) !== null
+
+  /** Click the entry and wait for the page it leads to. */
+  const landed = async (): Promise<void> => {
+    await userEvent.setup().click(entry())
+    await waitFor(() => { expect(offer()).toBeTruthy() }, { timeout: 4000 })
+  }
 
   const extracts = (): unknown[] => callsTo('/api/extract').map(c => c.body)
-
-  const readOf = (src: string): number =>
-    calls.findIndex(c => c.path.startsWith('/api/doc') && c.path.includes(encodeURIComponent(src)))
 
   const logSays = (text: string): boolean =>
     useStore.getState().log.some(l => l.text.includes(text))
 
-  it('extracts the file that was clicked, not the one that is open, and then opens it', async () => {
-    serve()
-    await opened()
-
-    await userEvent.setup().click(entry())
-    await waitFor(() => { expect(extracts()).toHaveLength(1) }, { timeout: 4000 })
-    // One request, and it names the file that was clicked — as a plain extract:
-    // a first extract has no register to keep and nothing to reset.
-    expect(extracts()).toEqual([{ src: fresh.source, lang: 'zh-TW' }])
-
-    await waitFor(() => {
-      expect(window.location.hash).toBe(address(fresh.source))
-      expect(screen.getByText('/4 translated')).toBeTruthy()
-    }, { timeout: 4000 })
-    await settle()
-    expect(extracts()).toHaveLength(1)
-    // The file is read only once it exists, so no `no state for …` is ever
-    // drawn or logged on the way to it.
-    expect(readOf(fresh.source)).toBeGreaterThan(calls.indexOf(callsTo('/api/extract')[0]!))
-    expect(logSays('no state for')).toBe(false)
-    // The log names what was extracted, and says what the extract did.
-    expect(logSays(`— extract ${fresh.source} [zh-TW] —`)).toBe(true)
-    expect(logSays('4 segments, 0 reused')).toBe(true)
-    // And the document that was open was never re-read by anything but the
-    // address that first opened it.
-    expect(calls.filter(c => c.path.startsWith('/api/doc') && c.path.includes(encodeURIComponent(doc.source))))
-      .toHaveLength(1)
-    // It is tracked now: the rail lists it with the others.
-    expect(screen.queryByRole('button', { name: /docs\/untracked\.md.*extract/ })).toBeNull()
-  }, 15000)
-
-  it('is a history entry, like every other way of opening a document', async () => {
+  it('is a link: it opens the file\'s page, extracts nothing, and adds one history entry', async () => {
     serve()
     await opened()
     const entries = window.history.length
 
     await userEvent.setup().click(entry())
-    await waitFor(() => { expect(screen.getByText('/4 translated')).toBeTruthy() }, { timeout: 4000 })
+    await settle()
+    // A link sends no act. Against `83a865b` this is where it fails, and the
+    // failure is the defect as measured: one extract, naming `book/ch1.md`.
+    expect(extracts()).toEqual([])
+    await waitFor(() => { expect(offer()).toBeTruthy() }, { timeout: 4000 })
+    expect(window.location.hash).toBe(address(fresh.source))
+    expect(screen.getByRole('heading', { name: fresh.source })).toBeTruthy()
     expect(window.history.length).toBe(entries + 1)
+    expect(entry().textContent).toContain('not extracted')
+    // And following it is not an error: the page explains itself, so the
+    // server's `no state for …` is shown there and not logged in red.
+    expect(screen.getByText(/^no state for docs\/untracked\.md/)).toBeTruthy()
+    expect(useStore.getState().log.some(l => l.level === 'bad')).toBe(false)
 
     // Back returns to the chapter and its paragraph.
     window.history.back()
@@ -859,11 +856,50 @@ describe('the rail\'s Not yet extracted entry', () => {
     }, { timeout: 4000 })
   }, 15000)
 
-  it('does not strand the words in the open document, and a refused open does not cost them', async () => {
+  it('extracts the file its page is about, not the document that was open, and then shows it', async () => {
+    serve()
+    await opened()
+    await landed()
+
+    await userEvent.setup().click(offer())
+    await waitFor(() => { expect(extracts()).toHaveLength(1) }, { timeout: 4000 })
+    // The request names the file that was clicked — as a plain extract: a first
+    // extract has no register to keep and nothing to reset.
+    expect(extracts()).toEqual([{ src: fresh.source, lang: 'zh-TW' }])
+
+    await waitFor(() => { expect(screen.getByText('/4 translated')).toBeTruthy() }, { timeout: 4000 })
+    await settle()
+    expect(extracts()).toHaveLength(1)
+    expect(window.location.hash).toBe(address(fresh.source))
+    // The log names what was extracted, and says what the extract did.
+    expect(logSays(`— extract ${fresh.source} [zh-TW] —`)).toBe(true)
+    expect(logSays('4 segments, 0 reused')).toBe(true)
+    // The document that was open was read once, by the address that opened it,
+    // and nothing re-parsed it.
+    expect(calls.filter(c => c.path.startsWith('/api/doc') && c.path.includes(encodeURIComponent(doc.source))))
+      .toHaveLength(1)
+    // It is tracked now: the rail lists it with the others.
+    expect(screen.queryByRole('button', { name: /not extracted/ })).toBeNull()
+  }, 15000)
+
+  it('opens a file a terminal has extracted since the list was read, and offers no extract', async () => {
+    // The list is a snapshot taken at startup; the server already holds state.
+    // The page's own read is the fresh fact, and it succeeds.
+    serve({ made: true, listed: () => true })
+    await opened()
+
+    await userEvent.setup().click(entry())
+    await waitFor(() => { expect(screen.getByText('/4 translated')).toBeTruthy() }, { timeout: 4000 })
+    await settle()
+    expect(offered()).toBe(false)
+    expect(extracts()).toEqual([])
+  }, 15000)
+
+  it('offers no extract on a page that declined to leave the chapter, and the chapter\'s words survive', async () => {
     // The test HANDOFF-087 named for this package: `POST /api/save` failing
-    // while a dirty field is open. The old button re-extracted the document on
-    // screen here too — and a re-extract marks every unsaved word in it
-    // unwritable, so the words were gone as well as the wrong file parsed.
+    // while a dirty field is open. The old button re-extracted the chapter here
+    // — and a re-extract marks every unsaved word in it unwritable, so the words
+    // went as well as the wrong file being parsed.
     serve({ save: { status: 400, body: { error: 'nothing is listening on 8787' } } })
     await opened()
     await userEvent.setup().type(document.querySelector<HTMLTextAreaElement>('.ledger textarea')!, '燈還亮著。')
@@ -874,25 +910,69 @@ describe('the rail\'s Not yet extracted entry', () => {
     }, { timeout: 4000 })
     await settle()
 
-    expect(extracts()).toEqual([{ src: fresh.source, lang: 'zh-TW' }])
-    // The file that was clicked is extracted either way: the page declined to
-    // *leave*, which is a fact about the words in this chapter and not about
-    // the other file.
-    expect(logSays('4 segments, 0 reused')).toBe(true)
-    // The words are still this page's, still writable, and still in their row.
+    // The page did not read the file — it declined to leave — so it has no
+    // fresh fact to offer an extract on.
+    expect(offered()).toBe(false)
+    expect(extracts()).toEqual([])
     expect(drafts.get('s0003')).toBe('燈還亮著。')
     expect(drafts.stranded()).toBe(false)
     expect(useStore.getState().doc?.source).toBe(doc.source)
-    expect(logSays('could not be written anywhere')).toBe(false)
   }, 15000)
 
-  it('does not move a reviewer who has gone elsewhere while it was extracting', async () => {
+  it('stays on the file\'s page when the extract is refused, with the reason in the log', async () => {
+    serve({ extract: { status: 400, body: { error: 'docs/untracked.md: not UTF-8 and no configured encoding reads it' } } })
+    await opened()
+    await landed()
+
+    await userEvent.setup().click(offer())
+    await waitFor(() => { expect(logSays('not UTF-8')).toBe(true) }, { timeout: 4000 })
+    await settle()
+    expect(window.location.hash).toBe(address(fresh.source))
+    expect(offer().disabled).toBe(false)
+    // Only the landing read: nothing re-read a file the server said it could
+    // not make.
+    expect(callsTo('/api/doc').filter(c => c.path.includes(encodeURIComponent(fresh.source)))).toHaveLength(1)
+  }, 15000)
+
+  it('waits for a run in flight, rather than logging an extract it will not send', async () => {
+    serve()
+    await opened()
+    await landed()
+    act(() => { useStore.setState({ running: true }) })
+
+    expect(offer().disabled).toBe(true)
+    await userEvent.setup().click(offer())
+    await settle()
+    expect(extracts()).toHaveLength(0)
+    expect(logSays('— extract')).toBe(false)
+  }, 15000)
+
+  it('offers the same page to a hand-typed link, and adds no history entry of its own', async () => {
+    // Slashes left bare, which `parse` accepts on purpose. The extract re-reads
+    // what the address names, and nothing navigates — so the address stays
+    // spelled the way the reviewer typed it.
+    serve()
+    startAt('#/doc/zh-TW/docs/untracked.md')
+    render(<App />)
+    await waitFor(() => { expect(offer()).toBeTruthy() }, { timeout: 4000 })
+    const entries = window.history.length
+
+    await userEvent.setup().click(offer())
+    await waitFor(() => { expect(screen.getByText('/4 translated')).toBeTruthy() }, { timeout: 4000 })
+    await settle()
+    expect(extracts()).toEqual([{ src: fresh.source, lang: 'zh-TW' }])
+    expect(window.location.hash).toBe('#/doc/zh-TW/docs/untracked.md')
+    expect(window.history.length).toBe(entries)
+  }, 15000)
+
+  it('does not pull back a reviewer who left the page while it was extracting', async () => {
     let release: () => void = () => undefined
     serve({ extract: { body: extracted, after: new Promise<void>(r => { release = r }) } })
     await opened()
+    await landed()
     const user = userEvent.setup()
 
-    await user.click(entry())
+    await user.click(offer())
     await waitFor(() => { expect(extracts()).toHaveLength(1) })
     await user.click(screen.getByRole('button', { name: /book\/ch2\.md/ }))
     await waitFor(() => { expect(screen.getByText('/2 translated')).toBeTruthy() }, { timeout: 4000 })
@@ -900,55 +980,162 @@ describe('the rail\'s Not yet extracted entry', () => {
     release()
     await waitFor(() => { expect(logSays('4 segments, 0 reused')).toBe(true) }, { timeout: 4000 })
     await settle()
-    // The click asked for a file that did not exist yet; by the time it did,
-    // the reviewer had chosen something else, and that choice stands.
     expect(window.location.hash).toBe(address(second.source))
     expect(screen.getByText('/2 translated')).toBeTruthy()
-    expect(readOf(fresh.source)).toBe(-1)
+    // It is made, and listed as made — nothing read it, because nothing asked.
+    expect(screen.queryByRole('button', { name: /not extracted/ })).toBeNull()
+    expect(callsTo('/api/doc').filter(c => c.path.includes(encodeURIComponent(fresh.source)))).toHaveLength(1)
   }, 15000)
+})
 
-  it('stays where it was when the extract is refused, with the reason in the log', async () => {
-    serve({ extract: { status: 400, body: { error: 'docs/untracked.md: not UTF-8 and no configured encoding reads it' } } })
-    await opened()
+/**
+ * The toolbar's two extracts, driven through the toolbar.
+ *
+ * Every store-level test calls `extract` and `startOver` with an address it
+ * builds itself, so the address these controls pass was covered by nothing: two
+ * independent mutation lanes swapped its fields, hard-coded its language and
+ * sent the document's old register in place of the one typed, and all of it
+ * survived (HANDOFF-088). These click the controls instead.
+ *
+ * jsdom 30 has no `HTMLDialogElement.showModal`, so it is stood in for here —
+ * locally, because nothing else in the suite opens a dialog and a harness-wide
+ * stand-in would answer for tests that never asked it to.
+ */
+describe('the toolbar\'s re-extract and start over', () => {
+  const japanese: DocResponse = { ...doc, lang: 'ja' }
+  const extracted = { segments: 3, reused: 3, rejected: 0, kept: [], ambiguous: [], replaced: [], waived_source: [] }
+  const empty: DocResponse = {
+    ...doc,
+    source: 'book/ch2.md',
+    report: { segments: 1, translated: 0, errors: 0, warnings: 0, by_rule: {} },
+    segments: [{ ...doc.segments[2]!, id: 's0001', source: 'Morning came late.', target: '', token: 'u1', issues: [] }],
+  }
 
-    await userEvent.setup().click(entry())
-    await waitFor(() => { expect(logSays('not UTF-8')).toBe(true) }, { timeout: 4000 })
-    await settle()
+  const real = {
+    showModal: Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, 'showModal'),
+    close: Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, 'close'),
+  }
+  beforeEach(() => {
+    Object.defineProperty(HTMLDialogElement.prototype, 'showModal', {
+      configurable: true,
+      value: function showModal(this: HTMLDialogElement) { this.setAttribute('open', '') },
+    })
+    Object.defineProperty(HTMLDialogElement.prototype, 'close', {
+      configurable: true,
+      value: function close(this: HTMLDialogElement) { this.removeAttribute('open') },
+    })
+  })
+  afterEach(() => {
+    for (const [name, d] of Object.entries(real)) {
+      if (d) Object.defineProperty(HTMLDialogElement.prototype, name, d)
+      else delete (HTMLDialogElement.prototype as unknown as Record<string, unknown>)[name]
+    }
+  })
 
-    expect(window.location.hash).toBe(address(doc.source, 's0003'))
-    expect(screen.getByText('/3 translated')).toBeTruthy()
-    // Nothing tried to read a file the server has just said it could not make.
-    expect(readOf(fresh.source)).toBe(-1)
-    expect(entry()).toBeTruthy()
-  }, 15000)
+  /** `slow`, when given, holds the n-th read of `book/ch1.md` until it settles. */
+  const serve = (first: DocResponse, slow?: { n: number; until: Promise<void> }): void => {
+    const reads = new Map<string, number>()
+    answering(call => {
+      const path = call.path
+      if (path.startsWith('/api/state')) {
+        return { body: { ...state, docs: [...state.docs, { source: empty.source, lang: 'zh-TW', total: 1, done: 0 }] } }
+      }
+      if (path.startsWith('/api/models')) return { body: { provider: 'local', configured: 'qwen', models: [], error: null } }
+      if (path.startsWith('/api/extract')) return { body: extracted }
+      if (path.startsWith('/api/doc')) {
+        const src = new URLSearchParams(path.split('?')[1]).get('src') ?? ''
+        const n = (reads.get(src) ?? 0) + 1
+        reads.set(src, n)
+        if (src === empty.source) return { body: empty }
+        return slow && n === slow.n ? { body: first, after: slow.until } : { body: first }
+      }
+      if (path.startsWith('/api/sentences')) return { body: { sentences: [] } }
+      return { body: { source: '', lang: first.lang, tone: null, ids: [], voice: '', voice_notes: [], algorithm: 'none', cutoff: 0, records: 0, segments: [] } }
+    })
+  }
 
-  it('opens the file it extracted when the address already names it', async () => {
-    // A hand-typed link to a file nobody has extracted: the page says so, and
-    // the rail offers the extract. The address names the file already, so no
-    // navigation can move it — the extract itself re-reads what the address
-    // names.
-    serve()
-    startAt(address(fresh.source))
+  const startAt = (hash: string): void => {
+    window.location.hash = hash
+    window.dispatchEvent(new HashChangeEvent('hashchange'))
+  }
+
+  const opened = async (d: DocResponse): Promise<void> => {
+    startAt(`#/doc/${d.lang}/${encodeURIComponent(d.source)}`)
     render(<App />)
-    await waitFor(() => { expect(useStore.getState().docError).toMatch(/^no state for docs\/untracked\.md/) }, { timeout: 4000 })
-    expect(screen.getByRole('heading', { name: fresh.source })).toBeTruthy()
+    await waitFor(() => { expect(screen.getByText(`/${d.report.segments} translated`)).toBeTruthy() }, { timeout: 4000 })
+  }
 
-    await userEvent.setup().click(entry())
-    await waitFor(() => { expect(screen.getByText('/4 translated')).toBeTruthy() }, { timeout: 4000 })
-    expect(extracts()).toEqual([{ src: fresh.source, lang: 'zh-TW' }])
-    expect(window.location.hash).toBe(address(fresh.source))
+  /** The dialog's own button, not the toolbar's control of the same name. */
+  const answer = async (label: string): Promise<void> => {
+    await waitFor(() => { expect(document.querySelector('dialog[open]')).not.toBeNull() }, { timeout: 4000 })
+    const dialog = document.querySelector<HTMLDialogElement>('dialog[open]')!
+    await userEvent.setup().click(within(dialog).getByRole('button', { name: label }))
+  }
+
+  it('re-extracts the document its dialog named, in that document\'s language', async () => {
+    serve(japanese)
+    await opened(japanese)
+
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Re-extract' }))
+    await answer('Re-extract')
+    await waitFor(() => { expect(callsTo('/api/extract')).toHaveLength(1) }, { timeout: 4000 })
+    expect(callsTo('/api/extract')[0]!.body).toEqual({ src: doc.source, lang: 'ja' })
   }, 15000)
 
-  it('is not offered while a run is in flight, rather than logging an extract it will not send', async () => {
-    serve()
-    await opened()
-    act(() => { useStore.setState({ running: true }) })
+  it('starts over in the register the reviewer typed, on the document its dialog named', async () => {
+    serve(japanese)
+    await opened(japanese)
+    const user = userEvent.setup()
 
-    expect((entry() as HTMLButtonElement).disabled).toBe(true)
-    await userEvent.setup().click(entry())
-    await settle()
-    expect(extracts()).toHaveLength(0)
-    expect(logSays('— extract')).toBe(false)
+    await user.click(screen.getByRole('button', { name: /Start over in another register/ }))
+    await user.type(screen.getByPlaceholderText('type a register'), 'plain')
+    await user.click(screen.getByRole('button', { name: 'Start over…' }))
+    await answer('Discard and re-extract')
+    await waitFor(() => { expect(callsTo('/api/extract')).toHaveLength(1) }, { timeout: 4000 })
+    // Not the register the document is frozen in (`literary`), which is shown
+    // beside the field precisely so it is not mistaken for the value.
+    expect(callsTo('/api/extract')[0]!.body).toEqual({ src: doc.source, lang: 'ja', reset: true, tone: 'plain' })
+  }, 15000)
+
+  it('does not decide its confirmation from a document the reviewer moved to', async () => {
+    // Its `refresh()` re-reads whatever is on screen. Held long enough for the
+    // reviewer to open an untranslated chapter, the count it then read was that
+    // chapter's — zero — so the dialog was skipped and a document holding
+    // translations was re-parsed unasked (found by the review of HANDOFF-088).
+    let release: () => void = () => undefined
+    serve(doc, { n: 2, until: new Promise<void>(r => { release = r }) })
+    await opened(doc)
+    const user = userEvent.setup()
+
+    await user.click(screen.getByRole('button', { name: 'Re-extract' }))
+    await waitFor(() => { expect(callsTo('/api/doc')).toHaveLength(2) })
+    await user.click(screen.getByRole('button', { name: /book\/ch2\.md/ }))
+    await waitFor(() => { expect(screen.getByText('/1 translated')).toBeTruthy() }, { timeout: 4000 })
+    release()
+    await new Promise(r => { setTimeout(r, 200) })
+
+    expect(document.querySelector('dialog[open]')).toBeNull()
+    expect(callsTo('/api/extract')).toEqual([])
+    expect(useStore.getState().log.some(l => l.level === 'warn' && l.text.includes('was not re-extracted'))).toBe(true)
+  }, 15000)
+
+  it('logs no header over an extract a run has started in front of', async () => {
+    // The run buttons stay enabled while Re-extract saves and re-reads, so a
+    // run can start in that window, and `reExtract` then declines the extract.
+    let release: () => void = () => undefined
+    serve(doc, { n: 2, until: new Promise<void>(r => { release = r }) })
+    await opened(doc)
+
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Re-extract' }))
+    await waitFor(() => { expect(callsTo('/api/doc')).toHaveLength(2) })
+    act(() => { useStore.setState({ running: true }) })
+    release()
+    await answer('Re-extract')
+    await new Promise(r => { setTimeout(r, 100) })
+
+    expect(callsTo('/api/extract')).toEqual([])
+    expect(useStore.getState().log.some(l => l.text.startsWith('— re-extract'))).toBe(false)
+    expect(useStore.getState().log.some(l => l.level === 'warn' && l.text.includes('a run started'))).toBe(true)
   }, 15000)
 })
 
@@ -1043,4 +1230,57 @@ describe('the margin after a re-parse', () => {
     // The cache is for exactly this: a second look at a paragraph is free.
     expect(callsTo('/api/style')).toHaveLength(asked)
   }, 15000)
+
+  it('does not keep a reply asked in the old register as the new register\'s answer', async () => {
+    // The ledger stays mounted through a start-over's request, so a reviewer
+    // who moves meanwhile asks about a paragraph in the register that is about
+    // to go — and the reply can land after the page has emptied the cache for
+    // the next one. Written into whichever map was current when it landed, it
+    // was served as the new register's brief on the next look at that
+    // paragraph. Found by the review of HANDOFF-088, and older than it.
+    let tone = 'literary'
+    let releaseExtract: () => void = () => undefined
+    let holdNextStyle = false
+    const heldStyles: Array<() => void> = []
+    answering(call => {
+      const path = call.path
+      if (path.startsWith('/api/state')) return { body: state }
+      if (path.startsWith('/api/models')) return { body: { provider: 'local', configured: 'qwen', models: [], error: null } }
+      if (path.startsWith('/api/extract')) {
+        return { body: extracted, after: new Promise<void>(r => { releaseExtract = () => { tone = 'plain'; r() } }) }
+      }
+      if (path.startsWith('/api/doc')) return { body: { ...doc, tone } }
+      if (path.startsWith('/api/style')) {
+        const id = (call.body as { ids: string[] }).ids[0]
+        // Answered in the register the server holds when the request arrives.
+        const body = { source: doc.source, lang: 'zh-TW', tone, ids: [id], voice: `brief for ${tone}`, voice_notes: [] }
+        if (!holdNextStyle) return { body }
+        holdNextStyle = false
+        return { body, after: new Promise<void>(r => { heldStyles.push(r) }) }
+      }
+      return { body: { algorithm: 'none', cutoff: 0, records: 0, segments: [] } }
+    })
+    startAt('#/doc/zh-TW/book%2Fch1.md?seg=s0001')
+    render(<App />)
+    await waitFor(() => { expect(screen.getByText('brief for literary')).toBeTruthy() }, { timeout: 4000 })
+
+    let done: Promise<boolean> = Promise.resolve(true)
+    act(() => { done = useStore.getState().startOver({ src: doc.source, lang: 'zh-TW' }, 'plain') })
+    await waitFor(() => { expect(callsTo('/api/extract')).toHaveLength(1) })
+    holdNextStyle = true
+    act(() => { routes.focus(doc.source, 'zh-TW', 's0002') })
+    await waitFor(() => { expect(heldStyles).toHaveLength(1) }, { timeout: 3000 })
+
+    releaseExtract()
+    await act(async () => { await done })
+    await waitFor(() => { expect(useStore.getState().doc?.tone).toBe('plain') }, { timeout: 3000 })
+    await act(async () => { heldStyles[0]!(); await new Promise(r => { setTimeout(r, 20) }) })
+
+    act(() => { routes.focus(doc.source, 'zh-TW', 's0003') })
+    await waitFor(() => { expect(screen.getByText('brief for plain')).toBeTruthy() }, { timeout: 3000 })
+    act(() => { routes.focus(doc.source, 'zh-TW', 's0002') })
+    await new Promise(r => { setTimeout(r, 1000) })
+    expect(screen.queryByText('brief for literary')).toBeNull()
+    expect(screen.getByText('brief for plain')).toBeTruthy()
+  }, 20000)
 })

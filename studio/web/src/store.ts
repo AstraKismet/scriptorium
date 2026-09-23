@@ -63,6 +63,13 @@ interface Store {
   doc: DocResponse | null
   docLoading: boolean
   docError: string
+  /**
+   * Whether `docError` is the server's answer to reading `at`, rather than this
+   * page declining to leave a document whose words it could not write. The two
+   * draw on one screen and mean opposite things: only a read that failed can be
+   * a file nobody has extracted yet, and only that screen offers the extract.
+   */
+  readFailed: boolean
 
   /** One run at a time, and every entry point reads it. */
   running: boolean
@@ -131,10 +138,11 @@ interface Store {
    * Read a source and parse it, keeping the frozen register if it has one.
    *
    * **The document is named by the caller**, never read off the screen: the
-   * toolbar names the one its confirmation named, and the rail names a file that
-   * is not open at all and cannot be until this has made it exist. It used to
-   * read `shown()`, and the rail's *Not yet extracted* entry re-extracted
-   * whatever document was open (HANDOFF-088). True when the server accepted it.
+   * toolbar names the one its confirmation named, and the page for a file
+   * nobody has extracted names that file — which is not on screen at all, and
+   * cannot be until this has made it exist. It used to read `shown()`, and the
+   * rail's *Not yet extracted* entry re-extracted whatever document was open
+   * (HANDOFF-088). True when the server accepted it.
    */
   extract: (where: DocAddress) => Promise<boolean>
   /**
@@ -352,9 +360,10 @@ async function reExtract(
     // when, and only when, the document re-parsed is the one those edits were
     // typed in. That is `shown()`, read now: `drafts` holds the words of the
     // document on screen, and a re-parse of any other document renumbers
-    // nothing they are keyed on. Marking them anyway is what the rail's entry
-    // would do on its way to a file that is not open, and the words would then
-    // go as "renumbered" by a parse that never touched them.
+    // nothing they are keyed on. Marked anyway, they would go as "renumbered" by
+    // a parse that never touched them — an extract from the page for a file
+    // nobody has extracted leaves `doc` on the document before it, whose words
+    // that page may be holding because it could not write them.
     //
     // It is said here rather than left for the re-open below to notice: what
     // follows is `reloadState()` and then a fetch, two round trips with the
@@ -416,15 +425,16 @@ async function reExtract(
     // hashes an absent target and an empty one alike, so between two
     // untranslated segments the lost-update check cannot catch it either.
     //
-    // **Only while `at` still names it.** This re-reads the document the address
-    // already asked for; it never opens one the address does not name — that is
-    // `App.tsx`'s effect's, and a second opener is how the rail's entry lost its
-    // document. So a reviewer who moved on while the extract was in flight is
-    // not pulled back, and a file the rail extracts from another document is
-    // opened by the navigation the rail makes next. `at` rather than the screen,
-    // because a hand-typed link to a file with no state leaves `doc` on the
-    // previous document while `at` names the file — and once this has made the
-    // file exist, reading it is exactly what that address was asking for.
+    // **Only while `at` still names it.** `at` is set from the address and
+    // nothing else, so this reads what the address already asked for; it never
+    // opens one the address does not name — that is `App.tsx`'s effect's, and a
+    // second opener is how the rail's entry lost its document. So a reviewer who
+    // moved on while the extract was in flight is not pulled back. `at` rather
+    // than the screen, because the page for a file with no state — reached from
+    // the rail or by a hand-typed link — leaves `doc` on the previous document
+    // while `at` names the file, and once this has made the file exist, reading
+    // it is exactly what that address was asking for. It is then a first read
+    // and not a re-read, which is why this is `open()`.
     if (same(get().at, where)) await get().open(where.src, where.lang)
     return true
   } catch (e) {
@@ -445,6 +455,7 @@ export const useStore = create<Store>()((set, get) => ({
   doc: null,
   docLoading: false,
   docError: '',
+  readFailed: false,
 
   running: false,
   runCost: null,
@@ -576,7 +587,7 @@ export const useStore = create<Store>()((set, get) => ({
     // textarea with it, before the flush has read the field — taking an IME
     // composition that has not yet produced an `input` event, in a workbench
     // that exists for writing Chinese.
-    set({ at: want, docError: '' })
+    set({ at: want, docError: '', readFailed: false })
 
     // **Written before it is discarded.** A navigation that moves no DOM focus —
     // Back, Forward, a mouse side button, a hand-typed link — blurs no field, so
@@ -646,8 +657,12 @@ export const useStore = create<Store>()((set, get) => ({
       set({ doc, docLoading: false })
     } catch (e) {
       if (!same(get().at, want)) return
-      set({ docLoading: false, docError: reason(e) })
-      get().say(reason(e), 'bad')
+      set({ docLoading: false, docError: reason(e), readFailed: true })
+      // Not logged for a file the project lists as not yet extracted. Every
+      // read of one fails this way, the screen that draws this error offers the
+      // extract, and a line in red for following a link in the rail is noise
+      // that teaches a reviewer to stop reading red lines.
+      if (!notExtracted(get().state, want)) get().say(reason(e), 'bad')
     }
   },
 
@@ -978,6 +993,20 @@ export function visible(doc: DocResponse | null, filter: Filter): Segment[] {
     case 'waived': return doc.segments.filter(s => s.waived)
     case 'all': return doc.segments
   }
+}
+
+/**
+ * Whether the project lists this document as not yet extracted.
+ *
+ * `GET /api/state`'s `untracked`, which is a **snapshot**: this page reads it at
+ * startup and after its own extracts, and a terminal can extract a file in
+ * between. So it is never the only fact an act rests on — the page that offers
+ * an extract asks it only after a read of the document has just failed, which
+ * is the fresh half. One predicate, read by `open()` and by that page, so the
+ * two cannot disagree about which files it covers.
+ */
+export function notExtracted(state: StateResponse | null, where: DocAddress): boolean {
+  return !!state?.untracked.some(u => u.source === where.src && u.lang === where.lang)
 }
 
 /** `ApiError` when the server refused, so a caller can branch on the status.

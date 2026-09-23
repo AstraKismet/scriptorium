@@ -429,6 +429,21 @@ describe('a re-parse voids every unsaved edit, at the moment the server accepts 
     expect(useStore.getState().log.some(l => l.level === 'bad' && l.text.includes('not UTF-8'))).toBe(true)
   })
 
+  it('sends one extract when a second is asked for while the first is in flight', async () => {
+    // The flag is raised before the first await, and that ordering is the whole
+    // of the guard: raised after the request, two calls in one tick both pass it
+    // and both are sent. A mutation lane moved it and nothing failed.
+    await openWith([segment({ id: 's0001' })])
+    let release: () => void = () => undefined
+    replies({ body: extracted, after: new Promise<void>(r => { release = r }) }, { body: state() })
+    otherwise({ body: doc([segment()]) })
+    const first = useStore.getState().extract(ch1)
+    expect(await useStore.getState().extract(ch1)).toBe(false)
+    release()
+    expect(await first).toBe(true)
+    expect(callsTo('/api/extract')).toHaveLength(1)
+  })
+
   it('answers false and sends nothing while a run is in flight', async () => {
     await openWith([segment({ id: 's0001' })])
     useStore.setState({ running: true })

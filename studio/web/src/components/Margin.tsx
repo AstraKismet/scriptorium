@@ -49,8 +49,11 @@ const SETTLE = 700
  * What the style margin already answered, for this document.
  *
  * The answer depends on the segment's own text, on the register the document is
- * frozen in — the standing brief is chosen by it — and on a style sheet that
- * does not move while a page is open, so a second look at a paragraph is free.
+ * frozen in — the standing brief is chosen by it — and on `config/style.txt`,
+ * which the server reads on every request and this cache **assumes** does not
+ * change while the page is open: an edit to it shows here after a reload, or
+ * on a paragraph not yet looked at. Within that, a second look at a paragraph
+ * is free.
  *
  * **Keyed on the text as well as the id, and scoped by the register as well as
  * the document**, because a re-extract changes neither `src` nor `lang` and
@@ -83,8 +86,13 @@ export function Margin() {
   const lang = doc?.lang ?? ''
   const register = doc?.tone ?? ''
   const seg = doc?.segments.find(s => s.id === focused) ?? null
-  // The paragraph the id names *in this parse*. Every effect below is keyed on
-  // it beside the id, because the id alone survives a re-parse that moved it.
+  // The paragraph the id names *in this parse*, because the id alone survives a
+  // re-parse that moved it. What holds that is the cache key below; the effects
+  // also list it as a dependency, and that half is redundant today — `Main`
+  // draws the loading page, unmounting this, for every fetch `open()` makes, so
+  // a re-parse always remounts the margin. Two independent mutation lanes
+  // measured it equivalent. It stays so the rule does not rest on a loading
+  // screen nobody here decided about.
   const text = seg?.source ?? ''
   // Where a near match earns its cost without being asked for.
   const wanted = !!seg && (!seg.target || seg.issues.some(isError))
@@ -96,14 +104,22 @@ export function Margin() {
     const scope = JSON.stringify([src, lang, register])
     if (cachedFor !== scope) { styleCache = new Map(); cachedFor = scope }
     const key = JSON.stringify([focused, text])
-    const cached = styleCache.get(key)
+    // The map this answer belongs to, held rather than looked up when the reply
+    // lands. A reply outlives the effect that asked for it — `live` hides it
+    // from the screen, not from the cache — and by then the scope may have
+    // moved: a start-over asked in one register is answered after the page has
+    // emptied the map for the next, and written into *that* one it was served
+    // as the new register's brief on the next look at the paragraph (found by
+    // the review of HANDOFF-088, and older than it).
+    const cache = styleCache
+    const cached = cache.get(key)
     if (cached) { setMargin({ ...EMPTY, style: cached }); return }
     let live = true
     setMargin(EMPTY)
     const timer = setTimeout(() => {
       void api.postStyle({ src, lang, ids: [focused] })
         .then(style => {
-          styleCache.set(key, style)
+          cache.set(key, style)
           if (live) setMargin(m => ({ ...m, style }))
         })
         .catch((e: unknown) => { if (live) setMargin(m => ({ ...m, error: String(e) })) })

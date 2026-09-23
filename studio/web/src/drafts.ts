@@ -50,12 +50,15 @@ let stamp = 0
  * hashes an absent target and an empty one alike and a re-parse leaves runs of
  * untranslated segments between which the token agrees.
  *
- * The act that asked for the re-parse says so, and it stays said until the new
- * parse is on screen: a re-extract reloads the whole project and *then* re-opens
- * the document, two round trips with the ledger still mounted, and a keystroke
- * arriving in between would otherwise be indistinguishable from one typed
- * against the parse that is gone. Emptying the map is not enough for the same
- * reason.
+ * The act that asked for the re-parse says so — when the document it re-parsed
+ * is the one on screen, whose ids these are; since HANDOFF-088 an extract can be
+ * about a file that is not — and it stays said until a parse the entries could
+ * have been typed against is on screen: a re-extract reloads the whole project
+ * and *then*, while the address still names the document, re-opens it, two
+ * round trips with the ledger still mounted, and a keystroke arriving in between
+ * would otherwise be indistinguishable from one typed against the parse that is
+ * gone. A reviewer who moved on meanwhile lowers it with the document they
+ * moved to. Emptying the map is not enough for the same reason.
  *
  * It is a fact about this page's own re-parse and says nothing about anybody
  * else's: `lx extract` in a terminal renumbers with no signal here at all. See

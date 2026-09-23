@@ -196,18 +196,6 @@ export function focus(src: string, lang: string, id: string): void {
 export const go = (to: string): void => { window.location.hash = to }
 
 /**
- * The address as it stands, for an act that has to know afterwards whether a
- * person moved it in the meantime — the rail's *Not yet extracted* entry, which
- * navigates only once its extract has landed. Read live rather than from the
- * last announcement, for the reason `announce` gives. A string, compared whole:
- * a click on another paragraph of the document still on screen moves it too,
- * and a reviewer who has gone back to work there is not someone to navigate
- * away. Typing into the paragraph the address already names moves nothing, and
- * is not seen here.
- */
-export const now = (): string => window.location.hash
-
-/**
  * Move the address without adding a history entry.
  *
  * For view state a person did not navigate to: which paragraph they are on.

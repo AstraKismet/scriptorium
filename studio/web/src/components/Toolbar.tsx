@@ -23,6 +23,24 @@ import { useStore, type Filter } from '../store'
 
 const BOUNDS = [0, 10, 25, 50, 100]
 
+/**
+ * Whether an extract this control is about to send would be refused because a
+ * run started while it was saving, reading or asking — and if so, say so.
+ *
+ * `reExtract` declines while anything runs, and the run buttons beside this one
+ * stay enabled through those round trips. Checked immediately before the
+ * header, in the same tick as the call, so the header is never logged over a
+ * request that is then not sent.
+ */
+function refusedWhileRunning(src: string): boolean {
+  if (!useStore.getState().running) return false
+  useStore.getState().say(
+    `  ${src} was not re-extracted: a run started while this was asking — try again when it finishes`,
+    'warn',
+  )
+  return true
+}
+
 export function Toolbar() {
   const doc = useStore(s => s.doc)
   const running = useStore(s => s.running)
@@ -76,6 +94,21 @@ export function Toolbar() {
     // been skipped. One extra read on a deliberate, rare, destructive press.
     await refresh()
     const now = useStore.getState().doc
+    // **The count must be this document's.** `refresh()` re-reads whatever is on
+    // screen, and the rail stays live through the two round trips above — so a
+    // reviewer who moved to another document meanwhile had *its* count read
+    // here, and an untranslated one skipped the dialog for a document holding a
+    // whole book (found by the review of HANDOFF-088; before that change the
+    // extract went to the other document instead, which was the same defect
+    // pointing the other way).
+    if (!now || now.source !== doc.source || now.lang !== doc.lang) {
+      say(
+        `  ${doc.source} was not re-extracted: the page moved to another document ` +
+        `before it could read what this one holds`,
+        'warn',
+      )
+      return
+    }
     // **Asked only when there is something to lose.** On a document with nothing
     // translated a re-extract cannot discard a translation, and it cannot drop a
     // hold either — holding requires a non-empty target. A dialog there would be
@@ -108,6 +141,7 @@ export function Toolbar() {
       'Re-extract',
     )
     if (!ok) return
+    if (refusedWhileRunning(doc.source)) return
     say(`— re-extract ${doc.source} [${doc.lang}] —`, 'plain', true)
     // The document the dialog named, and not whatever is on screen when the
     // reviewer answers it: Back still works under an open dialog.
@@ -274,6 +308,7 @@ function StartOver({ onClose, onChoose }: {
     )
     if (!ok) return
     onClose()
+    if (refusedWhileRunning(doc.source)) return
     say(`— start over · ${doc.source} [${doc.lang}] · register ${chosen} —`, 'plain', true)
     // Addressed to the document the dialog above named, for the reason the
     // toolbar's Re-extract gives.
