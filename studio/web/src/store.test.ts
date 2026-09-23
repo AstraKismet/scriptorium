@@ -509,6 +509,30 @@ describe('reading again', () => {
     expect(useStore.getState().log.some(l => l.text.includes('docs/y.md') && l.text.includes('was not extracted'))).toBe(true)
   })
 
+  it('does not swallow a click on the same file in another language made while the first is asking', async () => {
+    // The key is the pair, and each half is load-bearing: a key of the path
+    // alone swallowed the second language's click the way one flag for every
+    // file swallowed the second file's.
+    const listed = state({
+      targets: ['zh-TW', 'ja'],
+      untracked: [{ source: 'docs/x.md', lang: 'zh-TW' }, { source: 'docs/x.md', lang: 'ja' }],
+    })
+    useStore.setState({ state: listed })
+    let release: () => void = () => undefined
+    const gate = new Promise<void>(r => { release = r })
+    answering(call => (call.path.startsWith('/api/state') ? { body: listed, after: gate }
+      : call.path.startsWith('/api/extract')
+        ? { body: { segments: 1, reused: 0, rejected: 0, kept: [], ambiguous: [], replaced: [], waived_source: [] } }
+        : null))
+    const zh = useStore.getState().extractUntracked({ src: 'docs/x.md', lang: 'zh-TW' })
+    const ja = useStore.getState().extractUntracked({ src: 'docs/x.md', lang: 'ja' })
+    release()
+    await Promise.all([zh, ja])
+
+    expect(callsTo('/api/state')).toHaveLength(3)
+    expect(useStore.getState().log.some(l => l.text.includes('docs/x.md was not extracted'))).toBe(true)
+  })
+
   it('answers false when the file turned out to be extracted already, having sent no extract', async () => {
     useStore.setState({ state: state({ untracked: [{ source: 'docs/new.md', lang: 'zh-TW' }] }) })
     replies({ body: state() })

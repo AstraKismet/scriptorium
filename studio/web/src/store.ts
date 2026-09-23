@@ -123,7 +123,8 @@ interface Store {
   /** Re-read the document on screen. True when it read it and it is still the
    *  one on screen; false when the read failed or the page moved meanwhile. */
   refresh: () => Promise<boolean>
-  /** True when the ledger is showing the document `at` names. */
+  /** True when the ledger is showing the document `at` names, and no read is on
+   *  its way to replace it. */
   settled: () => boolean
   /** The address of what is on screen — read from `doc`, never from `at`, so
    *  the two cannot disagree about which document an act is addressed to. */
@@ -207,6 +208,21 @@ let modelSeq = 0
  * HANDOFF-088; the first half is older than it.
  */
 let openSeq = 0
+
+/**
+ * Which read of a document is the latest one asked for — `open()`'s fetch and
+ * every `refresh()` take the next number, and only the latest may put what it
+ * read on screen.
+ *
+ * Reads race, and the one asked later saw the later state. A refresh asked
+ * before a save and answered after the save's own re-read put the older count
+ * back on screen — the toolbar then skipped its confirmation over the words the
+ * save had just written, and a field showed its wording vanish (found by the
+ * fifth review; older than this package). A counter of `open()` calls alone,
+ * which is what the fourth review's repair used, answered only the case where
+ * the newer read was an open's.
+ */
+let readSeq = 0
 
 /**
  * The files an `extractUntracked` is asking the server about. A second click on
@@ -616,7 +632,12 @@ export const useStore = create<Store>()((set, get) => ({
     if (models.error) get().say('  models: ' + models.error, 'warn')
   },
 
-  settled: () => same(get().at, get().shown()),
+  // Not while a read is on its way to replace what is on screen: an act taken
+  // then reads a snapshot the page is about to discard. "Draft again" after a
+  // save, with Back and Forward pressed during it, sent a run built from the
+  // origin before the save — no question about a person's wording, the model
+  // billed, the write refused (found by the fifth review).
+  settled: () => same(get().at, get().shown()) && !get().docLoading,
 
   shown: () => {
     const doc = get().doc
@@ -694,6 +715,7 @@ export const useStore = create<Store>()((set, get) => ({
     }
 
     set({ docLoading: true })
+    readSeq += 1
     try {
       const doc = await api.getDoc(want)
       // Someone may have opened another document — or this one again — while
@@ -739,7 +761,7 @@ export const useStore = create<Store>()((set, get) => ({
   refresh: async () => {
     const where = get().shown()
     if (!where) return false
-    const asked = openSeq
+    const asked = ++readSeq
     try {
       const doc = await api.getDoc(where)
       // **Only while the ledger is still showing the document this refresh was
@@ -755,12 +777,13 @@ export const useStore = create<Store>()((set, get) => ({
       // review of HANDOFF-088; older than it). A document the page is on its
       // way to is `open()`'s to read.
       //
-      // **And not after any `open()` that started since it was asked.** That
-      // open read the document later than this did, so a reviewer who left and
-      // came back while this was in flight had the fresher read replaced by this
-      // one — and the toolbar's Re-extract decided its confirmation from the
-      // count this carried (found by the fourth review; older than it).
-      if (asked !== openSeq || !same(get().shown(), where)) return false
+      // **And only while it is still the latest read asked for** — see
+      // `readSeq`. A read asked after this one, by an `open()` on the way back
+      // to this document or by the re-read a save makes, saw a later state, and
+      // this landing over it put an older count on screen for the toolbar's
+      // confirmation to be decided from (found by the fourth and fifth reviews;
+      // older than this package).
+      if (asked !== readSeq || !same(get().shown(), where)) return false
       set({ doc })
       return true
     } catch (e) {

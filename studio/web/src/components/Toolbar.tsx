@@ -130,8 +130,8 @@ export function Toolbar() {
     // translated in a terminal. Older than HANDOFF-088, found by its review.
     if (!read) {
       say(
-        `  ${doc.source} was not re-extracted: what it holds could not be read again — ` +
-        `press Re-extract again`,
+        `  ${doc.source} was not re-extracted: what it holds could not be read again, or ` +
+        `changed while it was being read — press Re-extract again`,
         'warn',
       )
       return
@@ -190,6 +190,18 @@ export function Toolbar() {
       'Re-extract',
     )
     if (!ok) return
+    // **The last look, and nothing is awaited after it.** Every round trip above
+    // left the ledger editable, and the dialog's own focus moving out of a field
+    // saves it — a save that can be refused. Words still here now are words the
+    // extract would strand (found by the fifth review).
+    if (drafts.size()) {
+      say(
+        `  ${drafts.ids().slice(0, 20).join(', ')} changed while this was asking and are not ` +
+        `written yet — ${doc.source} was not re-extracted; press Re-extract again`,
+        'warn',
+      )
+      return
+    }
     if (refusedWhileRunning(doc.source)) return
     say(`— re-extract ${doc.source} [${doc.lang}] —`, 'plain', true)
     // The document the dialog named, and not whatever is on screen when the

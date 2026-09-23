@@ -122,6 +122,19 @@ export const SegmentRow = memo(function SegmentRow({ seg }: { seg: Segment }) {
   const again = async (mode: 'draft' | 'polish') => {
     if (running) return
     await save()
+    // The origin below decides whether to ask about replacing a person's
+    // wording, so it must come from a document the page is not about to
+    // replace. A save's own re-read is discarded when a newer read has been
+    // asked — Back and Forward during the save — and the snapshot left behind
+    // predates the save that made this segment a person's.
+    if (!useStore.getState().settled()) {
+      useStore.getState().say(
+        `  ${seg.id} was not sent: the page moved while its wording was being written — ` +
+        `press it again once the document is on screen`,
+        'warn',
+      )
+      return
+    }
     const now = useStore.getState().doc?.segments.find(s => s.id === seg.id)
     if (!now || useStore.getState().running) return
     // **A hold does not stop this control, and that is the one place the two

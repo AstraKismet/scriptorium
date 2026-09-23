@@ -1436,6 +1436,7 @@ describe('what the page acts on is what it has just read', () => {
         return { body: over.base ?? doc }
       }
       if (path.startsWith('/api/check')) return { body: { errors: 1, warnings: 0, by_rule: { missing: 1 } } }
+      if (path.startsWith('/api/translate')) return { body: { id: 'j1', total: 0, route: { provider: 'local', model: 'qwen', error: null } } }
       if (path.startsWith('/api/sentences')) return { body: { sentences: [] } }
       if (path.startsWith('/api/preview')) {
         const blocks = fresh.segments.map(s => ({ id: s.id, kind: s.kind, from: 'source' as const, text: s.source }))
@@ -1555,6 +1556,9 @@ describe('what the page acts on is what it has just read', () => {
     expect(extracts()).toEqual([])
     expect(logged('warn', 'is no longer listed as not extracted')).toBe(true)
     expect(logged('warn', 'reading it again')).toBe(true)
+    // All three ways a file stops being listed are named, since the page
+    // cannot tell which it was.
+    expect(logged('warn', 'shares its identity with another path')).toBe(true)
     expect(useStore.getState().log.some(l => l.text.startsWith('— extract'))).toBe(false)
   }, 15000)
 
@@ -2009,5 +2013,128 @@ describe('what the page acts on is what it has just read', () => {
     expect(extracts()).toEqual([])
     expect(logged('warn', 'is no longer listed as not extracted')).toBe(true)
     expect(logged('warn', 'something else started running')).toBe(false)
+  }, 20000)
+
+  // ── the fifth review: which read is the latest, and the last look ────────
+
+  it('does not strand words typed during its last read, when the dialog\'s own focus change cannot save them', async () => {
+    // The dialog's Cancel takes focus, the field blurs and saves, and that save
+    // is refused. Confirmed, the extract stranded the words; nothing looked at
+    // `drafts` after the dialog.
+    const refresh = held()
+    const last = held()
+    let saved = false
+    serve({
+      base: untranslated,
+      save: n => { saved = true; return n >= 2 ? refused : null },
+      read: (src, n) => (src === doc.source && n === 2 ? { body: untranslated, after: refresh.until }
+        : src === doc.source && n === 4 ? { body: withWords, after: last.until }
+          : src === doc.source && saved ? { body: withWords }
+            : null),
+    })
+    await opened(address(doc.source, 's0003'), '/3 translated')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Re-extract' }))
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(2) })
+    await user.type(field(), '燈還亮著。')
+    await act(async () => { refresh.release(); await settle(300) })
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(4) }, { timeout: 4000 })
+    await user.type(field(), '還')
+    await act(async () => { last.release(); await settle(300) })
+    await waitFor(() => { expect(dialogOpen()).toBe(true) }, { timeout: 4000 })
+    await user.click(within(document.querySelector<HTMLDialogElement>('dialog[open]')!).getByRole('button', { name: 'Re-extract' }))
+    await settle(300)
+
+    expect(extracts()).toEqual([])
+    expect(logged('bad', 'are gone')).toBe(false)
+    expect(drafts.get('s0003')).toBe('燈還亮著。還')
+    expect(logged('warn', 'changed while this was asking')).toBe(true)
+  }, 20000)
+
+  it('asks before re-extracting over a translation a blur wrote while its re-read was in flight (older)', async () => {
+    // The re-read was asked before the blur's save and answered after the
+    // save's own re-read, and put the count from before the save back.
+    const refresh = held()
+    let saved = false
+    serve({
+      base: untranslated,
+      save: () => { saved = true; return null },
+      read: (src, n) => (src === doc.source && n === 2 ? { body: untranslated, after: refresh.until }
+        : src === doc.source && saved ? { body: withWords }
+          : null),
+    })
+    await opened(address(doc.source, 's0003'), '/3 translated')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Re-extract' }))
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(2) })
+    await user.type(field(), '燈還亮著。')
+    await user.click(screen.getByText('The lamp was still burning.'))
+    await waitFor(() => { expect(useStore.getState().doc?.report.translated).toBe(1) }, { timeout: 4000 })
+    await act(async () => { refresh.release(); await settle(300) })
+
+    expect(extracts()).toEqual([])
+    expect(useStore.getState().doc?.report.translated).toBe(1)
+  }, 20000)
+
+  it('keeps wording a blur has just written on screen when an older re-read lands (older)', async () => {
+    const refresh = held()
+    let saved = false
+    const written: DocResponse = {
+      ...doc,
+      report: { ...doc.report, translated: 3, errors: 0, by_rule: {} },
+      segments: doc.segments.map(s => (s.id === 's0003'
+        ? { ...s, target: '燈還亮著。', status: 'translated' as const, origin: 'human', token: 'w3', issues: [] }
+        : s)),
+    }
+    serve({
+      save: () => { saved = true; return null },
+      read: (src, n) => (src === doc.source && n === 2 ? { body: doc, after: refresh.until }
+        : src === doc.source && saved ? { body: written }
+          : null),
+    })
+    await opened(address(doc.source, 's0003'), '/3 translated')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Check' }))
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(2) })
+    await user.type(field(), '燈還亮著。')
+    await user.click(screen.getByText('The lamp was still burning.'))
+    await waitFor(() => { expect(useStore.getState().doc?.report.translated).toBe(3) }, { timeout: 4000 })
+    await act(async () => { refresh.release(); await settle(300) })
+
+    expect(useStore.getState().doc?.segments.find(s => s.id === 's0003')?.target).toBe('燈還亮著。')
+    expect(field().value).toBe('燈還亮著。')
+  }, 20000)
+
+  it('does not send "Draft again" built from a document the page is about to replace', async () => {
+    // Back and Forward during its save: the save's re-read was discarded for the
+    // newer read on the way back, and the origin read from what was left
+    // predated the save that made the segment a person's — no question asked,
+    // the model billed, the write refused.
+    const refresh = held()
+    const backRead = held()
+    const away = held()
+    let saved = false
+    serve({
+      save: () => { saved = true; return null },
+      read: (src, n) => (src === doc.source && n === 2 ? { body: withWords, after: refresh.until }
+        : src === doc.source && n === 3 ? { body: withWords, after: backRead.until }
+          : src === second.source && n === 1 ? { body: second, after: away.until }
+            : src === doc.source && saved ? { body: withWords }
+              : null),
+    })
+    await opened(address(doc.source, 's0003'), '/3 translated')
+    await userEvent.setup().type(field(), '燈還亮著。')
+    act(() => { [...document.querySelectorAll<HTMLButtonElement>('.ledger button')].find(b => b.textContent === 'Draft again')!.click() })
+    await waitFor(() => { expect(saved).toBe(true) })
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(2) })
+    window.location.hash = address(second.source, 's0001')
+    await waitFor(() => { expect(readsOf(second.source)).toBe(1) })
+    window.location.hash = address(doc.source, 's0003')
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(3) })
+    await act(async () => { refresh.release(); await settle(200) })
+
+    expect(callsTo('/api/translate')).toHaveLength(0)
+    expect(logged('warn', 's0003 was not sent: the page moved')).toBe(true)
+    await act(async () => { backRead.release(); away.release(); await settle(100) })
   }, 20000)
 })
