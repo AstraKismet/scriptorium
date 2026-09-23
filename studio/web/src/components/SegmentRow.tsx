@@ -129,8 +129,8 @@ export const SegmentRow = memo(function SegmentRow({ seg }: { seg: Segment }) {
     // predates the save that made this segment a person's.
     if (!useStore.getState().settled()) {
       useStore.getState().say(
-        `  ${seg.id} was not sent: the page moved while its wording was being written — ` +
-        `press it again once the document is on screen`,
+        `  ${seg.id} was not sent: the document on screen was being replaced or read again ` +
+        `while its wording was being written — press it again once it is back`,
         'warn',
       )
       return

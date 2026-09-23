@@ -1380,13 +1380,16 @@ describe('what the page acts on is what it has just read', () => {
    *  `book/ch1.md` reads as. */
   const serve = (over: {
     read?: (src: string, n: number) => Answer | null
-    save?: (n: number) => Answer | null
+    save?: (n: number, body: unknown) => Answer | null
     listing?: (n: number) => Promise<void> | null
+    hold?: (n: number) => Answer | null
+    onExtract?: () => void
     base?: DocResponse
   } = {}): void => {
     const reads = new Map<string, number>()
     let saves = 0
     let listings = 0
+    let holds = 0
     let requests = 0
     const project = (): StateResponse => ({
       ...state,
@@ -1415,10 +1418,15 @@ describe('what the page acts on is what it has just read', () => {
         return { body: project() }
       }
       if (path.startsWith('/api/models')) return { body: { provider: 'local', configured: 'qwen', models: [], error: null } }
-      if (path.startsWith('/api/save')) { saves += 1; return over.save?.(saves) ?? { body: wrote } }
+      if (path.startsWith('/api/save')) { saves += 1; return over.save?.(saves, call.body) ?? { body: wrote } }
       if (path.startsWith('/api/extract')) {
+        over.onExtract?.()
         if ((call.body as { src?: string } | null)?.src === fresh.source) { world.made = true; world.listed = false }
         return { body: extracted }
+      }
+      if (path.startsWith('/api/hold')) { holds += 1; return over.hold?.(holds) ?? { body: { applied: 1, unknown: [] } } }
+      if (path.startsWith('/api/job')) {
+        return { body: { id: 'j1', done: true, total: 1, applied: 1, log: [], failures: [], refused: [], error: null, usage: { replies: 0, prompt_tokens: 0, completion_tokens: 0, reported: 0, unreported: 0 } } }
       }
       if (path.startsWith('/api/doc')) {
         const src = new URLSearchParams(path.split('?')[1]).get('src') ?? ''
@@ -1471,6 +1479,8 @@ describe('what the page acts on is what it has just read', () => {
   const unreachable = (): Answer => ({ body: {}, after: Promise.reject(new TypeError('Failed to fetch')) })
 
   const field = (): HTMLTextAreaElement => document.querySelector<HTMLTextAreaElement>('.ledger textarea')!
+  const rowButton = (name: string): HTMLButtonElement =>
+    [...document.querySelectorAll<HTMLButtonElement>('.ledger button')].find(b => b.textContent === name)!
   const entry = (): HTMLElement => screen.getByRole('button', { name: /docs\/untracked\.md.*extract/ })
   const offer = (): HTMLButtonElement => screen.getByRole('button', { name: `Extract ${fresh.source}` })
   const offered = (): boolean => screen.queryByRole('button', { name: `Extract ${fresh.source}` }) !== null
@@ -1965,9 +1975,11 @@ describe('what the page acts on is what it has just read', () => {
     await waitFor(() => { expect(useStore.getState().doc?.report.translated).toBe(1) }, { timeout: 4000 })
 
     await act(async () => { refresh.release(); await settle(300) })
-    expect(extracts()).toEqual([])
+    // The older re-read did not land over the newer read, and the count the
+    // dialog is decided from is the newer one: something is translated, so it asks.
     expect(useStore.getState().doc?.report.translated).toBe(1)
-    expect(logged('warn', 'could not be read again')).toBe(true)
+    expect(dialogOpen()).toBe(true)
+    expect(extracts()).toEqual([])
   }, 20000)
 
   it('says words typed during its own save changed, not that they could not be saved', async () => {
@@ -2134,7 +2146,364 @@ describe('what the page acts on is what it has just read', () => {
     await act(async () => { refresh.release(); await settle(200) })
 
     expect(callsTo('/api/translate')).toHaveLength(0)
-    expect(logged('warn', 's0003 was not sent: the page moved')).toBe(true)
+    expect(logged('warn', 's0003 was not sent: the document on screen was being replaced')).toBe(true)
     await act(async () => { backRead.release(); away.release(); await settle(100) })
+  }, 20000)
+
+  // ── the sixth review: a read that landed, not one that was asked ─────────
+  //
+  // The fifth round's repair dropped a read whenever a later one had been
+  // *asked*, and a later one that failed or was still on its way then cost the
+  // page the save's good re-read. Ported from that review's probes.
+
+  it('asks before "Draft again" over wording a blur wrote, when a later re-read fails', async () => {
+    const saveRead = held()
+    let saved = false
+    serve({
+      base: untranslated,
+      save: () => { saved = true; return null },
+      read: (src, n) => (src === doc.source && n === 2 ? { body: withWords, after: saveRead.until }
+        : src === doc.source && n === 3 ? unreachable()
+          : src === doc.source && saved ? { body: withWords }
+            : null),
+    })
+    await opened(address(doc.source, 's0003'), '/3 translated')
+    const user = userEvent.setup()
+    await user.type(field(), '燈還亮著。')
+    await user.click(screen.getByText('The lamp was still burning.'))
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(2) })
+    await user.click(screen.getByRole('button', { name: 'Check' }))
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(3) })
+    await act(async () => { saveRead.release(); await settle(200) })
+
+    // What the page now shows for the segment a person has just written.
+    const shown = useStore.getState().doc?.segments.find(s => s.id === 's0003')
+    await user.click(rowButton('Draft again'))
+    await settle(300)
+
+    expect(callsTo('/api/translate')).toHaveLength(0)
+    expect(dialogOpen()).toBe(true)
+    expect({ origin: shown?.origin, translated: useStore.getState().doc?.report.translated })
+      .toEqual({ origin: 'human', translated: 1 })
+  }, 20000)
+
+  // P1b: the same, with the later re-read merely still in flight. settled() says
+  // true while "a read is on its way to replace the document on screen".
+  it('does not send "Draft again" from a snapshot while a later re-read is still on its way', async () => {
+    const saveRead = held()
+    const checkRead = held()
+    let saved = false
+    serve({
+      base: untranslated,
+      save: () => { saved = true; return null },
+      read: (src, n) => (src === doc.source && n === 2 ? { body: withWords, after: saveRead.until }
+        : src === doc.source && n === 3 ? { body: withWords, after: checkRead.until }
+          : src === doc.source && saved ? { body: withWords }
+            : null),
+    })
+    await opened(address(doc.source, 's0003'), '/3 translated')
+    const user = userEvent.setup()
+    await user.type(field(), '燈還亮著。')
+    await user.click(screen.getByText('The lamp was still burning.'))
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(2) })
+    await user.click(screen.getByRole('button', { name: 'Check' }))
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(3) })
+    await act(async () => { saveRead.release(); await settle(200) })
+
+    await user.click(rowButton('Draft again'))
+    await settle(300)
+    const sent = callsTo('/api/translate').length
+    await act(async () => { checkRead.release(); await settle(100) })
+
+    expect(sent).toBe(0)
+  }, 20000)
+
+  // P2: open()'s own landing ignores readSeq. Back and Forward while Hold is in
+  // flight: the open on the way back reads before the hold is written, the
+  // hold's re-read reads after and lands first, and the open's older read then
+  // lands over it. Nothing reads again.
+  it('does not let an open\'s older read land over a later re-read (hold) (older)', async () => {
+    const holdGate = held()
+    const backRead = held()
+    const away = held()
+    let holdDone = false
+    const heldDoc: DocResponse = {
+      ...doc,
+      segments: doc.segments.map(s => (s.id === 's0001' ? { ...s, review: 'held' as const, token: 't1h' } : s)),
+    }
+    serve({
+      hold: () => ({ body: { applied: 1, unknown: [] }, after: holdGate.until.then(() => { holdDone = true }) }),
+      read: (src, n) => (src === doc.source && n === 2 ? { body: doc, after: backRead.until }
+        : src === second.source && n === 1 ? { body: second, after: away.until }
+          : src === doc.source && holdDone ? { body: heldDoc }
+            : null),
+    })
+    await opened(address(doc.source, 's0001'), '/3 translated')
+    act(() => { rowButton('Hold').click() })
+    await waitFor(() => { expect(callsTo('/api/hold')).toHaveLength(1) })
+    window.location.hash = address(second.source, 's0001')
+    await waitFor(() => { expect(readsOf(second.source)).toBe(1) })
+    window.location.hash = address(doc.source, 's0001')
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(2) })
+    await act(async () => { holdGate.release(); await settle(200) })
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(3) })
+    await act(async () => { backRead.release(); await settle(200) })
+    await act(async () => { away.release(); await settle(100) })
+
+    expect(useStore.getState().doc?.segments.find(s => s.id === 's0001')?.review).toBe('held')
+  }, 20000)
+
+  // P1c: the same dropped re-read, read by the one dialog that discards a
+  // document: it states the count from before the save.
+  it('states the translated count a blur has just changed, in Start over\'s dialog', async () => {
+    const saveRead = held()
+    let saved = false
+    serve({
+      base: untranslated,
+      save: () => { saved = true; return null },
+      read: (src, n) => (src === doc.source && n === 2 ? { body: withWords, after: saveRead.until }
+        : src === doc.source && n === 3 ? unreachable()
+          : src === doc.source && saved ? { body: withWords }
+            : null),
+    })
+    await opened(address(doc.source, 's0003'), '/3 translated')
+    const user = userEvent.setup()
+    await user.type(field(), '燈還亮著。')
+    await user.click(screen.getByText('The lamp was still burning.'))
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(2) })
+    await user.click(screen.getByRole('button', { name: 'Check' }))
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(3) })
+    await act(async () => { saveRead.release(); await settle(200) })
+
+    await user.click(screen.getByRole('button', { name: /Start over in another register/ }))
+    await user.type(screen.getByPlaceholderText('type a register'), 'plain')
+    await user.click(screen.getByRole('button', { name: 'Start over…' }))
+    await waitFor(() => { expect(dialogOpen()).toBe(true) })
+    expect(document.querySelector('dialog[open]')!.textContent).toContain('1 of 3 segments are translated now')
+  }, 20000)
+
+  // P1e: the reviewer's own next edit is refused as a conflict with their own
+  // first save, because the token the page holds predates it — and the edit is
+  // then replaced on screen by the first wording.
+  it('bases the next edit on the token the page\'s own save produced', async () => {
+    const saveRead = held()
+    let saved = false
+    serve({
+      base: untranslated,
+      save: (_n, body) => {
+        const base = (body as { base?: Record<string, string> }).base ?? {}
+        if (saved && base['s0003'] !== 'w3') {
+          return { body: { applied: 0, unknown: [], stored: {}, conflicts: { s0003: { target: '燈還亮著。', token: 'w3' } } } }
+        }
+        saved = true
+        return null
+      },
+      read: (src, n) => (src === doc.source && n === 2 ? { body: withWords, after: saveRead.until }
+        : src === doc.source && n === 3 ? unreachable()
+          : src === doc.source && saved ? { body: withWords }
+            : null),
+    })
+    await opened(address(doc.source, 's0003'), '/3 translated')
+    const user = userEvent.setup()
+    await user.type(field(), '燈還亮著。')
+    await user.click(screen.getByText('The lamp was still burning.'))
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(2) })
+    await user.click(screen.getByRole('button', { name: 'Check' }))
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(3) })
+    await act(async () => { saveRead.release(); await settle(200) })
+
+    await user.type(field(), '還')
+    await user.click(screen.getByText('The lamp was still burning.'))
+    await waitFor(() => { expect(callsTo('/api/save')).toHaveLength(2) })
+    await settle(300)
+
+    expect(logged('bad', 'changed underneath this edit')).toBe(false)
+    expect((callsTo('/api/save')[1]!.body as { base: Record<string, string> }).base).toEqual({ s0003: 'w3' })
+  }, 20000)
+
+  // P2b: P2's stale landing, acted on: "Draft again" on a segment the reviewer
+  // has just held is sent without the held-segment question.
+  it('asks before sending a segment just held, after Back and Forward during the hold (older)', async () => {
+    const holdGate = held()
+    const backRead = held()
+    const away = held()
+    let holdDone = false
+    const unheld: DocResponse = {
+      ...doc,
+      segments: doc.segments.map(s => (s.id === 's0002' ? { ...s, review: null } : s)),
+    }
+    const heldDoc: DocResponse = {
+      ...doc,
+      segments: doc.segments.map(s => (s.id === 's0002' ? { ...s, review: 'held' as const } : s)),
+    }
+    serve({
+      base: unheld,
+      hold: () => ({ body: { applied: 1, unknown: [] }, after: holdGate.until.then(() => { holdDone = true }) }),
+      read: (src, n) => (src === doc.source && n === 2 ? { body: unheld, after: backRead.until }
+        : src === second.source && n === 1 ? { body: second, after: away.until }
+          : src === doc.source && holdDone ? { body: heldDoc }
+            : null),
+    })
+    await opened(address(doc.source, 's0002'), '/3 translated')
+    act(() => { rowButton('Hold').click() })
+    await waitFor(() => { expect(callsTo('/api/hold')).toHaveLength(1) })
+    window.location.hash = address(second.source, 's0001')
+    await waitFor(() => { expect(readsOf(second.source)).toBe(1) })
+    window.location.hash = address(doc.source, 's0002')
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(2) })
+    await act(async () => { holdGate.release(); await settle(200) })
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(3) })
+    await act(async () => { backRead.release(); await settle(200) })
+    await act(async () => { away.release(); await settle(100) })
+
+    act(() => { rowButton('Draft again').click() })
+    await settle(300)
+    expect(callsTo('/api/translate')).toHaveLength(0)
+    expect(dialogOpen()).toBe(true)
+  }, 20000)
+
+  // P4: an unrelated read asked during Re-extract's own re-read (Check pressed
+  // while it reads) makes Re-extract refuse, saying the document "changed while
+  // it was being read" although nothing was written.
+  it('carries Re-extract on when a Check read was asked during its re-read', async () => {
+    const tRead = held()
+    serve({
+      read: (src, n) => (src === doc.source && n === 2 ? { body: doc, after: tRead.until } : null),
+    })
+    await opened(address(doc.source, 's0003'), '/3 translated')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Re-extract' }))
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(2) })
+    await user.click(screen.getByRole('button', { name: 'Check' }))
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(3) })
+    await settle(100)
+    await act(async () => { tRead.release(); await settle(300) })
+
+    expect(logged('warn', 'changed while it was being read')).toBe(false)
+    expect(dialogOpen()).toBe(true)
+  }, 20000)
+
+  // P5: a confirmed "Replace it" is dropped without a line when Back and
+  // Forward happen under the dialog: runJob's settled() is false while the open
+  // on the way back is reading, and runJob returns silently.
+  it('sends, or says why not, a "Draft again" the reviewer confirmed while Back and Forward read the page again', async () => {
+    const backRead = held()
+    const away = held()
+    serve({
+      read: (src, n) => (src === doc.source && n === 2 ? { body: doc, after: backRead.until }
+        : src === second.source && n === 1 ? { body: second, after: away.until }
+          : null),
+    })
+    await opened(address(doc.source, 's0001'), '/3 translated')
+    act(() => { rowButton('Draft again').click() })
+    await waitFor(() => { expect(dialogOpen()).toBe(true) })
+    window.location.hash = address(second.source, 's0001')
+    await waitFor(() => { expect(readsOf(second.source)).toBe(1) })
+    window.location.hash = address(doc.source, 's0001')
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(2) })
+    await userEvent.setup().click(within(document.querySelector<HTMLDialogElement>('dialog[open]')!).getByRole('button', { name: 'Replace it' }))
+    await settle(300)
+    const sent = callsTo('/api/translate').length
+    const said = useStore.getState().log.filter(l => l.text.includes('s0001')).map(l => l.text)
+    await act(async () => { backRead.release(); away.release(); await settle(100) })
+
+    expect({ sent, said }).not.toEqual({ sent: 0, said: [] })
+  }, 20000)
+
+  // P6: "Draft again" overtaken by the toolbar's Re-extract (pressed while its
+  // save was in flight): the refusal names a move that did not happen.
+  it('does not say the page moved when what overtook "Draft again" was a re-extract of the same page', async () => {
+    const firstSave = held()
+    const reopen = held()
+    let extracted = false
+    let after = 0
+    serve({
+      base: untranslated,
+      onExtract: () => { extracted = true },
+      save: n => (n === 1 ? { body: wrote, after: firstSave.until } : null),
+      read: src => {
+        if (src !== doc.source || !extracted) return null
+        after += 1
+        return after === 1 ? { body: untranslated, after: reopen.until } : null
+      },
+    })
+    await opened(address(doc.source, 's0003'), '/3 translated')
+    await userEvent.setup().type(field(), '燈')
+    act(() => { rowButton('Draft again').click() })
+    await waitFor(() => { expect(callsTo('/api/save')).toHaveLength(1) })
+    act(() => { screen.getByRole('button', { name: 'Re-extract' }).click() })
+    await waitFor(() => { expect(callsTo('/api/extract')).toHaveLength(1) }, { timeout: 4000 })
+    await waitFor(() => { expect(after).toBe(1) }, { timeout: 4000 })
+    await act(async () => { firstSave.release(); await settle(300) })
+    const said = useStore.getState().log.filter(l => l.text.includes('s0003')).map(l => l.text)
+    await act(async () => { reopen.release(); await settle(100) })
+
+    expect(said.filter(t => t.includes('the page moved'))).toEqual([])
+  }, 20000)
+
+  it('lets an open of a document yield to a later re-read of it that landed first (older)', async () => {
+    // A hold's re-read asked after the open on the way back, and answered
+    // first: the open's older read may not replace it — and the open still
+    // finishes, or the page reads "reading…" for good.
+    const holdGate = held()
+    const backRead = held()
+    const away = held()
+    let holdDone = false
+    const heldDoc: DocResponse = {
+      ...doc,
+      segments: doc.segments.map(s => (s.id === 's0001' ? { ...s, review: 'held' as const, token: 't1h' } : s)),
+    }
+    serve({
+      hold: () => ({ body: { applied: 1, unknown: [] }, after: holdGate.until.then(() => { holdDone = true }) }),
+      read: (src, n) => (src === doc.source && n === 2 ? { body: doc, after: backRead.until }
+        : src === second.source && n === 1 ? { body: second, after: away.until }
+          : src === doc.source && holdDone ? { body: heldDoc }
+            : null),
+    })
+    await opened(address(doc.source, 's0001'), '/3 translated')
+    act(() => { rowButton('Hold').click() })
+    await waitFor(() => { expect(callsTo('/api/hold')).toHaveLength(1) })
+    window.location.hash = address(second.source, 's0001')
+    await waitFor(() => { expect(readsOf(second.source)).toBe(1) })
+    window.location.hash = address(doc.source, 's0001')
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(2) })
+    await act(async () => { holdGate.release(); await settle(200) })
+    await act(async () => { backRead.release(); away.release(); await settle(200) })
+    expect(useStore.getState().docLoading).toBe(false)
+    expect(screen.queryByText(/^reading book\//)).toBeNull()
+    expect(useStore.getState().doc?.segments.find(s => s.id === 's0001')?.review).toBe('held')
+  }, 20000)
+
+  it('reports the words it would strand before it reports a run in the way, when both are true', async () => {
+    // A refusal over a run can be retried; stranded words cannot be recovered,
+    // so that is the reason given first.
+    const refresh = held()
+    const last = held()
+    let saved = false
+    serve({
+      base: untranslated,
+      save: n => { saved = true; return n >= 2 ? refused : null },
+      read: (src, n) => (src === doc.source && n === 2 ? { body: untranslated, after: refresh.until }
+        : src === doc.source && n === 4 ? { body: withWords, after: last.until }
+          : src === doc.source && saved ? { body: withWords }
+            : null),
+    })
+    await opened(address(doc.source, 's0003'), '/3 translated')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Re-extract' }))
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(2) })
+    await user.type(field(), '燈還亮著。')
+    await act(async () => { refresh.release(); await settle(300) })
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(4) }, { timeout: 4000 })
+    await user.type(field(), '還')
+    await act(async () => { last.release(); await settle(300) })
+    await waitFor(() => { expect(dialogOpen()).toBe(true) }, { timeout: 4000 })
+    act(() => { useStore.setState({ running: true }) })
+    await user.click(within(document.querySelector<HTMLDialogElement>('dialog[open]')!).getByRole('button', { name: 'Re-extract' }))
+    await settle(300)
+
+    expect(extracts()).toEqual([])
+    expect(logged('warn', 'changed while this was asking')).toBe(true)
+    expect(logged('warn', 'a run started')).toBe(false)
   }, 20000)
 })

@@ -120,8 +120,9 @@ interface Store {
    * words. Opening the document those words belong to is never declined.
    */
   open: (src: string, lang: string) => Promise<void>
-  /** Re-read the document on screen. True when it read it and it is still the
-   *  one on screen; false when the read failed or the page moved meanwhile. */
+  /** Re-read the document on screen. True when what is on screen afterwards is
+   *  no older than this call — its own read, or a later one of the same
+   *  document that landed first; false when the read failed or the page moved. */
   refresh: () => Promise<boolean>
   /** True when the ledger is showing the document `at` names, and no read is on
    *  its way to replace it. */
@@ -210,19 +211,26 @@ let modelSeq = 0
 let openSeq = 0
 
 /**
- * Which read of a document is the latest one asked for — `open()`'s fetch and
- * every `refresh()` take the next number, and only the latest may put what it
- * read on screen.
+ * The order reads of a document were asked in — `open()`'s fetch and every
+ * `refresh()` take the next number — and, per document, the number of the
+ * latest one that reached the screen.
  *
- * Reads race, and the one asked later saw the later state. A refresh asked
- * before a save and answered after the save's own re-read put the older count
- * back on screen — the toolbar then skipped its confirmation over the words the
- * save had just written, and a field showed its wording vanish (found by the
- * fifth review; older than this package). A counter of `open()` calls alone,
- * which is what the fourth review's repair used, answered only the case where
- * the newer read was an open's.
+ * Reads race, and the one asked later saw the later state. **A read reaches the
+ * screen unless a read of the same document asked after it already has.** A
+ * refresh asked before a save and answered after the save's own re-read put the
+ * older count back — the toolbar then skipped its confirmation over the words
+ * the save had just written, and a field showed its wording vanish (fifth
+ * review; older than this package). The rule is about reads that *landed*, not
+ * reads that were asked: dropping a read because a later one had merely been
+ * sent threw away the save's good re-read whenever that later one failed or was
+ * still on its way, and "Draft again" then built its run from the snapshot
+ * before the save (sixth review, against the fifth round's repair). And it is
+ * per document: a refresh of the document being left, asked while an open of
+ * the next one is reading, is no reason to drop that open.
  */
 let readSeq = 0
+const landed = new Map<string, number>()
+const keyOf = (a: DocAddress): string => JSON.stringify([a.src, a.lang])
 
 /**
  * The files an `extractUntracked` is asking the server about. A second click on
@@ -715,7 +723,7 @@ export const useStore = create<Store>()((set, get) => ({
     }
 
     set({ docLoading: true })
-    readSeq += 1
+    const asked = ++readSeq
     try {
       const doc = await api.getDoc(want)
       // Someone may have opened another document — or this one again — while
@@ -740,7 +748,14 @@ export const useStore = create<Store>()((set, get) => ({
           )
         }
       }
-      set({ doc, docLoading: false })
+      // A read of this document asked after this one has already reached the
+      // screen — the re-read a hold or a save made while this was in flight.
+      // What is on screen is newer, and this open's work is done without
+      // replacing it (sixth review; older than this package).
+      const k = keyOf(want)
+      const newer = (landed.get(k) ?? 0) > asked && same(get().shown(), want)
+      if (!newer) landed.set(k, asked)
+      set(newer ? { docLoading: false } : { doc, docLoading: false })
     } catch (e) {
       if (!current()) return
       // A refusal the server *answered* — never a request that did not arrive.
@@ -762,6 +777,7 @@ export const useStore = create<Store>()((set, get) => ({
     const where = get().shown()
     if (!where) return false
     const asked = ++readSeq
+    const k = keyOf(where)
     try {
       const doc = await api.getDoc(where)
       // **Only while the ledger is still showing the document this refresh was
@@ -777,13 +793,13 @@ export const useStore = create<Store>()((set, get) => ({
       // review of HANDOFF-088; older than it). A document the page is on its
       // way to is `open()`'s to read.
       //
-      // **And only while it is still the latest read asked for** — see
-      // `readSeq`. A read asked after this one, by an `open()` on the way back
-      // to this document or by the re-read a save makes, saw a later state, and
-      // this landing over it put an older count on screen for the toolbar's
-      // confirmation to be decided from (found by the fourth and fifth reviews;
-      // older than this package).
-      if (asked !== readSeq || !same(get().shown(), where)) return false
+      if (!same(get().shown(), where)) return false
+      // **And not over a read of it asked later that has already landed** — see
+      // `readSeq`. That read saw a later state, so what is on screen is newer
+      // than this, and it is the answer this call was asked for: the caller
+      // wanted a count no older than the moment it asked, and has one.
+      if ((landed.get(k) ?? 0) > asked) return true
+      landed.set(k, asked)
       set({ doc })
       return true
     } catch (e) {
@@ -885,7 +901,19 @@ export const useStore = create<Store>()((set, get) => ({
    * is sent either way.
    */
   runJob: async (mode, ids, overwriteHuman, note) => {
-    if (!get().settled() || get().running) return
+    if (get().running) return
+    // Said, because the one caller that can reach this unsettled is a row whose
+    // dialog was answered while the page read the document again underneath
+    // it, and a confirmed act that vanishes without a line is indistinguishable
+    // from one never made (sixth review).
+    if (!get().settled()) {
+      get().say(
+        `  ${ids ? ids.join(', ') : mode} not sent: the document on screen was being read again ` +
+        `— press it again once it is back`,
+        'warn',
+      )
+      return
+    }
     const where = get().shown()
     if (!where) return
 
