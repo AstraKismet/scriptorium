@@ -80,12 +80,18 @@ export function Toolbar() {
     // name different text. So the act stops instead, with the reviewer holding
     // the only copy.
     const written = async (): Promise<boolean> => {
-      await save()
+      const saved = await save()
       if (!drafts.size()) return true
+      // Two different reasons, and only one of them is a refusal: `save()`
+      // answers true when everything it sent was written, so what is left then
+      // was typed while it was in flight.
       say(
-        `  ${drafts.ids().slice(0, 20).join(', ')} could not be saved, and a re-extract ` +
-        `renumbers segments — copy that wording somewhere before trying again`,
-        'bad',
+        saved
+          ? `  ${drafts.ids().slice(0, 20).join(', ')} changed while this was saving and are not ` +
+            `written yet — ${doc.source} was not re-extracted; press Re-extract again`
+          : `  ${drafts.ids().slice(0, 20).join(', ')} could not be saved, and a re-extract ` +
+            `renumbers segments — copy that wording somewhere before trying again`,
+        saved ? 'warn' : 'bad',
       )
       return false
     }
@@ -124,8 +130,8 @@ export function Toolbar() {
     // translated in a terminal. Older than HANDOFF-088, found by its review.
     if (!read) {
       say(
-        `  ${doc.source} was not re-extracted: it could not be read again to see what it ` +
-        `holds — the log says why`,
+        `  ${doc.source} was not re-extracted: what it holds could not be read again — ` +
+        `press Re-extract again`,
         'warn',
       )
       return
@@ -135,9 +141,21 @@ export function Toolbar() {
     // landed, and on a document with nothing translated no dialog stood in the
     // way: they were stranded and named as gone (older than HANDOFF-088, found
     // twice by its reviews). The dialog below is modal, so nothing is typed
-    // after this — but the count is read once more, since a save that wrote
-    // something has changed it, and a page that moved during it is asked again.
+    // after this. A save that wrote something has changed the count, so the
+    // document is read once more and that read must succeed: the re-read
+    // `save()` makes of its own accord swallows its failure, and a count from
+    // before the write skipped the dialog over the translation just written
+    // (found by the fourth review).
+    const typed = drafts.size() > 0
     if (!await written()) return
+    if (typed && !await refresh()) {
+      say(
+        `  ${doc.source} was not re-extracted: what it holds could not be read again after ` +
+        `saving — press Re-extract again`,
+        'warn',
+      )
+      return
+    }
     now = stillHere()
     if (!now) return
     // **Asked only when there is something to lose.** On a document with nothing

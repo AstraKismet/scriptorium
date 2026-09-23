@@ -208,9 +208,14 @@ let modelSeq = 0
  */
 let openSeq = 0
 
-/** An `extractUntracked` is asking the server, so a second click in the same
- *  moment is the same act, not a second one — and says nothing. */
-let asking = false
+/**
+ * The files an `extractUntracked` is asking the server about. A second click on
+ * the same file in the same moment is the same act, not a second one, and says
+ * nothing. Per file, because a single flag swallowed a click on a *different*
+ * file made while the first was asking — no request and no line, the symptom
+ * this package exists for (found by its fourth review).
+ */
+const asking = new Set<string>()
 
 const same = (a: DocAddress | null, b: DocAddress | null): boolean =>
   !!a && !!b && a.src === b.src && a.lang === b.lang
@@ -734,6 +739,7 @@ export const useStore = create<Store>()((set, get) => ({
   refresh: async () => {
     const where = get().shown()
     if (!where) return false
+    const asked = openSeq
     try {
       const doc = await api.getDoc(where)
       // **Only while the ledger is still showing the document this refresh was
@@ -748,7 +754,13 @@ export const useStore = create<Store>()((set, get) => ({
       // tokens, and a re-extract stranded them as "renumbered" (found by the
       // review of HANDOFF-088; older than it). A document the page is on its
       // way to is `open()`'s to read.
-      if (!same(get().shown(), where)) return false
+      //
+      // **And not after any `open()` that started since it was asked.** That
+      // open read the document later than this did, so a reviewer who left and
+      // came back while this was in flight had the fresher read replaced by this
+      // one — and the toolbar's Re-extract decided its confirmation from the
+      // count this carried (found by the fourth review; older than it).
+      if (asked !== openSeq || !same(get().shown(), where)) return false
       set({ doc })
       return true
     } catch (e) {
@@ -1008,12 +1020,13 @@ export const useStore = create<Store>()((set, get) => ({
   startOver: (where, register) => reExtract(set, get, where, register),
 
   extractUntracked: async where => {
-    if (get().running || asking) return false
-    asking = true
+    const key = JSON.stringify([where.src, where.lang])
+    if (get().running || asking.has(key)) return false
+    asking.add(key)
     try {
       if (!await get().reloadState()) return false
     } finally {
-      asking = false
+      asking.delete(key)
     }
     if (!notExtracted(get().state, where)) {
       // Extracted elsewhere since this page read it, most likely — or no longer
@@ -1022,18 +1035,25 @@ export const useStore = create<Store>()((set, get) => ({
       const here = same(get().at, where)
       get().say(
         `  ${where.src} [${where.lang}] is no longer listed as not extracted, so nothing was ` +
-        `extracted — it has been extracted elsewhere, or no longer matches \`sources\`` +
+        `extracted — it has been extracted elsewhere, no longer matches \`sources\`, or now ` +
+        `shares its identity with another path` +
         (here ? '; reading it again' : '; open it from the rail'),
         'warn',
       )
       if (here) await get().open(where.src, where.lang)
       return false
     }
-    // Asked again after the round trip: a run may have started meanwhile. Said,
-    // because a click that does nothing and says nothing is indistinguishable
-    // from one that was never made.
+    // Asked again after the round trip: a run, or the extract of another file
+    // clicked meanwhile, may have started. Said, because a click that does
+    // nothing and says nothing is indistinguishable from one never made. After
+    // the listing test and not before it, because a file that no longer needs
+    // extracting needs nothing to wait for.
     if (get().running) {
-      get().say(`  ${where.src} was not extracted: a run started while this was asking — try again when it finishes`, 'warn')
+      get().say(
+        `  ${where.src} was not extracted: something else started running while this was ` +
+        `asking — try again when it finishes`,
+        'warn',
+      )
       return false
     }
     get().say(`— extract ${where.src} [${where.lang}] —`, 'plain', true)

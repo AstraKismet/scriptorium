@@ -1570,6 +1570,11 @@ describe('what the page acts on is what it has just read', () => {
     await settle()
     expect(extracts()).toHaveLength(1)
     expect(useStore.getState().log.filter(l => l.text.startsWith('— extract'))).toHaveLength(1)
+    // And the server was asked once for the two clicks: the bootstrap, the
+    // click, and the reload after the extract. The second click is the same
+    // act and says nothing.
+    expect(callsTo('/api/state')).toHaveLength(3)
+    expect(logged('warn', 'was not extracted')).toBe(false)
   }, 15000)
 
   it('offers the extract on the reading view\'s address too, and then shows the reading view', async () => {
@@ -1838,7 +1843,7 @@ describe('what the page acts on is what it has just read', () => {
     await act(async () => { listing.release(); await settle(150) })
 
     expect(extracts()).toEqual([])
-    expect(logged('warn', `${fresh.source} was not extracted: a run started`)).toBe(true)
+    expect(logged('warn', `${fresh.source} was not extracted: something else started running`)).toBe(true)
     expect(useStore.getState().log.some(l => l.text.startsWith('— extract'))).toBe(false)
   }, 20000)
 
@@ -1883,5 +1888,126 @@ describe('what the page acts on is what it has just read', () => {
     expect(dialogOpen()).toBe(false)
     expect(extracts()).toEqual([])
     expect(logged('warn', 'the page moved to another document')).toBe(true)
+  }, 20000)
+
+  // ── the fourth review: the count a confirmation reads, and whose click it is ──
+
+  const withWords: DocResponse = {
+    ...untranslated,
+    report: { ...untranslated.report, translated: 1 },
+    segments: untranslated.segments.map(s => (s.id === 's0003'
+      ? { ...s, target: '燈還亮著。', status: 'translated' as const, origin: 'human', token: 'w3' }
+      : s)),
+  }
+
+  it('asks before re-extracting a document its re-read shows translated, whatever the page last drew', async () => {
+    // The page drew the chapter untranslated; `lx run` has since translated it.
+    // The dialog is decided from the re-read, not from what was on screen.
+    serve({ base: untranslated, read: (src, n) => (src === doc.source && n === 2 ? { body: doc } : null) })
+    await opened(address(doc.source), '/3 translated')
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Re-extract' }))
+    await waitFor(() => { expect(dialogOpen()).toBe(true) }, { timeout: 4000 })
+    expect(extracts()).toEqual([])
+  }, 20000)
+
+  it('decides Re-extract\'s confirmation from a read made after its second save wrote the words', async () => {
+    // The second save wrote a translation, and the re-read `save()` makes of its
+    // own accord failed — the count from before the write skipped the dialog
+    // over the translation just written.
+    const refresh = held()
+    let saved = false
+    serve({
+      base: untranslated,
+      save: () => { saved = true; return null },
+      read: (src, n) => (src === doc.source && n === 2 ? { body: untranslated, after: refresh.until }
+        : src === doc.source && n === 3 ? unreachable()
+          : src === doc.source && saved ? { body: withWords }
+            : null),
+    })
+    await opened(address(doc.source, 's0003'), '/3 translated')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Re-extract' }))
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(2) })
+    await user.type(field(), '燈還亮著。')
+    await act(async () => { refresh.release(); await settle(300) })
+
+    expect(saved).toBe(true)
+    expect(dialogOpen()).toBe(true)
+    expect(extracts()).toEqual([])
+  }, 20000)
+
+  it('does not decide Re-extract\'s confirmation from a re-read older than the page\'s own later read (older)', async () => {
+    // Left and came back while the re-read was in flight: the open on the way
+    // back read the chapter later than the re-read did, and the re-read landed
+    // over it carrying the count from before.
+    const refresh = held()
+    let saved = false
+    serve({
+      base: untranslated,
+      save: () => { saved = true; return null },
+      read: (src, n) => (src === doc.source && n === 2 ? { body: untranslated, after: refresh.until }
+        : src === doc.source && saved ? { body: withWords }
+          : null),
+    })
+    await opened(address(doc.source, 's0003'), '/3 translated')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Re-extract' }))
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(2) })
+    await user.type(field(), '燈還亮著。')
+    window.location.hash = address(second.source, 's0001')
+    await waitFor(() => { expect(callsTo('/api/save')).toHaveLength(1) }, { timeout: 4000 })
+    await waitFor(() => { expect(useStore.getState().doc?.source).toBe(second.source) }, { timeout: 4000 })
+    window.location.hash = address(doc.source, 's0003')
+    await waitFor(() => { expect(useStore.getState().doc?.report.translated).toBe(1) }, { timeout: 4000 })
+
+    await act(async () => { refresh.release(); await settle(300) })
+    expect(extracts()).toEqual([])
+    expect(useStore.getState().doc?.report.translated).toBe(1)
+    expect(logged('warn', 'could not be read again')).toBe(true)
+  }, 20000)
+
+  it('says words typed during its own save changed, not that they could not be saved', async () => {
+    const refresh = held()
+    const saveRead = held()
+    serve({
+      base: untranslated,
+      read: (src, n) => (src === doc.source && n === 2 ? { body: untranslated, after: refresh.until }
+        : src === doc.source && n === 3 ? { body: untranslated, after: saveRead.until }
+          : null),
+    })
+    await opened(address(doc.source, 's0003'), '/3 translated')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Re-extract' }))
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(2) })
+    await user.type(field(), '燈還亮著。')
+    await act(async () => { refresh.release(); await settle(100) })
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(3) }, { timeout: 4000 })
+    await user.type(field(), '還亮著')
+    await act(async () => { saveRead.release(); await settle(200) })
+
+    expect(extracts()).toEqual([])
+    expect(logged('bad', 'could not be saved')).toBe(false)
+    expect(logged('warn', 'changed while this was saving')).toBe(true)
+  }, 20000)
+
+  it('says the file needs no extract rather than that something is running, when both are true', async () => {
+    // Which reason is given is decided: a file that no longer needs extracting
+    // has nothing to wait for.
+    const listing = held()
+    serve({ listing: n => (n === 2 ? listing.until : null) })
+    await opened()
+    await userEvent.setup().click(entry())
+    await waitFor(() => { expect(offered()).toBe(true) }, { timeout: 4000 })
+    fireEvent.click(offer())
+    await waitFor(() => { expect(callsTo('/api/state')).toHaveLength(2) })
+    act(() => { useStore.setState({ running: true }) })
+    world.made = true
+    world.listed = false
+    world.held = freshTranslated
+    await act(async () => { listing.release(); await settle(150) })
+
+    expect(extracts()).toEqual([])
+    expect(logged('warn', 'is no longer listed as not extracted')).toBe(true)
+    expect(logged('warn', 'something else started running')).toBe(false)
   }, 20000)
 })

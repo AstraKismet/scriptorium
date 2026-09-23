@@ -488,6 +488,27 @@ describe('reading again', () => {
     expect(callsTo('/api/extract')).toHaveLength(0)
   })
 
+  it('does not swallow a click on another untracked file made while the first is asking', async () => {
+    // One flag for every file swallowed the second click whole — no request and
+    // no line — while the first file's extract then logged its own header: the
+    // symptom HANDOFF-088 was about, through a new door.
+    const listed = state({ untracked: [{ source: 'docs/x.md', lang: 'zh-TW' }, { source: 'docs/y.md', lang: 'zh-TW' }] })
+    useStore.setState({ state: listed })
+    let release: () => void = () => undefined
+    const gate = new Promise<void>(r => { release = r })
+    answering(call => (call.path.startsWith('/api/state') ? { body: listed, after: gate }
+      : call.path.startsWith('/api/extract')
+        ? { body: { segments: 1, reused: 0, rejected: 0, kept: [], ambiguous: [], replaced: [], waived_source: [] } }
+        : null))
+    const x = useStore.getState().extractUntracked({ src: 'docs/x.md', lang: 'zh-TW' })
+    const y = useStore.getState().extractUntracked({ src: 'docs/y.md', lang: 'zh-TW' })
+    release()
+    await Promise.all([x, y])
+
+    expect(callsTo('/api/extract').map(c => (c.body as { src: string }).src)).toEqual(['docs/x.md'])
+    expect(useStore.getState().log.some(l => l.text.includes('docs/y.md') && l.text.includes('was not extracted'))).toBe(true)
+  })
+
   it('answers false when the file turned out to be extracted already, having sent no extract', async () => {
     useStore.setState({ state: state({ untracked: [{ source: 'docs/new.md', lang: 'zh-TW' }] }) })
     replies({ body: state() })
