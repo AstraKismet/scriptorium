@@ -471,6 +471,31 @@ describe('a re-parse voids every unsaved edit, at the moment the server accepts 
   })
 })
 
+describe('reading again', () => {
+  it('answers false from a refresh with nothing on screen, and reads nothing', async () => {
+    // The toolbar reads the answer to decide whether it may trust a count; a
+    // refresh that read nothing must not say it did.
+    expect(await useStore.getState().refresh()).toBe(false)
+    expect(callsTo('/api/doc')).toHaveLength(0)
+  })
+
+  it('asks the server nothing for the untracked page\'s extract while a run is in flight', async () => {
+    // The button is disabled then, which is what every click test sees; this
+    // is the guard behind it, for a caller that is not that button.
+    useStore.setState({ state: state({ untracked: [{ source: 'docs/new.md', lang: 'zh-TW' }] }), running: true })
+    expect(await useStore.getState().extractUntracked({ src: 'docs/new.md', lang: 'zh-TW' })).toBe(false)
+    expect(callsTo('/api/state')).toHaveLength(0)
+    expect(callsTo('/api/extract')).toHaveLength(0)
+  })
+
+  it('answers false when the file turned out to be extracted already, having sent no extract', async () => {
+    useStore.setState({ state: state({ untracked: [{ source: 'docs/new.md', lang: 'zh-TW' }] }) })
+    replies({ body: state() })
+    expect(await useStore.getState().extractUntracked({ src: 'docs/new.md', lang: 'zh-TW' })).toBe(false)
+    expect(callsTo('/api/extract')).toHaveLength(0)
+  })
+})
+
 describe('opening a document', () => {
   it('does not paint a superseded open\'s failure over the document that won', async () => {
     // Two opens in flight, the first one failing after the second has been

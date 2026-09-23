@@ -102,7 +102,8 @@ interface Store {
   chooseProvider: (name: string) => void
 
   bootstrap: () => Promise<void>
-  reloadState: () => Promise<void>
+  /** True when the projection was read; a failure is logged and leaves it. */
+  reloadState: () => Promise<boolean>
   /** Take the two projections a `POST /api/config` reply carries back.
    *
    *  A settings screen repaints from its own write's answer and **never** calls
@@ -157,10 +158,17 @@ interface Store {
    * on the rail entry for the page already shown is the same address and reads
    * nothing either. A terminal can extract and translate the file in that time,
    * and the click would then be an unconfirmed re-extract of a translated
-   * document. So the click reads first — the toolbar's Re-extract re-reads
-   * before deciding its confirmation for the same reason — and a file that has
-   * state now is opened, not extracted. True when an extract was sent and
-   * accepted.
+   * document. So the click asks first — the toolbar's Re-extract re-reads
+   * before deciding its confirmation for the same reason.
+   *
+   * **What it asks is the server's own list, not the document.** A failed read
+   * of the document cannot answer: `web/server.py` turns every exception on a
+   * read into a 400, so a locked database looks exactly like a file with no
+   * state, and the page may not parse the sentence. `GET /api/state`'s
+   * `untracked` is computed now, by the server, from the identity state is keyed
+   * on — the fact the no-confirmation argument needs, fresh. A file it no
+   * longer lists is not extracted, and is re-read where the address still names
+   * it. True when an extract was sent and accepted.
    */
   extractUntracked: (where: DocAddress) => Promise<boolean>
   /**
@@ -185,6 +193,24 @@ const LOG_CAP = 4000
 
 let line = 0
 let modelSeq = 0
+
+/**
+ * Which call of `open()` is the current one.
+ *
+ * Not `at`: `at` names a *document*, and the same document can be asked for
+ * twice while the first call is still in flight — A, B, C, back to B. Compared
+ * by value, the first call for B then passed every "am I still the current
+ * open" test with the `leaving` it captured before C existed: its fetch cleared
+ * the words typed in C, which the second call for B had just declined to leave
+ * over, and its refusal or a late failure landed over the second call's page.
+ * A number per call has no second instance. Found by the third review of
+ * HANDOFF-088; the first half is older than it.
+ */
+let openSeq = 0
+
+/** An `extractUntracked` is asking the server, so a second click in the same
+ *  moment is the same act, not a second one — and says nothing. */
+let asking = false
 
 const same = (a: DocAddress | null, b: DocAddress | null): boolean =>
   !!a && !!b && a.src === b.src && a.lang === b.lang
@@ -557,8 +583,10 @@ export const useStore = create<Store>()((set, get) => ({
   reloadState: async () => {
     try {
       set({ state: await api.getState() })
+      return true
     } catch (e) {
       get().say(reason(e), 'bad')
+      return false
     }
   },
 
@@ -606,6 +634,8 @@ export const useStore = create<Store>()((set, get) => ({
     // composition that has not yet produced an `input` event, in a workbench
     // that exists for writing Chinese.
     set({ at: want, docError: '', readFailed: false })
+    const mine = ++openSeq
+    const current = (): boolean => mine === openSeq
 
     // **Written before it is discarded.** A navigation that moves no DOM focus —
     // Back, Forward, a mouse side button, a hand-typed link — blurs no field, so
@@ -625,7 +655,7 @@ export const useStore = create<Store>()((set, get) => ({
     // the reviewer moved again. Its refusal below would have written its error
     // over that page the same way. The newer open owns the page, and flushes
     // whatever is left itself. Found by the review of HANDOFF-088; older than it.
-    if (!same(get().at, want)) return
+    if (!current()) return
 
     // **What the save could not write, this will not discard.** The rule the
     // toolbar's Re-extract already follows, applied to a navigation: this page
@@ -661,8 +691,9 @@ export const useStore = create<Store>()((set, get) => ({
     set({ docLoading: true })
     try {
       const doc = await api.getDoc(want)
-      // Someone may have opened another document while this was in flight.
-      if (!same(get().at, want)) return
+      // Someone may have opened another document — or this one again — while
+      // this was in flight.
+      if (!current()) return
       // **Discarded here, and not a statement earlier.** `SegmentRow` reads
       // `drafts.get(seg.id)` by id alone and ids restart at `s0001` in every
       // document, so what the clear prevents is one document's words drawn in
@@ -684,7 +715,7 @@ export const useStore = create<Store>()((set, get) => ({
       }
       set({ doc, docLoading: false })
     } catch (e) {
-      if (!same(get().at, want)) return
+      if (!current()) return
       // A refusal the server *answered* — never a request that did not arrive.
       // A file this page has never read may have state after all, and a
       // transport failure says nothing either way; offering an extract over it
@@ -977,34 +1008,34 @@ export const useStore = create<Store>()((set, get) => ({
   startOver: (where, register) => reExtract(set, get, where, register),
 
   extractUntracked: async where => {
-    if (get().running) return false
-    let found = false
+    if (get().running || asking) return false
+    asking = true
     try {
-      await api.getDoc(where)
-      found = true
-    } catch (e) {
-      // Only the server saying no is a reason to extract. A request that did
-      // not arrive says nothing about what the server holds.
-      if (!(e instanceof ApiError)) {
-        get().say('  ' + reason(e), 'bad')
-        return false
-      }
+      if (!await get().reloadState()) return false
+    } finally {
+      asking = false
     }
-    if (found) {
+    if (!notExtracted(get().state, where)) {
+      // Extracted elsewhere since this page read it, most likely — or no longer
+      // matched by `sources`. Either way there is nothing to extract, and the
+      // document is `open()`'s to read, where the address still names it.
+      const here = same(get().at, where)
       get().say(
-        `  ${where.src} [${where.lang}] has been extracted since this page last read it — ` +
-        `opening it instead of extracting it again`,
+        `  ${where.src} [${where.lang}] is no longer listed as not extracted, so nothing was ` +
+        `extracted — it has been extracted elsewhere, or no longer matches \`sources\`` +
+        (here ? '; reading it again' : '; open it from the rail'),
         'warn',
       )
-      await get().reloadState()
-      // What `at` names, and only that — the rule `reExtract` follows.
-      if (same(get().at, where)) await get().open(where.src, where.lang)
+      if (here) await get().open(where.src, where.lang)
       return false
     }
-    // Asked again after the read: two clicks in one frame both passed the test
-    // above, and the second must not log a header over a request `reExtract`
-    // declines.
-    if (get().running) return false
+    // Asked again after the round trip: a run may have started meanwhile. Said,
+    // because a click that does nothing and says nothing is indistinguishable
+    // from one that was never made.
+    if (get().running) {
+      get().say(`  ${where.src} was not extracted: a run started while this was asking — try again when it finishes`, 'warn')
+      return false
+    }
     get().say(`— extract ${where.src} [${where.lang}] —`, 'plain', true)
     return get().extract(where)
   },

@@ -73,27 +73,29 @@ export function Toolbar() {
     // Before the dialog, not after: an edit still in the ledger is written
     // against the ids *this* parse produced, and the next parse reassigns them
     // from `s0001`.
-    await save()
+    //
     // **What `save()` could not write, this must not discard.** A refusal keeps
     // the entry in `drafts`, and re-extracting then clears it — and those edits
     // can never be applied afterwards, because the ids they are keyed on will
-    // name different text. So the act stops here instead, with the reviewer
-    // holding the only copy.
-    if (drafts.size()) {
+    // name different text. So the act stops instead, with the reviewer holding
+    // the only copy.
+    const written = async (): Promise<boolean> => {
+      await save()
+      if (!drafts.size()) return true
       say(
         `  ${drafts.ids().slice(0, 20).join(', ')} could not be saved, and a re-extract ` +
         `renumbers segments — copy that wording somewhere before trying again`,
         'bad',
       )
-      return
+      return false
     }
+    if (!await written()) return
     // **Re-read before deciding what to warn about.** `report.translated` is a
     // client snapshot, and `save()` refreshes it only when it had something to
     // send — so a book translated by `lx run` in a terminal while this page sat
     // open still reported 0 here, and the confirmation this act needs would have
     // been skipped. One extra read on a deliberate, rare, destructive press.
     const read = await refresh()
-    const { doc: now, at } = useStore.getState()
     // **The count must be this document's, and read now.** `refresh()` re-reads
     // whatever is on screen, and the rail stays live through the two round trips
     // above — so a reviewer who moved to another document meanwhile had *its*
@@ -104,15 +106,19 @@ export function Toolbar() {
     // move to a file nobody has extracted leaves `doc` where it was, and the
     // dialog would then open over that file's page.
     const named = { src: doc.source, lang: doc.lang }
-    if (!now || now.source !== named.src || now.lang !== named.lang ||
-        !at || at.src !== named.src || at.lang !== named.lang) {
+    const stillHere = () => {
+      const { doc: now, at } = useStore.getState()
+      if (now && now.source === named.src && now.lang === named.lang &&
+          at && at.src === named.src && at.lang === named.lang) return now
       say(
         `  ${doc.source} was not re-extracted: the page moved to another document ` +
         `before it could read what this one holds`,
         'warn',
       )
-      return
+      return null
     }
+    let now = stillHere()
+    if (!now) return
     // And a re-read that failed leaves the snapshot this exists to distrust —
     // one saying nothing is translated would skip the dialog for a book `lx run`
     // translated in a terminal. Older than HANDOFF-088, found by its review.
@@ -124,12 +130,22 @@ export function Toolbar() {
       )
       return
     }
+    // **Asked again, because the ledger stayed editable through that read.**
+    // Words typed while it was in flight were in `drafts` when the extract
+    // landed, and on a document with nothing translated no dialog stood in the
+    // way: they were stranded and named as gone (older than HANDOFF-088, found
+    // twice by its reviews). The dialog below is modal, so nothing is typed
+    // after this — but the count is read once more, since a save that wrote
+    // something has changed it, and a page that moved during it is asked again.
+    if (!await written()) return
+    now = stillHere()
+    if (!now) return
     // **Asked only when there is something to lose.** On a document with nothing
     // translated a re-extract cannot discard a translation, and it cannot drop a
     // hold either — holding requires a non-empty target. A dialog there would be
     // ceremony over an act with no cost, and one that fires every time teaches
     // people to click through the one that matters.
-    const ok = !now?.report.translated || await ask(
+    const ok = !now.report.translated || await ask(
       `Re-extract ${doc.source}?`,
       [
         'The source file is read again and the document re-parsed.',

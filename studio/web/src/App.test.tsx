@@ -929,9 +929,9 @@ describe('the rail\'s Not yet extracted entry', () => {
     await settle()
     expect(window.location.hash).toBe(address(fresh.source))
     expect(offer().disabled).toBe(false)
-    // The landing read and the click's own, and no third: nothing re-read a
-    // file the server said it could not make.
-    expect(callsTo('/api/doc').filter(c => c.path.includes(encodeURIComponent(fresh.source)))).toHaveLength(2)
+    // Only the landing read: the click asks the project's list, not the file,
+    // and nothing re-read a file the server said it could not make.
+    expect(callsTo('/api/doc').filter(c => c.path.includes(encodeURIComponent(fresh.source)))).toHaveLength(1)
   }, 15000)
 
   it('waits for a run in flight, rather than logging an extract it will not send', async () => {
@@ -983,9 +983,9 @@ describe('the rail\'s Not yet extracted entry', () => {
     expect(window.location.hash).toBe(address(second.source))
     expect(screen.getByText('/2 translated')).toBeTruthy()
     // It is made, and listed as made — and not read after the extract, because
-    // nothing asked: the landing read and the click's are the only two.
+    // nothing asked: the landing read is the only one.
     expect(screen.queryByRole('button', { name: /not extracted/ })).toBeNull()
-    expect(callsTo('/api/doc').filter(c => c.path.includes(encodeURIComponent(fresh.source)))).toHaveLength(2)
+    expect(callsTo('/api/doc').filter(c => c.path.includes(encodeURIComponent(fresh.source)))).toHaveLength(1)
   }, 15000)
 })
 
@@ -1375,32 +1375,44 @@ describe('what the page acts on is what it has just read', () => {
   const world = { made: false, listed: true, held: fresh }
 
   /** `read(src, n)` may answer the n-th `GET /api/doc` of a file, `save(n)` the
-   *  n-th `POST /api/save`; `base` is what `book/ch1.md` reads as. */
+   *  n-th `POST /api/save`, `listing(n)` the n-th `GET /api/state` (its body is
+   *  still the world's, read when the reply is sent); `base` is what
+   *  `book/ch1.md` reads as. */
   const serve = (over: {
     read?: (src: string, n: number) => Answer | null
     save?: (n: number) => Answer | null
+    listing?: (n: number) => Promise<void> | null
     base?: DocResponse
   } = {}): void => {
     const reads = new Map<string, number>()
     let saves = 0
+    let listings = 0
     let requests = 0
+    const project = (): StateResponse => ({
+      ...state,
+      docs: [
+        ...state.docs,
+        { source: second.source, lang: 'zh-TW', total: 2, done: 0 },
+        { source: third.source, lang: 'zh-TW', total: 2, done: 0 },
+        ...(world.listed ? [] : [{ source: fresh.source, lang: 'zh-TW', total: 4, done: 0 }]),
+      ],
+      untracked: world.listed ? [{ source: fresh.source, lang: 'zh-TW' }] : [],
+    })
     answering(call => {
       requests += 1
       if (requests > 200) return { body: {}, after: new Promise<void>(() => undefined) }
       const path = call.path
       if (path.startsWith('/api/state')) {
-        return {
-          body: {
-            ...state,
-            docs: [
-              ...state.docs,
-              { source: second.source, lang: 'zh-TW', total: 2, done: 0 },
-              { source: third.source, lang: 'zh-TW', total: 2, done: 0 },
-              ...(world.listed ? [] : [{ source: fresh.source, lang: 'zh-TW', total: 4, done: 0 }]),
-            ],
-            untracked: world.listed ? [{ source: fresh.source, lang: 'zh-TW' }] : [],
-          },
+        listings += 1
+        const hold = over.listing?.(listings)
+        // The body is built when the reply is released, so a test can change
+        // the world while the request is in flight — which is what a terminal
+        // does.
+        if (hold) {
+          const reply = { body: {} as StateResponse, after: hold.then(() => { reply.body = project() }) }
+          return reply
         }
+        return { body: project() }
       }
       if (path.startsWith('/api/models')) return { body: { provider: 'local', configured: 'qwen', models: [], error: null } }
       if (path.startsWith('/api/save')) { saves += 1; return over.save?.(saves) ?? { body: wrote } }
@@ -1520,11 +1532,11 @@ describe('what the page acts on is what it has just read', () => {
     expect(logged('bad', 'database is locked')).toBe(true)
   }, 15000)
 
-  it('reads the file again at the click, and opens it rather than extract a file a terminal has made', async () => {
+  it('asks the server again at the click, and reads the file rather than extract one a terminal has made', async () => {
     // `at` outlives a trip to the backend screens, so coming back reads nothing
     // and the offer still stands on the first read. A terminal extracted and
     // translated the file meanwhile; the click would have been an unconfirmed
-    // re-extract of it.
+    // re-extract of it. The server's list, read at the click, no longer names it.
     serve()
     await opened()
     await userEvent.setup().click(entry())
@@ -1532,6 +1544,7 @@ describe('what the page acts on is what it has just read', () => {
     window.location.hash = '#/backends'
     await settle()
     world.made = true
+    world.listed = false
     world.held = freshTranslated
     window.history.back()
     await waitFor(() => { expect(offered()).toBe(true) }, { timeout: 4000 })
@@ -1540,7 +1553,8 @@ describe('what the page acts on is what it has just read', () => {
     await waitFor(() => { expect(screen.getByText('/4 translated')).toBeTruthy() }, { timeout: 4000 })
     await settle()
     expect(extracts()).toEqual([])
-    expect(logged('warn', 'has been extracted since this page last read it')).toBe(true)
+    expect(logged('warn', 'is no longer listed as not extracted')).toBe(true)
+    expect(logged('warn', 'reading it again')).toBe(true)
     expect(useStore.getState().log.some(l => l.text.startsWith('— extract'))).toBe(false)
   }, 15000)
 
@@ -1707,6 +1721,9 @@ describe('what the page acts on is what it has just read', () => {
     await act(async () => { refresh.release(); await settle(200) })
     expect(dialogOpen()).toBe(false)
     expect(extracts()).toEqual([])
+    // The page moved: that is the reason given, not a failed read.
+    expect(logged('warn', 'the page moved to another document')).toBe(true)
+    expect(logged('warn', 'could not be read again')).toBe(false)
   }, 15000)
 
   it('does not log Start over\'s header over an extract a run has started in front of', async () => {
@@ -1724,4 +1741,147 @@ describe('what the page acts on is what it has just read', () => {
     expect(useStore.getState().log.some(l => l.text.startsWith('— start over'))).toBe(false)
     expect(logged('warn', 'a run started')).toBe(true)
   }, 15000)
+
+  // ── an open asked for again, and the clicks that ask the server ──────────
+  //
+  // The third review. `open()` told its own calls apart by the document `at`
+  // named, and the same document can be asked for twice while the first call
+  // is in flight — A, B, C, back to B.
+
+  it('does not let a slow first open of a document discard words a second open of it declined to leave (older)', async () => {
+    const slow = held()
+    serve({ read: (src, n) => (src === second.source && n === 1 ? { body: second, after: slow.until } : null), save: () => refused })
+    await opened()
+    window.location.hash = address(second.source, 's0001')
+    await waitFor(() => { expect(readsOf(second.source)).toBe(1) })
+    window.location.hash = address(third.source, 's0001')
+    await waitFor(() => { expect(useStore.getState().doc?.source).toBe(third.source) }, { timeout: 4000 })
+    await userEvent.setup().type(field(), '早晨來得晚。')
+    window.location.hash = address(second.source, 's0001')
+    await waitFor(() => { expect(screen.getByText(/could not be written to book\/ch3\.md/)).toBeTruthy() }, { timeout: 4000 })
+
+    // The first open's read lands: it was overtaken, and does nothing.
+    await act(async () => { slow.release(); await settle(150) })
+    expect(drafts.get('s0001')).toBe('早晨來得晚。')
+    expect(useStore.getState().doc?.source).toBe(third.source)
+    expect(screen.getByText(/could not be written to book\/ch3\.md/)).toBeTruthy()
+  }, 20000)
+
+  it('does not let a late failed read of the file replace a refusal to leave, or offer the extract over it', async () => {
+    const slow = held()
+    serve({
+      read: (src, n) => (src === fresh.source && n === 1
+        ? { status: 400, body: { error: `no state for ${fresh.source} [zh-TW]` }, after: slow.until }
+        : null),
+      save: () => refused,
+    })
+    await opened()
+    const user = userEvent.setup()
+    await user.click(entry())
+    await waitFor(() => { expect(readsOf(fresh.source)).toBe(1) })
+    await user.click(screen.getByRole('button', { name: /book\/ch1\.md/ }))
+    await waitFor(() => { expect(screen.getByText('/3 translated')).toBeTruthy() }, { timeout: 4000 })
+    await user.type(field(), '燈還亮著。')
+    await user.click(entry())
+    await waitFor(() => { expect(screen.getByText(/could not be written to book\/ch1\.md/)).toBeTruthy() }, { timeout: 4000 })
+
+    await act(async () => { slow.release(); await settle(150) })
+    expect(offered()).toBe(false)
+    expect(useStore.getState().docError).toMatch(/^s0003 could not be written to book\/ch1\.md/)
+    expect(extracts()).toEqual([])
+  }, 20000)
+
+  it('does not let an overtaken open write its refusal over the page of a later open of the same document (older)', async () => {
+    const s1 = held()
+    const s3 = held()
+    serve({ save: n => (n === 1 ? { body: wrote, after: s1.until } : n === 3 ? { body: wrote, after: s3.until } : null) })
+    await opened()
+    const user = userEvent.setup()
+    await user.type(field(), '燈還亮著。')
+    window.location.hash = address(second.source, 's0001')
+    await waitFor(() => { expect(callsTo('/api/save')).toHaveLength(1) })
+    window.location.hash = address(third.source, 's0001')
+    await waitFor(() => { expect(useStore.getState().doc?.source).toBe(third.source) }, { timeout: 4000 })
+    await user.type(field(), '早晨來得晚。')
+    window.location.hash = address(second.source, 's0001')
+    await waitFor(() => { expect(callsTo('/api/save')).toHaveLength(3) })
+
+    await act(async () => { s1.release(); await settle(100) })
+    await act(async () => { s3.release(); await settle(200) })
+    await waitFor(() => { expect(useStore.getState().doc?.source).toBe(second.source) }, { timeout: 4000 })
+    expect(useStore.getState().docError).toBe('')
+  }, 20000)
+
+  it('writes words typed during the re-read Re-extract makes, rather than stranding them (older)', async () => {
+    const refresh = held()
+    serve({ base: untranslated, read: (src, n) => (src === doc.source && n === 2 ? { body: untranslated, after: refresh.until } : null) })
+    await opened(address(doc.source, 's0003'), '/3 translated')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Re-extract' }))
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(2) })
+    await user.type(field(), '燈還亮著。')
+    await act(async () => { refresh.release(); await settle(300) })
+
+    expect(callsTo('/api/save').some(c => (c.body as { targets: Record<string, string> }).targets.s0003 === '燈還亮著。')).toBe(true)
+    expect(logged('bad', 'are gone')).toBe(false)
+  }, 20000)
+
+  it('says why when a run starts while the click is asking the server', async () => {
+    const listing = held()
+    serve({ listing: n => (n === 2 ? listing.until : null) })
+    await opened()
+    await userEvent.setup().click(entry())
+    await waitFor(() => { expect(offered()).toBe(true) }, { timeout: 4000 })
+    fireEvent.click(offer())
+    await waitFor(() => { expect(callsTo('/api/state')).toHaveLength(2) })
+    act(() => { useStore.setState({ running: true }) })
+    await act(async () => { listing.release(); await settle(150) })
+
+    expect(extracts()).toEqual([])
+    expect(logged('warn', `${fresh.source} was not extracted: a run started`)).toBe(true)
+    expect(useStore.getState().log.some(l => l.text.startsWith('— extract'))).toBe(false)
+  }, 20000)
+
+  it('reads nothing and says so when the address moved while the click was asking', async () => {
+    const listing = held()
+    serve({ listing: n => (n === 2 ? listing.until : null) })
+    await opened()
+    await userEvent.setup().click(entry())
+    await waitFor(() => { expect(offered()).toBe(true) }, { timeout: 4000 })
+    fireEvent.click(offer())
+    await waitFor(() => { expect(callsTo('/api/state')).toHaveLength(2) })
+    window.location.hash = address(second.source, 's0001')
+    await waitFor(() => { expect(useStore.getState().doc?.source).toBe(second.source) }, { timeout: 4000 })
+    // A terminal extracts the file while the click's question is in flight.
+    world.made = true
+    world.listed = false
+    world.held = freshTranslated
+    await act(async () => { listing.release(); await settle(150) })
+
+    expect(extracts()).toEqual([])
+    expect(useStore.getState().doc?.source).toBe(second.source)
+    expect(readsOf(fresh.source)).toBe(1)
+    expect(logged('warn', 'open it from the rail')).toBe(true)
+    expect(logged('warn', 'reading it again')).toBe(false)
+  }, 20000)
+
+  it('does not carry Re-extract on when the address moved to the same file in another language', async () => {
+    // Each clause of "is this still the document the dialog would name" is
+    // needed: here only the language `at` names says the page has moved.
+    const refresh = held()
+    serve({
+      read: (src, n) => (src === doc.source && n === 2 ? { body: doc, after: refresh.until }
+        : src === doc.source && n === 3 ? { status: 400, body: { error: 'no state for book/ch1.md [ja]' } }
+          : null),
+    })
+    await opened()
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Re-extract' }))
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(2) })
+    window.location.hash = `#/doc/ja/${encodeURIComponent(doc.source)}`
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(3) })
+    await act(async () => { refresh.release(); await settle(200) })
+    expect(dialogOpen()).toBe(false)
+    expect(extracts()).toEqual([])
+    expect(logged('warn', 'the page moved to another document')).toBe(true)
+  }, 20000)
 })
