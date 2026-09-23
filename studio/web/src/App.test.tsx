@@ -699,3 +699,348 @@ describe('leaving a document with words that were never written', () => {
     expect(drafts.size()).toBe(0)
   }, 15000)
 })
+
+/**
+ * The rail's *Not yet extracted* entry, which extracted the wrong document.
+ *
+ * HANDOFF-088, measured 2026-09-14 in Chrome 153 against `lx web` on `f34298b`:
+ * with a document open and an untracked source listed, a click on the untracked
+ * entry sent exactly one request, `POST /api/extract` naming **the document that
+ * was open**, while the log read `— extract <the clicked file> —`, and the
+ * clicked file stayed untracked. The button called `store.open()` beside the
+ * address, `App.tsx`'s effect put the addressed document back a render later,
+ * and the extract read `shown()` — still the open document.
+ *
+ * The fixture answers as the server does: `GET /api/doc` for a file with no
+ * state is a 400 carrying `no state for …`, until an extract has made one.
+ */
+describe('the rail\'s Not yet extracted entry', () => {
+  const fresh: DocResponse = {
+    ...doc,
+    source: 'docs/untracked.md',
+    report: { segments: 4, translated: 0, errors: 0, warnings: 0, by_rule: {} },
+    segments: ['s0001', 's0002', 's0003', 's0004'].map((id, i) => (
+      { ...doc.segments[2]!, id, source: `Line ${i + 1}.`, target: '', token: `n${i}`, issues: [] }
+    )),
+  }
+  const second: DocResponse = {
+    ...doc,
+    source: 'book/ch2.md',
+    report: { segments: 2, translated: 0, errors: 0, warnings: 0, by_rule: {} },
+    segments: [
+      { ...doc.segments[2]!, id: 's0001', source: 'Morning came late.', target: '', token: 'u1', issues: [] },
+      { ...doc.segments[2]!, id: 's0002', source: 'Nobody spoke.', target: '', token: 'u2', issues: [] },
+    ],
+  }
+  const extracted = { segments: 4, reused: 0, rejected: 0, kept: [], ambiguous: [], replaced: [], waived_source: [] }
+  const wrote = { applied: 1, unknown: [], stored: {}, conflicts: {} }
+
+  /** Whether the untracked file has state yet. Flipped by the extract the
+   *  server accepts for it, and read by every later answer. */
+  let made = false
+
+  const serve = (over: { extract?: Answer; save?: Answer } = {}): void => {
+    made = false
+    let requests = 0
+    answering(call => {
+      requests += 1
+      // The cap `leaving a document…` explains: a loop fails rather than hangs.
+      if (requests > 150) return { body: {}, after: new Promise<void>(() => undefined) }
+      const path = call.path
+      if (path.startsWith('/api/state')) {
+        const project: StateResponse = {
+          ...state,
+          docs: [
+            ...state.docs,
+            { source: second.source, lang: 'zh-TW', total: 2, done: 0 },
+            ...(made ? [{ source: fresh.source, lang: 'zh-TW', total: 4, done: 0 }] : []),
+          ],
+          untracked: made ? [] : [{ source: fresh.source, lang: 'zh-TW' }],
+        }
+        return { body: project }
+      }
+      if (path.startsWith('/api/models')) return { body: { provider: 'local', configured: 'qwen', models: [], error: null } }
+      if (path.startsWith('/api/save')) return over.save ?? { body: wrote }
+      if (path.startsWith('/api/extract')) {
+        const answer = over.extract ?? { body: extracted }
+        const ok = (answer.status ?? 200) < 300
+        const src = (call.body as { src?: string } | null)?.src
+        if (ok && src === fresh.source) {
+          if (answer.after) void answer.after.then(() => { made = true })
+          else made = true
+        }
+        return answer
+      }
+      if (path.startsWith('/api/doc')) {
+        const src = new URLSearchParams(path.split('?')[1]).get('src')
+        if (src === fresh.source) {
+          return made
+            ? { body: fresh }
+            : { status: 400, body: { error: `no state for ${fresh.source} [zh-TW] — run \`lx extract ${fresh.source} --lang zh-TW\` first` } }
+        }
+        return { body: src === second.source ? second : doc }
+      }
+      if (path.startsWith('/api/sentences')) return { body: { sentences: [] } }
+      return { body: { source: '', lang: 'zh-TW', tone: null, ids: [], voice: '', voice_notes: [], algorithm: 'none', cutoff: 0, records: 0, segments: [] } }
+    })
+  }
+
+  const address = (src: string, seg?: string): string =>
+    `#/doc/zh-TW/${encodeURIComponent(src)}` + (seg ? `?seg=${seg}` : '')
+
+  const startAt = (hash: string): void => {
+    window.location.hash = hash
+    window.dispatchEvent(new HashChangeEvent('hashchange'))
+  }
+
+  const settle = (): Promise<void> => new Promise(r => { setTimeout(r, 50) })
+
+  const opened = async (hash = address(doc.source, 's0003')): Promise<void> => {
+    startAt(hash)
+    render(<App />)
+    await waitFor(() => { expect(screen.getByText('/3 translated')).toBeTruthy() }, { timeout: 4000 })
+  }
+
+  const entry = (): HTMLElement => screen.getByRole('button', { name: /docs\/untracked\.md.*extract/ })
+
+  const extracts = (): unknown[] => callsTo('/api/extract').map(c => c.body)
+
+  const readOf = (src: string): number =>
+    calls.findIndex(c => c.path.startsWith('/api/doc') && c.path.includes(encodeURIComponent(src)))
+
+  const logSays = (text: string): boolean =>
+    useStore.getState().log.some(l => l.text.includes(text))
+
+  it('extracts the file that was clicked, not the one that is open, and then opens it', async () => {
+    serve()
+    await opened()
+
+    await userEvent.setup().click(entry())
+    await waitFor(() => { expect(extracts()).toHaveLength(1) }, { timeout: 4000 })
+    // One request, and it names the file that was clicked — as a plain extract:
+    // a first extract has no register to keep and nothing to reset.
+    expect(extracts()).toEqual([{ src: fresh.source, lang: 'zh-TW' }])
+
+    await waitFor(() => {
+      expect(window.location.hash).toBe(address(fresh.source))
+      expect(screen.getByText('/4 translated')).toBeTruthy()
+    }, { timeout: 4000 })
+    await settle()
+    expect(extracts()).toHaveLength(1)
+    // The file is read only once it exists, so no `no state for …` is ever
+    // drawn or logged on the way to it.
+    expect(readOf(fresh.source)).toBeGreaterThan(calls.indexOf(callsTo('/api/extract')[0]!))
+    expect(logSays('no state for')).toBe(false)
+    // The log names what was extracted, and says what the extract did.
+    expect(logSays(`— extract ${fresh.source} [zh-TW] —`)).toBe(true)
+    expect(logSays('4 segments, 0 reused')).toBe(true)
+    // And the document that was open was never re-read by anything but the
+    // address that first opened it.
+    expect(calls.filter(c => c.path.startsWith('/api/doc') && c.path.includes(encodeURIComponent(doc.source))))
+      .toHaveLength(1)
+    // It is tracked now: the rail lists it with the others.
+    expect(screen.queryByRole('button', { name: /docs\/untracked\.md.*extract/ })).toBeNull()
+  }, 15000)
+
+  it('is a history entry, like every other way of opening a document', async () => {
+    serve()
+    await opened()
+    const entries = window.history.length
+
+    await userEvent.setup().click(entry())
+    await waitFor(() => { expect(screen.getByText('/4 translated')).toBeTruthy() }, { timeout: 4000 })
+    expect(window.history.length).toBe(entries + 1)
+
+    // Back returns to the chapter and its paragraph.
+    window.history.back()
+    await waitFor(() => {
+      expect(window.location.hash).toBe(address(doc.source, 's0003'))
+      expect(screen.getByText('/3 translated')).toBeTruthy()
+    }, { timeout: 4000 })
+  }, 15000)
+
+  it('does not strand the words in the open document, and a refused open does not cost them', async () => {
+    // The test HANDOFF-087 named for this package: `POST /api/save` failing
+    // while a dirty field is open. The old button re-extracted the document on
+    // screen here too — and a re-extract marks every unsaved word in it
+    // unwritable, so the words were gone as well as the wrong file parsed.
+    serve({ save: { status: 400, body: { error: 'nothing is listening on 8787' } } })
+    await opened()
+    await userEvent.setup().type(document.querySelector<HTMLTextAreaElement>('.ledger textarea')!, '燈還亮著。')
+
+    await userEvent.setup().click(entry())
+    await waitFor(() => {
+      expect(screen.getByText(/could not be written to book\/ch1\.md/)).toBeTruthy()
+    }, { timeout: 4000 })
+    await settle()
+
+    expect(extracts()).toEqual([{ src: fresh.source, lang: 'zh-TW' }])
+    // The file that was clicked is extracted either way: the page declined to
+    // *leave*, which is a fact about the words in this chapter and not about
+    // the other file.
+    expect(logSays('4 segments, 0 reused')).toBe(true)
+    // The words are still this page's, still writable, and still in their row.
+    expect(drafts.get('s0003')).toBe('燈還亮著。')
+    expect(drafts.stranded()).toBe(false)
+    expect(useStore.getState().doc?.source).toBe(doc.source)
+    expect(logSays('could not be written anywhere')).toBe(false)
+  }, 15000)
+
+  it('does not move a reviewer who has gone elsewhere while it was extracting', async () => {
+    let release: () => void = () => undefined
+    serve({ extract: { body: extracted, after: new Promise<void>(r => { release = r }) } })
+    await opened()
+    const user = userEvent.setup()
+
+    await user.click(entry())
+    await waitFor(() => { expect(extracts()).toHaveLength(1) })
+    await user.click(screen.getByRole('button', { name: /book\/ch2\.md/ }))
+    await waitFor(() => { expect(screen.getByText('/2 translated')).toBeTruthy() }, { timeout: 4000 })
+
+    release()
+    await waitFor(() => { expect(logSays('4 segments, 0 reused')).toBe(true) }, { timeout: 4000 })
+    await settle()
+    // The click asked for a file that did not exist yet; by the time it did,
+    // the reviewer had chosen something else, and that choice stands.
+    expect(window.location.hash).toBe(address(second.source))
+    expect(screen.getByText('/2 translated')).toBeTruthy()
+    expect(readOf(fresh.source)).toBe(-1)
+  }, 15000)
+
+  it('stays where it was when the extract is refused, with the reason in the log', async () => {
+    serve({ extract: { status: 400, body: { error: 'docs/untracked.md: not UTF-8 and no configured encoding reads it' } } })
+    await opened()
+
+    await userEvent.setup().click(entry())
+    await waitFor(() => { expect(logSays('not UTF-8')).toBe(true) }, { timeout: 4000 })
+    await settle()
+
+    expect(window.location.hash).toBe(address(doc.source, 's0003'))
+    expect(screen.getByText('/3 translated')).toBeTruthy()
+    // Nothing tried to read a file the server has just said it could not make.
+    expect(readOf(fresh.source)).toBe(-1)
+    expect(entry()).toBeTruthy()
+  }, 15000)
+
+  it('opens the file it extracted when the address already names it', async () => {
+    // A hand-typed link to a file nobody has extracted: the page says so, and
+    // the rail offers the extract. The address names the file already, so no
+    // navigation can move it — the extract itself re-reads what the address
+    // names.
+    serve()
+    startAt(address(fresh.source))
+    render(<App />)
+    await waitFor(() => { expect(useStore.getState().docError).toMatch(/^no state for docs\/untracked\.md/) }, { timeout: 4000 })
+    expect(screen.getByRole('heading', { name: fresh.source })).toBeTruthy()
+
+    await userEvent.setup().click(entry())
+    await waitFor(() => { expect(screen.getByText('/4 translated')).toBeTruthy() }, { timeout: 4000 })
+    expect(extracts()).toEqual([{ src: fresh.source, lang: 'zh-TW' }])
+    expect(window.location.hash).toBe(address(fresh.source))
+  }, 15000)
+
+  it('is not offered while a run is in flight, rather than logging an extract it will not send', async () => {
+    serve()
+    await opened()
+    act(() => { useStore.setState({ running: true }) })
+
+    expect((entry() as HTMLButtonElement).disabled).toBe(true)
+    await userEvent.setup().click(entry())
+    await settle()
+    expect(extracts()).toHaveLength(0)
+    expect(logSays('— extract')).toBe(false)
+  }, 15000)
+})
+
+/**
+ * The margin after a re-parse.
+ *
+ * Ids are reassigned from `s0001` on every parse, and the margin's style cache
+ * was scoped `src|lang` — which no re-extract changes — with its effect keyed on
+ * the id alone. So once a re-extract put different text under the id the
+ * address names, the margin went on showing what the model is told about the
+ * paragraph that *used to* carry it, beside the one that does now. Traced by
+ * HANDOFF-088 from the code; these reproduce it.
+ */
+describe('the margin after a re-parse', () => {
+  const extracted = { segments: 3, reused: 3, rejected: 0, kept: [], ambiguous: [], replaced: [], waived_source: [] }
+
+  /** `after` is what the next `GET /api/doc` answers once a re-extract lands. */
+  const serve = (after: DocResponse): void => {
+    let parsed = false
+    answering(call => {
+      const path = call.path
+      if (path.startsWith('/api/state')) return { body: state }
+      if (path.startsWith('/api/models')) return { body: { provider: 'local', configured: 'qwen', models: [], error: null } }
+      if (path.startsWith('/api/extract')) { parsed = true; return { body: extracted } }
+      if (path.startsWith('/api/doc')) return { body: parsed ? after : doc }
+      if (path.startsWith('/api/style')) {
+        // What the server answers is a function of the paragraph's text and the
+        // document's register, so the fixture answers from those two.
+        const now = parsed ? after : doc
+        const id = (call.body as { ids: string[] }).ids[0]
+        const seg = now.segments.find(s => s.id === id)
+        return {
+          body: {
+            source: now.source, lang: 'zh-TW', tone: now.tone, ids: [id],
+            voice: `brief for ${now.tone ?? 'none'}`,
+            voice_notes: [{ names: ['note'], notes: `about: ${seg?.source ?? '?'}` }],
+          },
+        }
+      }
+      return { body: { algorithm: 'none', cutoff: 0, records: 0, segments: [] } }
+    })
+  }
+
+  const startAt = (hash: string): void => {
+    window.location.hash = hash
+    window.dispatchEvent(new HashChangeEvent('hashchange'))
+  }
+
+  const opened = async (): Promise<void> => {
+    startAt('#/doc/zh-TW/book%2Fch1.md?seg=s0001')
+    render(<App />)
+    await waitFor(() => { expect(screen.getByText('about: Chapter 1')).toBeTruthy() }, { timeout: 4000 })
+  }
+
+  it('asks again about the paragraph that now carries the id', async () => {
+    // A paragraph inserted at the top: every id now names the paragraph before
+    // the one it named.
+    const moved: DocResponse = {
+      ...doc,
+      segments: [
+        { ...doc.segments[1]!, id: 's0001', source: 'A new opening line.', token: 'm1' },
+        { ...doc.segments[0]!, id: 's0002', token: 'm2' },
+        { ...doc.segments[1]!, id: 's0003', token: 'm3' },
+      ],
+    }
+    serve(moved)
+    await opened()
+
+    await act(async () => { await useStore.getState().extract({ src: doc.source, lang: 'zh-TW' }) })
+    await waitFor(() => { expect(screen.getByText('about: A new opening line.')).toBeTruthy() }, { timeout: 4000 })
+    expect(screen.queryByText('about: Chapter 1')).toBeNull()
+  }, 15000)
+
+  it('asks again after a start-over, because the register is part of the answer', async () => {
+    const plain: DocResponse = { ...doc, tone: 'plain' }
+    serve(plain)
+    await opened()
+    expect(screen.getByText('brief for literary')).toBeTruthy()
+
+    await act(async () => { await useStore.getState().startOver({ src: doc.source, lang: 'zh-TW' }, 'plain') })
+    await waitFor(() => { expect(screen.getByText('brief for plain')).toBeTruthy() }, { timeout: 4000 })
+  }, 15000)
+
+  it('does not ask again when the re-parse left the paragraph where it was', async () => {
+    serve(doc)
+    await opened()
+    const asked = callsTo('/api/style').length
+
+    await act(async () => { await useStore.getState().extract({ src: doc.source, lang: 'zh-TW' }) })
+    await new Promise(r => { setTimeout(r, 900) })
+    expect(screen.getByText('about: Chapter 1')).toBeTruthy()
+    // The cache is for exactly this: a second look at a paragraph is free.
+    expect(callsTo('/api/style')).toHaveLength(asked)
+  }, 15000)
+})

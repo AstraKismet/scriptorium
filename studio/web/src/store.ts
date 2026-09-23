@@ -127,8 +127,16 @@ interface Store {
   setHold: (ids: string[], held: boolean) => Promise<void>
   setWaive: (ids: string[], waived: boolean) => Promise<void>
   check: () => Promise<void>
-  /** Re-read the source and re-parse, keeping the frozen register. */
-  extract: () => Promise<void>
+  /**
+   * Read a source and parse it, keeping the frozen register if it has one.
+   *
+   * **The document is named by the caller**, never read off the screen: the
+   * toolbar names the one its confirmation named, and the rail names a file that
+   * is not open at all and cannot be until this has made it exist. It used to
+   * read `shown()`, and the rail's *Not yet extracted* entry re-extracted
+   * whatever document was open (HANDOFF-088). True when the server accepted it.
+   */
+  extract: (where: DocAddress) => Promise<boolean>
   /**
    * Discard everything and re-extract in a register a person chose.
    *
@@ -138,7 +146,7 @@ interface Store {
    * the files: any second call site is a second chance to send the *string*
    * `"false"`, which is truthy in Python and discards a book.
    */
-  startOver: (register: string) => Promise<void>
+  startOver: (where: DocAddress, register: string) => Promise<boolean>
   render: () => Promise<void>
   commit: () => Promise<void>
 }
@@ -317,21 +325,38 @@ async function follow(
  * Written once, and a test asserts that by reading every file under `src/`: the
  * server type-checks neither field, so the *string* `"false"` is a reset that
  * discards a book, and a second call site is a second chance to send one.
+ *
+ * **`where` is the caller's, and nothing here reads the screen to decide it.**
+ * This function used to take `shown() ?? at`, and the rail's *Not yet extracted*
+ * entry — which had just asked for a document the address did not name, and
+ * lost it to `App.tsx`'s effect a render later — re-extracted the document that
+ * was open while its log line named the file that was clicked (HANDOFF-088).
+ * What the screen still decides is what the re-parse *does to this page*, and
+ * that is two questions, each asked when the reply lands: whether the unsaved
+ * words are keyed on the parse that has gone, and whether the document is the
+ * one the page is addressed to.
  */
 async function reExtract(
   set: (partial: Partial<Store>) => void,
   get: () => Store,
+  where: DocAddress,
   tone: string | null,
-): Promise<void> {
-  const where = get().shown() ?? get().at
-  if (!where || get().running) return
+): Promise<boolean> {
+  if (get().running) return false
   set({ running: true })
   try {
     const r = await api.postExtract(
       tone === null ? { ...where } : { ...where, reset: true, tone },
     )
-    // **The ids every unsaved edit is keyed on have just stopped existing**, and
-    // this is said here rather than left for the re-open below to notice: what
+    // **The ids every unsaved edit is keyed on have just stopped existing** —
+    // when, and only when, the document re-parsed is the one those edits were
+    // typed in. That is `shown()`, read now: `drafts` holds the words of the
+    // document on screen, and a re-parse of any other document renumbers
+    // nothing they are keyed on. Marking them anyway is what the rail's entry
+    // would do on its way to a file that is not open, and the words would then
+    // go as "renumbered" by a parse that never touched them.
+    //
+    // It is said here rather than left for the re-open below to notice: what
     // follows is `reloadState()` and then a fetch, two round trips with the
     // ledger still mounted, so a keystroke arriving after the re-parse would be
     // indistinguishable from one typed against the parse that is gone. Emptying
@@ -343,7 +368,7 @@ async function reExtract(
     // no such question, and its reviewer has confirmed discarding the document's
     // translations, not the sentence they were part-way through typing. So the
     // ids are named when they go rather than vanishing without a line.
-    drafts.strand()
+    if (same(get().shown(), where)) drafts.strand()
     get().say(
       `  ${r.segments} segments, ${r.reused} reused` +
       (r.rejected ? `, ${r.rejected} stale proposal(s) refused` : ''),
@@ -390,9 +415,21 @@ async function reExtract(
     // `s0007` would be written against whatever now sits there — and a token
     // hashes an absent target and an empty one alike, so between two
     // untranslated segments the lost-update check cannot catch it either.
-    await get().open(where.src, where.lang)
+    //
+    // **Only while `at` still names it.** This re-reads the document the address
+    // already asked for; it never opens one the address does not name — that is
+    // `App.tsx`'s effect's, and a second opener is how the rail's entry lost its
+    // document. So a reviewer who moved on while the extract was in flight is
+    // not pulled back, and a file the rail extracts from another document is
+    // opened by the navigation the rail makes next. `at` rather than the screen,
+    // because a hand-typed link to a file with no state leaves `doc` on the
+    // previous document while `at` names the file — and once this has made the
+    // file exist, reading it is exactly what that address was asking for.
+    if (same(get().at, where)) await get().open(where.src, where.lang)
+    return true
   } catch (e) {
     get().say('  ' + reason(e), 'bad')
+    return false
   } finally {
     set({ running: false })
   }
@@ -876,8 +913,8 @@ export const useStore = create<Store>()((set, get) => ({
     }
   },
 
-  extract: () => reExtract(set, get, null),
-  startOver: register => reExtract(set, get, register),
+  extract: where => reExtract(set, get, where, null),
+  startOver: (where, register) => reExtract(set, get, where, register),
 
   render: async () => {
     const where = get().shown()

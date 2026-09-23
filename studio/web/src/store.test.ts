@@ -52,6 +52,9 @@ const state = (over: Partial<StateResponse> = {}): StateResponse => ({
   ...over,
 })
 
+/** The document `openWith` puts on screen, as the address an act names it by. */
+const ch1 = { src: 'book/ch1.md', lang: 'zh-TW' }
+
 /** Put a document on screen without going through the wire twice. */
 async function openWith(segments: Segment[]): Promise<void> {
   replies({ body: doc(segments) })
@@ -67,7 +70,7 @@ describe('the register, which the server type-checks with nothing', () => {
     await openWith([segment()])
     replies({ body: { segments: 1, reused: 1, rejected: 0, kept: [], ambiguous: [], replaced: [], waived_source: [] } })
     otherwise({ body: doc([segment()]) })
-    await useStore.getState().extract()
+    await useStore.getState().extract(ch1)
 
     const sent = callsTo('/api/extract')[0]?.body as Record<string, unknown>
     expect(sent).toEqual({ src: 'book/ch1.md', lang: 'zh-TW' })
@@ -79,7 +82,7 @@ describe('the register, which the server type-checks with nothing', () => {
     await openWith([segment()])
     replies({ body: { segments: 1, reused: 0, rejected: 0, kept: [], ambiguous: [], replaced: [], waived_source: [] } })
     otherwise({ body: doc([segment({ target: '' , status: 'pending' })]) })
-    await useStore.getState().startOver('literary')
+    await useStore.getState().startOver(ch1, 'literary')
 
     const sent = callsTo('/api/extract')[0]?.body as Record<string, unknown>
     // The type is the assertion. `reset` is read for truthiness in Python, so
@@ -269,7 +272,7 @@ describe('a re-parse voids every unsaved edit, at the moment the server accepts 
     replies({ body: extracted })
     otherwise({ body: doc([segment({ id: 's0001' })]) })
 
-    await useStore.getState().extract()
+    await useStore.getState().extract(ch1)
     expect(callsTo('/api/save')).toHaveLength(0)
     expect(drafts.size()).toBe(0)
   })
@@ -284,7 +287,7 @@ describe('a re-parse voids every unsaved edit, at the moment the server accepts 
     replies({ body: extracted })
     otherwise({ body: doc([segment({ id: 's0001', target: '', status: 'pending' })]) })
 
-    await useStore.getState().startOver('literary')
+    await useStore.getState().startOver(ch1, 'literary')
     expect(callsTo('/api/save')).toHaveLength(0)
     expect(drafts.size()).toBe(0)
     // Gone, and said to be gone. Before this they vanished without a line.
@@ -305,7 +308,7 @@ describe('a re-parse voids every unsaved edit, at the moment the server accepts 
     replies({ body: extracted })
     otherwise({ body: doc([segment({ id: 's0001' })]) })
 
-    await useStore.getState().extract()
+    await useStore.getState().extract(ch1)
     expect(callsTo('/api/save')).toHaveLength(0)
     expect(drafts.size()).toBe(0)
   })
@@ -326,7 +329,7 @@ describe('a re-parse voids every unsaved edit, at the moment the server accepts 
     replies({ body: extracted })
     otherwise({ body: doc([segment({ id: 's0001' })]) })
 
-    await useStore.getState().extract()
+    await useStore.getState().extract(ch1)
     expect(callsTo('/api/save')).toHaveLength(0)
   })
 
@@ -338,7 +341,7 @@ describe('a re-parse voids every unsaved edit, at the moment the server accepts 
     await openWith([segment({ id: 's0001' })])
     replies({ body: extracted })
     otherwise({ body: doc([segment({ id: 's0001' })]) })
-    await useStore.getState().extract()
+    await useStore.getState().extract(ch1)
 
     drafts.set('s0001', '重新抽取之後才打的。', '她沒有睡。')
     otherwise({ body: { applied: 1, unknown: [], stored: {}, conflicts: {} } })
@@ -348,17 +351,92 @@ describe('a re-parse voids every unsaved edit, at the moment the server accepts 
       .toEqual({ s0001: '重新抽取之後才打的。' })
   })
 
-  it('addresses the re-extract to the document on screen, not the one asked for', async () => {
-    // `at` and `shown()` now differ for a whole round trip while a flush is in
-    // flight, with the ledger still mounted. The re-parse belongs to the
-    // document the reviewer is looking at — which is also the one whose ids the
-    // stranded mark voids.
+  /*
+   * Which document a re-extract is about is the caller's to say, and it used to
+   * be read off the screen: `shown() ?? at`. The rail's *Not yet extracted*
+   * entry then re-extracted the document that was open instead of the file that
+   * was clicked (HANDOFF-088). What the screen still decides is what the
+   * re-parse does to this page, and the four tests below are that half.
+   */
+
+  it('sends the document the caller names, whatever is on screen', async () => {
     await openWith([segment({ id: 's0001' })])
+    replies({ body: extracted })
+    otherwise({ body: state() })
+    expect(await useStore.getState().extract({ src: 'docs/new.md', lang: 'zh-TW' })).toBe(true)
+    expect(callsTo('/api/extract').map(c => c.body)).toEqual([{ src: 'docs/new.md', lang: 'zh-TW' }])
+  })
+
+  it('leaves the words on screen writable when it re-parses another document', async () => {
+    // Nothing they are keyed on was renumbered, so marking them would throw
+    // them away as casualties of a parse that never touched them — and the
+    // rail's entry, which extracts a file that is not open, would do it on
+    // every click made with a sentence unsaved.
+    await openWith([segment({ id: 's0001' })])
+    drafts.set('s0001', '改過的句子。', '她沒有睡。')
+    replies({ body: extracted })
+    otherwise({ body: state() })
+    await useStore.getState().extract({ src: 'docs/new.md', lang: 'zh-TW' })
+
+    expect(drafts.stranded()).toBe(false)
+    expect(drafts.get('s0001')).toBe('改過的句子。')
+    // And it opened nothing: the address names `book/ch1.md`, and a document the
+    // address does not name is the address's to open.
+    expect(callsTo('/api/doc')).toHaveLength(1)
+    expect(useStore.getState().doc?.source).toBe('book/ch1.md')
+    expect(useStore.getState().at).toEqual(ch1)
+  })
+
+  it('voids the words when the document re-parsed is the one they were typed in, even after the address moved', async () => {
+    // `at` and `shown()` differ for a whole round trip while an open is in
+    // flight, with the ledger still mounted. The words belong to the parse on
+    // screen, so it is the screen that decides whether they are void — and the
+    // address that decides nothing is re-opened: that is the effect's, for the
+    // document the reviewer went to.
+    await openWith([segment({ id: 's0001' })])
+    drafts.set('s0001', '改過的句子。', '她沒有睡。')
     useStore.setState({ at: { src: 'book/ch9.md', lang: 'zh-TW' } })
     replies({ body: extracted })
-    otherwise({ body: doc([segment()]) })
-    await useStore.getState().extract()
-    expect(callsTo('/api/extract')[0]?.body).toMatchObject({ src: 'book/ch1.md' })
+    otherwise({ body: state() })
+    await useStore.getState().extract(ch1)
+
+    expect(callsTo('/api/extract')[0]?.body).toEqual(ch1)
+    expect(drafts.stranded()).toBe(true)
+    expect(callsTo('/api/save')).toHaveLength(0)
+    expect(callsTo('/api/doc')).toHaveLength(1)
+  })
+
+  it('re-reads a document the address names even when another is on screen', async () => {
+    // A hand-typed link to a file with no state leaves `doc` on the document
+    // before it while `at` names the file. Once the extract has made the file
+    // exist, reading it is exactly what that address was asking for.
+    await openWith([segment({ id: 's0001' })])
+    useStore.setState({ at: { src: 'docs/new.md', lang: 'zh-TW' } })
+    replies({ body: extracted }, { body: state() })
+    otherwise({ body: { ...doc([segment()]), source: 'docs/new.md' } })
+    await useStore.getState().extract({ src: 'docs/new.md', lang: 'zh-TW' })
+
+    expect(useStore.getState().doc?.source).toBe('docs/new.md')
+    expect(drafts.stranded()).toBe(false)
+  })
+
+  it('answers false and opens nothing when the server refuses the extract', async () => {
+    await openWith([segment({ id: 's0001' })])
+    replies({ status: 400, body: { error: 'not UTF-8' } })
+    expect(await useStore.getState().extract(ch1)).toBe(false)
+    expect(callsTo('/api/doc')).toHaveLength(1)
+    expect(useStore.getState().running).toBe(false)
+    expect(useStore.getState().log.some(l => l.level === 'bad' && l.text.includes('not UTF-8'))).toBe(true)
+  })
+
+  it('answers false and sends nothing while a run is in flight', async () => {
+    await openWith([segment({ id: 's0001' })])
+    useStore.setState({ running: true })
+    expect(await useStore.getState().extract(ch1)).toBe(false)
+    expect(callsTo('/api/extract')).toHaveLength(0)
+    // Still running: refusing the extract must not clear the flag of the run
+    // that refused it.
+    expect(useStore.getState().running).toBe(true)
   })
 
   it('does not keep a reviewer on a document over words nothing can write', async () => {
@@ -401,11 +479,11 @@ describe('opening a document', () => {
  * Where an unsaved edit may be destroyed at all.
  *
  * Every test above is about the *conditions* under which the discard fires,
- * and a set of conditions is an enumeration of today's callers: `open()` has
- * three, `HANDOFF-088` will make a fourth, and a test set written against three
- * goes quietly wrong on the day of the fourth. This one is about *where* the
- * destruction lives instead, which is the half that survives a call site
- * nobody has written yet.
+ * and a set of conditions is an enumeration of today's callers: `open()` had
+ * three when this was written, `HANDOFF-088` took one away rather than adding
+ * one, and a test set written against today's goes quietly wrong on the day a
+ * new one appears. This one is about *where* the destruction lives instead,
+ * which is the half that survives a call site nobody has written yet.
  *
  * It is a text scan and it says so: it cannot tell a call inside `open()` from
  * one anywhere else in the same file. What it can say is that there is one.

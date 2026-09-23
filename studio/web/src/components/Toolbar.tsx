@@ -16,6 +16,7 @@ import { useState, useSyncExternalStore } from 'react'
 
 import { ask } from './Confirm'
 import { ModelPicker } from './ModelPicker'
+import type { DocAddress } from '../contract'
 import * as drafts from '../drafts'
 import * as routes from '../router'
 import { useStore, type Filter } from '../store'
@@ -108,7 +109,9 @@ export function Toolbar() {
     )
     if (!ok) return
     say(`— re-extract ${doc.source} [${doc.lang}] —`, 'plain', true)
-    await extract()
+    // The document the dialog named, and not whatever is on screen when the
+    // reviewer answers it: Back still works under an open dialog.
+    await extract({ src: doc.source, lang: doc.lang })
   }
 
   return (
@@ -239,7 +242,7 @@ export function Toolbar() {
  */
 function StartOver({ onClose, onChoose }: {
   onClose: () => void
-  onChoose: (register: string) => Promise<void>
+  onChoose: (where: DocAddress, register: string) => Promise<boolean>
 }) {
   const doc = useStore(s => s.doc)
   const say = useStore(s => s.say)
@@ -272,7 +275,9 @@ function StartOver({ onClose, onChoose }: {
     if (!ok) return
     onClose()
     say(`— start over · ${doc.source} [${doc.lang}] · register ${chosen} —`, 'plain', true)
-    await onChoose(chosen)
+    // Addressed to the document the dialog above named, for the reason the
+    // toolbar's Re-extract gives.
+    await onChoose({ src: doc.source, lang: doc.lang }, chosen)
   }
 
   return (

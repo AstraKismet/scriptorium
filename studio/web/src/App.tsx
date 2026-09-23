@@ -142,14 +142,18 @@ function Main() {
   const addressed = route.name === 'doc' || route.name === 'read' ? route : null
 
   // The address is what decides which document is open, so the back button, a
-  // deep link and a click in the rail are one path rather than three.
+  // deep link and every entry in the rail are one path rather than several.
   //
-  // It is not the only caller of `open`, and a comment here used to say it was:
-  // `Rail`'s *Not yet extracted* button calls it without moving the address,
-  // which is `HANDOFF-088`, and `store.reExtract` calls it to re-read the
-  // document it has just had re-parsed. Both are why `open()` writes unsaved
-  // words out itself rather than leaving that to this effect — a flush here
-  // would leave the rail's button losing them exactly as before.
+  // This is the only thing that opens a document. `store.reExtract` calls
+  // `open` too, and only to re-read the one `at` already names, once its
+  // re-parse has landed — never one the address does not name. That sentence
+  // was false twice before it was true: a comment here said nothing else called
+  // `open` while `Rail`'s *Not yet extracted* entry did, beside the address,
+  // and lost its document to this effect a render later; since HANDOFF-088 that
+  // entry navigates like every other link. `open()` still writes unsaved words
+  // out itself rather than leaving it to this effect, because leaving a
+  // document is what costs them and not who asked — the rule holds for a
+  // caller nobody has written yet.
   useEffect(() => {
     if (!addressed) return
     if (at && at.src === addressed.src && at.lang === addressed.lang) return

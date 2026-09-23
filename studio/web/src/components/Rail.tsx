@@ -1,13 +1,17 @@
 /**
  * The left rail: what this project holds, and what it could.
  *
- * **It is never disabled while a run is in flight.** The old page's `busy()`
- * swept the toolbar and the ledger and left the rail alone, and that was
- * recorded as a known hole — a document could be switched mid-run. The rebuild
- * does not close it by disabling the rail: switching document during a run is a
- * reasonable thing to want, and the run is already addressed to a snapshot taken
- * at dispatch, so it finishes against the document it started on and says which
- * one when that is no longer the one on screen.
+ * **Its links are never disabled while a run is in flight.** The old page's
+ * `busy()` swept the toolbar and the ledger and left the rail alone, and that
+ * was recorded as a known hole — a document could be switched mid-run. The
+ * rebuild does not close it by disabling the rail: switching document during a
+ * run is a reasonable thing to want, and the run is already addressed to a
+ * snapshot taken at dispatch, so it finishes against the document it started on
+ * and says which one when that is no longer the one on screen.
+ *
+ * The *Not yet extracted* entries are the exception, and they are one because
+ * they are not links: each one is an extract, an act like the toolbar's, and
+ * it waits for the run the way every act on this page does.
  */
 import { useMemo } from 'react'
 
@@ -30,9 +34,9 @@ export function Rail() {
   const state = useStore(s => s.state)
   const at = useStore(s => s.at)
   const doc = useStore(s => s.doc)
+  const running = useStore(s => s.running)
   const say = useStore(s => s.say)
   const extract = useStore(s => s.extract)
-  const open = useStore(s => s.open)
 
   const docs = useMemo(
     () => [...(state?.docs ?? [])].sort((a, b) =>
@@ -97,17 +101,47 @@ export function Rail() {
             key={c.source + ' ' + c.lang}
             type="button"
             className="doc"
+            // Not a silent no-op: the store refuses a second extract while
+            // anything is running, and a header logged over a request that was
+            // never sent is the lie this entry used to tell.
+            disabled={running}
+            title={running ? 'Waits for the run in flight: one act at a time.' : undefined}
             onClick={async () => {
-              say(`— extract ${c.source} [${c.lang}] —`, 'plain', true)
-              // `open` first so the extract is addressed to a document this
-              // page is holding, and so a failure leaves the person looking at
-              // the thing they clicked rather than at nothing. A first extract
+              // **Extracted first, opened second, and opened by the address.**
+              // This entry used to call `open()` beside the address and then
+              // extract whatever was on screen: `App.tsx`'s effect put the
+              // addressed document back a render later, so the one request it
+              // sent re-parsed the document that was open while this line named
+              // the file that was clicked (HANDOFF-088).
+              //
+              // Not the other order. Navigating first sends `GET /api/doc` for a
+              // file with no state, racing the extract on a threaded server — a
+              // `no state for …` drawn and logged on the way to a file that is
+              // about to exist. And the extract is addressed here rather than
+              // read off the screen, so there is nothing an open could leave
+              // behind for it to read.
+              //
+              // **No confirmation, and that is decided rather than inherited.**
+              // The toolbar's asks only when a re-parse could discard a
+              // translation; this list is files with no document row in this
+              // language — `do_untracked` subtracts by the identity state is
+              // keyed on — so there is none to discard, and nothing here touches
+              // the document on screen.
+              //
+              // The toolbar's action and not a copy of it. A first extract
               // produces none of `kept` / `replaced` / `ambiguous`, so the noise
               // those lines would make is not owed here — but they are reported
               // by the same action either way, because a rule with two spellings
               // is a rule that comes apart.
-              await open(c.source, c.lang)
-              await extract()
+              const asked = routes.now()
+              say(`— extract ${c.source} [${c.lang}] —`, 'plain', true)
+              if (!await extract({ src: c.source, lang: c.lang })) return
+              // Only if nobody has moved since the click. An extract of a novel
+              // takes long enough to choose something else, and that choice
+              // stands: the log says what was made and the rail now lists it.
+              if (routes.now() === asked) {
+                routes.go(routes.doc(c.source, c.lang, routes.placeIn(c.source, c.lang)))
+              }
             }}
           >
             <b>{c.source}</b>
