@@ -243,7 +243,16 @@ that the suite does not count: that return trip reads the chapter twice, once in
 `save()`'s own re-read — `at` names it again — and once in `open()`'s fetch. It
 is confined to coming back after a refusal. The synthetic Alt+← the automation
 can press does not reach the browser's own shortcut at all, so the keyboard Back
-itself — and an IME — are the maintainer's run to make.
+itself was left for the maintainer.
+
+**The maintainer ran it on 2026-09-23 and it passed**: typed into a field,
+Alt+← to another document, then opened the chapter again, and the wording typed
+before the key was read back on the segments it belonged to. That is the half
+this suite cannot reach — the browser's own Back, with the caret still in the
+field — so the flush is now confirmed on the door the package was written about,
+rather than only on the traversal the automation can drive. An IME composition
+in flight when the address moves is still unexercised anywhere, and stays
+recorded as such above.
 
 ### Left open, each with a package
 
