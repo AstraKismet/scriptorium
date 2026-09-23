@@ -64,10 +64,11 @@ interface Store {
   docLoading: boolean
   docError: string
   /**
-   * Whether `docError` is the server's answer to reading `at`, rather than this
-   * page declining to leave a document whose words it could not write. The two
-   * draw on one screen and mean opposite things: only a read that failed can be
-   * a file nobody has extracted yet, and only that screen offers the extract.
+   * Whether `docError` is the server's own refusal to read `at` — not this page
+   * declining to leave a document whose words it could not write, and not a
+   * request that never reached the server. They draw on one screen and mean
+   * different things: only an answered refusal can be a file nobody has
+   * extracted yet, and only that screen offers the extract.
    */
   readFailed: boolean
 
@@ -118,7 +119,9 @@ interface Store {
    * words. Opening the document those words belong to is never declined.
    */
   open: (src: string, lang: string) => Promise<void>
-  refresh: () => Promise<void>
+  /** Re-read the document on screen. True when it read it and it is still the
+   *  one on screen; false when the read failed or the page moved meanwhile. */
+  refresh: () => Promise<boolean>
   /** True when the ledger is showing the document `at` names. */
   settled: () => boolean
   /** The address of what is on screen — read from `doc`, never from `at`, so
@@ -145,6 +148,21 @@ interface Store {
    * (HANDOFF-088). True when the server accepted it.
    */
   extract: (where: DocAddress) => Promise<boolean>
+  /**
+   * The extract the page for a file nobody has extracted offers — after asking
+   * the server again whether that is still true.
+   *
+   * The offer rests on a read, and a read can be as old as the page: `at`
+   * outlives a trip to `#/backends`, so coming back reads nothing, and a click
+   * on the rail entry for the page already shown is the same address and reads
+   * nothing either. A terminal can extract and translate the file in that time,
+   * and the click would then be an unconfirmed re-extract of a translated
+   * document. So the click reads first — the toolbar's Re-extract re-reads
+   * before deciding its confirmation for the same reason — and a file that has
+   * state now is opened, not extracted. True when an extract was sent and
+   * accepted.
+   */
+  extractUntracked: (where: DocAddress) => Promise<boolean>
   /**
    * Discard everything and re-extract in a register a person chose.
    *
@@ -599,6 +617,16 @@ export const useStore = create<Store>()((set, get) => ({
     const writable = !drafts.stranded()
     if (drafts.size() && writable) await get().save()
 
+    // **A superseded open stops here, and touches nothing on its way out.** Two
+    // navigations inside one save round trip — Back, Back — leave the first
+    // open still flushing after the second has finished; carrying on, it raised
+    // `docLoading` over the page the second had drawn and returned at the check
+    // after its fetch without lowering it, so the page read "reading …" until
+    // the reviewer moved again. Its refusal below would have written its error
+    // over that page the same way. The newer open owns the page, and flushes
+    // whatever is left itself. Found by the review of HANDOFF-088; older than it.
+    if (!same(get().at, want)) return
+
     // **What the save could not write, this will not discard.** The rule the
     // toolbar's Re-extract already follows, applied to a navigation: this page
     // holds the only copy, so the act stops instead.
@@ -657,27 +685,44 @@ export const useStore = create<Store>()((set, get) => ({
       set({ doc, docLoading: false })
     } catch (e) {
       if (!same(get().at, want)) return
-      set({ docLoading: false, docError: reason(e), readFailed: true })
-      // Not logged for a file the project lists as not yet extracted. Every
-      // read of one fails this way, the screen that draws this error offers the
-      // extract, and a line in red for following a link in the rail is noise
-      // that teaches a reviewer to stop reading red lines.
-      if (!notExtracted(get().state, want)) get().say(reason(e), 'bad')
+      // A refusal the server *answered* — never a request that did not arrive.
+      // A file this page has never read may have state after all, and a
+      // transport failure says nothing either way; offering an extract over it
+      // is offering an unconfirmed re-extract of whatever the server holds.
+      const answered = e instanceof ApiError
+      set({ docLoading: false, docError: reason(e), readFailed: answered })
+      // Not logged when the server answered a read of a file the project lists
+      // as not yet extracted: every read of one fails that way, the screen that
+      // draws this error offers the extract, and a line in red for following a
+      // link in the rail is noise that teaches a reviewer to stop reading red
+      // lines. A failure the server did not answer is logged whatever the file.
+      if (!(answered && notExtracted(get().state, want))) get().say(reason(e), 'bad')
     }
   },
 
   refresh: async () => {
     const where = get().shown()
-    if (!where) return
+    if (!where) return false
     try {
       const doc = await api.getDoc(where)
-      // Only if the ledger is still showing the document this refresh was
-      // about. Compared **by value**: `open()` mints a fresh address on every
-      // call, so an identity test would call the same document a different one.
-      if (!same(get().shown(), where) && !same(get().at, where)) return
+      // **Only while the ledger is still showing the document this refresh was
+      // about** — compared by value, because `open()` mints a fresh address on
+      // every call. It used to accept the reply when `at` named the document
+      // too, and that let it put a document on screen that `open()` had
+      // declined to show: `at` names a chapter the moment a navigation asks for
+      // it, `doc` stays on the chapter being left while that one's words cannot
+      // be written, and a refresh of the first chapter still in flight then
+      // swapped `doc` underneath them. The next save posted the second
+      // chapter's words onto the first chapter's ids with the first chapter's
+      // tokens, and a re-extract stranded them as "renumbered" (found by the
+      // review of HANDOFF-088; older than it). A document the page is on its
+      // way to is `open()`'s to read.
+      if (!same(get().shown(), where)) return false
       set({ doc })
+      return true
     } catch (e) {
       get().say(reason(e), 'bad')
+      return false
     }
   },
 
@@ -930,6 +975,39 @@ export const useStore = create<Store>()((set, get) => ({
 
   extract: where => reExtract(set, get, where, null),
   startOver: (where, register) => reExtract(set, get, where, register),
+
+  extractUntracked: async where => {
+    if (get().running) return false
+    let found = false
+    try {
+      await api.getDoc(where)
+      found = true
+    } catch (e) {
+      // Only the server saying no is a reason to extract. A request that did
+      // not arrive says nothing about what the server holds.
+      if (!(e instanceof ApiError)) {
+        get().say('  ' + reason(e), 'bad')
+        return false
+      }
+    }
+    if (found) {
+      get().say(
+        `  ${where.src} [${where.lang}] has been extracted since this page last read it — ` +
+        `opening it instead of extracting it again`,
+        'warn',
+      )
+      await get().reloadState()
+      // What `at` names, and only that — the rule `reExtract` follows.
+      if (same(get().at, where)) await get().open(where.src, where.lang)
+      return false
+    }
+    // Asked again after the read: two clicks in one frame both passed the test
+    // above, and the second must not log a header over a request `reExtract`
+    // declines.
+    if (get().running) return false
+    get().say(`— extract ${where.src} [${where.lang}] —`, 'plain', true)
+    return get().extract(where)
+  },
 
   render: async () => {
     const where = get().shown()

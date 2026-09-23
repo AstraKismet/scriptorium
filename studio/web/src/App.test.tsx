@@ -11,7 +11,7 @@
  * virtualized. See the note on 'opens the document the address names, and
  * settles', and the one on 'moving between segments'.
  */
-import { act, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -929,9 +929,9 @@ describe('the rail\'s Not yet extracted entry', () => {
     await settle()
     expect(window.location.hash).toBe(address(fresh.source))
     expect(offer().disabled).toBe(false)
-    // Only the landing read: nothing re-read a file the server said it could
-    // not make.
-    expect(callsTo('/api/doc').filter(c => c.path.includes(encodeURIComponent(fresh.source)))).toHaveLength(1)
+    // The landing read and the click's own, and no third: nothing re-read a
+    // file the server said it could not make.
+    expect(callsTo('/api/doc').filter(c => c.path.includes(encodeURIComponent(fresh.source)))).toHaveLength(2)
   }, 15000)
 
   it('waits for a run in flight, rather than logging an extract it will not send', async () => {
@@ -982,9 +982,10 @@ describe('the rail\'s Not yet extracted entry', () => {
     await settle()
     expect(window.location.hash).toBe(address(second.source))
     expect(screen.getByText('/2 translated')).toBeTruthy()
-    // It is made, and listed as made — nothing read it, because nothing asked.
+    // It is made, and listed as made — and not read after the extract, because
+    // nothing asked: the landing read and the click's are the only two.
     expect(screen.queryByRole('button', { name: /not extracted/ })).toBeNull()
-    expect(callsTo('/api/doc').filter(c => c.path.includes(encodeURIComponent(fresh.source)))).toHaveLength(1)
+    expect(callsTo('/api/doc').filter(c => c.path.includes(encodeURIComponent(fresh.source)))).toHaveLength(2)
   }, 15000)
 })
 
@@ -1095,6 +1096,44 @@ describe('the toolbar\'s re-extract and start over', () => {
     // Not the register the document is frozen in (`literary`), which is shown
     // beside the field precisely so it is not mistaken for the value.
     expect(callsTo('/api/extract')[0]!.body).toEqual({ src: doc.source, lang: 'ja', reset: true, tone: 'plain' })
+  }, 15000)
+
+  it('re-extracts the document its dialog named when Back has moved the page under the dialog', async () => {
+    // A modal dialog does not stop Back. The extract used to read the screen, so
+    // confirming a dialog that named one chapter re-parsed the chapter arrived
+    // at (measured against `83a865b` by the review of HANDOFF-088).
+    serve(doc)
+    await opened(doc)
+
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Re-extract' }))
+    await waitFor(() => { expect(document.querySelector('dialog[open]')).not.toBeNull() }, { timeout: 4000 })
+    window.location.hash = `#/doc/zh-TW/${encodeURIComponent(empty.source)}`
+    await waitFor(() => { expect(useStore.getState().doc?.source).toBe(empty.source) }, { timeout: 4000 })
+    await answer('Re-extract')
+    await waitFor(() => { expect(callsTo('/api/extract')).toHaveLength(1) }, { timeout: 4000 })
+    expect(callsTo('/api/extract')[0]!.body).toEqual({ src: doc.source, lang: 'zh-TW' })
+    // And the page stays where the reviewer went.
+    await new Promise(r => { setTimeout(r, 100) })
+    expect(useStore.getState().doc?.source).toBe(empty.source)
+  }, 15000)
+
+  it('starts over the document its dialog named when Back has moved the page under the dialog', async () => {
+    // The same door with the destructive control behind it: against `83a865b`
+    // the reset went to the chapter arrived at, and a reset discards every
+    // translation a document holds.
+    serve(doc)
+    await opened(doc)
+    const user = userEvent.setup()
+
+    await user.click(screen.getByRole('button', { name: /Start over in another register/ }))
+    await user.type(screen.getByPlaceholderText('type a register'), 'plain')
+    await user.click(screen.getByRole('button', { name: 'Start over…' }))
+    await waitFor(() => { expect(document.querySelector('dialog[open]')).not.toBeNull() }, { timeout: 4000 })
+    window.location.hash = `#/doc/zh-TW/${encodeURIComponent(empty.source)}`
+    await waitFor(() => { expect(useStore.getState().doc?.source).toBe(empty.source) }, { timeout: 4000 })
+    await answer('Discard and re-extract')
+    await waitFor(() => { expect(callsTo('/api/extract')).toHaveLength(1) }, { timeout: 4000 })
+    expect(callsTo('/api/extract')[0]!.body).toEqual({ src: doc.source, lang: 'zh-TW', reset: true, tone: 'plain' })
   }, 15000)
 
   it('does not decide its confirmation from a document the reviewer moved to', async () => {
@@ -1283,4 +1322,406 @@ describe('the margin after a re-parse', () => {
     expect(screen.queryByText('brief for literary')).toBeNull()
     expect(screen.getByText('brief for plain')).toBeTruthy()
   }, 20000)
+})
+
+/**
+ * What the page acts on is what it has just read — HANDOFF-088's second review.
+ *
+ * The first review broke a design that navigated by itself; the second broke
+ * the one that replaced it on a different axis: **how old a fact is when an act
+ * rests on it.** A startup list that a terminal has made stale, a read of a file
+ * made before a trip to the backend screens, a refresh that lands after the page
+ * has declined to show its document, an open overtaken by a newer one. Each test
+ * here failed against `082d0fb`, and those marked *older* failed against
+ * `83a865b` as well.
+ *
+ * The fixture models the server and the startup list apart — `world.made` is
+ * what the server holds, `world.listed` what `GET /api/state` says — because the
+ * difference between them is what half of these are about.
+ */
+describe('what the page acts on is what it has just read', () => {
+  const fresh: DocResponse = {
+    ...doc,
+    source: 'docs/untracked.md',
+    report: { segments: 4, translated: 0, errors: 0, warnings: 0, by_rule: {} },
+    segments: ['s0001', 's0002', 's0003', 's0004'].map((id, i) => (
+      { ...doc.segments[2]!, id, source: `Line ${i + 1}.`, target: '', token: `n${i}`, issues: [] }
+    )),
+  }
+  const freshTranslated: DocResponse = {
+    ...fresh,
+    report: { segments: 4, translated: 4, errors: 0, warnings: 0, by_rule: {} },
+    segments: fresh.segments.map((s, i) => ({ ...s, target: `第${i + 1}行。`, status: 'translated', origin: 'human', token: `x${i}`, issues: [] })),
+  }
+  const second: DocResponse = {
+    ...doc,
+    source: 'book/ch2.md',
+    report: { segments: 2, translated: 0, errors: 0, warnings: 0, by_rule: {} },
+    segments: [
+      { ...doc.segments[2]!, id: 's0001', source: 'Morning came late.', target: '', token: 'u1', issues: [] },
+      { ...doc.segments[2]!, id: 's0002', source: 'Nobody spoke.', target: '', token: 'u2', issues: [] },
+    ],
+  }
+  const third: DocResponse = { ...second, source: 'book/ch3.md' }
+  const untranslated: DocResponse = {
+    ...doc,
+    report: { ...doc.report, translated: 0 },
+    segments: doc.segments.map(s => ({ ...s, target: '', status: 'pending' as const, origin: null, review: null })),
+  }
+  const extracted = { segments: 4, reused: 0, rejected: 0, kept: [], ambiguous: [], replaced: [], waived_source: [] }
+  const wrote = { applied: 1, unknown: [], stored: {}, conflicts: {} }
+  const refused: Answer = { status: 400, body: { error: 'nothing is listening on 8787' } }
+
+  const world = { made: false, listed: true, held: fresh }
+
+  /** `read(src, n)` may answer the n-th `GET /api/doc` of a file, `save(n)` the
+   *  n-th `POST /api/save`; `base` is what `book/ch1.md` reads as. */
+  const serve = (over: {
+    read?: (src: string, n: number) => Answer | null
+    save?: (n: number) => Answer | null
+    base?: DocResponse
+  } = {}): void => {
+    const reads = new Map<string, number>()
+    let saves = 0
+    let requests = 0
+    answering(call => {
+      requests += 1
+      if (requests > 200) return { body: {}, after: new Promise<void>(() => undefined) }
+      const path = call.path
+      if (path.startsWith('/api/state')) {
+        return {
+          body: {
+            ...state,
+            docs: [
+              ...state.docs,
+              { source: second.source, lang: 'zh-TW', total: 2, done: 0 },
+              { source: third.source, lang: 'zh-TW', total: 2, done: 0 },
+              ...(world.listed ? [] : [{ source: fresh.source, lang: 'zh-TW', total: 4, done: 0 }]),
+            ],
+            untracked: world.listed ? [{ source: fresh.source, lang: 'zh-TW' }] : [],
+          },
+        }
+      }
+      if (path.startsWith('/api/models')) return { body: { provider: 'local', configured: 'qwen', models: [], error: null } }
+      if (path.startsWith('/api/save')) { saves += 1; return over.save?.(saves) ?? { body: wrote } }
+      if (path.startsWith('/api/extract')) {
+        if ((call.body as { src?: string } | null)?.src === fresh.source) { world.made = true; world.listed = false }
+        return { body: extracted }
+      }
+      if (path.startsWith('/api/doc')) {
+        const src = new URLSearchParams(path.split('?')[1]).get('src') ?? ''
+        const n = (reads.get(src) ?? 0) + 1
+        reads.set(src, n)
+        const o = over.read?.(src, n)
+        if (o) return o
+        if (src === fresh.source) {
+          return world.made
+            ? { body: world.held }
+            : { status: 400, body: { error: `no state for ${fresh.source} [zh-TW] — run \`lx extract ${fresh.source} --lang zh-TW\` first` } }
+        }
+        if (src === second.source) return { body: second }
+        if (src === third.source) return { body: third }
+        return { body: over.base ?? doc }
+      }
+      if (path.startsWith('/api/check')) return { body: { errors: 1, warnings: 0, by_rule: { missing: 1 } } }
+      if (path.startsWith('/api/sentences')) return { body: { sentences: [] } }
+      if (path.startsWith('/api/preview')) {
+        const blocks = fresh.segments.map(s => ({ id: s.id, kind: s.kind, from: 'source' as const, text: s.source }))
+        return { body: { text: blocks.map(b => b.text).join(''), blocks, missing: 0, default_out: 'out.md' } }
+      }
+      return { body: { source: '', lang: 'zh-TW', tone: null, ids: [], voice: '', voice_notes: [], algorithm: 'none', cutoff: 0, records: 0, segments: [] } }
+    })
+  }
+
+  const address = (src: string, seg?: string): string =>
+    `#/doc/zh-TW/${encodeURIComponent(src)}` + (seg ? `?seg=${seg}` : '')
+
+  const startAt = (hash: string): void => {
+    window.location.hash = hash
+    window.dispatchEvent(new HashChangeEvent('hashchange'))
+  }
+
+  const settle = (ms = 50): Promise<void> => new Promise(r => { setTimeout(r, ms) })
+
+  const opened = async (hash = address(doc.source, 's0003'), tally = '/3 translated'): Promise<void> => {
+    startAt(hash)
+    render(<App />)
+    await waitFor(() => { expect(screen.getByText(tally)).toBeTruthy() }, { timeout: 4000 })
+  }
+
+  const held = (): { until: Promise<void>; release: () => void } => {
+    let release: () => void = () => undefined
+    const until = new Promise<void>(r => { release = r })
+    return { until, release }
+  }
+
+  const unreachable = (): Answer => ({ body: {}, after: Promise.reject(new TypeError('Failed to fetch')) })
+
+  const field = (): HTMLTextAreaElement => document.querySelector<HTMLTextAreaElement>('.ledger textarea')!
+  const entry = (): HTMLElement => screen.getByRole('button', { name: /docs\/untracked\.md.*extract/ })
+  const offer = (): HTMLButtonElement => screen.getByRole('button', { name: `Extract ${fresh.source}` })
+  const offered = (): boolean => screen.queryByRole('button', { name: `Extract ${fresh.source}` }) !== null
+  const extracts = (): unknown[] => callsTo('/api/extract').map(c => c.body)
+  const readsOf = (src: string): number =>
+    callsTo('/api/doc').filter(c => c.path.includes(`src=${encodeURIComponent(src)}`)).length
+  const logged = (level: string, text: string): boolean =>
+    useStore.getState().log.some(l => l.level === level && l.text.includes(text))
+  const dialogOpen = (): boolean => document.querySelector('dialog[open]') !== null
+
+  const real = {
+    showModal: Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, 'showModal'),
+    close: Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, 'close'),
+  }
+  beforeEach(() => {
+    world.made = false
+    world.listed = true
+    world.held = fresh
+    Object.defineProperty(HTMLDialogElement.prototype, 'showModal', {
+      configurable: true,
+      value: function showModal(this: HTMLDialogElement) { this.setAttribute('open', '') },
+    })
+    Object.defineProperty(HTMLDialogElement.prototype, 'close', {
+      configurable: true,
+      value: function close(this: HTMLDialogElement) { this.removeAttribute('open') },
+    })
+  })
+  afterEach(() => {
+    for (const [name, d] of Object.entries(real)) {
+      if (d) Object.defineProperty(HTMLDialogElement.prototype, name, d)
+      else delete (HTMLDialogElement.prototype as unknown as Record<string, unknown>)[name]
+    }
+  })
+
+  // ── the page for a file nobody has extracted ──────────────────────────────
+
+  it('offers nothing over a read that never reached the server, and logs it', async () => {
+    // A request that did not arrive says nothing about what the server holds.
+    // The first version offered the extract over it and — because a listed
+    // file's failure was not logged — left no line at all.
+    serve({ read: (src, n) => (src === fresh.source && n === 1 ? unreachable() : null) })
+    await opened()
+    await userEvent.setup().click(entry())
+    await waitFor(() => { expect(useStore.getState().docError).toContain('Failed to fetch') }, { timeout: 4000 })
+    await settle()
+    expect(offered()).toBe(false)
+    expect(logged('bad', 'Failed to fetch')).toBe(true)
+  }, 15000)
+
+  it('offers nothing when a tracked document\'s read fails, whatever else is listed', async () => {
+    // Both halves of the condition, and both fields of the listing: the file
+    // must be the one listed, in the language listed, and a tracked chapter in
+    // the same language whose read fails is not it.
+    serve({ read: src => (src === second.source ? { status: 400, body: { error: 'database is locked' } } : null) })
+    await opened()
+    await userEvent.setup().click(screen.getByRole('button', { name: /book\/ch2\.md/ }))
+    await waitFor(() => { expect(useStore.getState().docError).toBe('database is locked') }, { timeout: 4000 })
+    await settle()
+    expect(screen.queryByRole('button', { name: /^Extract / })).toBeNull()
+    expect(logged('bad', 'database is locked')).toBe(true)
+  }, 15000)
+
+  it('reads the file again at the click, and opens it rather than extract a file a terminal has made', async () => {
+    // `at` outlives a trip to the backend screens, so coming back reads nothing
+    // and the offer still stands on the first read. A terminal extracted and
+    // translated the file meanwhile; the click would have been an unconfirmed
+    // re-extract of it.
+    serve()
+    await opened()
+    await userEvent.setup().click(entry())
+    await waitFor(() => { expect(offered()).toBe(true) }, { timeout: 4000 })
+    window.location.hash = '#/backends'
+    await settle()
+    world.made = true
+    world.held = freshTranslated
+    window.history.back()
+    await waitFor(() => { expect(offered()).toBe(true) }, { timeout: 4000 })
+
+    await userEvent.setup().click(offer())
+    await waitFor(() => { expect(screen.getByText('/4 translated')).toBeTruthy() }, { timeout: 4000 })
+    await settle()
+    expect(extracts()).toEqual([])
+    expect(logged('warn', 'has been extracted since this page last read it')).toBe(true)
+    expect(useStore.getState().log.some(l => l.text.startsWith('— extract'))).toBe(false)
+  }, 15000)
+
+  it('sends one extract and logs one header for two clicks in one frame', async () => {
+    serve()
+    await opened()
+    await userEvent.setup().click(entry())
+    await waitFor(() => { expect(offered()).toBe(true) }, { timeout: 4000 })
+
+    // Both before React has redrawn the button disabled.
+    act(() => { fireEvent.click(offer()); fireEvent.click(offer()) })
+    await waitFor(() => { expect(screen.getByText('/4 translated')).toBeTruthy() }, { timeout: 4000 })
+    await settle()
+    expect(extracts()).toHaveLength(1)
+    expect(useStore.getState().log.filter(l => l.text.startsWith('— extract'))).toHaveLength(1)
+  }, 15000)
+
+  it('offers the extract on the reading view\'s address too, and then shows the reading view', async () => {
+    // One page for a file with no state, whichever view was asked for; once it
+    // exists, the address's own view is drawn.
+    serve()
+    startAt(`#/read/zh-TW/${encodeURIComponent(fresh.source)}`)
+    render(<App />)
+    await waitFor(() => { expect(offered()).toBe(true) }, { timeout: 4000 })
+    await userEvent.setup().click(offer())
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Back to the ledger/ })).toBeTruthy()
+    }, { timeout: 4000 })
+    expect(extracts()).toEqual([{ src: fresh.source, lang: 'zh-TW' }])
+  }, 15000)
+
+  it('offers nothing on a refusal to leave, even after an earlier visit left a failed read behind', async () => {
+    // `readFailed` is lowered at the start of every open. Left up from the visit
+    // to the file's page, it drew the offer over the later refusal — a page
+    // whose trouble is the chapter's unwritten words.
+    serve({ save: () => refused })
+    await opened()
+    const user = userEvent.setup()
+    await user.click(entry())
+    await waitFor(() => { expect(offered()).toBe(true) }, { timeout: 4000 })
+    await user.click(screen.getByRole('button', { name: /book\/ch1\.md/ }))
+    await waitFor(() => { expect(screen.getByText('/3 translated')).toBeTruthy() }, { timeout: 4000 })
+
+    await user.type(field(), '燈還亮著。')
+    await user.click(entry())
+    await waitFor(() => { expect(screen.getByText(/could not be written to book\/ch1\.md/)).toBeTruthy() }, { timeout: 4000 })
+    await settle()
+    expect(offered()).toBe(false)
+    expect(drafts.get('s0003')).toBe('燈還亮著。')
+  }, 15000)
+
+  // ── the document on screen is the one the page chose ─────────────────────
+
+  it('never lets a late refresh put a document on screen that the page declined to show (older)', async () => {
+    // Chapter one's refresh is still in flight across a whole visit to chapter
+    // two, where the reviewer types and whose flush then fails, so the page
+    // declines to go back. The refresh used to be accepted because `at` named
+    // chapter one — putting chapter one under chapter two's words — and the
+    // save the refusal itself recommends then posted them onto chapter one's
+    // heading, with chapter one's token.
+    const refresh = held()
+    serve({
+      save: n => (n === 1 ? refused : null),
+      read: (src, n) => (src === doc.source && n === 2 ? { body: doc, after: refresh.until } : null),
+    })
+    await opened()
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Check' }))
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(2) })
+    window.location.hash = address(second.source, 's0001')
+    await waitFor(() => { expect(screen.getByText('/2 translated')).toBeTruthy() }, { timeout: 4000 })
+    await user.type(field(), '早晨來得晚。')
+    window.location.hash = address(doc.source, 's0003')
+    await waitFor(() => { expect(screen.getByText(/could not be written to book\/ch2\.md/)).toBeTruthy() }, { timeout: 4000 })
+
+    await act(async () => { refresh.release(); await settle(100) })
+    expect(useStore.getState().doc?.source).toBe(second.source)
+
+    // What the refusal tells the reviewer to do.
+    window.location.hash = address(second.source, 's0001')
+    await waitFor(() => { expect(callsTo('/api/save').length).toBeGreaterThan(1) }, { timeout: 4000 })
+    await settle(100)
+    for (const c of callsTo('/api/save')) expect((c.body as { src: string }).src).toBe(second.source)
+    expect((callsTo('/api/save').at(-1)!.body as { targets: Record<string, string> }).targets)
+      .toEqual({ s0001: '早晨來得晚。' })
+  }, 15000)
+
+  it('does not re-extract, or strand words, on the strength of that late refresh (older)', async () => {
+    // The same late refresh, through Re-extract: the post-refresh check passed
+    // because `doc` had become chapter one again, and the extract stranded the
+    // second chapter's words — which nothing re-parsed — as "renumbered".
+    const refresh = held()
+    serve({
+      save: n => (n === 1 ? refused : null),
+      read: (src, n) => (src === doc.source && n === 2 ? { body: doc, after: refresh.until } : null),
+    })
+    await opened()
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Re-extract' }))
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(2) })
+    window.location.hash = address(second.source, 's0001')
+    await waitFor(() => { expect(screen.getByText('/2 translated')).toBeTruthy() }, { timeout: 4000 })
+    await user.type(field(), '早晨來得晚。')
+    window.location.hash = address(doc.source, 's0003')
+    await waitFor(() => { expect(screen.getByText(/could not be written to book\/ch2\.md/)).toBeTruthy() }, { timeout: 4000 })
+
+    await act(async () => { refresh.release(); await settle(200) })
+    expect(dialogOpen()).toBe(false)
+    expect(extracts()).toEqual([])
+    expect(drafts.get('s0001')).toBe('早晨來得晚。')
+    expect(drafts.stranded()).toBe(false)
+    expect(logged('warn', 'was not re-extracted')).toBe(true)
+  }, 15000)
+
+  it('does not leave the page on the loading screen when an open is overtaken during its flush (older)', async () => {
+    // Back, Back with words unsaved: the first open was still flushing when the
+    // second finished, and carried on — raising `docLoading` over the page the
+    // second had drawn and never lowering it.
+    const first = held()
+    serve({
+      save: n => (n === 1
+        ? { body: wrote, after: first.until }
+        : { body: { applied: 0, unknown: [], stored: {}, conflicts: { s0003: { text: '燈還亮著。', token: 'z' } } } }),
+    })
+    await opened()
+    await userEvent.setup().type(field(), '燈還亮著。')
+    window.location.hash = address(second.source)
+    await waitFor(() => { expect(callsTo('/api/save')).toHaveLength(1) })
+    window.location.hash = address(third.source)
+    await waitFor(() => { expect(readsOf(third.source)).toBe(1) }, { timeout: 4000 })
+    await waitFor(() => { expect(screen.getByText('/2 translated')).toBeTruthy() }, { timeout: 4000 })
+
+    await act(async () => { first.release(); await settle(100) })
+    expect(screen.queryByText(/^reading /)).toBeNull()
+    expect(useStore.getState().doc?.source).toBe(third.source)
+    expect(readsOf(second.source)).toBe(0)
+  }, 15000)
+
+  // ── the toolbar's confirmation, decided from what it has just read ────────
+
+  it('does not decide Re-extract\'s confirmation from a snapshot it could not re-read (older)', async () => {
+    // The re-read exists because the snapshot can be stale — `lx run` may have
+    // translated the book in a terminal. When the re-read failed, the snapshot
+    // decided anyway, and one saying nothing was translated skipped the dialog.
+    serve({ base: untranslated, read: (src, n) => (src === doc.source && n === 2 ? unreachable() : null) })
+    await opened(address(doc.source), '/3 translated')
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Re-extract' }))
+    await settle(200)
+    expect(dialogOpen()).toBe(false)
+    expect(extracts()).toEqual([])
+    expect(logged('warn', 'could not be read again')).toBe(true)
+  }, 15000)
+
+  it('does not carry Re-extract on when the address has moved to a file whose read failed (older)', async () => {
+    // Such a move leaves `doc` on the chapter, so comparing the screen alone
+    // let the dialog open over the other file's page.
+    const refresh = held()
+    serve({ read: (src, n) => (src === doc.source && n === 2 ? { body: doc, after: refresh.until } : null) })
+    await opened()
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Re-extract' }))
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(2) })
+    window.location.hash = address(fresh.source)
+    await waitFor(() => { expect(screen.getByRole('heading', { name: fresh.source })).toBeTruthy() }, { timeout: 4000 })
+    await act(async () => { refresh.release(); await settle(200) })
+    expect(dialogOpen()).toBe(false)
+    expect(extracts()).toEqual([])
+  }, 15000)
+
+  it('does not log Start over\'s header over an extract a run has started in front of', async () => {
+    serve()
+    await opened()
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: /Start over in another register/ }))
+    await user.type(screen.getByPlaceholderText('type a register'), 'plain')
+    await user.click(screen.getByRole('button', { name: 'Start over…' }))
+    await waitFor(() => { expect(dialogOpen()).toBe(true) }, { timeout: 4000 })
+    act(() => { useStore.setState({ running: true }) })
+    await user.click(within(document.querySelector<HTMLDialogElement>('dialog[open]')!).getByRole('button', { name: 'Discard and re-extract' }))
+    await settle(100)
+    expect(extracts()).toEqual([])
+    expect(useStore.getState().log.some(l => l.text.startsWith('— start over'))).toBe(false)
+    expect(logged('warn', 'a run started')).toBe(true)
+  }, 15000)
 })

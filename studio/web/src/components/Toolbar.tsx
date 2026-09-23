@@ -92,19 +92,34 @@ export function Toolbar() {
     // send — so a book translated by `lx run` in a terminal while this page sat
     // open still reported 0 here, and the confirmation this act needs would have
     // been skipped. One extra read on a deliberate, rare, destructive press.
-    await refresh()
-    const now = useStore.getState().doc
-    // **The count must be this document's.** `refresh()` re-reads whatever is on
-    // screen, and the rail stays live through the two round trips above — so a
-    // reviewer who moved to another document meanwhile had *its* count read
-    // here, and an untranslated one skipped the dialog for a document holding a
-    // whole book (found by the review of HANDOFF-088; before that change the
-    // extract went to the other document instead, which was the same defect
-    // pointing the other way).
-    if (!now || now.source !== doc.source || now.lang !== doc.lang) {
+    const read = await refresh()
+    const { doc: now, at } = useStore.getState()
+    // **The count must be this document's, and read now.** `refresh()` re-reads
+    // whatever is on screen, and the rail stays live through the two round trips
+    // above — so a reviewer who moved to another document meanwhile had *its*
+    // count read here, and an untranslated one skipped the dialog for a document
+    // holding a whole book (found by the review of HANDOFF-088; before that
+    // change the extract went to the other document instead, which was the same
+    // defect pointing the other way). `at` is asked as well as the screen: a
+    // move to a file nobody has extracted leaves `doc` where it was, and the
+    // dialog would then open over that file's page.
+    const named = { src: doc.source, lang: doc.lang }
+    if (!now || now.source !== named.src || now.lang !== named.lang ||
+        !at || at.src !== named.src || at.lang !== named.lang) {
       say(
         `  ${doc.source} was not re-extracted: the page moved to another document ` +
         `before it could read what this one holds`,
+        'warn',
+      )
+      return
+    }
+    // And a re-read that failed leaves the snapshot this exists to distrust —
+    // one saying nothing is translated would skip the dialog for a book `lx run`
+    // translated in a terminal. Older than HANDOFF-088, found by its review.
+    if (!read) {
+      say(
+        `  ${doc.source} was not re-extracted: it could not be read again to see what it ` +
+        `holds — the log says why`,
         'warn',
       )
       return

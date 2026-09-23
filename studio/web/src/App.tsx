@@ -147,14 +147,16 @@ function Main() {
   // deep link and every entry in the rail are one path rather than several.
   //
   // This effect turns the address into `at`, and nothing else writes `at`:
-  // `open()` is its only writer, and its one other caller, `store.reExtract`,
-  // calls it only for the document `at` already names, once a re-parse has
-  // landed. That is a re-read after the toolbar's Re-extract, and the first
-  // successful read on the page for a file nobody had extracted, where `at`
-  // named the file while `doc` stayed on the document before it. `at` outlives
-  // a document route — on `#/backends` this returns early and `at` keeps the
-  // last document — which is harmless and is why the sentence is about `at`
-  // rather than the address.
+  // `open()` is its only writer, and its two other callers call it only for the
+  // document `at` already names. `store.reExtract` does once a re-parse has
+  // landed — a re-read after the toolbar's Re-extract, and the first successful
+  // read on the page for a file nobody had extracted, where `at` named the file
+  // while `doc` stayed on the document before it — and
+  // `store.extractUntracked` does when that file turns out to have been
+  // extracted elsewhere meanwhile. `at` outlives a document route — on
+  // `#/backends` this returns early and `at` keeps the last document — which is
+  // why the sentence is about `at` rather than the address, and why coming back
+  // reads nothing.
   //
   // It was false twice before it was this: a comment here said nothing else
   // called `open` while `Rail`'s *Not yet extracted* entry did, beside the
@@ -203,13 +205,15 @@ function Main() {
           <h3>{addressed.src}</h3>
           <p>{docError}</p>
           {/*
-            Two facts, and both are needed. The read has just failed — fresh,
-            and about this one file — and the project lists the file as not yet
-            extracted, which is a snapshot a terminal can have made stale. A
-            stale entry for a file somebody has since extracted never gets here:
-            its read succeeds and the document opens. And a page that declined
-            to leave another document over words it could not write is not a
-            failed read, so it offers nothing.
+            Two facts, and both are needed. The server refused to read this one
+            file — not a request that failed to arrive, and not this page
+            declining to leave another document over words it could not write,
+            which is `readFailed` false — and the project lists the file as not
+            yet extracted, which is a snapshot a terminal can have made stale. A
+            stale entry for a file somebody has since extracted usually never
+            gets here, because its read succeeds and the document opens; where
+            the read is older than that — a trip to the backend screens and back
+            reads nothing — the click reads again before it extracts.
           */}
           {readFailed && notExtracted(state, addressed) && (
             <NotExtracted src={addressed.src} lang={addressed.lang} />
@@ -259,18 +263,19 @@ function Main() {
  * screen, and `reExtract` then opens it, because `at` names it.
  *
  * **No confirmation, and that is decided rather than inherited.** The toolbar's
- * asks only when a re-parse could discard a translation, and this is drawn only
- * after a read of this very file has just failed while the project lists it as
- * never extracted — so there is no translation, hold or waiver to discard, and
- * the document on screen before this one is not touched. What is left is the
- * interval between that read and the click, which a terminal could fill; the
- * click would then be a plain re-extract, which keeps every translation whose
- * paragraph is unchanged — the act `lx run` performs on every invocation.
+ * asks only when a re-parse could discard a translation. This is drawn only
+ * after the server has refused to read this very file while the project lists
+ * it as never extracted, and the click asks the server again before it sends
+ * anything — so there is no translation, hold or waiver to discard, and the
+ * document on screen before this one is not touched. What is left is the
+ * interval between that second read and the extract, one round trip wide; a
+ * terminal filling it makes the click a plain re-extract, which keeps every
+ * translation whose paragraph is unchanged — the act `lx run` performs on
+ * every invocation.
  */
 function NotExtracted({ src, lang }: DocAddress) {
   const running = useStore(s => s.running)
-  const extract = useStore(s => s.extract)
-  const say = useStore(s => s.say)
+  const extractUntracked = useStore(s => s.extractUntracked)
   return (
     <>
       <p>
@@ -284,14 +289,10 @@ function NotExtracted({ src, lang }: DocAddress) {
           className="key"
           disabled={running}
           title={running ? 'Waits for the run in flight: one act at a time.' : undefined}
-          onClick={() => {
-            // Read now rather than from the render: a click in the same frame as
-            // the one that started a run would otherwise log a header over a
-            // request `reExtract` then declines to send.
-            if (useStore.getState().running) return
-            say(`— extract ${src} [${lang}] —`, 'plain', true)
-            void extract({ src, lang })
-          }}
+          // It reads the file again before it extracts anything; see
+          // `extractUntracked`. The header and the one-at-a-time test are there
+          // too, after that read, so two clicks in one frame log one.
+          onClick={() => { void extractUntracked({ src, lang }) }}
         >
           Extract {src}
         </button>
