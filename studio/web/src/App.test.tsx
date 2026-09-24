@@ -1322,6 +1322,78 @@ describe('the margin after a re-parse', () => {
     expect(screen.queryByText('brief for literary')).toBeNull()
     expect(screen.getByText('brief for plain')).toBeTruthy()
   }, 20000)
+
+  it('asks again when a re-parse made outside the page arrives through a refresh', async () => {
+    // `lx extract` in a terminal inserts a paragraph; the page picks it up on a
+    // Check, with no loading screen, so the margin is never remounted — and its
+    // effects are what notice that the id now names another paragraph.
+    let parsed = false
+    const moved: DocResponse = {
+      ...doc,
+      segments: [
+        { ...doc.segments[1]!, id: 's0001', source: 'A new opening line.', token: 'm1' },
+        { ...doc.segments[0]!, id: 's0002', token: 'm2' },
+        { ...doc.segments[1]!, id: 's0003', token: 'm3' },
+      ],
+    }
+    answering(call => {
+      const path = call.path
+      if (path.startsWith('/api/state')) return { body: state }
+      if (path.startsWith('/api/models')) return { body: { provider: 'local', configured: 'qwen', models: [], error: null } }
+      if (path.startsWith('/api/doc')) return { body: parsed ? moved : doc }
+      if (path.startsWith('/api/check')) return { body: { errors: 1, warnings: 0, by_rule: { missing: 1 } } }
+      if (path.startsWith('/api/style')) {
+        const now = parsed ? moved : doc
+        const id = (call.body as { ids: string[] }).ids[0]
+        const seg = now.segments.find(s => s.id === id)
+        return { body: { source: now.source, lang: 'zh-TW', tone: now.tone, ids: [id], voice: 'brief', voice_notes: [{ names: ['note'], notes: `about: ${seg?.source ?? '?'}` }] } }
+      }
+      return { body: { algorithm: 'none', cutoff: 0, records: 0, segments: [] } }
+    })
+    startAt('#/doc/zh-TW/book%2Fch1.md?seg=s0001')
+    render(<App />)
+    await waitFor(() => { expect(screen.getByText('about: Chapter 1')).toBeTruthy() }, { timeout: 4000 })
+    parsed = true
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Check' }))
+    await waitFor(() => { expect(screen.getByText('about: A new opening line.')).toBeTruthy() }, { timeout: 4000 })
+  }, 15000)
+
+  it('asks for near matches again when a refresh brings another register', async () => {
+    // A register reset in a terminal, picked up by a Check. The style half asked
+    // again and emptied the panel; the near-match half, keyed without the
+    // register, never asked again and left it empty.
+    let tone = 'literary'
+    answering(call => {
+      const path = call.path
+      if (path.startsWith('/api/state')) return { body: state }
+      if (path.startsWith('/api/models')) return { body: { provider: 'local', configured: 'qwen', models: [], error: null } }
+      if (path.startsWith('/api/doc')) return { body: { ...doc, tone } }
+      if (path.startsWith('/api/check')) return { body: { errors: 1, warnings: 0, by_rule: { missing: 1 } } }
+      if (path.startsWith('/api/style')) {
+        const id = (call.body as { ids: string[] }).ids[0]
+        return { body: { source: doc.source, lang: 'zh-TW', tone, ids: [id], voice: `brief for ${tone}`, voice_notes: [] } }
+      }
+      if (path.startsWith('/api/suggest')) {
+        return {
+          body: {
+            source: doc.source, lang: 'zh-TW', tone, algorithm: 'difflib', cutoff: 0.6, records: 9,
+            segments: [{
+              id: 's0003', source: 'The lamp was still burning.', examined: 9, truncated: false,
+              suggestions: [{ score: 0.9, source: 'The lamp was burning.', target: `NEAR-MATCH ${tone}`, context: 'para', tone, variant: null, waived: false }],
+            }],
+          },
+        }
+      }
+      return { body: {} }
+    })
+    startAt('#/doc/zh-TW/book%2Fch1.md?seg=s0003')
+    render(<App />)
+    await waitFor(() => { expect(screen.getByText('NEAR-MATCH literary')).toBeTruthy() }, { timeout: 4000 })
+    tone = 'plain'
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Check' }))
+    await waitFor(() => { expect(useStore.getState().doc?.tone).toBe('plain') }, { timeout: 4000 })
+    await waitFor(() => { expect(screen.getByText('NEAR-MATCH plain')).toBeTruthy() }, { timeout: 4000 })
+  }, 15000)
 })
 
 /**
@@ -2455,7 +2527,10 @@ describe('what the page acts on is what it has just read', () => {
     const said = useStore.getState().log.filter(l => l.text.includes('s0001')).map(l => l.text)
     await act(async () => { backRead.release(); away.release(); await settle(100) })
 
-    expect({ sent, said }).not.toEqual({ sent: 0, said: [] })
+    // Not sent, and said: `runJob` is the only guard after the dialog, and a
+    // looser "sent or said" let a mutant that removed it through.
+    expect(sent).toBe(0)
+    expect(said.some(t => t.includes('was between documents, or reading one'))).toBe(true)
   }, 20000)
 
   // P6: "Draft again" overtaken by the toolbar's Re-extract (pressed while its

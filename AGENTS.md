@@ -621,7 +621,7 @@ python -m scriptorium --help        # or `lx` after `pip install -e .`
 
 cd studio/web && npm ci             # only to CHANGE the workbench; `lx web`
 npm run typecheck                   #   needs none of this, because the build
-npm test                            #   is committed. 59 tests, jsdom, no network
+npm test                            #   is committed. 138 tests (8 `it.fails`), jsdom, no network
 npm run build                       # writes src/scriptorium/web/static/ — commit it
 
 lx run docs/guide.md --lang zh-TW   # extract -> translate -> check -> repair -> render

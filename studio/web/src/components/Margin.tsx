@@ -87,12 +87,14 @@ export function Margin() {
   const register = doc?.tone ?? ''
   const seg = doc?.segments.find(s => s.id === focused) ?? null
   // The paragraph the id names *in this parse*, because the id alone survives a
-  // re-parse that moved it. What holds that is the cache key below; the effects
-  // also list it as a dependency, and that half is redundant today — `Main`
-  // draws the loading page, unmounting this, for every fetch `open()` makes, so
-  // a re-parse always remounts the margin. Two independent mutation lanes
-  // measured it equivalent. It stays so the rule does not rest on a loading
-  // screen nobody here decided about.
+  // re-parse that moved it. The cache key below is one half; the effects listing
+  // it as a dependency are the other, and they are what answers a re-parse made
+  // outside the page — `lx extract` in a terminal — which the page picks up
+  // through a `refresh()` with no loading screen, so the margin is never
+  // remounted. The register is a dependency of both effects for the same reason:
+  // the style reply's brief is chosen by it, and so are the suggestions the
+  // memory offers. (Two mutation lanes once measured the text dependency
+  // equivalent; they only tried the page's own re-parse, which does remount.)
   const text = seg?.source ?? ''
   // Where a near match earns its cost without being asked for.
   const wanted = !!seg && (!seg.target || seg.issues.some(isError))
@@ -142,7 +144,7 @@ export function Margin() {
         .catch((e: unknown) => { if (live) setMargin(m => ({ ...m, loading: false, error: String(e) })) })
     }, SETTLE)
     return () => { live = false; clearTimeout(timer) }
-  }, [src, lang, focused, text, wanted, asked])
+  }, [src, lang, register, focused, text, wanted, asked])
 
   // A press belongs to the segment it was made on — the paragraph, not the id,
   // which a re-parse hands to another one. Without this the counter would keep

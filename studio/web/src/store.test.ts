@@ -10,7 +10,7 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 
 import * as drafts from './drafts'
-import { useStore, visible } from './store'
+import { useStore, visible, writeEpoch } from './store'
 import { answering, callsTo, lastCall, otherwise, replies } from './test/wire'
 import { CONTRACT_VERSION } from './contract'
 import type { DocResponse, Segment, StateResponse } from './contract'
@@ -472,6 +472,18 @@ describe('a re-parse voids every unsaved edit, at the moment the server accepts 
 })
 
 describe('reading again', () => {
+  it('moves the write epoch the moment a save sends, before any reply', async () => {
+    // Re-extract reads the epoch after awaits of its own; a save still on its
+    // way at that moment must already have moved it, or its wording is not in
+    // the count and nothing says so.
+    await openWith([segment({ id: 's0001' })])
+    drafts.set('s0001', '改過的句子。', '她沒有睡。')
+    replies({ body: { applied: 1, unknown: [], stored: {}, conflicts: {} }, after: new Promise<void>(() => undefined) })
+    const before = writeEpoch()
+    void useStore.getState().save()
+    expect(writeEpoch()).not.toBe(before)
+  })
+
   it('answers false from a refresh with nothing on screen, and reads nothing', async () => {
     // The toolbar reads the answer to decide whether it may trust a count; a
     // refresh that read nothing must not say it did.

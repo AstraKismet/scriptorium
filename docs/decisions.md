@@ -3,6 +3,285 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-09-24 · The address decides which document is open, and an act rests on what the page has just read
+
+Closing HANDOFF-088. The rail's *Not yet extracted* entry extracted the wrong
+document: whichever one was open, with the toolbar's confirmation bypassed,
+while the log named the file that was clicked.
+
+### What was measured
+
+On 2026-09-14, in Chrome 153 against `lx web` on `f34298b` — the code path
+unchanged through `83a865b` — with `five-thousand.txt` open and an untracked
+`docs/untracked.md`: a click on the untracked entry sent exactly one request,
+`POST /api/extract {"src":"five-thousand.txt","lang":"zh-TW"}`; the log read
+`— extract docs/untracked.md [zh-TW] —` and then `5000 segments, 0 reused`; and
+`GET /api/state` afterwards still listed `docs/untracked.md` as untracked.
+
+The sequence: the button called `store.open(clicked)` and then `extract()`.
+`open()` set `at` to the clicked file, but the address never moved, so
+`App.tsx`'s effect re-opened the addressed document a render later and set `at`
+back; the clicked file's `GET /api/doc` failed and was swallowed because `at` no
+longer named it; and `extract()` took `shown() ?? at`, where `shown()` reads
+`doc` — still the open document.
+
+### The rules
+
+**The address decides which document is open.** HANDOFF-084 removed a second
+authority over which *paragraph* is open; this is the same rule for which
+*document*, and the entry was the second caller found walking around it. It is a
+link now, like every other entry in the rail. `App.tsx`'s effect turns the
+address into `at`; `open()` is `at`'s only writer, and its two other callers —
+`store.reExtract` and `store.extractUntracked` — call it only for the document
+`at` already names. The comment above the effect said nothing else called
+`open` while this button did; HANDOFF-087 corrected it to name the button; it now
+says what is true, including that `at` outlives a document route.
+
+**An act names the document it is about; it never reads the screen to decide.**
+`extract(where)` and `startOver(where, register)` take the address and return
+whether the server accepted. The toolbar's Re-extract and Start over name the
+document their confirmation named — which also closes a narrower hole: Back is
+not stopped by a modal dialog, and against `83a865b` confirming a dialog that
+named one chapter re-parsed the chapter arrived at, reset included (two tests,
+both sending `book/ch2.md` there). What the screen still decides is what a
+re-parse does *to this page*, asked when the reply lands: unsaved words are
+stranded only when the document re-parsed is the one on screen — `drafts` holds
+that document's words, and a re-parse of any other renumbers nothing they are
+keyed on — and the document is read again only while `at` still names it.
+
+**And an act rests on what the page has just read.** Most of what the reviews
+found had one shape: a fact that had gone stale by the time something acted on
+it — a startup list, a read made before a trip to the backend screens, a
+refresh landing after the page declined to show its document, an open overtaken
+by a newer one, a count read before the reviewer's own write. Where this package
+closes one, it does so by asking at the moment of the act rather than by
+guarding the old answer. The general case — reads of one document landing out
+of order — it does not close; see *What was tried and taken back*.
+
+### The entry is a link, and the extract is offered on the page it leads to
+
+The page a link lands on reads the file. When the **server** has refused that
+read — not a request that never arrived, and not the page declining to leave
+another document, which the store now tells apart as `readFailed` — **and**
+`GET /api/state` lists the file as not yet extracted, the page shows the
+server's sentence and *Extract &lt;file&gt;*. The click asks the server's list
+again, because the read behind the offer can be as old as the page: `at`
+outlives `#/backends`, so coming back reads nothing. It asks the list rather than
+the document because `web/server.py` answers every failed read with 400 — a
+locked database looks exactly like a file with no state, and the page may not
+parse the sentence — while `untracked` is computed now, by the server, from the
+identity state is keyed on. A file it still lists is extracted; one it no longer
+lists is not, and is read again where the address still names it. A hand-typed
+link to such a file, and the reading view's address, reach the same page. A
+refusal the server answered for a listed file is not logged in red: the page
+explains itself; anything else is.
+
+**No confirmation, and that is decided rather than inherited.** The toolbar asks
+only when a re-parse could discard a translation. The offer is drawn only after
+the server refused to read this file while the project listed it, and the click
+re-reads the server's list before it sends anything, so there is no translation,
+hold or waiver to discard, and nothing on the page is touched. What is left is
+one round trip between that list and the extract; a terminal filling it makes
+the click a plain re-extract, which keeps every translation whose paragraph is
+unchanged — the act `lx run` performs on every invocation.
+
+HANDOFF-087 wrote that "the button must not extract at all when the open was
+declined". That sentence was about the old order, where a declined open left
+`shown()` on the document being left and the extract read it. There is no longer
+an open before an extract, the extract is addressed, and a declined open draws
+the refusal and offers nothing — including when an earlier failed read of the
+file lands after it (a test). This is a reading of the sentence's intent, stated
+here because it is not its letter.
+
+### The shape that lost, and why its review decided it
+
+The first version kept the entry an act: extract the clicked file, then navigate
+to it once the extract landed if the address had not moved since the click. It
+passed its own tests and a browser check. Its adversarial review found every
+defect in one place — **the page moving itself after a delay the reviewer did
+not choose**: text typed while that navigation wrote the open document out was
+dropped with no line (`save()`'s `drafts.forget(ids)` forgets what was *sent*,
+not what was written — measured on its own, older than this package, moved to
+HANDOFF-091, which owns that line); a reviewer who left and came back by Back was
+pulled away, because a string comparison cannot tell "nobody moved" from "moved
+and came back"; a hand-typed link with bare slashes gained a second history
+entry; and a stale startup list turned the click into a re-extract nobody
+confirmed. Each could have been guarded, and each guard would have been one more
+thing to keep true. The maintainer chose the link. The cost is one more click on
+an act that happens once per file.
+
+*Also lost:* **navigate first, then extract from the rail** — the navigation's
+`GET /api/doc` races the extract on a `ThreadingHTTPServer`, drawing
+`no state for …` on the way to a file about to exist. **Navigate first, with
+`open()` skipping its fetch while that document's extract is in flight** — a
+special case in `open()` and a second piece of state three places must agree on,
+which is the shape of the defect being repaired.
+
+### Found by the reviews, and fixed here
+
+Each was reproduced by a probe that failed on the commit under review; those
+marked *older* failed on `83a865b` too.
+
+- **`refresh()` could put a document on screen that `open()` had declined to
+  show** (*older*). It accepted its reply whenever `at` named the document, and
+  `at` names a chapter the moment a navigation asks for it while `doc` stays on
+  the chapter being left. A late refresh then swapped `doc` under the second
+  chapter's unwritten words; the save the refusal recommends posted them onto
+  the first chapter's heading with the first chapter's token, and a re-extract
+  stranded them as "renumbered". It now answers only for the document on screen.
+- **A confirmed "Draft again" went to whatever was on screen** (*older*): confirmed
+  after the page had moved to another document, it sent this row's id there
+  with `overwrite_human` set. The row names its document before its first
+  await and refuses, saying so, when the page is no longer on it.
+- **An act while the page was opening the document it would show** read a
+  snapshot about to be discarded. "Draft again", with Back and Forward pressed
+  during its save, built its run from the origin before that save — no question
+  about a person's wording, the model billed, the write refused. `settled()` is
+  now false while an `open()` is reading, and both the row and `runJob` say why
+  they stopped — a confirmed act that vanishes without a line is
+  indistinguishable from one never made.
+- **`open()` told its own calls apart by the document `at` named** (*older* in
+  part). Two navigations inside one save round trip left the first call raising
+  `docLoading` over the second's page for good; and because one document can be
+  asked for twice while the first call is in flight — A, B, C, back to B — the
+  first call for B passed every "am I current" test, cleared words typed in C
+  that the second call had just declined to leave over, and wrote its refusal or
+  a late failed read over the second call's page. Each call now carries a
+  generation number, and an overtaken call stops after its flush.
+- **The toolbar's Re-extract decided its confirmation from another document**,
+  or from a snapshot it could not re-read (*older*), or with the address moved to
+  a file whose read failed (*older*): its `refresh()` re-reads whatever is on
+  screen, and a failed re-read left the snapshot the re-read exists to distrust.
+  It now stops, saying which, unless the document on screen and `at` both still
+  name the document and the re-read succeeded.
+- **And from a count older than the reviewer's own write** (*older*). The ledger
+  stays editable through that re-read, so words typed, or written by a blur,
+  while it was in flight were not in the count, and on a document with nothing
+  translated no dialog stood in the way. It is asked directly rather than
+  inferred from which read is newer: a write epoch, `store.writeEpoch()`, moves
+  when a save sends and again when its reply lands, and Re-extract refuses when
+  it moved, or wording is unsaved, between asking for the count and extracting —
+  after its dialog too, whose focus change saves the field. The reviewer keeps
+  the words and presses again.
+- **A header over a request never sent, and a click that said nothing.** The run
+  buttons stay enabled while the toolbar saves and re-reads (*older* for the
+  toolbar), and a run can start while the untracked page's click asks the
+  server. Every such control now checks in the same tick as its header and says
+  why when it stops. A second click on the same file while its click is asking
+  is the same act and is silent; a click on another file is not swallowed — a
+  single flag for every file did that, and the first file's header then read
+  like the defect this package began with.
+- **The margin answered about the paragraph that used to carry the id.** The
+  package traced it; tests reproduced it. The style cache was scoped `src|lang`,
+  which no re-extract changes, and keyed by id, while ids restart at `s0001` on
+  every parse; after a start-over it served the old register's brief. The page
+  has no parse identity — HANDOFF-093 would add one — so the cache is keyed on
+  what the reply is a function of: the segment's masked text, which is what
+  `translate.style_notes` matches on, scoped by document, language and register.
+  A reply that lands after the scope moved is written into the map it was asked
+  for (*older*). The effects list the text and the register as dependencies
+  too, and that half is what answers a re-parse or a register reset made in a
+  terminal and picked up by a refresh, with no loading screen to remount the
+  margin: the style asks again about the paragraph now under the id, and the
+  near matches ask again in the new register (the final review found the near
+  matches left empty when only the style half listed the register). Two
+  mutation lanes had measured the text dependency equivalent; they tried only
+  the page's own re-parse, which does remount.
+
+### What was tried and taken back: ordering the page's reads
+
+From the fourth round on, every review found its defects in one place — the
+page's reads and writes of a document racing each other — and every one of those
+defects fails on `83a865b` too. Four client-side orderings were built, each
+reviewed by a lane that had to prove every claim with a failing probe, and each
+broken by the next round: `refresh()` voided by any later `open()`; a global
+read number where a read landed only if no later one had been *asked* (which
+threw away a save's good re-read whenever the later read failed); a read landing
+unless a later read of the same document had *landed*, per document; and the
+save reply's `stored` applied locally as a read that landed at the reply, which
+the contract does intend `stored` for, but which dropped reads served after the
+server wrote — a hold, a re-parse — and applied by id to whatever version was on
+screen. The shared lesson: without something saying **which version of the
+document** a read or a reply describes, the page infers it from arrival order,
+and there is always an order the inference did not cover.
+
+**The maintainer chose to take the machinery back out and give the problem its
+own design package**, `HANDOFF-096`, rather than go on iterating here. Its eight
+cases stay in the suite as `it.fails` — *Known broken, HANDOFF-096* — so the
+suite turns red the day they are fixed and the marker goes in that commit, the
+convention `KNOWN_BROKEN` follows in `tests/test_pipeline.py`. What stays from
+those rounds is what does not depend on read order: the write epoch above,
+`open()`'s generation number, `refresh()` answering only for the document on
+screen, `settled()` and the row's named document.
+
+### How it is tested
+
+`npm test` goes from 59 to 138 tests in the same seven files: 130 pass and 8 are
+the `it.fails` above. With the final test files run against `83a865b`'s
+production code, 59 of the 119 tests in `App.test.tsx` and `store.test.ts` fail
+— the one acceptance criterion 2 names with the defect exactly as measured,
+`expected [ { src: 'book/ch1.md', lang: 'zh-TW' } ] to deeply equal []`, and a
+group of store tests only because `extract` now takes an address and returns a
+boolean — and the 8 `it.fails` fail there too, which is what makes them *older*.
+The test that clicks through to *Extract* and asserts the request names the
+clicked file passes here. Each review round's new tests were run against the
+commit that round reviewed, and failed there.
+
+Nine review rounds, each an adversarial lane that had to prove every claim with
+a probe failing on the commit — round one also had a lane testing the package's
+premises against the source — beside ten mutation lanes that planted their own
+mutants, 210 in all. Every survivor judged a real gap got the assertion it
+lacked; the ones left in the final code are argued equivalent: the order of
+`extractUntracked`'s header and its call (`reExtract` raises `running`
+synchronously either way), and the write epoch's second and third moves, each
+redundant beside the first, which fires before any await. The final round found
+no blocker and one note-level regression, fixed.
+
+In a browser, driven by automation against `lx web` with a screenshot forcing
+each paint (the tab was hidden), on a project with one translated chapter open
+and one untracked source, on the final build: the entry sent one
+`GET /api/doc`, answered 400, and drew the page, the server's sentence and the
+button, with nothing logged in red; the button sent `GET /api/state` — the
+click's own question — then `POST /api/extract` naming the clicked file, then
+`GET /api/state` and `GET /api/doc`; the file opened with its four segments and
+moved to Tracked; the chapter still held five segments, two translated; and the
+log read `— extract docs/final.md [zh-TW] —` and `4 segments, 0 reused`. The
+first design had been checked the same way before its review broke it. The
+maintainer's check in their own browser is acceptance criterion 4.
+
+What jsdom cannot answer, and the suite does not claim: real session history
+beyond `history.length`, and an IME composition.
+
+### Left open, each with a package
+
+- `save()` forgets words typed while its request is in flight, and one wording
+  flushed twice comes back as a conflict that is not one — `HANDOFF-091`, which
+  owns those lines.
+- A save sent while this page's own re-extract is in flight, before the reply
+  raises the stranded mark — `HANDOFF-093`, whose server-side refusal answers it.
+- `cli.py` defines `_fold` twice, and `do_untracked` runs the credential-name
+  fold rather than the identity fold it documents; right today by coincidence —
+  `HANDOFF-094`.
+- A finished run refreshes the document on screen rather than its own, so after
+  a leave-and-return during the run the page can show the run's document without
+  its last writes — `HANDOFF-095`, traced and not reproduced.
+- The page does not order its reads of a document, so an older read can land
+  over a newer one, and it learns what a save stored only from the re-read after
+  it — `HANDOFF-096`, design tier, eight `it.fails` cases and four orderings that
+  lost.
+- *Start over*'s dialog states a count only a re-read updates, and *Re-extract*
+  tells a reviewer to copy wording out of a field they emptied — `HANDOFF-092`.
+
+### What this supersedes in the 2026-09-20 entry
+
+Three sentences there are now history rather than description: the flush lives
+in `open()` "decided by a door" — `Rail`'s button reaching `open()` without the
+address — and that door is gone, while the rule stands because leaving a
+document is what costs words, whoever asks; `reExtract` re-opening the same
+document is now conditional on `at` naming it; and "a re-extract addresses the
+document on screen", one of that entry's tests, was replaced by tests of the
+opposite rule.
+
 ## 2026-09-20 · Unsaved words are written before they are discarded, and a page that cannot write them does not leave
 
 Closing HANDOFF-087. A reviewer's unsaved edit was thrown away whenever the
