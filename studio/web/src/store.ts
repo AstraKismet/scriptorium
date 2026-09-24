@@ -233,6 +233,20 @@ const landed = new Map<string, number>()
 const keyOf = (a: DocAddress): string => JSON.stringify([a.src, a.lang])
 
 /**
+ * Moves when a save sends wording and again when its reply lands. An act whose
+ * confirmation depends on what the document holds — the toolbar's Re-extract —
+ * records it before it reads the count and refuses if it moved: the count can
+ * be older than the reviewer's own write however the reads were ordered, and
+ * seven review rounds spent on ordering the reads kept finding the order that
+ * was not covered. Whether anything was written is asked directly instead
+ * (seventh review).
+ */
+let writes = 0
+
+/** The write epoch; see `writes`. */
+export const writeEpoch = (): number => writes
+
+/**
  * The files an `extractUntracked` is asking the server about. A second click on
  * the same file in the same moment is the same act, not a second one, and says
  * nothing. Per file, because a single flag swallowed a click on a *different*
@@ -758,6 +772,14 @@ export const useStore = create<Store>()((set, get) => ({
       set(newer ? { docLoading: false } : { doc, docLoading: false })
     } catch (e) {
       if (!current()) return
+      // A read of this document asked after this one has already reached the
+      // screen, so the page has the document and this failure costs nothing —
+      // drawn, it put an error over a current document that a click on the
+      // same entry could not clear (seventh review; older than this package).
+      if ((landed.get(keyOf(want)) ?? 0) > asked && same(get().shown(), want)) {
+        set({ docLoading: false })
+        return
+      }
       // A refusal the server *answered* — never a request that did not arrive.
       // A file this page has never read may have state after all, and a
       // transport failure says nothing either way; offering an extract over it
@@ -859,10 +881,41 @@ export const useStore = create<Store>()((set, get) => ({
       if (token) base[id] = token
     }
 
+    writes += 1
     try {
       const r = await api.postSave({ ...where, targets, base })
+      writes += 1
       // Only what was sent. A held-back blank stays dirty and stays on screen.
       drafts.forget(ids)
+      // **The reply says what is now stored, and the page takes it at once**:
+      // `stored` carries each written id's text and new token, and this
+      // endpoint writes `origin` "human" by contract (`docs/contracts/
+      // workbench-http.md`, `POST /api/save`). Left to the re-read below, the
+      // page showed the snapshot from before its own write for as long as that
+      // re-read was on its way — for good if it failed — so "Draft again"
+      // skipped its question over the words just written and the next edit
+      // carried a token the server had already retired (seventh review; older
+      // than this package). It counts as a read that landed now, so a re-read
+      // asked before the save cannot put the older state back.
+      const written = Object.entries(r.stored)
+      if (written.length && same(get().shown(), where)) {
+        const now = get().doc
+        if (now) {
+          const stored = new Map(written)
+          landed.set(keyOf(where), ++readSeq)
+          set({
+            doc: {
+              ...now,
+              segments: now.segments.map(seg => {
+                const got = stored.get(seg.id)
+                return got
+                  ? { ...seg, target: got.text, token: got.token, origin: 'human', status: 'translated' as const }
+                  : seg
+              }),
+            },
+          })
+        }
+      }
       const lost = Object.keys(r.conflicts)
       if (lost.length) {
         get().say(
@@ -884,6 +937,7 @@ export const useStore = create<Store>()((set, get) => ({
       if (same(get().at, where)) await get().refresh()
       return !held.length && !lost.length
     } catch (e) {
+      writes += 1
       // Cleared only on success: an empty target is a 400, and clearing first
       // would throw away every other edit in the batch along with the one the
       // server would not take.
@@ -908,8 +962,8 @@ export const useStore = create<Store>()((set, get) => ({
     // from one never made (sixth review).
     if (!get().settled()) {
       get().say(
-        `  ${ids ? ids.join(', ') : mode} not sent: the document on screen was being read again ` +
-        `— press it again once it is back`,
+        `  ${ids ? ids.join(', ') : mode} not sent: the page was between documents, or reading ` +
+        `one, when this was confirmed — press it again once the document is on screen`,
         'warn',
       )
       return

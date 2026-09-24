@@ -19,7 +19,7 @@ import { ModelPicker } from './ModelPicker'
 import type { DocAddress } from '../contract'
 import * as drafts from '../drafts'
 import * as routes from '../router'
-import { useStore, type Filter } from '../store'
+import { useStore, writeEpoch, type Filter } from '../store'
 
 const BOUNDS = [0, 10, 25, 50, 100]
 
@@ -96,6 +96,7 @@ export function Toolbar() {
       return false
     }
     if (!await written()) return
+    const before = writeEpoch()
     // **Re-read before deciding what to warn about.** `report.translated` is a
     // client snapshot, and `save()` refreshes it only when it had something to
     // send — so a book translated by `lx run` in a terminal while this page sat
@@ -136,28 +137,21 @@ export function Toolbar() {
       )
       return
     }
-    // **Asked again, because the ledger stayed editable through that read.**
-    // Words typed while it was in flight were in `drafts` when the extract
-    // landed, and on a document with nothing translated no dialog stood in the
-    // way: they were stranded and named as gone (older than HANDOFF-088, found
-    // twice by its reviews). The dialog below is modal, so nothing is typed
-    // after this. A save that wrote something has changed the count, so the
-    // document is read once more and that read must succeed: the re-read
-    // `save()` makes of its own accord swallows its failure, and a count from
-    // before the write skipped the dialog over the translation just written
-    // (found by the fourth review).
-    const typed = drafts.size() > 0
-    if (!await written()) return
-    if (typed && !await refresh()) {
+    // **Nothing may have been written since the count was asked for.** The
+    // ledger stays editable through that read: words typed during it, or
+    // written by a blur during it, are not in the count however the reads
+    // came back, and on a document with nothing translated no dialog stood in
+    // the way (older than HANDOFF-088; its reviews found it three times, each
+    // time in an ordering of the reads the last repair had not covered). The
+    // reviewer keeps the words and presses again.
+    if (writeEpoch() !== before || drafts.size()) {
       say(
-        `  ${doc.source} was not re-extracted: what it holds could not be read again after ` +
-        `saving — press Re-extract again`,
+        `  ${doc.source} was not re-extracted: wording changed while it was being read — ` +
+        `press Re-extract again`,
         'warn',
       )
       return
     }
-    now = stillHere()
-    if (!now) return
     // **Asked only when there is something to lose.** On a document with nothing
     // translated a re-extract cannot discard a translation, and it cannot drop a
     // hold either — holding requires a non-empty target. A dialog there would be
@@ -194,10 +188,10 @@ export function Toolbar() {
     // left the ledger editable, and the dialog's own focus moving out of a field
     // saves it — a save that can be refused. Words still here now are words the
     // extract would strand (found by the fifth review).
-    if (drafts.size()) {
+    if (drafts.size() || writeEpoch() !== before) {
       say(
-        `  ${drafts.ids().slice(0, 20).join(', ')} changed while this was asking and are not ` +
-        `written yet — ${doc.source} was not re-extracted; press Re-extract again`,
+        `  ${doc.source} was not re-extracted: wording changed while this was asking — ` +
+        `press Re-extract again`,
         'warn',
       )
       return

@@ -1418,7 +1418,16 @@ describe('what the page acts on is what it has just read', () => {
         return { body: project() }
       }
       if (path.startsWith('/api/models')) return { body: { provider: 'local', configured: 'qwen', models: [], error: null } }
-      if (path.startsWith('/api/save')) { saves += 1; return over.save?.(saves, call.body) ?? { body: wrote } }
+      if (path.startsWith('/api/save')) {
+        saves += 1
+        // As the server answers by default: every target sent is stored, with a
+        // new token — `stored` is what the page takes at once (contract,
+        // `POST /api/save`), so a fixture answering it empty would be a server
+        // this page never talks to.
+        const sent = (call.body as { targets?: Record<string, string> } | null)?.targets ?? {}
+        const stored = Object.fromEntries(Object.entries(sent).map(([id, text]) => [id, { text, token: `w-${id}-${saves}` }]))
+        return over.save?.(saves, call.body) ?? { body: { applied: Object.keys(stored).length, unknown: [], stored, conflicts: {} } }
+      }
       if (path.startsWith('/api/extract')) {
         over.onExtract?.()
         if ((call.body as { src?: string } | null)?.src === fresh.source) { world.made = true; world.listed = false }
@@ -1479,6 +1488,9 @@ describe('what the page acts on is what it has just read', () => {
   const unreachable = (): Answer => ({ body: {}, after: Promise.reject(new TypeError('Failed to fetch')) })
 
   const field = (): HTMLTextAreaElement => document.querySelector<HTMLTextAreaElement>('.ledger textarea')!
+  const replaceIt = async (): Promise<void> => {
+    await userEvent.setup().click(within(document.querySelector<HTMLDialogElement>('dialog[open]')!).getByRole('button', { name: 'Replace it' }))
+  }
   const rowButton = (name: string): HTMLButtonElement =>
     [...document.querySelectorAll<HTMLButtonElement>('.ledger button')].find(b => b.textContent === name)!
   const entry = (): HTMLElement => screen.getByRole('button', { name: /docs\/untracked\.md.*extract/ })
@@ -1831,7 +1843,9 @@ describe('what the page acts on is what it has just read', () => {
     expect(useStore.getState().docError).toBe('')
   }, 20000)
 
-  it('writes words typed during the re-read Re-extract makes, rather than stranding them (older)', async () => {
+  it('keeps words typed during the re-read Re-extract makes, and does not extract over them (older)', async () => {
+    // The ledger stays editable through the re-read. Words typed then used to
+    // be stranded by the extract and named as gone.
     const refresh = held()
     serve({ base: untranslated, read: (src, n) => (src === doc.source && n === 2 ? { body: untranslated, after: refresh.until } : null) })
     await opened(address(doc.source, 's0003'), '/3 translated')
@@ -1841,8 +1855,11 @@ describe('what the page acts on is what it has just read', () => {
     await user.type(field(), '燈還亮著。')
     await act(async () => { refresh.release(); await settle(300) })
 
-    expect(callsTo('/api/save').some(c => (c.body as { targets: Record<string, string> }).targets.s0003 === '燈還亮著。')).toBe(true)
+    expect(extracts()).toEqual([])
+    expect(dialogOpen()).toBe(false)
+    expect(drafts.get('s0003')).toBe('燈還亮著。')
     expect(logged('bad', 'are gone')).toBe(false)
+    expect(logged('warn', 'wording changed while it was being read')).toBe(true)
   }, 20000)
 
   it('says why when a run starts while the click is asking the server', async () => {
@@ -1924,15 +1941,46 @@ describe('what the page acts on is what it has just read', () => {
     expect(extracts()).toEqual([])
   }, 20000)
 
-  it('decides Re-extract\'s confirmation from a read made after its second save wrote the words', async () => {
-    // The second save wrote a translation, and the re-read `save()` makes of its
-    // own accord failed — the count from before the write skipped the dialog
-    // over the translation just written.
+  it('does not re-extract when a blur wrote during its re-read, whichever read lands first', async () => {
+    // The count can be older than the reviewer's own write however the reads
+    // come back — this ordering, the re-read landing before the save's own,
+    // reopened the defect the previous repair of the ordering had closed. So
+    // it asks whether anything was written, not which read is newer.
     const refresh = held()
+    const saveRead = held()
     let saved = false
     serve({
       base: untranslated,
       save: () => { saved = true; return null },
+      read: (src, n) => (src === doc.source && n === 2 ? { body: untranslated, after: refresh.until }
+        : src === doc.source && n === 3 ? { body: withWords, after: saveRead.until }
+          : src === doc.source && saved ? { body: withWords }
+            : null),
+    })
+    await opened(address(doc.source, 's0003'), '/3 translated')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Re-extract' }))
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(2) })
+    await user.type(field(), '燈還亮著。')
+    await user.click(screen.getByText('The lamp was still burning.'))
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(3) })
+    await act(async () => { refresh.release(); await settle(300) })
+    const sent = extracts()
+    const asked = dialogOpen()
+    await act(async () => { saveRead.release(); await settle(200) })
+
+    expect(sent).toEqual([])
+    expect(asked).toBe(false)
+    expect(logged('warn', 'wording changed while it was being read')).toBe(true)
+  }, 20000)
+
+  it('does not re-extract when a blur wrote during its re-read and the save\'s own re-read failed', async () => {
+    const refresh = held()
+    let saved = false
+    serve({
+      base: untranslated,
+      // As the server answers: what it stored, and the new token.
+      save: () => { saved = true; return { body: { applied: 1, unknown: [], stored: { s0003: { text: '燈還亮著。', token: 'w3' } }, conflicts: {} } } },
       read: (src, n) => (src === doc.source && n === 2 ? { body: untranslated, after: refresh.until }
         : src === doc.source && n === 3 ? unreachable()
           : src === doc.source && saved ? { body: withWords }
@@ -1943,17 +1991,20 @@ describe('what the page acts on is what it has just read', () => {
     await user.click(screen.getByRole('button', { name: 'Re-extract' }))
     await waitFor(() => { expect(readsOf(doc.source)).toBe(2) })
     await user.type(field(), '燈還亮著。')
+    await user.click(screen.getByText('The lamp was still burning.'))
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(3) })
     await act(async () => { refresh.release(); await settle(300) })
 
-    expect(saved).toBe(true)
-    expect(dialogOpen()).toBe(true)
     expect(extracts()).toEqual([])
+    expect(dialogOpen()).toBe(false)
+    // And the page took what its own save stored, so the count is right even
+    // though nothing re-read it.
+    expect(useStore.getState().doc?.segments.find(s => s.id === 's0003')).toMatchObject({ target: '燈還亮著。', origin: 'human' })
   }, 20000)
 
   it('does not decide Re-extract\'s confirmation from a re-read older than the page\'s own later read (older)', async () => {
-    // Left and came back while the re-read was in flight: the open on the way
-    // back read the chapter later than the re-read did, and the re-read landed
-    // over it carrying the count from before.
+    // Left and came back while the re-read was in flight, the way out writing
+    // the words that were typed: the count the re-read carried predates them.
     const refresh = held()
     let saved = false
     serve({
@@ -1975,31 +2026,22 @@ describe('what the page acts on is what it has just read', () => {
     await waitFor(() => { expect(useStore.getState().doc?.report.translated).toBe(1) }, { timeout: 4000 })
 
     await act(async () => { refresh.release(); await settle(300) })
-    // The older re-read did not land over the newer read, and the count the
-    // dialog is decided from is the newer one: something is translated, so it asks.
-    expect(useStore.getState().doc?.report.translated).toBe(1)
-    expect(dialogOpen()).toBe(true)
     expect(extracts()).toEqual([])
+    expect(useStore.getState().doc?.report.translated).toBe(1)
+    expect(logged('warn', 'wording changed while it was being read')).toBe(true)
   }, 20000)
 
-  it('says words typed during its own save changed, not that they could not be saved', async () => {
-    const refresh = held()
-    const saveRead = held()
-    serve({
-      base: untranslated,
-      read: (src, n) => (src === doc.source && n === 2 ? { body: untranslated, after: refresh.until }
-        : src === doc.source && n === 3 ? { body: untranslated, after: saveRead.until }
-          : null),
-    })
+  it('says words that changed during its own save changed, not that they could not be saved', async () => {
+    // `save()` answered that everything it sent was written; what is left was
+    // edited while it was in flight, which is not a refusal.
+    const first = held()
+    serve({ base: untranslated, save: n => (n === 1 ? { body: wrote, after: first.until } : null) })
     await opened(address(doc.source, 's0003'), '/3 translated')
-    const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Re-extract' }))
-    await waitFor(() => { expect(readsOf(doc.source)).toBe(2) })
-    await user.type(field(), '燈還亮著。')
-    await act(async () => { refresh.release(); await settle(100) })
-    await waitFor(() => { expect(readsOf(doc.source)).toBe(3) }, { timeout: 4000 })
-    await user.type(field(), '還亮著')
-    await act(async () => { saveRead.release(); await settle(200) })
+    act(() => { drafts.set('s0003', '燈還亮著。', '') })
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Re-extract' }))
+    await waitFor(() => { expect(callsTo('/api/save')).toHaveLength(1) })
+    act(() => { drafts.set('s0002', '另一段。', '') })
+    await act(async () => { first.release(); await settle(200) })
 
     expect(extracts()).toEqual([])
     expect(logged('bad', 'could not be saved')).toBe(false)
@@ -2029,38 +2071,20 @@ describe('what the page acts on is what it has just read', () => {
 
   // ── the fifth review: which read is the latest, and the last look ────────
 
-  it('does not strand words typed during its last read, when the dialog\'s own focus change cannot save them', async () => {
-    // The dialog's Cancel takes focus, the field blurs and saves, and that save
-    // is refused. Confirmed, the extract stranded the words; nothing looked at
-    // `drafts` after the dialog.
-    const refresh = held()
-    const last = held()
-    let saved = false
-    serve({
-      base: untranslated,
-      save: n => { saved = true; return n >= 2 ? refused : null },
-      read: (src, n) => (src === doc.source && n === 2 ? { body: untranslated, after: refresh.until }
-        : src === doc.source && n === 4 ? { body: withWords, after: last.until }
-          : src === doc.source && saved ? { body: withWords }
-            : null),
-    })
+  it('takes a last look after its dialog, and does not extract over wording that changed under it', async () => {
+    // Nothing can be typed under a modal dialog, but a save can still land or
+    // the map still change; the look after it is the one nothing is awaited
+    // behind.
+    serve()
     await opened(address(doc.source, 's0003'), '/3 translated')
-    const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Re-extract' }))
-    await waitFor(() => { expect(readsOf(doc.source)).toBe(2) })
-    await user.type(field(), '燈還亮著。')
-    await act(async () => { refresh.release(); await settle(300) })
-    await waitFor(() => { expect(readsOf(doc.source)).toBe(4) }, { timeout: 4000 })
-    await user.type(field(), '還')
-    await act(async () => { last.release(); await settle(300) })
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Re-extract' }))
     await waitFor(() => { expect(dialogOpen()).toBe(true) }, { timeout: 4000 })
-    await user.click(within(document.querySelector<HTMLDialogElement>('dialog[open]')!).getByRole('button', { name: 'Re-extract' }))
-    await settle(300)
+    act(() => { drafts.set('s0002', '另一段。', '她沒有睡。') })
+    await userEvent.setup().click(within(document.querySelector<HTMLDialogElement>('dialog[open]')!).getByRole('button', { name: 'Re-extract' }))
+    await settle(200)
 
     expect(extracts()).toEqual([])
-    expect(logged('bad', 'are gone')).toBe(false)
-    expect(drafts.get('s0003')).toBe('燈還亮著。還')
-    expect(logged('warn', 'changed while this was asking')).toBe(true)
+    expect(logged('warn', 'wording changed while this was asking')).toBe(true)
   }, 20000)
 
   it('asks before re-extracting over a translation a blur wrote while its re-read was in flight (older)', async () => {
@@ -2474,36 +2498,175 @@ describe('what the page acts on is what it has just read', () => {
     expect(useStore.getState().doc?.segments.find(s => s.id === 's0001')?.review).toBe('held')
   }, 20000)
 
-  it('reports the words it would strand before it reports a run in the way, when both are true', async () => {
+  it('reports the wording it would strand before it reports a run in the way, when both are true', async () => {
     // A refusal over a run can be retried; stranded words cannot be recovered,
     // so that is the reason given first.
-    const refresh = held()
-    const last = held()
+    serve()
+    await opened(address(doc.source, 's0003'), '/3 translated')
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Re-extract' }))
+    await waitFor(() => { expect(dialogOpen()).toBe(true) }, { timeout: 4000 })
+    act(() => {
+      drafts.set('s0002', '另一段。', '她沒有睡。')
+      useStore.setState({ running: true })
+    })
+    await userEvent.setup().click(within(document.querySelector<HTMLDialogElement>('dialog[open]')!).getByRole('button', { name: 'Re-extract' }))
+    await settle(200)
+
+    expect(extracts()).toEqual([])
+    expect(logged('warn', 'wording changed while this was asking')).toBe(true)
+    expect(logged('warn', 'a run started')).toBe(false)
+  }, 20000)
+
+  // ── the seventh review: what was written, and where a confirmed act goes ─
+  //
+  // Ported from that review's probes. The fixture's save answers as the server
+  // does, with what it stored; the page takes that at once.
+
+  it('a "Draft again" confirmed after the page moved to another document is not sent to that document (older)', async () => {
+    serve()
+    await opened(address(doc.source, 's0001'), '/3 translated')
+    act(() => { rowButton('Draft again').click() })
+    await waitFor(() => { expect(dialogOpen()).toBe(true) })
+    window.location.hash = address(second.source, 's0001')
+    await waitFor(() => { expect(useStore.getState().doc?.source).toBe(second.source) }, { timeout: 4000 })
+    await waitFor(() => { expect(useStore.getState().docLoading).toBe(false) })
+    expect(dialogOpen()).toBe(true)
+    await replaceIt()
+    await settle(300)
+    const sentTo = callsTo('/api/translate').map(c => c.body)
+    expect(sentTo).toEqual([])
+  }, 20000)
+
+  it('does not say the document on screen was being read again when the page was on its way to another one', async () => {
+    const away = held()
+    serve({ read: (src, n) => (src === second.source && n === 1 ? { body: second, after: away.until } : null) })
+    await opened(address(doc.source, 's0001'), '/3 translated')
+    act(() => { rowButton('Draft again').click() })
+    await waitFor(() => { expect(dialogOpen()).toBe(true) })
+    window.location.hash = address(second.source, 's0001')
+    await waitFor(() => { expect(readsOf(second.source)).toBe(1) })
+    await replaceIt()
+    await settle(300)
+    const said = useStore.getState().log.filter(l => l.text.includes('s0001')).map(l => l.text)
+    await act(async () => { away.release(); await settle(100) })
+    expect(said.filter(t => t.includes('being read again') && !t.includes('replaced'))).toEqual([])
+  }, 20000)
+
+  it('does not say the document on screen was being read again when the page declined to leave it', async () => {
+    serve({ save: () => refused })
+    await opened(address(doc.source, 's0001'), '/3 translated')
+    await userEvent.setup().type(field(), '！')
+    act(() => { rowButton('Draft again').click() })
+    await waitFor(() => { expect(dialogOpen()).toBe(true) })
+    window.location.hash = address(second.source, 's0001')
+    await waitFor(() => { expect(useStore.getState().docError).toContain('could not be written') }, { timeout: 4000 })
+    await replaceIt()
+    await settle(300)
+    const said = useStore.getState().log.filter(l => l.text.includes('s0001') && l.text.includes('not sent')).map(l => l.text)
+    expect(said.filter(t => t.includes('being read again') && !t.includes('replaced'))).toEqual([])
+  }, 20000)
+
+  it('asks before "Draft again" over wording its own save just wrote, when that save\'s re-read fails (older)', async () => {
     let saved = false
     serve({
       base: untranslated,
-      save: n => { saved = true; return n >= 2 ? refused : null },
-      read: (src, n) => (src === doc.source && n === 2 ? { body: untranslated, after: refresh.until }
-        : src === doc.source && n === 4 ? { body: withWords, after: last.until }
-          : src === doc.source && saved ? { body: withWords }
-            : null),
+      save: () => { saved = true; return null },
+      read: (src, n) => (src === doc.source && n === 2 ? unreachable()
+        : src === doc.source && saved ? { body: withWords }
+          : null),
+    })
+    await opened(address(doc.source, 's0003'), '/3 translated')
+    await userEvent.setup().type(field(), '燈還亮著。')
+    act(() => { rowButton('Draft again').click() })
+    await settle(400)
+    expect(saved).toBe(true)
+    expect({ sent: callsTo('/api/translate').map(c => c.body), asked: dialogOpen() })
+      .toEqual({ sent: [], asked: true })
+  }, 20000)
+
+  it('asks before "Draft again" over wording a blur wrote whose re-read is still on its way (older)', async () => {
+    const saveRead = held()
+    let saved = false
+    serve({
+      base: untranslated,
+      save: () => { saved = true; return null },
+      read: (src, n) => (src === doc.source && n === 2 ? { body: withWords, after: saveRead.until }
+        : src === doc.source && saved ? { body: withWords }
+          : null),
     })
     await opened(address(doc.source, 's0003'), '/3 translated')
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Re-extract' }))
-    await waitFor(() => { expect(readsOf(doc.source)).toBe(2) })
     await user.type(field(), '燈還亮著。')
-    await act(async () => { refresh.release(); await settle(300) })
-    await waitFor(() => { expect(readsOf(doc.source)).toBe(4) }, { timeout: 4000 })
-    await user.type(field(), '還')
-    await act(async () => { last.release(); await settle(300) })
-    await waitFor(() => { expect(dialogOpen()).toBe(true) }, { timeout: 4000 })
-    act(() => { useStore.setState({ running: true }) })
-    await user.click(within(document.querySelector<HTMLDialogElement>('dialog[open]')!).getByRole('button', { name: 'Re-extract' }))
+    await user.click(screen.getByText('The lamp was still burning.'))
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(2) })
+    expect(saved).toBe(true)
+    await user.click(rowButton('Draft again'))
     await settle(300)
+    const sent = callsTo('/api/translate').map(c => c.body)
+    const asked = dialogOpen()
+    await act(async () => { saveRead.release(); await settle(100) })
+    expect({ sent, asked }).toEqual({ sent: [], asked: true })
+  }, 20000)
 
-    expect(extracts()).toEqual([])
-    expect(logged('warn', 'changed while this was asking')).toBe(true)
-    expect(logged('warn', 'a run started')).toBe(false)
+  it('keeps the reviewer\'s next edit when the re-read after their first save failed (older)', async () => {
+    let saved = false
+    serve({
+      base: untranslated,
+      save: (_n, body) => {
+        const base = (body as { base?: Record<string, string> }).base ?? {}
+        if (saved && base['s0003'] !== 'w3') {
+          return { body: { applied: 0, unknown: [], stored: {}, conflicts: { s0003: { text: '燈還亮著。', token: 'w3' } } } }
+        }
+        saved = true
+        return { body: { applied: 1, unknown: [], stored: { s0003: { text: '燈還亮著。', token: 'w3' } }, conflicts: {} } }
+      },
+      read: (src, n) => (src === doc.source && n === 2 ? unreachable()
+        : src === doc.source && saved ? { body: withWords }
+          : null),
+    })
+    await opened(address(doc.source, 's0003'), '/3 translated')
+    const user = userEvent.setup()
+    await user.type(field(), '燈還亮著。')
+    await user.click(screen.getByText('The lamp was still burning.'))
+    await waitFor(() => { expect(callsTo('/api/save')).toHaveLength(1) })
+    await settle(200)
+    await user.type(field(), '還')
+    await user.click(screen.getByText('The lamp was still burning.'))
+    await waitFor(() => { expect(callsTo('/api/save')).toHaveLength(2) })
+    await settle(300)
+    expect({ lost: logged('bad', 'changed underneath this edit'), field: field().value })
+      .toEqual({ lost: false, field: '燈還亮著。還' })
+  }, 20000)
+
+  it('an open that a later re-read of its document overtook does not draw an error over that re-read when its own read fails (older)', async () => {
+    const holdGate = held()
+    const backRead = held()
+    const away = held()
+    let holdDone = false
+    const heldDoc: DocResponse = {
+      ...doc,
+      segments: doc.segments.map(s => (s.id === 's0001' ? { ...s, review: 'held' as const, token: 't1h' } : s)),
+    }
+    serve({
+      hold: () => ({ body: { applied: 1, unknown: [] }, after: holdGate.until.then(() => { holdDone = true }) }),
+      read: (src, n) => (src === doc.source && n === 2 ? { body: {}, after: backRead.until.then(() => { throw new TypeError('Failed to fetch') }) }
+        : src === second.source && n === 1 ? { body: second, after: away.until }
+          : src === doc.source && holdDone ? { body: heldDoc }
+            : null),
+    })
+    await opened(address(doc.source, 's0001'), '/3 translated')
+    act(() => { rowButton('Hold').click() })
+    await waitFor(() => { expect(callsTo('/api/hold')).toHaveLength(1) })
+    window.location.hash = address(second.source, 's0001')
+    await waitFor(() => { expect(readsOf(second.source)).toBe(1) })
+    window.location.hash = address(doc.source, 's0001')
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(2) })
+    await act(async () => { holdGate.release(); await settle(200) })
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(3) })
+    expect(useStore.getState().doc?.segments.find(s => s.id === 's0001')?.review).toBe('held')
+    await act(async () => { backRead.release(); await settle(200) })
+    await act(async () => { away.release(); await settle(100) })
+    expect({ docError: useStore.getState().docError, loading: useStore.getState().docLoading })
+      .toEqual({ docError: '', loading: false })
   }, 20000)
 })
