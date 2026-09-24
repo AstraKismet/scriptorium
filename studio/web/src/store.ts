@@ -120,12 +120,12 @@ interface Store {
    * words. Opening the document those words belong to is never declined.
    */
   open: (src: string, lang: string) => Promise<void>
-  /** Re-read the document on screen. True when what is on screen afterwards is
-   *  no older than this call — its own read, or a later one of the same
-   *  document that landed first; false when the read failed or the page moved. */
+  /** Re-read the document on screen. True when it read it and it is still the
+   *  one on screen; false when the read failed or the page moved meanwhile. */
   refresh: () => Promise<boolean>
-  /** True when the ledger is showing the document `at` names, and no read is on
-   *  its way to replace it. */
+  /** True when the ledger is showing the document `at` names and no `open()` is
+   *  reading a document to replace it. A `refresh()` in flight does not count —
+   *  ordering the page's reads is HANDOFF-096's. */
   settled: () => boolean
   /** The address of what is on screen — read from `doc`, never from `at`, so
    *  the two cannot disagree about which document an act is addressed to. */
@@ -211,35 +211,14 @@ let modelSeq = 0
 let openSeq = 0
 
 /**
- * The order reads of a document were asked in — `open()`'s fetch and every
- * `refresh()` take the next number — and, per document, the number of the
- * latest one that reached the screen.
- *
- * Reads race, and the one asked later saw the later state. **A read reaches the
- * screen unless a read of the same document asked after it already has.** A
- * refresh asked before a save and answered after the save's own re-read put the
- * older count back — the toolbar then skipped its confirmation over the words
- * the save had just written, and a field showed its wording vanish (fifth
- * review; older than this package). The rule is about reads that *landed*, not
- * reads that were asked: dropping a read because a later one had merely been
- * sent threw away the save's good re-read whenever that later one failed or was
- * still on its way, and "Draft again" then built its run from the snapshot
- * before the save (sixth review, against the fifth round's repair). And it is
- * per document: a refresh of the document being left, asked while an open of
- * the next one is reading, is no reason to drop that open.
- */
-let readSeq = 0
-const landed = new Map<string, number>()
-const keyOf = (a: DocAddress): string => JSON.stringify([a.src, a.lang])
-
-/**
  * Moves when a save sends wording and again when its reply lands. An act whose
  * confirmation depends on what the document holds — the toolbar's Re-extract —
  * records it before it reads the count and refuses if it moved: the count can
- * be older than the reviewer's own write however the reads were ordered, and
- * seven review rounds spent on ordering the reads kept finding the order that
- * was not covered. Whether anything was written is asked directly instead
- * (seventh review).
+ * be older than the reviewer's own write however the reads came back, so
+ * whether anything was written is asked directly rather than inferred from the
+ * order of the reads. Ordering the page's reads was tried four ways in
+ * HANDOFF-088's reviews and each left an ordering uncovered; that problem is
+ * HANDOFF-096's, and this does not depend on it.
  */
 let writes = 0
 
@@ -654,11 +633,11 @@ export const useStore = create<Store>()((set, get) => ({
     if (models.error) get().say('  models: ' + models.error, 'warn')
   },
 
-  // Not while a read is on its way to replace what is on screen: an act taken
-  // then reads a snapshot the page is about to discard. "Draft again" after a
-  // save, with Back and Forward pressed during it, sent a run built from the
-  // origin before the save — no question about a person's wording, the model
-  // billed, the write refused (found by the fifth review).
+  // Not while an `open()` is on its way to replace what is on screen: an act
+  // taken then reads a snapshot the page is about to discard. "Draft again"
+  // after a save, with Back and Forward pressed during it, sent a run built from
+  // the origin before the save — no question about a person's wording, the
+  // model billed, the write refused (found by HANDOFF-088's fifth review).
   settled: () => same(get().at, get().shown()) && !get().docLoading,
 
   shown: () => {
@@ -737,7 +716,6 @@ export const useStore = create<Store>()((set, get) => ({
     }
 
     set({ docLoading: true })
-    const asked = ++readSeq
     try {
       const doc = await api.getDoc(want)
       // Someone may have opened another document — or this one again — while
@@ -762,24 +740,9 @@ export const useStore = create<Store>()((set, get) => ({
           )
         }
       }
-      // A read of this document asked after this one has already reached the
-      // screen — the re-read a hold or a save made while this was in flight.
-      // What is on screen is newer, and this open's work is done without
-      // replacing it (sixth review; older than this package).
-      const k = keyOf(want)
-      const newer = (landed.get(k) ?? 0) > asked && same(get().shown(), want)
-      if (!newer) landed.set(k, asked)
-      set(newer ? { docLoading: false } : { doc, docLoading: false })
+      set({ doc, docLoading: false })
     } catch (e) {
       if (!current()) return
-      // A read of this document asked after this one has already reached the
-      // screen, so the page has the document and this failure costs nothing —
-      // drawn, it put an error over a current document that a click on the
-      // same entry could not clear (seventh review; older than this package).
-      if ((landed.get(keyOf(want)) ?? 0) > asked && same(get().shown(), want)) {
-        set({ docLoading: false })
-        return
-      }
       // A refusal the server *answered* — never a request that did not arrive.
       // A file this page has never read may have state after all, and a
       // transport failure says nothing either way; offering an extract over it
@@ -798,8 +761,6 @@ export const useStore = create<Store>()((set, get) => ({
   refresh: async () => {
     const where = get().shown()
     if (!where) return false
-    const asked = ++readSeq
-    const k = keyOf(where)
     try {
       const doc = await api.getDoc(where)
       // **Only while the ledger is still showing the document this refresh was
@@ -815,13 +776,13 @@ export const useStore = create<Store>()((set, get) => ({
       // review of HANDOFF-088; older than it). A document the page is on its
       // way to is `open()`'s to read.
       //
+      //
+      // What it does not do is order itself against the page's other reads — a
+      // refresh asked before a save and answered after the save's own re-read
+      // still puts the older state back. Four ways of ordering them were built
+      // and reviewed in HANDOFF-088, and each left an ordering uncovered; that is
+      // HANDOFF-096's to design, and its cases are `it.fails` in the suite.
       if (!same(get().shown(), where)) return false
-      // **And not over a read of it asked later that has already landed** — see
-      // `readSeq`. That read saw a later state, so what is on screen is newer
-      // than this, and it is the answer this call was asked for: the caller
-      // wanted a count no older than the moment it asked, and has one.
-      if ((landed.get(k) ?? 0) > asked) return true
-      landed.set(k, asked)
       set({ doc })
       return true
     } catch (e) {
@@ -887,35 +848,6 @@ export const useStore = create<Store>()((set, get) => ({
       writes += 1
       // Only what was sent. A held-back blank stays dirty and stays on screen.
       drafts.forget(ids)
-      // **The reply says what is now stored, and the page takes it at once**:
-      // `stored` carries each written id's text and new token, and this
-      // endpoint writes `origin` "human" by contract (`docs/contracts/
-      // workbench-http.md`, `POST /api/save`). Left to the re-read below, the
-      // page showed the snapshot from before its own write for as long as that
-      // re-read was on its way — for good if it failed — so "Draft again"
-      // skipped its question over the words just written and the next edit
-      // carried a token the server had already retired (seventh review; older
-      // than this package). It counts as a read that landed now, so a re-read
-      // asked before the save cannot put the older state back.
-      const written = Object.entries(r.stored)
-      if (written.length && same(get().shown(), where)) {
-        const now = get().doc
-        if (now) {
-          const stored = new Map(written)
-          landed.set(keyOf(where), ++readSeq)
-          set({
-            doc: {
-              ...now,
-              segments: now.segments.map(seg => {
-                const got = stored.get(seg.id)
-                return got
-                  ? { ...seg, target: got.text, token: got.token, origin: 'human', status: 'translated' as const }
-                  : seg
-              }),
-            },
-          })
-        }
-      }
       const lost = Object.keys(r.conflicts)
       if (lost.length) {
         get().say(

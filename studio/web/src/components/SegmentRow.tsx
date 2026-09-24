@@ -130,9 +130,10 @@ export const SegmentRow = memo(function SegmentRow({ seg }: { seg: Segment }) {
     await save()
     // The origin below decides whether to ask about replacing a person's
     // wording, so it must come from a document the page is not about to
-    // replace. A save's own re-read is discarded when a newer read has been
-    // asked — Back and Forward during the save — and the snapshot left behind
-    // predates the save that made this segment a person's.
+    // replace: Back and Forward during the save put an open on its way, and the
+    // snapshot left behind predates the save that made this segment a person's.
+    // That the snapshot can predate the save without any move, while the save's
+    // own re-read is still on its way, is HANDOFF-096's (an `it.fails` there).
     if (!useStore.getState().settled()) {
       useStore.getState().say(
         `  ${seg.id} was not sent: the document on screen was being replaced or read again ` +

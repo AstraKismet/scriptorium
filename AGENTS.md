@@ -843,14 +843,35 @@ own.
   putting one back rewrites the reviewer's history. Opening the document the
   words belong to is never declined, and a blank is not wording. The map is
   emptied when `doc` is replaced, not before; the only other thing that voids
-  it is a re-parse, which the act that asks for one declares with
-  `drafts.strand()` the moment the server accepts it — and `save()` reads that
-  mark, because every write goes through `save()` and a blur during the
-  re-extract's own reload is a write. Stranded words never keep a reviewer on a
-  document. A new caller of `open()`, or anything else that replaces `doc`,
-  answers to this rule. Before 2026-09-20 a
+  it is a re-parse of the document on screen, which the act that asks for one
+  declares with `drafts.strand()` the moment the server accepts it — and
+  `save()` reads that mark, because every write goes through `save()` and a blur
+  during the re-extract's own reload is a write. Stranded words never keep a
+  reviewer on a document. A new caller of `open()`, or anything else that
+  replaces `doc`, answers to this rule. Before 2026-09-20 a
   Back press threw the words away with no request at all. `docs/decisions.md`,
   2026-09-20.
+
+- **A document is opened by the address, and an act rests on what the page has
+  just read.** `App.tsx`'s effect turns the address into `at`. `open()` is
+  `at`'s only writer and tells its own calls apart by a generation number, not
+  by the document `at` names, because one document can be asked for twice while
+  the first call is in flight; its other callers, `store.reExtract` and
+  `store.extractUntracked`, call it only for the document `at` already names.
+  Every rail entry is a link: the page for a file with no state offers the
+  extract only when the server refused to read it and the project lists it, and
+  the click asks the server's list again before sending anything.
+  `extract(where)` and `startOver(where, register)` take the address rather than
+  reading the screen; `refresh()` answers only for the document on screen;
+  nothing acts while an open is reading (`settled()`), and a row's "Draft again"
+  names its document before its first await. The toolbar's Re-extract decides
+  its confirmation from a re-read of the document its dialog names, and refuses
+  when that read failed, the page moved, or anything was written while it read
+  (`writeEpoch()`). **What the page does not yet do is order its reads of one
+  document**, so an older read can land over a newer one: that is `HANDOFF-096`,
+  its cases are `it.fails` in `App.test.tsx`, and four client-side orderings
+  already lost. Before 2026-09-24 the untracked entry called `open()` beside the
+  address and re-extracted whatever was open. `docs/decisions.md`, 2026-09-24.
 
 - **The frontend reads `contract_version` at startup and refuses a number it does
   not know.** That refusal is the entire reason the field exists. `contract.ts`
