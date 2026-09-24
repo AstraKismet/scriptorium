@@ -17,10 +17,10 @@ import { Rail } from './components/Rail'
 import { Reading } from './components/Reading'
 import { RoutingScreen } from './components/RoutingScreen'
 import { Toolbar } from './components/Toolbar'
-import { CONTRACT_VERSION } from './contract'
+import { CONTRACT_VERSION, type DocAddress } from './contract'
 import * as drafts from './drafts'
 import * as routes from './router'
-import { useStore } from './store'
+import { notExtracted, useStore } from './store'
 
 export function App() {
   const boot = useStore(s => s.boot)
@@ -137,19 +137,34 @@ function Main() {
   const doc = useStore(s => s.doc)
   const docLoading = useStore(s => s.docLoading)
   const docError = useStore(s => s.docError)
+  const readFailed = useStore(s => s.readFailed)
+  const state = useStore(s => s.state)
   const open = useStore(s => s.open)
 
   const addressed = route.name === 'doc' || route.name === 'read' ? route : null
 
   // The address is what decides which document is open, so the back button, a
-  // deep link and a click in the rail are one path rather than three.
+  // deep link and every entry in the rail are one path rather than several.
   //
-  // It is not the only caller of `open`, and a comment here used to say it was:
-  // `Rail`'s *Not yet extracted* button calls it without moving the address,
-  // which is `HANDOFF-088`, and `store.reExtract` calls it to re-read the
-  // document it has just had re-parsed. Both are why `open()` writes unsaved
-  // words out itself rather than leaving that to this effect — a flush here
-  // would leave the rail's button losing them exactly as before.
+  // This effect turns the address into `at`, and nothing else writes `at`:
+  // `open()` is its only writer, and its two other callers call it only for the
+  // document `at` already names. `store.reExtract` does once a re-parse has
+  // landed — a re-read after the toolbar's Re-extract, and the first successful
+  // read on the page for a file nobody had extracted, where `at` named the file
+  // while `doc` stayed on the document before it — and
+  // `store.extractUntracked` does when that file turns out to have been
+  // extracted elsewhere meanwhile. `at` outlives a document route — on
+  // `#/backends` this returns early and `at` keeps the last document — which is
+  // why the sentence is about `at` rather than the address, and why coming back
+  // reads nothing.
+  //
+  // It was false twice before it was this: a comment here said nothing else
+  // called `open` while `Rail`'s *Not yet extracted* entry did, beside the
+  // address, and lost its document to this effect a render later. Since
+  // HANDOFF-088 that entry is a link like every other. `open()` still writes
+  // unsaved words out itself rather than leaving it to this effect, because
+  // leaving a document is what costs them and not who asked — the rule holds
+  // for a caller nobody has written yet.
   useEffect(() => {
     if (!addressed) return
     if (at && at.src === addressed.src && at.lang === addressed.lang) return
@@ -189,6 +204,20 @@ function Main() {
         <div className="empty-page">
           <h3>{addressed.src}</h3>
           <p>{docError}</p>
+          {/*
+            Two facts, and both are needed. The server refused to read this one
+            file — not a request that failed to arrive, and not this page
+            declining to leave another document over words it could not write,
+            which is `readFailed` false — and the project lists the file as not
+            yet extracted, which is a snapshot a terminal can have made stale. A
+            stale entry for a file somebody has since extracted usually never
+            gets here, because its read succeeds and the document opens; where
+            the read is older than that — a trip to the backend screens and back
+            reads nothing — the click reads again before it extracts.
+          */}
+          {readFailed && notExtracted(state, addressed) && (
+            <NotExtracted src={addressed.src} lang={addressed.lang} />
+          )}
         </div>
         <LogDrawer />
       </main>
@@ -222,5 +251,52 @@ function Main() {
       </div>
       <LogDrawer />
     </main>
+  )
+}
+
+/**
+ * The extract, offered on the page of the file it is about.
+ *
+ * The rail's *Not yet extracted* entry leads here and does nothing else, and so
+ * does a hand-typed link to such a file — one page, whichever way a reviewer
+ * arrived. The request names the file this page is about and nothing on the
+ * screen, and `reExtract` then opens it, because `at` names it.
+ *
+ * **No confirmation, and that is decided rather than inherited.** The toolbar's
+ * asks only when a re-parse could discard a translation. This is drawn only
+ * after the server has refused to read this very file while the project lists
+ * it as never extracted, and the click asks the server again before it sends
+ * anything — so there is no translation, hold or waiver to discard, and the
+ * document on screen before this one is not touched. What is left is the
+ * interval between that second read and the extract, one round trip wide; a
+ * terminal filling it makes the click a plain re-extract, which keeps every
+ * translation whose paragraph is unchanged — the act `lx run` performs on
+ * every invocation.
+ */
+function NotExtracted({ src, lang }: DocAddress) {
+  const running = useStore(s => s.running)
+  const extractUntracked = useStore(s => s.extractUntracked)
+  return (
+    <>
+      <p>
+        This file matches the project&rsquo;s <code>sources</code> and has not been extracted into{' '}
+        {lang}. Extracting reads it and parses it into segments; wording already banked in the
+        translation memory is offered to them, and nothing that is tracked is touched.
+      </p>
+      <p>
+        <button
+          type="button"
+          className="key"
+          disabled={running}
+          title={running ? 'Waits for the run in flight: one act at a time.' : undefined}
+          // It reads the file again before it extracts anything; see
+          // `extractUntracked`. The header and the one-at-a-time test are there
+          // too, after that read, so two clicks in one frame log one.
+          onClick={() => { void extractUntracked({ src, lang }) }}
+        >
+          Extract {src}
+        </button>
+      </p>
+    </>
   )
 }

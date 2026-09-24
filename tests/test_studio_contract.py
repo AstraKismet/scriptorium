@@ -196,7 +196,7 @@ def test_only_one_place_in_the_frontend_names_reset_or_tone_on_a_request():
         f"reset that destroys a document's translations — so every request that "
         f"carries them is written in one function, store.ts's `reExtract`, and a "
         f"second call site is a second chance to send a string. If a new control "
-        f"needs to start a document over, call `startOver(tone)`."
+        f"needs to start a document over, call `startOver(where, register)`."
     )
 
 

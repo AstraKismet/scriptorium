@@ -48,10 +48,21 @@ const SETTLE = 700
 /**
  * What the style margin already answered, for this document.
  *
- * The answer depends on the segment's own text and on a style sheet that does
- * not move while a page is open, so a second look at a paragraph is free.
- * Cleared when the document changes, because ids are reassigned from `s0001` on
- * every parse and a cached answer keyed on one would then be about other text.
+ * The answer depends on the segment's own text, on the register the document is
+ * frozen in — the standing brief is chosen by it — and on `config/style.txt`,
+ * which the server reads on every request and this cache **assumes** does not
+ * change while the page is open: an edit to it shows here after a reload, or
+ * on a paragraph not yet looked at. Within that, a second look at a paragraph
+ * is free.
+ *
+ * **Keyed on the text as well as the id, and scoped by the register as well as
+ * the document**, because a re-extract changes neither `src` nor `lang` and
+ * ids are reassigned from `s0001` on every parse. Scoped by those two alone and
+ * keyed by id, the margin went on answering about the paragraph that used to
+ * carry the id after a re-extract put another one under it, and about the old
+ * register after a start-over (HANDOFF-088). The page has no identity for a
+ * parse to scope by — the wire carries none — so the key is what the answer is
+ * a function of, and a paragraph a re-parse left where it was is still free.
  */
 let styleCache = new Map<string, StyleResponse>()
 let cachedFor = ''
@@ -73,22 +84,44 @@ export function Margin() {
 
   const src = doc?.source ?? ''
   const lang = doc?.lang ?? ''
+  const register = doc?.tone ?? ''
   const seg = doc?.segments.find(s => s.id === focused) ?? null
+  // The paragraph the id names *in this parse*, because the id alone survives a
+  // re-parse that moved it. The cache key below is one half; the effects listing
+  // it as a dependency are the other, and they are what answers a re-parse made
+  // outside the page — `lx extract` in a terminal — which the page picks up
+  // through a `refresh()` with no loading screen, so the margin is never
+  // remounted. The register is a dependency of both effects for the same reason:
+  // the style reply's brief is chosen by it, and so are the suggestions the
+  // memory offers. (Two mutation lanes once measured the text dependency
+  // equivalent; they only tried the page's own re-parse, which does remount.)
+  const text = seg?.source ?? ''
   // Where a near match earns its cost without being asked for.
   const wanted = !!seg && (!seg.target || seg.issues.some(isError))
 
   useEffect(() => {
     if (!src || !focused) { setMargin(EMPTY); return }
-    const scope = `${src}|${lang}`
+    // JSON rather than a separator: a path may contain any character one would
+    // pick, and so may a paragraph.
+    const scope = JSON.stringify([src, lang, register])
     if (cachedFor !== scope) { styleCache = new Map(); cachedFor = scope }
-    const cached = styleCache.get(focused)
+    const key = JSON.stringify([focused, text])
+    // The map this answer belongs to, held rather than looked up when the reply
+    // lands. A reply outlives the effect that asked for it — `live` hides it
+    // from the screen, not from the cache — and by then the scope may have
+    // moved: a start-over asked in one register is answered after the page has
+    // emptied the map for the next, and written into *that* one it was served
+    // as the new register's brief on the next look at the paragraph (found by
+    // the review of HANDOFF-088, and older than it).
+    const cache = styleCache
+    const cached = cache.get(key)
     if (cached) { setMargin({ ...EMPTY, style: cached }); return }
     let live = true
     setMargin(EMPTY)
     const timer = setTimeout(() => {
       void api.postStyle({ src, lang, ids: [focused] })
         .then(style => {
-          styleCache.set(focused, style)
+          cache.set(key, style)
           if (live) setMargin(m => ({ ...m, style }))
         })
         .catch((e: unknown) => { if (live) setMargin(m => ({ ...m, error: String(e) })) })
@@ -98,7 +131,7 @@ export function Margin() {
     // segment nobody is looking at, and the last reply to *arrive* would
     // otherwise win.
     return () => { live = false; clearTimeout(timer) }
-  }, [src, lang, focused])
+  }, [src, lang, register, focused, text])
 
   useEffect(() => {
     if (!src || !focused) return
@@ -111,12 +144,13 @@ export function Margin() {
         .catch((e: unknown) => { if (live) setMargin(m => ({ ...m, loading: false, error: String(e) })) })
     }, SETTLE)
     return () => { live = false; clearTimeout(timer) }
-  }, [src, lang, focused, wanted, asked])
+  }, [src, lang, register, focused, text, wanted, asked])
 
-  // A press belongs to the segment it was made on. Without this the counter
-  // would keep a later segment's panel open because an earlier one was asked
-  // about, which is the same stale-reply shape one layer up.
-  useEffect(() => { setAsked(0) }, [focused])
+  // A press belongs to the segment it was made on — the paragraph, not the id,
+  // which a re-parse hands to another one. Without this the counter would keep
+  // a later segment's panel open because an earlier one was asked about, which
+  // is the same stale-reply shape one layer up.
+  useEffect(() => { setAsked(0) }, [focused, text])
 
   if (!doc) return null
 

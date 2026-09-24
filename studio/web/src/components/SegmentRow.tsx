@@ -121,7 +121,27 @@ export const SegmentRow = memo(function SegmentRow({ seg }: { seg: Segment }) {
    */
   const again = async (mode: 'draft' | 'polish') => {
     if (running) return
+    // The document this row is on, named now: every await below — the save, a
+    // dialog — lets the page move, and `runJob` sends to whatever is on screen.
+    // Confirmed after a move, "Draft again" sent this row's id to the other
+    // document with `overwrite_human` set (seventh review; older than this
+    // package).
+    const named = useStore.getState().shown()
     await save()
+    // The origin below decides whether to ask about replacing a person's
+    // wording, so it must come from a document the page is not about to
+    // replace: Back and Forward during the save put an open on its way, and the
+    // snapshot left behind predates the save that made this segment a person's.
+    // That the snapshot can predate the save without any move, while the save's
+    // own re-read is still on its way, is HANDOFF-096's (an `it.fails` there).
+    if (!useStore.getState().settled()) {
+      useStore.getState().say(
+        `  ${seg.id} was not sent: the document on screen was being replaced or read again ` +
+        `while its wording was being written — press it again once it is back`,
+        'warn',
+      )
+      return
+    }
     const now = useStore.getState().doc?.segments.find(s => s.id === seg.id)
     if (!now || useStore.getState().running) return
     // **A hold does not stop this control, and that is the one place the two
@@ -171,6 +191,14 @@ export const SegmentRow = memo(function SegmentRow({ seg }: { seg: Segment }) {
     // A hold means "no queue may take this"; naming the id is the reviewer
     // overriding that deliberately, and the hold itself survives — the write
     // touches `target`, `status` and `origin` and never `review`.
+    const here = useStore.getState().shown()
+    if (!named || !here || here.src !== named.src || here.lang !== named.lang) {
+      useStore.getState().say(
+        `  ${seg.id} was not sent: the page moved to another document while this was asking`,
+        'warn',
+      )
+      return
+    }
     await runJob(mode, [seg.id], over, now.review === 'held' ? 'held, and named anyway' : '')
   }
 

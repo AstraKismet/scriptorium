@@ -8,6 +8,11 @@
  * reasonable thing to want, and the run is already addressed to a snapshot taken
  * at dispatch, so it finishes against the document it started on and says which
  * one when that is no longer the one on screen.
+ *
+ * **Every entry is a link, and does nothing but move the address** — the *Not
+ * yet extracted* ones included, since HANDOFF-088. The page a link lands on is
+ * where acts live; for a file nobody has extracted, that page offers the
+ * extract.
  */
 import { useMemo } from 'react'
 
@@ -30,9 +35,6 @@ export function Rail() {
   const state = useStore(s => s.state)
   const at = useStore(s => s.at)
   const doc = useStore(s => s.doc)
-  const say = useStore(s => s.say)
-  const extract = useStore(s => s.extract)
-  const open = useStore(s => s.open)
 
   const docs = useMemo(
     () => [...(state?.docs ?? [])].sort((a, b) =>
@@ -97,21 +99,28 @@ export function Rail() {
             key={c.source + ' ' + c.lang}
             type="button"
             className="doc"
-            onClick={async () => {
-              say(`— extract ${c.source} [${c.lang}] —`, 'plain', true)
-              // `open` first so the extract is addressed to a document this
-              // page is holding, and so a failure leaves the person looking at
-              // the thing they clicked rather than at nothing. A first extract
-              // produces none of `kept` / `replaced` / `ambiguous`, so the noise
-              // those lines would make is not owed here — but they are reported
-              // by the same action either way, because a rule with two spellings
-              // is a rule that comes apart.
-              await open(c.source, c.lang)
-              await extract()
-            }}
+            aria-current={current(c.source, c.lang)}
+            // **A link, like every entry above it.** This entry used to be the
+            // extract itself: it called `open()` beside the address and then
+            // extracted whatever was on screen, and `App.tsx`'s effect put the
+            // addressed document back a render later — so the one request it sent
+            // re-parsed the document that was open while the log named the file
+            // that was clicked (HANDOFF-088).
+            //
+            // *Lost:* extracting here and then navigating, which kept the act to
+            // one click. Every defect the review of it found came from the page
+            // moving itself after a delay the reviewer did not choose: text typed
+            // while that navigation wrote the open document out was dropped with
+            // no line, a reviewer who had left and come back by Back was pulled
+            // away, and a list read at startup offered a file a terminal had since
+            // extracted and translated, so the click was a re-extract nobody
+            // confirmed. A link moves the address when the reviewer asks and at no
+            // other time, and the page it lands on reads the file before anything
+            // is offered — so a stale entry opens the document instead.
+            onClick={() => { routes.go(routes.doc(c.source, c.lang, routes.placeIn(c.source, c.lang))) }}
           >
             <b>{c.source}</b>
-            <small>{c.lang} · extract</small>
+            <small>{c.lang} · not extracted</small>
           </button>
         ))}
       </div>

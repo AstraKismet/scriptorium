@@ -16,11 +16,30 @@ import { useState, useSyncExternalStore } from 'react'
 
 import { ask } from './Confirm'
 import { ModelPicker } from './ModelPicker'
+import type { DocAddress } from '../contract'
 import * as drafts from '../drafts'
 import * as routes from '../router'
-import { useStore, type Filter } from '../store'
+import { useStore, writeEpoch, type Filter } from '../store'
 
 const BOUNDS = [0, 10, 25, 50, 100]
+
+/**
+ * Whether an extract this control is about to send would be refused because a
+ * run started while it was saving, reading or asking — and if so, say so.
+ *
+ * `reExtract` declines while anything runs, and the run buttons beside this one
+ * stay enabled through those round trips. Checked immediately before the
+ * header, in the same tick as the call, so the header is never logged over a
+ * request that is then not sent.
+ */
+function refusedWhileRunning(src: string): boolean {
+  if (!useStore.getState().running) return false
+  useStore.getState().say(
+    `  ${src} was not re-extracted: a run started while this was asking — try again when it finishes`,
+    'warn',
+  )
+  return true
+}
 
 export function Toolbar() {
   const doc = useStore(s => s.doc)
@@ -54,33 +73,91 @@ export function Toolbar() {
     // Before the dialog, not after: an edit still in the ledger is written
     // against the ids *this* parse produced, and the next parse reassigns them
     // from `s0001`.
-    await save()
+    //
     // **What `save()` could not write, this must not discard.** A refusal keeps
     // the entry in `drafts`, and re-extracting then clears it — and those edits
     // can never be applied afterwards, because the ids they are keyed on will
-    // name different text. So the act stops here instead, with the reviewer
-    // holding the only copy.
-    if (drafts.size()) {
+    // name different text. So the act stops instead, with the reviewer holding
+    // the only copy.
+    const written = async (): Promise<boolean> => {
+      const saved = await save()
+      if (!drafts.size()) return true
+      // Two different reasons, and only one of them is a refusal: `save()`
+      // answers true when everything it sent was written, so what is left then
+      // was typed while it was in flight.
       say(
-        `  ${drafts.ids().slice(0, 20).join(', ')} could not be saved, and a re-extract ` +
-        `renumbers segments — copy that wording somewhere before trying again`,
-        'bad',
+        saved
+          ? `  ${drafts.ids().slice(0, 20).join(', ')} changed while this was saving and are not ` +
+            `written yet — ${doc.source} was not re-extracted; press Re-extract again`
+          : `  ${drafts.ids().slice(0, 20).join(', ')} could not be saved, and a re-extract ` +
+            `renumbers segments — copy that wording somewhere before trying again`,
+        saved ? 'warn' : 'bad',
       )
-      return
+      return false
     }
+    if (!await written()) return
+    const before = writeEpoch()
     // **Re-read before deciding what to warn about.** `report.translated` is a
     // client snapshot, and `save()` refreshes it only when it had something to
     // send — so a book translated by `lx run` in a terminal while this page sat
     // open still reported 0 here, and the confirmation this act needs would have
     // been skipped. One extra read on a deliberate, rare, destructive press.
-    await refresh()
-    const now = useStore.getState().doc
+    const read = await refresh()
+    // **The count must be this document's, and read now.** `refresh()` re-reads
+    // whatever is on screen, and the rail stays live through the two round trips
+    // above — so a reviewer who moved to another document meanwhile had *its*
+    // count read here, and an untranslated one skipped the dialog for a document
+    // holding a whole book (found by the review of HANDOFF-088; before that
+    // change the extract went to the other document instead, which was the same
+    // defect pointing the other way). `at` is asked as well as the screen: a
+    // move to a file nobody has extracted leaves `doc` where it was, and the
+    // dialog would then open over that file's page.
+    const named = { src: doc.source, lang: doc.lang }
+    const stillHere = () => {
+      const { doc: now, at } = useStore.getState()
+      if (now && now.source === named.src && now.lang === named.lang &&
+          at && at.src === named.src && at.lang === named.lang) return now
+      say(
+        `  ${doc.source} was not re-extracted: the page moved to another document ` +
+        `before it could read what this one holds`,
+        'warn',
+      )
+      return null
+    }
+    let now = stillHere()
+    if (!now) return
+    // And a re-read that failed leaves the snapshot this exists to distrust —
+    // one saying nothing is translated would skip the dialog for a book `lx run`
+    // translated in a terminal. Older than HANDOFF-088, found by its review.
+    if (!read) {
+      say(
+        `  ${doc.source} was not re-extracted: what it holds could not be read again, or ` +
+        `changed while it was being read — press Re-extract again`,
+        'warn',
+      )
+      return
+    }
+    // **Nothing may have been written since the count was asked for.** The
+    // ledger stays editable through that read: words typed during it, or
+    // written by a blur during it, are not in the count however the reads
+    // came back, and on a document with nothing translated no dialog stood in
+    // the way (older than HANDOFF-088; its reviews found it three times, each
+    // time in an ordering of the reads the last repair had not covered). The
+    // reviewer keeps the words and presses again.
+    if (writeEpoch() !== before || drafts.size()) {
+      say(
+        `  ${doc.source} was not re-extracted: wording changed while it was being read — ` +
+        `press Re-extract again`,
+        'warn',
+      )
+      return
+    }
     // **Asked only when there is something to lose.** On a document with nothing
     // translated a re-extract cannot discard a translation, and it cannot drop a
     // hold either — holding requires a non-empty target. A dialog there would be
     // ceremony over an act with no cost, and one that fires every time teaches
     // people to click through the one that matters.
-    const ok = !now?.report.translated || await ask(
+    const ok = !now.report.translated || await ask(
       `Re-extract ${doc.source}?`,
       [
         'The source file is read again and the document re-parsed.',
@@ -107,8 +184,23 @@ export function Toolbar() {
       'Re-extract',
     )
     if (!ok) return
+    // **The last look, and nothing is awaited after it.** Every round trip above
+    // left the ledger editable, and the dialog's own focus moving out of a field
+    // saves it — a save that can be refused. Words still here now are words the
+    // extract would strand (found by the fifth review).
+    if (drafts.size() || writeEpoch() !== before) {
+      say(
+        `  ${doc.source} was not re-extracted: wording changed while this was asking — ` +
+        `press Re-extract again`,
+        'warn',
+      )
+      return
+    }
+    if (refusedWhileRunning(doc.source)) return
     say(`— re-extract ${doc.source} [${doc.lang}] —`, 'plain', true)
-    await extract()
+    // The document the dialog named, and not whatever is on screen when the
+    // reviewer answers it: Back still works under an open dialog.
+    await extract({ src: doc.source, lang: doc.lang })
   }
 
   return (
@@ -239,7 +331,7 @@ export function Toolbar() {
  */
 function StartOver({ onClose, onChoose }: {
   onClose: () => void
-  onChoose: (register: string) => Promise<void>
+  onChoose: (where: DocAddress, register: string) => Promise<boolean>
 }) {
   const doc = useStore(s => s.doc)
   const say = useStore(s => s.say)
@@ -271,8 +363,11 @@ function StartOver({ onClose, onChoose }: {
     )
     if (!ok) return
     onClose()
+    if (refusedWhileRunning(doc.source)) return
     say(`— start over · ${doc.source} [${doc.lang}] · register ${chosen} —`, 'plain', true)
-    await onChoose(chosen)
+    // Addressed to the document the dialog above named, for the reason the
+    // toolbar's Re-extract gives.
+    await onChoose({ src: doc.source, lang: doc.lang }, chosen)
   }
 
   return (

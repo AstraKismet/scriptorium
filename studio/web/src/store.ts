@@ -63,6 +63,14 @@ interface Store {
   doc: DocResponse | null
   docLoading: boolean
   docError: string
+  /**
+   * Whether `docError` is the server's own refusal to read `at` — not this page
+   * declining to leave a document whose words it could not write, and not a
+   * request that never reached the server. They draw on one screen and mean
+   * different things: only an answered refusal can be a file nobody has
+   * extracted yet, and only that screen offers the extract.
+   */
+  readFailed: boolean
 
   /** One run at a time, and every entry point reads it. */
   running: boolean
@@ -94,7 +102,8 @@ interface Store {
   chooseProvider: (name: string) => void
 
   bootstrap: () => Promise<void>
-  reloadState: () => Promise<void>
+  /** True when the projection was read; a failure is logged and leaves it. */
+  reloadState: () => Promise<boolean>
   /** Take the two projections a `POST /api/config` reply carries back.
    *
    *  A settings screen repaints from its own write's answer and **never** calls
@@ -111,8 +120,12 @@ interface Store {
    * words. Opening the document those words belong to is never declined.
    */
   open: (src: string, lang: string) => Promise<void>
-  refresh: () => Promise<void>
-  /** True when the ledger is showing the document `at` names. */
+  /** Re-read the document on screen. True when it read it and it is still the
+   *  one on screen; false when the read failed or the page moved meanwhile. */
+  refresh: () => Promise<boolean>
+  /** True when the ledger is showing the document `at` names and no `open()` is
+   *  reading a document to replace it. A `refresh()` in flight does not count —
+   *  ordering the page's reads is HANDOFF-096's. */
   settled: () => boolean
   /** The address of what is on screen — read from `doc`, never from `at`, so
    *  the two cannot disagree about which document an act is addressed to. */
@@ -127,8 +140,39 @@ interface Store {
   setHold: (ids: string[], held: boolean) => Promise<void>
   setWaive: (ids: string[], waived: boolean) => Promise<void>
   check: () => Promise<void>
-  /** Re-read the source and re-parse, keeping the frozen register. */
-  extract: () => Promise<void>
+  /**
+   * Read a source and parse it, keeping the frozen register if it has one.
+   *
+   * **The document is named by the caller**, never read off the screen: the
+   * toolbar names the one its confirmation named, and the page for a file
+   * nobody has extracted names that file — which is not on screen at all, and
+   * cannot be until this has made it exist. It used to read `shown()`, and the
+   * rail's *Not yet extracted* entry re-extracted whatever document was open
+   * (HANDOFF-088). True when the server accepted it.
+   */
+  extract: (where: DocAddress) => Promise<boolean>
+  /**
+   * The extract the page for a file nobody has extracted offers — after asking
+   * the server again whether that is still true.
+   *
+   * The offer rests on a read, and a read can be as old as the page: `at`
+   * outlives a trip to `#/backends`, so coming back reads nothing, and a click
+   * on the rail entry for the page already shown is the same address and reads
+   * nothing either. A terminal can extract and translate the file in that time,
+   * and the click would then be an unconfirmed re-extract of a translated
+   * document. So the click asks first — the toolbar's Re-extract re-reads
+   * before deciding its confirmation for the same reason.
+   *
+   * **What it asks is the server's own list, not the document.** A failed read
+   * of the document cannot answer: `web/server.py` turns every exception on a
+   * read into a 400, so a locked database looks exactly like a file with no
+   * state, and the page may not parse the sentence. `GET /api/state`'s
+   * `untracked` is computed now, by the server, from the identity state is keyed
+   * on — the fact the no-confirmation argument needs, fresh. A file it no
+   * longer lists is not extracted, and is re-read where the address still names
+   * it. True when an extract was sent and accepted.
+   */
+  extractUntracked: (where: DocAddress) => Promise<boolean>
   /**
    * Discard everything and re-extract in a register a person chose.
    *
@@ -138,7 +182,7 @@ interface Store {
    * the files: any second call site is a second chance to send the *string*
    * `"false"`, which is truthy in Python and discards a book.
    */
-  startOver: (register: string) => Promise<void>
+  startOver: (where: DocAddress, register: string) => Promise<boolean>
   render: () => Promise<void>
   commit: () => Promise<void>
 }
@@ -151,6 +195,44 @@ const LOG_CAP = 4000
 
 let line = 0
 let modelSeq = 0
+
+/**
+ * Which call of `open()` is the current one.
+ *
+ * Not `at`: `at` names a *document*, and the same document can be asked for
+ * twice while the first call is still in flight — A, B, C, back to B. Compared
+ * by value, the first call for B then passed every "am I still the current
+ * open" test with the `leaving` it captured before C existed: its fetch cleared
+ * the words typed in C, which the second call for B had just declined to leave
+ * over, and its refusal or a late failure landed over the second call's page.
+ * A number per call has no second instance. Found by the third review of
+ * HANDOFF-088; the first half is older than it.
+ */
+let openSeq = 0
+
+/**
+ * Moves when a save sends wording and again when its reply lands. An act whose
+ * confirmation depends on what the document holds — the toolbar's Re-extract —
+ * records it before it reads the count and refuses if it moved: the count can
+ * be older than the reviewer's own write however the reads came back, so
+ * whether anything was written is asked directly rather than inferred from the
+ * order of the reads. Ordering the page's reads was tried four ways in
+ * HANDOFF-088's reviews and each left an ordering uncovered; that problem is
+ * HANDOFF-096's, and this does not depend on it.
+ */
+let writes = 0
+
+/** The write epoch; see `writes`. */
+export const writeEpoch = (): number => writes
+
+/**
+ * The files an `extractUntracked` is asking the server about. A second click on
+ * the same file in the same moment is the same act, not a second one, and says
+ * nothing. Per file, because a single flag swallowed a click on a *different*
+ * file made while the first was asking — no request and no line, the symptom
+ * this package exists for (found by its fourth review).
+ */
+const asking = new Set<string>()
 
 const same = (a: DocAddress | null, b: DocAddress | null): boolean =>
   !!a && !!b && a.src === b.src && a.lang === b.lang
@@ -317,21 +399,39 @@ async function follow(
  * Written once, and a test asserts that by reading every file under `src/`: the
  * server type-checks neither field, so the *string* `"false"` is a reset that
  * discards a book, and a second call site is a second chance to send one.
+ *
+ * **`where` is the caller's, and nothing here reads the screen to decide it.**
+ * This function used to take `shown() ?? at`, and the rail's *Not yet extracted*
+ * entry — which had just asked for a document the address did not name, and
+ * lost it to `App.tsx`'s effect a render later — re-extracted the document that
+ * was open while its log line named the file that was clicked (HANDOFF-088).
+ * What the screen still decides is what the re-parse *does to this page*, and
+ * that is two questions, each asked when the reply lands: whether the unsaved
+ * words are keyed on the parse that has gone, and whether the document is the
+ * one the page is addressed to.
  */
 async function reExtract(
   set: (partial: Partial<Store>) => void,
   get: () => Store,
+  where: DocAddress,
   tone: string | null,
-): Promise<void> {
-  const where = get().shown() ?? get().at
-  if (!where || get().running) return
+): Promise<boolean> {
+  if (get().running) return false
   set({ running: true })
   try {
     const r = await api.postExtract(
       tone === null ? { ...where } : { ...where, reset: true, tone },
     )
-    // **The ids every unsaved edit is keyed on have just stopped existing**, and
-    // this is said here rather than left for the re-open below to notice: what
+    // **The ids every unsaved edit is keyed on have just stopped existing** —
+    // when, and only when, the document re-parsed is the one those edits were
+    // typed in. That is `shown()`, read now: `drafts` holds the words of the
+    // document on screen, and a re-parse of any other document renumbers
+    // nothing they are keyed on. Marked anyway, they would go as "renumbered" by
+    // a parse that never touched them — an extract from the page for a file
+    // nobody has extracted leaves `doc` on the document before it, whose words
+    // that page may be holding because it could not write them.
+    //
+    // It is said here rather than left for the re-open below to notice: what
     // follows is `reloadState()` and then a fetch, two round trips with the
     // ledger still mounted, so a keystroke arriving after the re-parse would be
     // indistinguishable from one typed against the parse that is gone. Emptying
@@ -343,7 +443,7 @@ async function reExtract(
     // no such question, and its reviewer has confirmed discarding the document's
     // translations, not the sentence they were part-way through typing. So the
     // ids are named when they go rather than vanishing without a line.
-    drafts.strand()
+    if (same(get().shown(), where)) drafts.strand()
     get().say(
       `  ${r.segments} segments, ${r.reused} reused` +
       (r.rejected ? `, ${r.rejected} stale proposal(s) refused` : ''),
@@ -390,9 +490,22 @@ async function reExtract(
     // `s0007` would be written against whatever now sits there — and a token
     // hashes an absent target and an empty one alike, so between two
     // untranslated segments the lost-update check cannot catch it either.
-    await get().open(where.src, where.lang)
+    //
+    // **Only while `at` still names it.** `at` is set from the address and
+    // nothing else, so this reads what the address already asked for; it never
+    // opens one the address does not name — that is `App.tsx`'s effect's, and a
+    // second opener is how the rail's entry lost its document. So a reviewer who
+    // moved on while the extract was in flight is not pulled back. `at` rather
+    // than the screen, because the page for a file with no state — reached from
+    // the rail or by a hand-typed link — leaves `doc` on the previous document
+    // while `at` names the file, and once this has made the file exist, reading
+    // it is exactly what that address was asking for. It is then a first read
+    // and not a re-read, which is why this is `open()`.
+    if (same(get().at, where)) await get().open(where.src, where.lang)
+    return true
   } catch (e) {
     get().say('  ' + reason(e), 'bad')
+    return false
   } finally {
     set({ running: false })
   }
@@ -408,6 +521,7 @@ export const useStore = create<Store>()((set, get) => ({
   doc: null,
   docLoading: false,
   docError: '',
+  readFailed: false,
 
   running: false,
   runCost: null,
@@ -491,8 +605,10 @@ export const useStore = create<Store>()((set, get) => ({
   reloadState: async () => {
     try {
       set({ state: await api.getState() })
+      return true
     } catch (e) {
       get().say(reason(e), 'bad')
+      return false
     }
   },
 
@@ -517,7 +633,12 @@ export const useStore = create<Store>()((set, get) => ({
     if (models.error) get().say('  models: ' + models.error, 'warn')
   },
 
-  settled: () => same(get().at, get().shown()),
+  // Not while an `open()` is on its way to replace what is on screen: an act
+  // taken then reads a snapshot the page is about to discard. "Draft again"
+  // after a save, with Back and Forward pressed during it, sent a run built from
+  // the origin before the save — no question about a person's wording, the
+  // model billed, the write refused (found by HANDOFF-088's fifth review).
+  settled: () => same(get().at, get().shown()) && !get().docLoading,
 
   shown: () => {
     const doc = get().doc
@@ -539,7 +660,9 @@ export const useStore = create<Store>()((set, get) => ({
     // textarea with it, before the flush has read the field — taking an IME
     // composition that has not yet produced an `input` event, in a workbench
     // that exists for writing Chinese.
-    set({ at: want, docError: '' })
+    set({ at: want, docError: '', readFailed: false })
+    const mine = ++openSeq
+    const current = (): boolean => mine === openSeq
 
     // **Written before it is discarded.** A navigation that moves no DOM focus —
     // Back, Forward, a mouse side button, a hand-typed link — blurs no field, so
@@ -550,6 +673,16 @@ export const useStore = create<Store>()((set, get) => ({
     // the words were typed in, so it is correctly addressed whoever called.
     const writable = !drafts.stranded()
     if (drafts.size() && writable) await get().save()
+
+    // **A superseded open stops here, and touches nothing on its way out.** Two
+    // navigations inside one save round trip — Back, Back — leave the first
+    // open still flushing after the second has finished; carrying on, it raised
+    // `docLoading` over the page the second had drawn and returned at the check
+    // after its fetch without lowering it, so the page read "reading …" until
+    // the reviewer moved again. Its refusal below would have written its error
+    // over that page the same way. The newer open owns the page, and flushes
+    // whatever is left itself. Found by the review of HANDOFF-088; older than it.
+    if (!current()) return
 
     // **What the save could not write, this will not discard.** The rule the
     // toolbar's Re-extract already follows, applied to a navigation: this page
@@ -585,8 +718,9 @@ export const useStore = create<Store>()((set, get) => ({
     set({ docLoading: true })
     try {
       const doc = await api.getDoc(want)
-      // Someone may have opened another document while this was in flight.
-      if (!same(get().at, want)) return
+      // Someone may have opened another document — or this one again — while
+      // this was in flight.
+      if (!current()) return
       // **Discarded here, and not a statement earlier.** `SegmentRow` reads
       // `drafts.get(seg.id)` by id alone and ids restart at `s0001` in every
       // document, so what the clear prevents is one document's words drawn in
@@ -608,24 +742,52 @@ export const useStore = create<Store>()((set, get) => ({
       }
       set({ doc, docLoading: false })
     } catch (e) {
-      if (!same(get().at, want)) return
-      set({ docLoading: false, docError: reason(e) })
-      get().say(reason(e), 'bad')
+      if (!current()) return
+      // A refusal the server *answered* — never a request that did not arrive.
+      // A file this page has never read may have state after all, and a
+      // transport failure says nothing either way; offering an extract over it
+      // is offering an unconfirmed re-extract of whatever the server holds.
+      const answered = e instanceof ApiError
+      set({ docLoading: false, docError: reason(e), readFailed: answered })
+      // Not logged when the server answered a read of a file the project lists
+      // as not yet extracted: every read of one fails that way, the screen that
+      // draws this error offers the extract, and a line in red for following a
+      // link in the rail is noise that teaches a reviewer to stop reading red
+      // lines. A failure the server did not answer is logged whatever the file.
+      if (!(answered && notExtracted(get().state, want))) get().say(reason(e), 'bad')
     }
   },
 
   refresh: async () => {
     const where = get().shown()
-    if (!where) return
+    if (!where) return false
     try {
       const doc = await api.getDoc(where)
-      // Only if the ledger is still showing the document this refresh was
-      // about. Compared **by value**: `open()` mints a fresh address on every
-      // call, so an identity test would call the same document a different one.
-      if (!same(get().shown(), where) && !same(get().at, where)) return
+      // **Only while the ledger is still showing the document this refresh was
+      // about** — compared by value, because `open()` mints a fresh address on
+      // every call. It used to accept the reply when `at` named the document
+      // too, and that let it put a document on screen that `open()` had
+      // declined to show: `at` names a chapter the moment a navigation asks for
+      // it, `doc` stays on the chapter being left while that one's words cannot
+      // be written, and a refresh of the first chapter still in flight then
+      // swapped `doc` underneath them. The next save posted the second
+      // chapter's words onto the first chapter's ids with the first chapter's
+      // tokens, and a re-extract stranded them as "renumbered" (found by the
+      // review of HANDOFF-088; older than it). A document the page is on its
+      // way to is `open()`'s to read.
+      //
+      //
+      // What it does not do is order itself against the page's other reads — a
+      // refresh asked before a save and answered after the save's own re-read
+      // still puts the older state back. Four ways of ordering them were built
+      // and reviewed in HANDOFF-088, and each left an ordering uncovered; that is
+      // HANDOFF-096's to design, and its cases are `it.fails` in the suite.
+      if (!same(get().shown(), where)) return false
       set({ doc })
+      return true
     } catch (e) {
       get().say(reason(e), 'bad')
+      return false
     }
   },
 
@@ -680,8 +842,10 @@ export const useStore = create<Store>()((set, get) => ({
       if (token) base[id] = token
     }
 
+    writes += 1
     try {
       const r = await api.postSave({ ...where, targets, base })
+      writes += 1
       // Only what was sent. A held-back blank stays dirty and stays on screen.
       drafts.forget(ids)
       const lost = Object.keys(r.conflicts)
@@ -705,6 +869,7 @@ export const useStore = create<Store>()((set, get) => ({
       if (same(get().at, where)) await get().refresh()
       return !held.length && !lost.length
     } catch (e) {
+      writes += 1
       // Cleared only on success: an empty target is a 400, and clearing first
       // would throw away every other edit in the batch along with the one the
       // server would not take.
@@ -722,7 +887,19 @@ export const useStore = create<Store>()((set, get) => ({
    * is sent either way.
    */
   runJob: async (mode, ids, overwriteHuman, note) => {
-    if (!get().settled() || get().running) return
+    if (get().running) return
+    // Said, because the one caller that can reach this unsettled is a row whose
+    // dialog was answered while the page read the document again underneath
+    // it, and a confirmed act that vanishes without a line is indistinguishable
+    // from one never made (sixth review).
+    if (!get().settled()) {
+      get().say(
+        `  ${ids ? ids.join(', ') : mode} not sent: the page was between documents, or reading ` +
+        `one, when this was confirmed — press it again once the document is on screen`,
+        'warn',
+      )
+      return
+    }
     const where = get().shown()
     if (!where) return
 
@@ -876,8 +1053,49 @@ export const useStore = create<Store>()((set, get) => ({
     }
   },
 
-  extract: () => reExtract(set, get, null),
-  startOver: register => reExtract(set, get, register),
+  extract: where => reExtract(set, get, where, null),
+  startOver: (where, register) => reExtract(set, get, where, register),
+
+  extractUntracked: async where => {
+    const key = JSON.stringify([where.src, where.lang])
+    if (get().running || asking.has(key)) return false
+    asking.add(key)
+    try {
+      if (!await get().reloadState()) return false
+    } finally {
+      asking.delete(key)
+    }
+    if (!notExtracted(get().state, where)) {
+      // Extracted elsewhere since this page read it, most likely — or no longer
+      // matched by `sources`. Either way there is nothing to extract, and the
+      // document is `open()`'s to read, where the address still names it.
+      const here = same(get().at, where)
+      get().say(
+        `  ${where.src} [${where.lang}] is no longer listed as not extracted, so nothing was ` +
+        `extracted — it has been extracted elsewhere, no longer matches \`sources\`, or now ` +
+        `shares its identity with another path` +
+        (here ? '; reading it again' : '; open it from the rail'),
+        'warn',
+      )
+      if (here) await get().open(where.src, where.lang)
+      return false
+    }
+    // Asked again after the round trip: a run, or the extract of another file
+    // clicked meanwhile, may have started. Said, because a click that does
+    // nothing and says nothing is indistinguishable from one never made. After
+    // the listing test and not before it, because a file that no longer needs
+    // extracting needs nothing to wait for.
+    if (get().running) {
+      get().say(
+        `  ${where.src} was not extracted: something else started running while this was ` +
+        `asking — try again when it finishes`,
+        'warn',
+      )
+      return false
+    }
+    get().say(`— extract ${where.src} [${where.lang}] —`, 'plain', true)
+    return get().extract(where)
+  },
 
   render: async () => {
     const where = get().shown()
@@ -941,6 +1159,20 @@ export function visible(doc: DocResponse | null, filter: Filter): Segment[] {
     case 'waived': return doc.segments.filter(s => s.waived)
     case 'all': return doc.segments
   }
+}
+
+/**
+ * Whether the project lists this document as not yet extracted.
+ *
+ * `GET /api/state`'s `untracked`, which is a **snapshot**: this page reads it at
+ * startup and after its own extracts, and a terminal can extract a file in
+ * between. So it is never the only fact an act rests on — the page that offers
+ * an extract asks it only after a read of the document has just failed, which
+ * is the fresh half. One predicate, read by `open()` and by that page, so the
+ * two cannot disagree about which files it covers.
+ */
+export function notExtracted(state: StateResponse | null, where: DocAddress): boolean {
+  return !!state?.untracked.some(u => u.source === where.src && u.lang === where.lang)
 }
 
 /** `ApiError` when the server refused, so a caller can branch on the status.
