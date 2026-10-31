@@ -866,6 +866,11 @@ class NotJsonHandler(BaseHTTPRequestHandler):
         pass
 
     def _reply(self):
+        # Read what was sent before answering. A POST answered with its body
+        # still unread closes a socket that has data waiting, and Windows
+        # resets such a connection: the client then reads WinError 10054 in
+        # place of this reply, about one run in three, measured 2026-10-31.
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
         body = b"<html><body>404 not found</body></html>"
         self.send_response(200)
         self.send_header("Content-Type", "text/html")
@@ -1214,6 +1219,8 @@ class RudeHandler(BaseHTTPRequestHandler):
         pass
 
     def _rude(self):
+        # Drained first, for the reason `NotJsonHandler._reply` gives.
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
         body = RUDE["body"].encode("utf-8")
         self.send_response(400)
         self.send_header("Content-Type", "text/plain")
