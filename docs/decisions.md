@@ -271,6 +271,9 @@ beyond `history.length`, and an IME composition.
   lost.
 - *Start over*'s dialog states a count only a re-read updates, and *Re-extract*
   tells a reviewer to copy wording out of a field they emptied — `HANDOFF-092`.
+- Acceptance criterion 4, the maintainer's own browser, has not been run: the
+  environment was built and checked on 2026-10-31 and the maintainer could not
+  take the check that day — `HANDOFF-098`, which rebuilds it in one command.
 
 ### What this supersedes in the 2026-09-20 entry
 
