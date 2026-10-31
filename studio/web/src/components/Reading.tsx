@@ -96,11 +96,16 @@ export function Reading() {
   const say = useStore(s => s.say)
   const [preview, setPreview] = useState<PreviewResponse | null>(null)
   const [error, setError] = useState('')
-  const [pieces, setPieces] = useState<string[] | null>(null)
+  // The sentences of one paragraph, **with the id they belong to**. Held bare,
+  // they were handed to whichever paragraph was current, so moving the address
+  // drew the new paragraph in the old one's sentences until its own request
+  // answered (found by HANDOFF-090's mutation pass; older than it).
+  const [split, setSplit] = useState<{ id: string; pieces: string[] } | null>(null)
   // The paragraph the reviewer is on is the address's, here as in the ledger —
   // never a copy seeded from it on mount. A copy is what let this view keep
   // highlighting, and send Back to, a paragraph the address no longer named.
   const current = routes.useFocused()
+  const pieces = split && split.id === current ? split.pieces : null
   const landed = useRef('')
 
   const src = doc?.source ?? ''
@@ -151,11 +156,12 @@ export function Reading() {
   // question about one paragraph.
   useEffect(() => {
     const block = preview?.blocks.find(b => b.id === current)
-    if (!block) { setPieces(null); return }
+    if (!block || block.id == null) { setSplit(null); return }
+    const id = block.id
     let live = true
     api.postSentences({ texts: [block.text] })
-      .then(r => { if (live) setPieces(r.sentences[0] ?? null) })
-      .catch(() => { if (live) setPieces(null) })
+      .then(r => { if (live) setSplit(r.sentences[0] ? { id, pieces: r.sentences[0] } : null) })
+      .catch(() => { if (live) setSplit(null) })
     return () => { live = false }
   }, [preview, current])
 

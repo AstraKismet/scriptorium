@@ -167,6 +167,27 @@ is fixed here. Mutants that dropped the focused line from `keepMounted`, aimed
 the centring at the first paragraph, and landed on every click were each killed
 by exactly the test written for them.
 
+A second lane planted 31 mutants of its own in the first commit. The suite
+killed 13. Four of the survivors were equivalent, and fourteen were real gaps.
+The worst: the bounded-mount test was vacuous for the range, because the test
+setup's `ResizeObserver` reports nothing, so jsdom gives `virtua` a viewport of
+zero. A mutant widening the range to the whole chapter passed it. The lane wrote
+a test for each gap, and they are in `Reading.test.tsx`:
+
+- a measuring observer, so a screenful mounts and the bound means something;
+- the scroller's text equal to the rendered document byte for byte;
+- the margins on the first and last lines only;
+- the sentence request naming the address's paragraph;
+- no scroll under the first click after a landing on no paragraph;
+- sentence pieces drawn in order, on the current paragraph only;
+- Space and double-click.
+
+It also found a defect older than this change, reproduced on the parent commit.
+The sentence pieces were held with no record of which paragraph they belonged
+to, so moving the address drew the new paragraph in the old one's sentences
+until its own request answered. They are held with their id now, and a test
+fails without that.
+
 ### Left open
 
 - Acceptance criterion 4, the maintainer's foreground check — `HANDOFF-099`,
