@@ -27,7 +27,7 @@ paint), and the blocks mounted. Ranges over the three runs:
 |---|---|---|---|---|---|
 | `dd2e3dd` | 353–1265 ms | 176–270 ms | 34–70 ms | 150 ms | 10 001 |
 | `3d375ef` (before) | 315–1284 ms | 122–124 ms | 26–52 ms | 129 ms | 10 001 |
-| this change | 235–1177 ms | 20–28 ms | 25–51 ms | none ≥ 50 ms | 42 |
+| this change | 1197–1253 ms | 18–34 ms | 23–67 ms | none ≥ 50 ms | 42 |
 
 The same three builds again with `--force-renderer-accessibility`, which makes
 the renderer build its accessibility tree the way a screen reader or an input
@@ -37,7 +37,7 @@ method's UI Automation client makes it on Windows:
 |---|---|---|---|---|
 | `dd2e3dd` | 777–1940 ms | 622–684 ms | 170–203 ms | 162 ms |
 | `3d375ef` (before) | 814–1786 ms | 969–1038 ms | 168–172 ms | 156 ms |
-| this change | 581–1222 ms | 18–34 ms | 45–69 ms | none ≥ 50 ms |
+| this change | 1190–1204 ms | 29–48 ms | 56–70 ms | none ≥ 50 ms |
 
 **Attribution: the cost belongs to neither build in particular.** `dd2e3dd` and
 `3d375ef` mount the same 10 001 blocks and cost the same within run-to-run
@@ -60,8 +60,9 @@ tab of their own browser is acceptance criterion 4, and it has not been run —
 see *Left open*.
 
 What the open-*Read* wall time still holds is not main-thread work: no frame of
-50 ms or more was recorded in this build. The 2.14 MB `GET /api/preview` for
-this document answered in about 0.2 s from `curl`.
+50 ms or more was recorded in this build, so the page is waiting rather than
+working. The 2.14 MB `GET /api/preview` for this document answered in about
+0.2 s from `curl`; the rest of the wait was not attributed further.
 
 ### The change
 
@@ -78,13 +79,14 @@ the *first* line break of each skeleton run. The run up to and including that
 break closes the current line, and the rest opens the next. In `pre-wrap` a
 break at the very end of a block box draws no empty line after it, and a break
 at the very start draws one before it, so `para\n\npara` cut as `para\n` |
-`\npara` draws the one blank line the unbroken flow drew. Cutting at every break
-would draw it twice. A segment is never divided, interior line breaks included.
-The lines concatenate back to the rendered text byte for byte, and a test pins
-that. Screenshots of `3d375ef` and this change, landed on the same paragraph,
-show the same line breaks and spacing. They are offset by about 14 px, because
-`scrollIntoView` and `virtua` centre the paragraph slightly differently, and
-they are not pixel-identical under any integer shift.
+`\npara` draws the one blank line the unbroken flow drew. A segment is never
+divided, interior line breaks included. The lines concatenate back to the
+rendered text byte for byte, and a test pins that. The review below measured the
+equivalence in headless Chrome: 846 renders at two widths, every visible
+character in the same place as in the unbroken flow. It also measured that
+cutting at *every* break draws the same. An earlier draft of this entry said it
+would draw the blank lines twice, which was wrong. The first break is kept
+because it makes fewer lines.
 
 **No padding on the scroller.** The old page's `40vh` run-out was first moved
 onto the `VList`, and the measured result was lines stopping 160 px above the
@@ -97,8 +99,32 @@ its rows are tall, ending at 800 px. A document of short rows would show the
 gap. That is the ledger's scroll feel, so it is recorded in HANDOFF-060 rather
 than changed here.
 
+**The paragraph is centred, not its line, and the virtualizer is not asked to
+scroll.** The line the address names is in `keepMounted`, so it is mounted at
+its estimated position from the first render. Two frames later the element is
+scrolled into the middle, and `virtua` keeps it there as the lines around it are
+measured. The first version asked `scrollToIndex` to centre the line, which
+centres the unit it virtualizes. A line taller than the window then put the
+paragraph out of view. The case is real: a Markdown table row is one line, every
+cell a segment joined by ` | `. Centring the element after `scrollToIndex` did
+not help, because `scrollToIndex` goes on correcting towards its own target as
+lines are measured. Measured on a 364-segment table with one 4000-character
+cell, deep-linked to the cell after it: the target landed at 495 px in a window
+spanning 82–900 px, where the first version left it at 1337 px. An ordinary
+paragraph lands within 30 px of the centre.
+
+**The line holding keyboard focus stays mounted as well.** Tab moves focus and
+not the address. In the first version a PageDown from a paragraph reached by Tab
+unmounted the focused element, focus fell to `body`, and keyboard scrolling
+stopped. Measured now: Tab twice, then six PageDowns, and the scroll advanced
+715 px each time with focus still on the paragraph.
+
 **What this costs: the browser's own find-in-page reaches only mounted lines.**
-At this scale the ledger's filter is the search that works.
+At this scale the ledger's filter is the search that works. A screen reader
+likewise reads only what is mounted; that has not been tried with assistive
+technology. And a click within about 150 ms of a scroll is swallowed, because
+`virtua` sets `pointer-events: none` while it scrolls. The ledger has always done
+the same.
 
 ### The alternatives that lost
 
@@ -126,9 +152,20 @@ a 5000-segment preview and asserts fewer than 100 segment blocks mount. A mutant
 that drew every line in a plain `div` failed exactly that assertion. A line's
 click and Enter handlers are clicked beside the list, the way the ledger's rows
 are, because jsdom lays nothing out and `VList` mounts only the line
-`keepMounted` names. Measurement is not mocked. The App test that follows a
-reading-view landing now watches `scrollTo`, the call `virtua` makes, instead
-of `scrollIntoView`.
+`keepMounted` names. Measurement is not mocked. Another test focuses a paragraph,
+moves the address to another line, and asserts that the focused element is
+still mounted and still focused. The App test that follows a reading-view
+landing asserts which element `scrollIntoView` was called on, not how many times
+a scroll happened. Counting calls is how the review found a landing aimed at the
+wrong line passing every test.
+
+An independent review re-derived the view's properties from the package alone
+and checked them against the first commit, in jsdom and in headless Chrome. It
+found the focus and table landings above, the untested landing target, and the
+false blank-line claim, each with a probe that failed on that commit, and each
+is fixed here. Mutants that dropped the focused line from `keepMounted`, aimed
+the centring at the first paragraph, and landed on every click were each killed
+by exactly the test written for them.
 
 ### Left open
 

@@ -35,7 +35,7 @@
  * this scale. `docs/decisions.md`, 2026-10-31.
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { VList, type VListHandle } from 'virtua'
+import { VList } from 'virtua'
 
 import * as api from '../api'
 import * as routes from '../router'
@@ -61,13 +61,17 @@ export interface Piece {
  * segment's own text is never divided, interior line breaks included, because a
  * segment is the unit a click names.
  *
- * Why the *first* break and not every break: in `white-space: pre-wrap` a line
- * break at the very end of a block-level box draws no empty line after it, and
- * one at the very start draws one before it. So `para\n\npara` cut as `para\n` |
- * `\npara` is the blank line the unbroken flow drew, and cutting at every break
- * would draw it twice. A skeleton run with no break (a list marker, a run between
- * two inline segments) stays on the line it is on, which is what keeps `- ` next
- * to its item.
+ * It draws what the unbroken flow drew: in `white-space: pre-wrap` a break at
+ * the very end of a block-level box draws no empty line after it, and one at the
+ * very start draws one before it, so `para\n\npara` cut as `para\n` | `\npara`
+ * is the one blank line it always was. Measured by the review of HANDOFF-090 in
+ * headless Chrome, 846 renders at two widths, every visible character in the
+ * same place. Cutting at *every* break measured the same too; the first break is
+ * kept because it makes fewer lines, not because the other draws differently —
+ * an earlier version of this comment claimed it did, and the measurement said
+ * otherwise. A skeleton run with no break (a list marker, a run between two
+ * inline segments, a table's ` | `) stays on the line it is on, which is what
+ * keeps `- ` next to its item.
  */
 export function lines(blocks: readonly Block[]): Piece[][] {
   const out: Piece[][] = []
@@ -98,7 +102,6 @@ export function Reading() {
   // highlighting, and send Back to, a paragraph the address no longer named.
   const current = routes.useFocused()
   const landed = useRef('')
-  const list = useRef<VListHandle>(null)
 
   const src = doc?.source ?? ''
   const lang = doc?.lang ?? ''
@@ -111,12 +114,20 @@ export function Reading() {
     rows.forEach((line, i) => { for (const p of line) if (p.block.id != null) m.set(p.block.id, i) })
     return m
   }, [rows])
-  // The line the reviewer is on stays mounted wherever the scroll goes, as the
-  // ledger keeps its row: it carries the sentence marks and keyboard focus.
+  // The line keyboard focus is in, tracked on its own: Tab moves focus and not
+  // the address, so focus can sit on a line the address does not name.
+  const [focusedLine, setFocusedLine] = useState<number | null>(null)
+  // Two lines stay mounted wherever the scroll goes, as the ledger keeps its
+  // row: the address's, which carries the sentence marks, and the one holding
+  // keyboard focus. Without the second, a PageDown from a paragraph reached by
+  // Tab unmounted the focused element, focus fell to `body`, and keyboard
+  // scrolling stopped — measured by HANDOFF-090's review, in headless Chrome.
   const keep = useMemo(() => {
-    const i = current == null ? undefined : lineOf.get(current)
-    return i == null ? [] : [i]
-  }, [lineOf, current])
+    const at = current == null ? undefined : lineOf.get(current)
+    const out = at == null ? [] : [at]
+    if (focusedLine != null && focusedLine !== at && focusedLine < rows.length) out.push(focusedLine)
+    return out
+  }, [lineOf, current, focusedLine, rows.length])
 
   useEffect(() => {
     if (!src) return
@@ -154,16 +165,34 @@ export function Reading() {
   // click moves the address and the address is a dependency here: keyed on it
   // alone, every click re-centred the page, which is what this view did until
   // HANDOFF-084 measured it (a paragraph near the bottom of the window, clicked,
-  // moved 517 px). The virtualizer is asked rather than the element, because the
-  // line a deep link names is in the middle of a list that has mounted almost
-  // none of the others.
+  // moved 517 px).
+  //
+  // **The paragraph is centred, not its line, and the virtualizer is not asked
+  // to scroll at all.** The line the address names is in `keepMounted`, so it is
+  // mounted at its estimated position from the first render, and two frames
+  // later — once it has been measured — the element itself is scrolled into the
+  // middle; `virtua` keeps it there as the lines around it are measured. Asking
+  // `scrollToIndex` to centre the line was the first version: it centres the
+  // unit it virtualizes, so a line taller than the window — a Markdown table
+  // row, every cell a segment joined by ` | ` — put the paragraph 1500 px below
+  // the bottom of it (HANDOFF-090's review, T4), and centring the element after
+  // it did not help, because `scrollToIndex` goes on correcting towards its own
+  // target as lines are measured and undid it. Measured in headless Chrome: the
+  // table cell lands in the middle of the window, an ordinary paragraph within
+  // 30 px of it.
   useEffect(() => {
     if (!preview) return
     const key = `${src} ${lang}`
     if (landed.current === key) return
     landed.current = key
     const i = current == null ? undefined : lineOf.get(current)
-    if (i != null) list.current?.scrollToIndex(i, { align: 'center' })
+    if (i == null || current == null) return
+    let frame = requestAnimationFrame(() => {
+      frame = requestAnimationFrame(() => {
+        document.getElementById(`b-${current}`)?.scrollIntoView({ block: 'center' })
+      })
+    })
+    return () => { cancelAnimationFrame(frame) }
   }, [preview, current, src, lang, lineOf])
 
   if (!doc) return null
@@ -196,7 +225,6 @@ export function Reading() {
       {!error && !preview && <div className="reading"><div className="empty-page"><p>rendering…</p></div></div>}
       {preview && (
         <VList
-          ref={list}
           className="reading"
           data={rows}
           keepMounted={keep}
@@ -219,6 +247,7 @@ export function Reading() {
               pieces={pieces}
               failing={id => (issues.get(id) ?? []).some(isError)}
               say={say}
+              onFocusIn={() => { setFocusedLine(i) }}
             />
           )}
         </VList>
@@ -234,7 +263,7 @@ export function Reading() {
  * rows are tested beside the application for the same reason, and this is the
  * same component with the same handlers the list draws.
  */
-export function Line({ line, first, last = false, src, lang, current, pieces, failing, say }: {
+export function Line({ line, first, last = false, src, lang, current, pieces, failing, say, onFocusIn }: {
   line: readonly Piece[]
   /** Carries the page's top margin. */
   first: boolean
@@ -246,11 +275,16 @@ export function Line({ line, first, last = false, src, lang, current, pieces, fa
   pieces: string[] | null
   failing: (id: string) => boolean
   say: (text: string) => void
+  /** Keyboard focus entered this line; the list keeps it mounted. */
+  onFocusIn?: () => void
 }) {
   return (
     <div
       className="line"
       style={first || last ? { paddingTop: first ? 48 : undefined, paddingBottom: last ? '40vh' : undefined } : undefined}
+      // React's `onFocus` bubbles, so this hears focus landing on any paragraph
+      // of the line.
+      onFocus={onFocusIn}
     >
       {line.map(piece => {
         const id = piece.block.id

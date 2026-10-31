@@ -129,6 +129,30 @@ describe('the reading view at a novel\'s scale', () => {
     await waitFor(() => { expect(document.querySelector('#b-s2500 .sentence')).toBeTruthy() })
     expect(callsTo('/api/preview')).toHaveLength(1)
   }, 15000)
+
+  /**
+   * Tab moves focus and not the address, so the line holding focus is kept
+   * mounted on its own. Without it, measured in headless Chrome by HANDOFF-090's
+   * review, a PageDown from a paragraph reached by Tab unmounted the focused
+   * element and keyboard scrolling stopped. jsdom scrolls nothing, so the door
+   * here is the address moving while focus stays: the line the address leaves
+   * would be dropped from `keepMounted`, and the focused element with it.
+   */
+  it('keeps the line keyboard focus is in mounted when the address moves away from it', async () => {
+    render(<Reading />)
+    await waitFor(() => { expect(document.getElementById('b-s2500')).toBeTruthy() }, { timeout: 4000 })
+    const focused = document.getElementById('b-s2500')!
+    act(() => { focused.focus() })
+    act(() => {
+      window.location.hash = `#/read/zh-TW/${encodeURIComponent(doc.source)}?seg=s0007`
+      window.dispatchEvent(new HashChangeEvent('hashchange'))
+    })
+    await waitFor(() => {
+      expect(document.getElementById('b-s0007')?.getAttribute('aria-current')).toBe('true')
+    })
+    expect(document.getElementById('b-s2500')).toBe(focused)
+    expect(document.activeElement).toBe(focused)
+  }, 15000)
 })
 
 /**
