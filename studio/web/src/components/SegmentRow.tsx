@@ -47,6 +47,13 @@ export const SegmentRow = memo(function SegmentRow({ seg }: { seg: Segment }) {
     drafts.subscribe,
     useCallback(() => drafts.has(seg.id), [seg.id]),
   )
+  // The stored wording this row's edit lost to, while the reviewer has not
+  // chosen between them (HANDOFF-091). The registry hands back the same object
+  // until it changes, which is what `useSyncExternalStore` needs.
+  const refusedAs = useSyncExternalStore(
+    drafts.subscribe,
+    useCallback(() => drafts.conflict(seg.id), [seg.id]),
+  )
 
   /**
    * Adopt a stored target that moved underneath this row.
@@ -63,6 +70,12 @@ export const SegmentRow = memo(function SegmentRow({ seg }: { seg: Segment }) {
    *      un-composed field is still a caret somebody is using;
    *   3. and the write only happens when the text actually differs, so a
    *      re-render that changed nothing cannot move a caret.
+   *
+   * It also runs when a conflict on this row ends. *Discard mine* drops the
+   * entry and changes nothing else this effect depended on, so without that the
+   * field went on showing the words the reviewer had just thrown away. Not keyed
+   * on `dirty`: a save forgets an entry before its re-read lands, and adopting
+   * then would write the wording from before the save.
    */
   useEffect(() => {
     const el = box.current
@@ -73,7 +86,7 @@ export const SegmentRow = memo(function SegmentRow({ seg }: { seg: Segment }) {
     el.value = seg.target
     grow(el)
     setSlotsDiffer(false)
-  }, [seg.id, seg.target, seg.token])
+  }, [seg.id, seg.target, seg.token, refusedAs])
 
   useEffect(() => { if (box.current) grow(box.current) }, [])
 
@@ -209,6 +222,7 @@ export const SegmentRow = memo(function SegmentRow({ seg }: { seg: Segment }) {
         bad ? 'failing' : '',
         held ? 'held' : '',
         dirty ? 'dirty' : '',
+        refusedAs ? 'conflicted' : '',
       ].filter(Boolean).join(' ')}
       aria-selected={isFocused}
       onClick={point}
@@ -261,6 +275,46 @@ export const SegmentRow = memo(function SegmentRow({ seg }: { seg: Segment }) {
           }}
         />
       </div>
+
+      {refusedAs && (
+        // **The reviewer's words stay in the field and the stored wording is
+        // shown here, until one is chosen.** Nothing sends this row meanwhile —
+        // not a blur, not Ctrl+Enter, not leaving the document. A choice without
+        // the stored wording in view would be a blind overwrite or a blind
+        // discard, and the field cannot show it without replacing theirs. Plain
+        // text in `pre-wrap`, inline because jsdom loads no stylesheet: a
+        // segment's interior line breaks are part of it, and copying from here
+        // into the field is byte-exact, placeholders included. HANDOFF-091.
+        <div className="conflict" role="group" aria-label={`${seg.id} was not written`}>
+          <span className="why">
+            Not written: the stored wording changed while you were editing. Yours stays in
+            the field; what is stored now is below. Nothing writes this row until you choose.
+          </span>
+          <div className="stored" style={{ whiteSpace: 'pre-wrap' }}>
+            {refusedAs.text || <span className="blank">nothing is stored for this segment now</span>}
+          </div>
+          <div className="choose">
+            <button
+              type="button"
+              title="Write your wording, over the stored wording shown here"
+              onClick={() => { drafts.overrule(seg.id); void save() }}
+            >
+              Write mine over it
+            </button>
+            <button
+              type="button"
+              title="Drop your wording and keep the stored wording shown here"
+              onClick={() => {
+                drafts.discard(seg.id)
+                useStore.getState().say(`  ${seg.id}: your wording was dropped at your request; the stored wording stands`)
+                void useStore.getState().refresh()
+              }}
+            >
+              Discard mine
+            </button>
+          </div>
+        </div>
+      )}
 
       {isFocused && (
         <div className="acts">

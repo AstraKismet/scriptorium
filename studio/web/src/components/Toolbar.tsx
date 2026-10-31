@@ -295,6 +295,15 @@ export function Toolbar() {
               <b>{drafts.size()}</b> unsaved
             </span>
           )}
+          {dirty >= 0 && drafts.conflicted().length > 0 && (
+            <span
+              className="err"
+              title={`Changed underneath your edit, and not written: ${drafts.conflicted().join(', ')}. ` +
+                'Each row shows your wording beside the stored one until you choose.'}
+            >
+              <b>{drafts.conflicted().length}</b> waiting on your choice
+            </span>
+          )}
         </span>
       </div>
 

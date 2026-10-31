@@ -20,7 +20,7 @@ import * as drafts from './drafts'
 import {
   CONTRACT_VERSION, isError, isJobRecord,
   type DocAddress, type DocResponse, type ModelsResponse, type Mode,
-  type Provider, type Routing, type Segment, type StateResponse, type Usage,
+  type Provider, type Routing, type SaveResponse, type Segment, type StateResponse, type Usage,
 } from './contract'
 
 export type Filter = 'all' | 'pending' | 'failing' | 'held' | 'waived'
@@ -224,6 +224,36 @@ let writes = 0
 
 /** The write epoch; see `writes`. */
 export const writeEpoch = (): number => writes
+
+/**
+ * What one round of writing came to. `failed` is a request that did not answer
+ * or answered with something this page cannot read — as distinct from words
+ * held back on purpose (a blank, a wording waiting on the reviewer's choice),
+ * which is not a failure and must not be reported as one.
+ */
+interface Outcome { ok: boolean; failed: boolean }
+
+/**
+ * **One save on the wire at a time.** HANDOFF-091: the field's blur and the
+ * act that took focus from it — Ctrl+Enter's move to the next row, any toolbar
+ * button, a rail click, Back pressed twice — each called `save()`, and a second
+ * call made while the first was in flight sent the same wording again under the
+ * same `base`. The server's compare-and-swap then refused the second as a
+ * conflict carrying the very words the first had written, and the page said in
+ * red that a write which succeeded had not. Matching the twin by text cannot
+ * work here: the server normalizes what it stores, so the conflict's text and
+ * the text sent differ for ordinary zh-TW input. Not sending the duplicate is
+ * the one rule that holds.
+ *
+ * A call made while a round is on the wire waits for it and then runs one more
+ * round, shared by every caller that asked meanwhile, which reads `drafts` when
+ * it starts — so what it sends is what is still unwritten then. Keyed on the
+ * drafts epoch: a document replaced under a round in flight starts a fresh
+ * line, so a request that never answers holds up nothing on the next document.
+ */
+let onWire: Promise<void> | null = null
+let onWireEpoch = -1
+let queued: Promise<Outcome> | null = null
 
 /**
  * The files an `extractUntracked` is asking the server about. A second click on
@@ -671,8 +701,22 @@ export const useStore = create<Store>()((set, get) => ({
     // log. Nothing here asks which document is being opened, and it does not
     // need to: the flush is addressed to `shown()`, which is still the document
     // the words were typed in, so it is correctly addressed whoever called.
+    //
+    // **Two laps, and no more.** Words typed while the first lap was in flight
+    // are newer than what it wrote, and stay unwritten after it (HANDOFF-091);
+    // refusing over them would say "could not be written" about a write that
+    // succeeded. So one more lap writes them, based on the token the first lap
+    // produced. Typing that outlasts both laps is refused with a sentence saying
+    // so — a lap per keystroke is a loop with no bound.
     const writable = !drafts.stranded()
-    if (drafts.size() && writable) await get().save()
+    let lapFailed = false
+    if (drafts.size() && writable) {
+      lapFailed = (await flush(get)).failed
+      if (!current()) return
+      if (!lapFailed && unwritten().some(id => !drafts.conflict(id))) {
+        lapFailed = (await flush(get)).failed
+      }
+    }
 
     // **A superseded open stops here, and touches nothing on its way out.** Two
     // navigations inside one save round trip — Back, Back — leave the first
@@ -707,11 +751,30 @@ export const useStore = create<Store>()((set, get) => ({
     if (held.length && leaving && !same(leaving, want)) {
       // `docError` is the field `App.tsx` already renders as "here is the
       // document you asked for, and why you do not have it". That is exactly
-      // what this is.
-      set({ docError:
-        `${names(held)} could not be written to ${leaving.src}, and this page holds the ` +
-        `only copy of that wording — the log says why. Open ${leaving.src} again to get ` +
-        `back to it, or copy the wording out and empty the field.` })
+      // what this is. **It says why per id**, because the three reasons have
+      // three different remedies and only one of them is a failure.
+      const waiting = held.filter(id => drafts.conflict(id))
+      const rest = held.filter(id => !drafts.conflict(id))
+      const parts: string[] = []
+      if (rest.length && lapFailed) {
+        parts.push(
+          `${names(rest)} could not be written to ${leaving.src}, and this page holds the ` +
+          `only copy of that wording — the log says why. Open ${leaving.src} again to get ` +
+          `back to it, or copy the wording out and empty the field.`)
+      } else if (rest.length) {
+        parts.push(
+          `${names(rest)} ${rest.length === 1 ? 'was' : 'were'} typed into while ` +
+          `${leaving.src} was being written, so the newest wording is not written yet — ` +
+          `nothing failed. Open ${leaving.src} again, which writes it.`)
+      }
+      if (waiting.length) {
+        parts.push(
+          `${names(waiting)} changed in ${leaving.src} underneath your edit, so your wording ` +
+          `was not written over what is stored now. Open ${leaving.src} again: ` +
+          `${waiting.length === 1 ? 'its row shows' : 'each row shows'} both, and you choose ` +
+          `which stays.`)
+      }
+      set({ docError: parts.join(' ') })
       return
     }
 
@@ -795,88 +858,7 @@ export const useStore = create<Store>()((set, get) => ({
    * Flush every dirty row. Returns false when something was held back or
    * refused, so a caller about to do something destructive can stop.
    */
-  save: async () => {
-    // **Nothing stranded is written, by anyone.** A re-extract this page asked
-    // for has renumbered the ids every entry is keyed on, and until the new
-    // parse is on screen `doc` still carries the old one's tokens — so a blur in
-    // that window would post a sentence onto whatever paragraph now holds the
-    // id. The mark is checked here because every write goes through here: it
-    // was first checked only in `open()`, and a blur during the re-extract's own
-    // reload walked straight past it (found by an adversarial pass, 2026-09-21).
-    // `false`, because something is being held back; `open()` names what goes.
-    if (drafts.stranded()) return false
-    const where = get().shown()
-    if (!where || !drafts.size()) return true
-    const doc = get().doc
-    if (!doc) return true
-
-    // Blank edits are held back rather than sent. The server refuses an empty
-    // target for the WHOLE request, and this is one map for the whole ledger —
-    // so one cleared segment would refuse every later edit in the same session,
-    // over and over, because the poisoned batch keeps being resent. Held back,
-    // the good edits go through and the blank one is named once.
-    const held: string[] = []
-    const targets: Record<string, string> = {}
-    for (const [id, text] of drafts.entries()) {
-      if (wording(text)) targets[id] = text
-      else held.push(id)
-    }
-    for (const id of held) {
-      get().say(
-        `  ${id} is empty — an empty target is not storable; restore the wording, ` +
-        `or re-draft this segment to have it done again`,
-        'bad',
-      )
-    }
-    const ids = Object.keys(targets)
-    if (!ids.length) return !held.length
-
-    // The token each edit was based on, so a translation batch that landed
-    // mid-review — or a second window — cannot overwrite a sentence silently.
-    // Per id and optional: a segment we hold no token for is written the way it
-    // always was.
-    const base: Record<string, string> = {}
-    const byId = new Map(doc.segments.map(s => [s.id, s]))
-    for (const id of ids) {
-      const token = byId.get(id)?.token
-      if (token) base[id] = token
-    }
-
-    writes += 1
-    try {
-      const r = await api.postSave({ ...where, targets, base })
-      writes += 1
-      // Only what was sent. A held-back blank stays dirty and stays on screen.
-      drafts.forget(ids)
-      const lost = Object.keys(r.conflicts)
-      if (lost.length) {
-        get().say(
-          `  ${names(lost)} changed underneath this edit and were not written — ` +
-          `the wording on screen for them is now the stored one`,
-          'bad',
-        )
-      }
-      if (r.unknown.length) {
-        get().say(`  ${names(r.unknown)} name no segment and were ignored`, 'warn')
-      }
-      // **Re-read only the document this page is still on.** A flush that ran
-      // because the address moved is followed by the arriving document's own
-      // fetch, so re-reading the one being left is a second full `GET /api/doc`
-      // — every segment of it — thrown away under the loading screen. Decided
-      // from state rather than from an argument the caller passes: a re-read a
-      // caller can turn off is two spellings of one rule, and the reviewer who
-      // goes straight back re-reads it in that fetch anyway.
-      if (same(get().at, where)) await get().refresh()
-      return !held.length && !lost.length
-    } catch (e) {
-      writes += 1
-      // Cleared only on success: an empty target is a 400, and clearing first
-      // would throw away every other edit in the batch along with the one the
-      // server would not take.
-      get().say('  ' + reason(e), 'bad')
-      return false
-    }
-  },
+  save: () => flush(get).then(o => o.ok),
 
   /**
    * Start a run and follow it to a terminal state.
@@ -1180,3 +1162,180 @@ export function notExtracted(state: StateResponse | null, where: DocAddress): bo
  *  and send it again. The sentence is for a person and is never parsed. */
 export const statusOf = (e: unknown): number | null =>
   e instanceof ApiError ? e.status : null
+
+/**
+ * One save on the wire at a time; see `onWire`.
+ *
+ * **The lock covers the request and the settling of its reply, and not the
+ * re-read after it.** A re-read is a whole `GET /api/doc`, and an act queued
+ * behind it — Check, a run, a flush on the way out — would wait on a read that
+ * concerns none of what it sends. The caller still gets its answer only once
+ * the re-read has landed, as it always did.
+ */
+function flush(get: () => Store): Promise<Outcome> {
+  const epoch = drafts.epoch()
+  if (!onWire || onWireEpoch !== epoch) {
+    // Started synchronously when nothing is on the wire, so the write epoch
+    // moves before the caller's next statement, as it always has.
+    const sent = round(get)
+    const lock: Promise<void> = sent.then(() => undefined, () => undefined)
+    onWire = lock
+    onWireEpoch = epoch
+    queued = null
+    void lock.then(() => { if (onWire === lock) onWire = null })
+    return sent.then(async ({ outcome, reread }) => {
+      if (reread) await get().refresh()
+      return outcome
+    })
+  }
+  if (!queued) {
+    const after = onWire
+    const next: Promise<Outcome> = after.then(() => {
+      if (queued === next) queued = null
+      return flush(get)
+    })
+    queued = next
+  }
+  return queued
+}
+
+/** One round of writing: what `save()` was before HANDOFF-091, and its reply. */
+async function round(get: () => Store): Promise<{ outcome: Outcome; reread: boolean }> {
+  {
+    // **Nothing stranded is written, by anyone.** A re-extract this page asked
+    // for has renumbered the ids every entry is keyed on, and until the new
+    // parse is on screen `doc` still carries the old one's tokens — so a blur in
+    // that window would post a sentence onto whatever paragraph now holds the
+    // id. The mark is checked here because every write goes through here: it
+    // was first checked only in `open()`, and a blur during the re-extract's own
+    // reload walked straight past it (found by an adversarial pass, 2026-09-21).
+    // `false`, because something is being held back; `open()` names what goes.
+    if (drafts.stranded()) return { outcome: { ok: false, failed: false }, reread: false }
+    const where = get().shown()
+    if (!where || !drafts.size()) return { outcome: { ok: true, failed: false }, reread: false }
+    const doc = get().doc
+    if (!doc) return { outcome: { ok: true, failed: false }, reread: false }
+
+    // Blank edits are held back rather than sent. The server refuses an empty
+    // target for the WHOLE request, and this is one map for the whole ledger —
+    // so one cleared segment would refuse every later edit in the same session,
+    // over and over, because the poisoned batch keeps being resent. Held back,
+    // the good edits go through and the blank one is named once.
+    //
+    // A wording waiting on the reviewer's choice is held back too, silently — its
+    // row says so, and it is not sent until the reviewer chooses (HANDOFF-091).
+    const held: string[] = []
+    const waiting: string[] = []
+    const targets: Record<string, string> = {}
+    for (const [id, text] of drafts.entries()) {
+      if (drafts.conflict(id)) waiting.push(id)
+      else if (wording(text)) targets[id] = text
+      else held.push(id)
+    }
+    for (const id of held) {
+      get().say(
+        `  ${id} is empty — an empty target is not storable; restore the wording, ` +
+        `or re-draft this segment to have it done again`,
+        'bad',
+      )
+    }
+    const ids = Object.keys(targets)
+    if (!ids.length) return { outcome: { ok: !held.length && !waiting.length, failed: false }, reread: false }
+
+    // The token each edit was based on, so a translation batch that landed
+    // mid-review — or a second window — cannot overwrite a sentence silently.
+    // Per id and optional: a segment we hold no token for is written the way it
+    // always was. An entry may carry its own: the token of the wording a
+    // reviewer chose to write over, or of this page's own write that the entry
+    // was typed on top of.
+    //
+    // *Known gap, not closed here:* for every other entry the token is read from
+    // `doc` when the save is sent, not when the edit began, so a re-read landing
+    // between the first keystroke and the save moves the base past wording the
+    // reviewer never saw. That needs the token of the page's own writes in
+    // general, which is HANDOFF-096's to design; it is an `it.fails` there.
+    const base: Record<string, string> = {}
+    const byId = new Map(doc.segments.map(s => [s.id, s]))
+    for (const id of ids) {
+      const token = drafts.base(id) ?? byId.get(id)?.token
+      if (token) base[id] = token
+    }
+
+    const epoch = drafts.epoch()
+    writes += 1
+    drafts.sending(targets)
+    let r: SaveResponse
+    try {
+      r = await api.postSave({ ...where, targets, base })
+    } catch (e) {
+      writes += 1
+      drafts.landed()
+      // Kept on failure: an empty target is a 400, and clearing first would
+      // throw away every other edit in the batch along with the one the server
+      // would not take.
+      get().say('  ' + reason(e), 'bad')
+      return { outcome: { ok: false, failed: true }, reread: false }
+    }
+    writes += 1
+    drafts.landed()
+
+    // **A reply about a parse no longer on screen settles nothing here.** Ids
+    // restart at `s0001` in every document, so settling it would forget, keep
+    // or mark some other paragraph's entry.
+    if (drafts.epoch() !== epoch) return { outcome: { ok: false, failed: false }, reread: false }
+
+    // **A reply this page cannot read takes nothing as written.** It used to
+    // forget every entry it sent and only then fail on `r.conflicts`.
+    if (!r || typeof r.conflicts !== 'object' || r.conflicts === null ||
+        typeof r.stored !== 'object' || r.stored === null || !Array.isArray(r.unknown)) {
+      get().say(
+        `  the server answered this save with something this page cannot read, so nothing ` +
+        `was taken as written — ${names(ids)} stay unsaved here`,
+        'bad',
+      )
+      return { outcome: { ok: false, failed: true }, reread: false }
+    }
+
+    // Every id sent is exactly one of: named no segment, refused, written. A
+    // conflict whose stored text is the text sent is a write, not a refusal —
+    // with one save on the wire this page no longer sends itself into one, so
+    // it is a backstop, and normalization means it is not the mechanism.
+    const unknown = new Set(r.unknown)
+    const written: Record<string, string> = {}
+    const tokens: Record<string, string | undefined> = {}
+    const lost: string[] = []
+    for (const id of ids) {
+      if (unknown.has(id)) continue
+      const c = r.conflicts[id]
+      if (c && c.text !== targets[id]) { lost.push(id); continue }
+      written[id] = targets[id]!
+      tokens[id] = (c ?? r.stored[id])?.token
+    }
+    drafts.settle(written, tokens)
+    for (const id of lost) drafts.mark(id, r.conflicts[id]!)
+    if (r.unknown.length) {
+      drafts.forget(r.unknown)
+      get().say(`  ${names(r.unknown)} name no segment and were ignored`, 'warn')
+    }
+    const refused = lost.filter(id => drafts.conflict(id))
+    if (refused.length) {
+      get().say(
+        `  ${names(refused)} changed underneath this edit and were not written — your ` +
+        `wording is still in ${refused.length === 1 ? 'its row' : 'each row'}, beside what is ` +
+        `stored now, and nothing sends it until you choose there which stays`,
+        'bad',
+      )
+    }
+    // **Re-read only the document this page is still on.** A flush that ran
+    // because the address moved is followed by the arriving document's own
+    // fetch, so re-reading the one being left is a second full `GET /api/doc`
+    // — every segment of it — thrown away under the loading screen. Decided
+    // from state rather than from an argument the caller passes: a re-read a
+    // caller can turn off is two spellings of one rule, and the reviewer who
+    // goes straight back re-reads it in that fetch anyway.
+    return {
+      outcome: { ok: !held.length && !waiting.length && !refused.length, failed: false },
+      reread: same(get().at, where),
+    }
+  }
+}

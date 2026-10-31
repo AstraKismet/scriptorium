@@ -573,6 +573,254 @@ describe('opening a document', () => {
 })
 
 /**
+ * HANDOFF-091: what a save does with a reviewer's words it could not write.
+ *
+ * Each test puts its assertion about the words first, so on the commit before
+ * this package it fails on what the page did with them rather than on a
+ * function that did not exist yet.
+ */
+describe('a refused wording, and words typed while a save is in flight', () => {
+  const bad = (part: string): boolean =>
+    useStore.getState().log.some(l => l.level === 'bad' && l.text.includes(part))
+  const ch2 = (segments: Segment[]): DocResponse => ({ ...doc(segments), source: 'book/ch2.md' })
+  const hold = (): { until: Promise<void>; release: () => void } => {
+    let release: () => void = () => undefined
+    const until = new Promise<void>(r => { release = r })
+    return { until, release }
+  }
+  const refused = { applied: 0, unknown: [], stored: {}, conflicts: { s0001: { text: '她整夜未眠。', token: 'tok9' } } }
+
+  it('keeps the words a conflict refused, marked with what is stored now', async () => {
+    await openWith([segment({ id: 's0001', token: 'tok1' })])
+    drafts.set('s0001', '她一夜沒睡。', '她沒有睡。')
+    replies({ body: refused })
+    otherwise({ body: doc([segment({ id: 's0001', target: '她整夜未眠。', token: 'tok9' })]) })
+
+    const ok = await useStore.getState().save()
+    expect(drafts.get('s0001')).toBe('她一夜沒睡。')
+    expect(drafts.conflict('s0001')).toEqual({ text: '她整夜未眠。', token: 'tok9' })
+    expect(ok).toBe(false)
+    expect(bad('changed underneath this edit')).toBe(true)
+    expect(bad('beside what is stored now')).toBe(true)
+  })
+
+  it('sends a refused wording again only once the reviewer chooses it, against what they were shown', async () => {
+    await openWith([segment({ id: 's0001', token: 'tok1' })])
+    drafts.set('s0001', '她一夜沒睡。', '她沒有睡。')
+    replies({ body: refused })
+    otherwise({ body: doc([segment({ id: 's0001', target: '她整夜未眠。', token: 'tok9' })]) })
+    await useStore.getState().save()
+
+    // More words, a blur, Ctrl+Enter: nothing goes out for this row.
+    drafts.set('s0001', '她一夜沒睡。還', '她整夜未眠。')
+    await useStore.getState().save()
+    await useStore.getState().save()
+    expect(callsTo('/api/save')).toHaveLength(1)
+    expect(drafts.get('s0001')).toBe('她一夜沒睡。還')
+
+    drafts.overrule('s0001')
+    replies({ body: { applied: 1, unknown: [], stored: { s0001: { text: '她一夜沒睡。還', token: 'tok10' } }, conflicts: {} } })
+    expect(await useStore.getState().save()).toBe(true)
+    const sent = lastCall('/api/save')?.body as { targets: unknown; base: unknown }
+    expect(sent.targets).toEqual({ s0001: '她一夜沒睡。還' })
+    expect(sent.base).toEqual({ s0001: 'tok9' })
+    expect(drafts.has('s0001')).toBe(false)
+    expect(drafts.conflict('s0001')).toBeUndefined()
+  })
+
+  it('marks a chosen wording again when the stored one moved once more', async () => {
+    await openWith([segment({ id: 's0001', token: 'tok1' })])
+    drafts.set('s0001', '她一夜沒睡。', '她沒有睡。')
+    replies(
+      { body: refused },
+      { body: doc([segment({ id: 's0001', target: '她整夜未眠。', token: 'tok9' })]) },
+      { body: { applied: 0, unknown: [], stored: {}, conflicts: { s0001: { text: '她沒睡。', token: 'tok11' } } } },
+    )
+    otherwise({ body: doc([segment({ id: 's0001', target: '她沒睡。', token: 'tok11' })]) })
+    await useStore.getState().save()
+    drafts.overrule('s0001')
+    expect(await useStore.getState().save()).toBe(false)
+    expect(drafts.get('s0001')).toBe('她一夜沒睡。')
+    expect(drafts.conflict('s0001')).toEqual({ text: '她沒睡。', token: 'tok11' })
+  })
+
+  it('drops the words when the reviewer chooses the stored wording', async () => {
+    await openWith([segment({ id: 's0001', token: 'tok1' })])
+    drafts.set('s0001', '她一夜沒睡。', '她沒有睡。')
+    replies({ body: refused })
+    otherwise({ body: doc([segment({ id: 's0001', target: '她整夜未眠。', token: 'tok9' })]) })
+    await useStore.getState().save()
+    drafts.discard('s0001')
+    expect(drafts.has('s0001')).toBe(false)
+    expect(drafts.conflict('s0001')).toBeUndefined()
+    expect(await useStore.getState().save()).toBe(true)
+    expect(callsTo('/api/save')).toHaveLength(1)
+  })
+
+  // The package's own probe, verbatim but for the fixture helpers.
+  it('keeps text typed while the save that sent an older version was in flight', async () => {
+    await openWith([segment({ id: 's0001', target: 'orig', token: 't0' })])
+    drafts.set('s0001', '燈還', 'orig')
+    const wire = hold()
+    replies({ body: { applied: 1, unknown: [], stored: {}, conflicts: {} }, after: wire.until })
+    otherwise({ body: doc([segment({ id: 's0001', target: '燈還', token: 'w1' })]) })
+    const saving = useStore.getState().save()
+    drafts.set('s0001', '燈還亮著', 'orig')
+    wire.release()
+    await saving
+    expect(drafts.get('s0001')).toBe('燈還亮著')
+  })
+
+  it('bases the next send of text typed during a save on the token that save produced', async () => {
+    await openWith([segment({ id: 's0001', target: 'orig', token: 't0' })])
+    drafts.set('s0001', '燈還', 'orig')
+    const wire = hold()
+    replies(
+      { body: { applied: 1, unknown: [], stored: { s0001: { text: '燈還', token: 'w1' } }, conflicts: {} }, after: wire.until },
+      // The re-read is older than the write — a read ordering is HANDOFF-096's.
+      { body: doc([segment({ id: 's0001', target: 'orig', token: 't0' })]) },
+    )
+    otherwise({ body: { applied: 1, unknown: [], stored: { s0001: { text: '燈還亮著', token: 'w2' } }, conflicts: {} } })
+    const saving = useStore.getState().save()
+    drafts.set('s0001', '燈還亮著', 'orig')
+    wire.release()
+    await saving
+    await useStore.getState().save()
+    const sent = lastCall('/api/save')?.body as { targets: unknown; base: unknown }
+    expect(sent.targets).toEqual({ s0001: '燈還亮著' })
+    expect(sent.base).toEqual({ s0001: 'w1' })
+  })
+
+  it('writes words typed during the flush on the way out, and leaves', async () => {
+    await openWith([segment({ id: 's0001', target: 'orig', token: 't0' })])
+    drafts.set('s0001', '燈還', 'orig')
+    const wire = hold()
+    let n = 0
+    answering(call => {
+      if (call.path.startsWith('/api/save')) {
+        n += 1
+        return n === 1
+          ? { body: { applied: 1, unknown: [], stored: { s0001: { text: '燈還', token: 'w1' } }, conflicts: {} }, after: wire.until }
+          : { body: { applied: 1, unknown: [], stored: { s0001: { text: '燈還亮著', token: 'w2' } }, conflicts: {} } }
+      }
+      if (call.path.startsWith('/api/doc')) return { body: ch2([segment({ id: 's0001' })]) }
+      return null
+    })
+    const opening = useStore.getState().open('book/ch2.md', 'zh-TW')
+    drafts.set('s0001', '燈還亮著', 'orig')
+    wire.release()
+    await opening
+    expect(useStore.getState().docError).toBe('')
+    expect(useStore.getState().doc?.source).toBe('book/ch2.md')
+    const saves = callsTo('/api/save')
+    expect(saves).toHaveLength(2)
+    expect((saves[1]!.body as { targets: unknown }).targets).toEqual({ s0001: '燈還亮著' })
+    expect((saves[1]!.body as { base: unknown }).base).toEqual({ s0001: 'w1' })
+  })
+
+  it('says nothing failed when typing outlasts both laps of the flush', async () => {
+    await openWith([segment({ id: 's0001', target: 'orig', token: 't0' })])
+    drafts.set('s0001', '燈', 'orig')
+    const first = hold()
+    const second = hold()
+    let n = 0
+    answering(call => {
+      if (call.path.startsWith('/api/save')) {
+        n += 1
+        const text = (call.body as { targets: Record<string, string> }).targets.s0001!
+        return { body: { applied: 1, unknown: [], stored: { s0001: { text, token: `w${n}` } }, conflicts: {} },
+          after: n === 1 ? first.until : second.until }
+      }
+      return { body: ch2([segment({ id: 's0001' })]) }
+    })
+    const opening = useStore.getState().open('book/ch2.md', 'zh-TW')
+    drafts.set('s0001', '燈還', 'orig')
+    first.release()
+    await new Promise(r => { setTimeout(r, 20) })
+    expect(callsTo('/api/save')).toHaveLength(2)
+    drafts.set('s0001', '燈還亮著', 'orig')
+    second.release()
+    await opening
+    const error = useStore.getState().docError
+    expect(drafts.get('s0001')).toBe('燈還亮著')
+    expect(error).toMatch(/^s0001 was typed into while book\/ch1\.md was being written/)
+    expect(error).toContain('nothing failed')
+    expect(error).not.toContain('could not be written')
+    expect(useStore.getState().doc?.source).toBe('book/ch1.md')
+  })
+
+  it('does not leave a document while a refused wording waits there, and says why', async () => {
+    await openWith([segment({ id: 's0001', token: 'tok1' })])
+    drafts.set('s0001', '她一夜沒睡。', '她沒有睡。')
+    replies({ body: refused })
+    otherwise({ body: doc([segment({ id: 's0001', target: '她整夜未眠。', token: 'tok9' })]) })
+    await useStore.getState().save()
+    const reads = callsTo('/api/doc').length
+    await useStore.getState().open('book/ch2.md', 'zh-TW')
+    expect(drafts.get('s0001')).toBe('她一夜沒睡。')
+    expect(useStore.getState().docError).toMatch(/^s0001 changed in book\/ch1\.md underneath your edit/)
+    expect(useStore.getState().docError).not.toContain('could not be written')
+    expect(useStore.getState().doc?.source).toBe('book/ch1.md')
+    expect(callsTo('/api/doc')).toHaveLength(reads)
+    expect(callsTo('/api/save')).toHaveLength(1)
+  })
+
+  it('takes a conflict carrying the very text sent as a write, and says nothing', async () => {
+    await openWith([segment({ id: 's0001', token: 'tok1' })])
+    drafts.set('s0001', '她一夜沒睡。', '她沒有睡。')
+    replies({ body: { applied: 0, unknown: [], stored: {}, conflicts: { s0001: { text: '她一夜沒睡。', token: 'tok5' } } } })
+    otherwise({ body: doc([segment({ id: 's0001', target: '她一夜沒睡。', token: 'tok5' })]) })
+    expect(await useStore.getState().save()).toBe(true)
+    expect(drafts.has('s0001')).toBe(false)
+    expect(bad('changed underneath')).toBe(false)
+  })
+
+  it('sends one request for saves asked while one is on the wire', async () => {
+    await openWith([segment({ id: 's0001', token: 'tok1' })])
+    drafts.set('s0001', '她一夜沒睡。', '她沒有睡。')
+    const wire = hold()
+    replies({ body: { applied: 1, unknown: [], stored: { s0001: { text: '她一夜沒睡。', token: 'tok2' } }, conflicts: {} }, after: wire.until })
+    otherwise({ body: doc([segment({ id: 's0001', target: '她一夜沒睡。', token: 'tok2' })]) })
+    const all = [useStore.getState().save(), useStore.getState().save(), useStore.getState().save()]
+    wire.release()
+    expect(await Promise.all(all)).toEqual([true, true, true])
+    expect(callsTo('/api/save')).toHaveLength(1)
+    expect(bad('changed underneath')).toBe(false)
+  })
+
+  /**
+   * **Known broken, HANDOFF-096 (its ninth case).** Found by HANDOFF-091's
+   * premise review and left open there on purpose. `base` is read from `doc`
+   * when a save is sent, not when the edit began, so a re-read landing between
+   * the first keystroke and the save — `follow()`'s at the end of a run, or
+   * another row's save — moves the base past wording the reviewer never saw,
+   * and the save overwrites a batch's write with no conflict reported. The fix
+   * is the token of the wording an edit began on, advanced by the page's own
+   * writes, which is HANDOFF-096's to design. `it.fails`, so the suite turns red
+   * the day it lands and the marker is removed in the same commit.
+   */
+  it.fails('bases an edit on the token of the wording it began on, not on a re-read that landed since', async () => {
+    await openWith([segment({ id: 's0001', token: 'tok1' })])
+    drafts.set('s0001', '她一夜沒睡。', '她沒有睡。')
+    replies({ body: doc([segment({ id: 's0001', target: '批次寫下的句子。', token: 'tok7' })]) })
+    await useStore.getState().refresh()
+    replies({ body: { applied: 1, unknown: [], stored: {}, conflicts: {} } })
+    otherwise({ body: doc([segment({ id: 's0001', target: '她一夜沒睡。', token: 'tok8' })]) })
+    await useStore.getState().save()
+    expect((lastCall('/api/save')?.body as { base: unknown }).base).toEqual({ s0001: 'tok1' })
+  })
+
+  it('takes nothing as written from a reply it cannot read', async () => {
+    await openWith([segment({ id: 's0001', token: 'tok1' })])
+    drafts.set('s0001', '她一夜沒睡。', '她沒有睡。')
+    replies({ body: {} })
+    expect(await useStore.getState().save()).toBe(false)
+    expect(drafts.get('s0001')).toBe('她一夜沒睡。')
+    expect(bad('cannot read')).toBe(true)
+  })
+})
+
+/**
  * Where an unsaved edit may be destroyed at all.
  *
  * Every test above is about the *conditions* under which the discard fires,
@@ -605,5 +853,12 @@ describe('where an unsaved edit may be destroyed', () => {
   it('empties the map in exactly one place, and marks it void in exactly one other', () => {
     expect(sites('drafts.clear(')).toEqual([['./store.ts', 1]])
     expect(sites('drafts.strand(')).toEqual([['./store.ts', 1]])
+  })
+
+  // HANDOFF-091: a reviewer's refused wording is dropped, or written over the
+  // stored one, only by the reviewer's own choice in its row.
+  it('drops a refused wording, or writes it anyway, from the row alone', () => {
+    expect(sites('drafts.discard(')).toEqual([['./components/SegmentRow.tsx', 1]])
+    expect(sites('drafts.overrule(')).toEqual([['./components/SegmentRow.tsx', 1]])
   })
 })
