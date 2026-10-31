@@ -3,6 +3,200 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-10-31 · The reading view is virtualized by line
+
+Closing HANDOFF-090. On 2026-09-14 the maintainer measured *Read → click a
+paragraph → Back to the ledger*, on a 5000-segment document in a painted Chrome
+tab, freezing the whole browser for about ten seconds. The reading view drew the
+whole chapter in one pass: 9999 `.block` spans, about 10 000 DOM nodes.
+
+### What was measured
+
+A synthetic 5000-segment Markdown document — a heading every fifty paragraphs,
+every segment translated — served by `lx web`. Headless Chrome 156
+(`--headless=new`) over the DevTools protocol, one foregrounded tab at
+1366×900, and **`document.visibilityState` recorded as `visible` on every
+step**; a run whose tab was not visible would have been refused rather than
+reported. Three runs per build, each a fresh load at `?seg=s2500`, input
+dispatched as trusted events. Per step: the wall time from the input to the
+first frame after its outcome appeared, the longest `long-animation-frame` entry
+starting inside the step (which, unlike `longtask`, includes style, layout and
+paint), and the blocks mounted. Ranges over the three runs:
+
+| build | open *Read* | click a paragraph | *Back* | worst LoAF | blocks mounted |
+|---|---|---|---|---|---|
+| `dd2e3dd` | 353–1265 ms | 176–270 ms | 34–70 ms | 150 ms | 10 001 |
+| `3d375ef` (before) | 315–1284 ms | 122–124 ms | 26–52 ms | 129 ms | 10 001 |
+| this change | 1197–1253 ms | 18–34 ms | 23–67 ms | none ≥ 50 ms | 42 |
+
+The same three builds again with `--force-renderer-accessibility`, which makes
+the renderer build its accessibility tree the way a screen reader or an input
+method's UI Automation client makes it on Windows:
+
+| build | open *Read* | click a paragraph | *Back* | worst LoAF |
+|---|---|---|---|---|
+| `dd2e3dd` | 777–1940 ms | 622–684 ms | 170–203 ms | 162 ms |
+| `3d375ef` (before) | 814–1786 ms | 969–1038 ms | 168–172 ms | 156 ms |
+| this change | 1190–1204 ms | 29–48 ms | 56–70 ms | none ≥ 50 ms |
+
+**Attribution: the cost belongs to neither build in particular.** `dd2e3dd` and
+`3d375ef` mount the same 10 001 blocks and cost the same within run-to-run
+noise. What HANDOFF-084 changed is reachability: `dd2e3dd` opens the reading
+view at the top of the chapter, `3d375ef` opens it in the middle of the 10 000
+nodes at the paragraph the ledger was on, and before HANDOFF-084 a second click
+blanked the page, so the trip the maintainer made was rarely completed.
+
+**The ten seconds were not reproduced, and that is stated rather than
+explained away.** No step in any build came near them. The worst main-thread
+frame was 162 ms. Whatever spent the ten seconds is work a headless run does not
+do: GPU rasterization into a real window, or the browser process's own platform
+accessibility layer. That layer is a plausible culprit on this machine, because
+on Windows an input method can switch it on, and it would explain why the whole
+browser stalled rather than one tab. The one measured hint is the second table:
+forcing renderer accessibility made a click 5–8× slower and *Back* about 3×
+slower in the unvirtualized builds, and changed neither in this one. It is a
+hint, not a measurement of the stall. The maintainer's check in a foregrounded
+tab of their own browser is acceptance criterion 4, and it has not been run —
+see *Left open*.
+
+What the open-*Read* wall time still holds is not main-thread work: no frame of
+50 ms or more was recorded in this build, so the page is waiting rather than
+working. The 2.14 MB `GET /api/preview` for this document answered in about
+0.2 s from `curl`; the rest of the wait was not attributed further.
+
+### The change
+
+`Reading.tsx` draws the chapter through `virtua`'s `VList`, the dependency the
+ledger already virtualizes with. Every claim the view made before still holds:
+a click moves the address through `routes.focus`, the view lands once per
+document, the sentence pieces come from `POST /api/sentences` and are rendered
+in order, and nothing is editable.
+
+**The unit is a line, not a block.** Blocks are inline spans in one
+`white-space: pre-wrap` flow, so making each block an item would put a list
+marker on a different line from its item. `lines()` cuts the block sequence at
+the *first* line break of each skeleton run. The run up to and including that
+break closes the current line, and the rest opens the next. In `pre-wrap` a
+break at the very end of a block box draws no empty line after it, and a break
+at the very start draws one before it, so `para\n\npara` cut as `para\n` |
+`\npara` draws the one blank line the unbroken flow drew. A segment is never
+divided, interior line breaks included. The lines concatenate back to the
+rendered text byte for byte, and a test pins that. The review below measured the
+equivalence in headless Chrome: 846 renders at two widths, every visible
+character in the same place as in the unbroken flow. It also measured that
+cutting at *every* break draws the same. An earlier draft of this entry said it
+would draw the blank lines twice, which was wrong. The first break is kept
+because it makes fewer lines.
+
+**No padding on the scroller.** The old page's `40vh` run-out was first moved
+onto the `VList`, and the measured result was lines stopping 160 px above the
+bottom of an 818 px window, which a scroll did not fill in. `virtua` sizes its
+viewport from the scroller's *content* box, so padding there shrinks the range
+it mounts. The top margin and the run-out are now the first and last line's own
+padding. The ledger carries `paddingBottom: '30vh'` on its `VList` in the same
+way. Measured on the same document it fills an 801 px-high window only because
+its rows are tall, ending at 800 px. A document of short rows would show the
+gap. That is the ledger's scroll feel, so it is recorded in HANDOFF-060 rather
+than changed here.
+
+**The paragraph is centred, not its line, and the virtualizer is not asked to
+scroll.** The line the address names is in `keepMounted`, so it is mounted at
+its estimated position from the first render. Two frames later the element is
+scrolled into the middle, and `virtua` keeps it there as the lines around it are
+measured. The first version asked `scrollToIndex` to centre the line, which
+centres the unit it virtualizes. A line taller than the window then put the
+paragraph out of view. The case is real: a Markdown table row is one line, every
+cell a segment joined by ` | `. Centring the element after `scrollToIndex` did
+not help, because `scrollToIndex` goes on correcting towards its own target as
+lines are measured. Measured on a 364-segment table with one 4000-character
+cell, deep-linked to the cell after it: the target landed at 495 px in a window
+spanning 82–900 px, where the first version left it at 1337 px. An ordinary
+paragraph lands within 30 px of the centre.
+
+**The line holding keyboard focus stays mounted as well.** Tab moves focus and
+not the address. In the first version a PageDown from a paragraph reached by Tab
+unmounted the focused element, focus fell to `body`, and keyboard scrolling
+stopped. Measured now: Tab twice, then six PageDowns, and the scroll advanced
+715 px each time with focus still on the paragraph.
+
+**What this costs: the browser's own find-in-page reaches only mounted lines.**
+At this scale the ledger's filter is the search that works. A screen reader
+likewise reads only what is mounted; that has not been tried with assistive
+technology. And a click within about 150 ms of a scroll is swallowed, because
+`virtua` sets `pointer-events: none` while it scrolls. The ledger has always done
+the same.
+
+### The alternatives that lost
+
+- **`content-visibility: auto` on each paragraph.** It keeps find-in-page and
+  every element in the DOM, and skips layout and paint off-screen. It also keeps
+  all 10 000 nodes in the accessibility tree and in the teardown on *Back*, and
+  those are two of the three places the stall could live that a headless run
+  cannot rule out. It answers one of three.
+- **An indicator instead of a fix.** The maintainer's steer of 2026-09-14
+  allowed it if the cost proved inherent. It did not: no step of the
+  virtualized view blocks the main thread for 50 ms. The existing *rendering…*
+  covers the fetch.
+- **Virtualizing only past a length threshold.** It would keep find-in-page for
+  ordinary chapters, at the price of two render paths for one view, which is
+  how the two would come to disagree.
+
+### How it is tested
+
+`Reading.test.tsx` pins `lines()` against the shapes the parsers leave between
+segments: a blank line, several, a list marker on the next line, a marker with
+no break, a segment with its own wrapped lines, an empty run, and skeleton at
+both ends. The pieces concatenate back to the text, every segment is drawn once
+and whole, and no block appears twice on one line. It also mounts the view over
+a 5000-segment preview and asserts fewer than 100 segment blocks mount. A mutant
+that drew every line in a plain `div` failed exactly that assertion. A line's
+click and Enter handlers are clicked beside the list, the way the ledger's rows
+are, because jsdom lays nothing out and `VList` mounts only the line
+`keepMounted` names. Measurement is not mocked. Another test focuses a paragraph,
+moves the address to another line, and asserts that the focused element is
+still mounted and still focused. The App test that follows a reading-view
+landing asserts which element `scrollIntoView` was called on, not how many times
+a scroll happened. Counting calls is how the review found a landing aimed at the
+wrong line passing every test.
+
+An independent review re-derived the view's properties from the package alone
+and checked them against the first commit, in jsdom and in headless Chrome. It
+found the focus and table landings above, the untested landing target, and the
+false blank-line claim, each with a probe that failed on that commit, and each
+is fixed here. Mutants that dropped the focused line from `keepMounted`, aimed
+the centring at the first paragraph, and landed on every click were each killed
+by exactly the test written for them.
+
+A second lane planted 31 mutants of its own in the first commit. The suite
+killed 13. Four of the survivors were equivalent, and fourteen were real gaps.
+The worst: the bounded-mount test was vacuous for the range, because the test
+setup's `ResizeObserver` reports nothing, so jsdom gives `virtua` a viewport of
+zero. A mutant widening the range to the whole chapter passed it. The lane wrote
+a test for each gap, and they are in `Reading.test.tsx`:
+
+- a measuring observer, so a screenful mounts and the bound means something;
+- the scroller's text equal to the rendered document byte for byte;
+- the margins on the first and last lines only;
+- the sentence request naming the address's paragraph;
+- no scroll under the first click after a landing on no paragraph;
+- sentence pieces drawn in order, on the current paragraph only;
+- Space and double-click.
+
+It also found a defect older than this change, reproduced on the parent commit.
+The sentence pieces were held with no record of which paragraph they belonged
+to, so moving the address drew the new paragraph in the old one's sentences
+until its own request answered. They are held with their id now, and a test
+fails without that.
+
+### Left open
+
+- Acceptance criterion 4, the maintainer's foreground check — `HANDOFF-099`,
+  which carries the environment and the steps.
+- The ledger's padded `VList` — `HANDOFF-060`.
+- Dropping the preview's duplicate `text` stays a `contract_version` question,
+  as the package said. The measurement here gives it no urgency: the reply is
+  not where the time went.
+
 ## 2026-09-24 · The address decides which document is open, and an act rests on what the page has just read
 
 Closing HANDOFF-088. The rail's *Not yet extracted* entry extracted the wrong

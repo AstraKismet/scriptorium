@@ -348,14 +348,22 @@ describe('moving between segments', () => {
     startAt(address(doc.source, 's0003'))
     await opened()
     await waitFor(() => { marginIsAbout('s0003') })
-    const landed = vi.spyOn(Element.prototype, 'scrollIntoView')
+    // The landing centres the paragraph the address names: since HANDOFF-090
+    // the reading view is virtualized and keeps that paragraph's line mounted,
+    // and the element itself is scrolled into view. Asserted on the element it
+    // was called on, not on a count: a landing aimed at the wrong line passed
+    // every test here while only calls were counted (HANDOFF-090's review, F3).
+    // Installed after the ledger has landed, so the one call is the reading
+    // view's.
+    const centred = vi.spyOn(Element.prototype, 'scrollIntoView')
 
     const user = userEvent.setup()
     await user.click(screen.getByRole('button', { name: 'Read' }))
     await waitFor(() => {
       expect(window.location.hash).toBe(reading(doc.source, 's0003'))
       expect(document.getElementById('b-s0003')?.getAttribute('aria-current')).toBe('true')
-      expect(landed).toHaveBeenCalledTimes(1)
+      expect(centred).toHaveBeenCalledTimes(1)
+      expect(centred.mock.contexts[0]).toBe(document.getElementById('b-s0003'))
     }, { timeout: 4000 })
 
     // A click in the reading view moves the address, and the page stays where
@@ -370,7 +378,7 @@ describe('moving between segments', () => {
       expect(document.getElementById('b-s0001')?.getAttribute('aria-current')).toBe('true')
     })
     await settle()
-    expect(landed).toHaveBeenCalledTimes(1)
+    expect(centred).toHaveBeenCalledTimes(1)
     expect(writes - before).toBe(1)
     expect(window.history.length).toBe(entries)
 
