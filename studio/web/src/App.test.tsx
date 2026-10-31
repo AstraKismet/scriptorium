@@ -348,7 +348,11 @@ describe('moving between segments', () => {
     startAt(address(doc.source, 's0003'))
     await opened()
     await waitFor(() => { marginIsAbout('s0003') })
-    const landed = vi.spyOn(Element.prototype, 'scrollIntoView')
+    // The landing is the virtualizer's since HANDOFF-090, and `virtua` scrolls
+    // its viewport with `scrollTo` — the element a deep link names is not mounted
+    // to be scrolled into view. Installed after the ledger has landed, so the
+    // one call counted is the reading view's.
+    const landed = vi.spyOn(Element.prototype, 'scrollTo')
 
     const user = userEvent.setup()
     await user.click(screen.getByRole('button', { name: 'Read' }))

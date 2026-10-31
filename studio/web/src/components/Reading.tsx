@@ -23,13 +23,69 @@
  * both marks on the first. Its known failure is visible here and is the rule
  * working as specified: Chinese dialogue attribution over-splits, so
  * `「站住！」他喊。沒有人停下。` shows `他喊。` as a piece of its own.
+ *
+ * **It is virtualized, by line, since HANDOFF-090.** A five-thousand-segment
+ * document rendered here in one pass was 9999 `.block` spans and about 10 000
+ * DOM nodes, and the maintainer measured *Read → click → Back* freezing the
+ * whole browser for about ten seconds in a painted tab. The unit `virtua` lays
+ * out is a {@link lines line}: the blocks between two line breaks of the
+ * document's own skeleton, so each item is a block-level box and the prose still
+ * flows inside it. What that costs is the browser's own find-in-page, which can
+ * only search what is mounted — the ledger's filter is the search that works at
+ * this scale. `docs/decisions.md`, 2026-10-31.
  */
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { VList, type VListHandle } from 'virtua'
 
 import * as api from '../api'
 import * as routes from '../router'
 import { isError, type Block, type PreviewResponse } from '../contract'
 import { useStore } from '../store'
+
+/** One piece of one block, as drawn on one line of the reading view. */
+export interface Piece {
+  block: Block
+  /** The block's text, or the half of a skeleton run a line break divided. */
+  text: string
+  /** The block's position in `preview.blocks`, which is what keys it. */
+  index: number
+}
+
+/**
+ * The document's blocks, cut into the lines its own skeleton already draws.
+ *
+ * A line ends at the first line break of a skeleton run: the run's text up to
+ * and including that break closes the line it is on, and what follows the break
+ * opens the next. **Nothing is added, dropped or reordered** — the pieces of
+ * every line, concatenated in order, are `preview.text` byte for byte — and a
+ * segment's own text is never divided, interior line breaks included, because a
+ * segment is the unit a click names.
+ *
+ * Why the *first* break and not every break: in `white-space: pre-wrap` a line
+ * break at the very end of a block-level box draws no empty line after it, and
+ * one at the very start draws one before it. So `para\n\npara` cut as `para\n` |
+ * `\npara` is the blank line the unbroken flow drew, and cutting at every break
+ * would draw it twice. A skeleton run with no break (a list marker, a run between
+ * two inline segments) stays on the line it is on, which is what keeps `- ` next
+ * to its item.
+ */
+export function lines(blocks: readonly Block[]): Piece[][] {
+  const out: Piece[][] = []
+  let line: Piece[] = []
+  blocks.forEach((block, index) => {
+    const at = block.id == null ? block.text.indexOf('\n') : -1
+    if (at < 0) {
+      line.push({ block, text: block.text, index })
+      return
+    }
+    line.push({ block, text: block.text.slice(0, at + 1), index })
+    out.push(line)
+    const rest = block.text.slice(at + 1)
+    line = rest ? [{ block, text: rest, index }] : []
+  })
+  if (line.length) out.push(line)
+  return out
+}
 
 export function Reading() {
   const doc = useStore(s => s.doc)
@@ -42,9 +98,25 @@ export function Reading() {
   // highlighting, and send Back to, a paragraph the address no longer named.
   const current = routes.useFocused()
   const landed = useRef('')
+  const list = useRef<VListHandle>(null)
 
   const src = doc?.source ?? ''
   const lang = doc?.lang ?? ''
+
+  const rows = useMemo(() => (preview ? lines(preview.blocks) : []), [preview])
+  // Which line each segment is drawn on, so landing and `keepMounted` are a
+  // lookup rather than a scan of every line per render.
+  const lineOf = useMemo(() => {
+    const m = new Map<string, number>()
+    rows.forEach((line, i) => { for (const p of line) if (p.block.id != null) m.set(p.block.id, i) })
+    return m
+  }, [rows])
+  // The line the reviewer is on stays mounted wherever the scroll goes, as the
+  // ledger keeps its row: it carries the sentence marks and keyboard focus.
+  const keep = useMemo(() => {
+    const i = current == null ? undefined : lineOf.get(current)
+    return i == null ? [] : [i]
+  }, [lineOf, current])
 
   useEffect(() => {
     if (!src) return
@@ -82,14 +154,17 @@ export function Reading() {
   // click moves the address and the address is a dependency here: keyed on it
   // alone, every click re-centred the page, which is what this view did until
   // HANDOFF-084 measured it (a paragraph near the bottom of the window, clicked,
-  // moved 517 px).
+  // moved 517 px). The virtualizer is asked rather than the element, because the
+  // line a deep link names is in the middle of a list that has mounted almost
+  // none of the others.
   useEffect(() => {
     if (!preview) return
     const key = `${src} ${lang}`
     if (landed.current === key) return
     landed.current = key
-    if (current) document.getElementById(`b-${current}`)?.scrollIntoView({ block: 'center' })
-  }, [preview, current, src, lang])
+    const i = current == null ? undefined : lineOf.get(current)
+    if (i != null) list.current?.scrollToIndex(i, { align: 'center' })
+  }, [preview, current, src, lang, lineOf])
 
   if (!doc) return null
 
@@ -117,38 +192,98 @@ export function Reading() {
         </span>
       </div>
 
-      <div className="reading">
-        {error && <div className="empty-page"><h3>Could not read it</h3><p>{error}</p></div>}
-        {!error && !preview && <div className="empty-page"><p>rendering…</p></div>}
-        {preview && (
-          <div className="page">
-            {preview.blocks.map((block, i) => (
-              <Paragraph
-                key={block.id ?? `k${i}`}
-                block={block}
-                failing={(issues.get(block.id ?? '') ?? []).some(isError)}
-                current={block.id != null && block.id === current}
-                pieces={block.id != null && block.id === current ? pieces : null}
-                onPick={() => {
-                  if (block.id == null) return
-                  routes.focus(src, lang, block.id)
-                }}
-                onOpen={() => {
-                  if (block.id == null) return
-                  say(`opening ${block.id} in the ledger`)
-                  routes.go(routes.doc(src, lang, block.id))
-                }}
-              />
-            ))}
-          </div>
-        )}
-      </div>
+      {error && <div className="reading"><div className="empty-page"><h3>Could not read it</h3><p>{error}</p></div></div>}
+      {!error && !preview && <div className="reading"><div className="empty-page"><p>rendering…</p></div></div>}
+      {preview && (
+        <VList
+          ref={list}
+          className="reading"
+          data={rows}
+          keepMounted={keep}
+          // No padding on the scroller, at either end. `virtua` sizes its
+          // viewport from the scroller's *content* box, so padding there shrinks
+          // the range it mounts: measured on HANDOFF-090 with the old page's 40vh
+          // run-out on this element, the lines stopped 160 px above the bottom of
+          // an 818 px window and a scroll did not fill them in. The page's top
+          // margin and its run-out are the first and the last line's instead.
+        >
+          {(line, i) => (
+            <Line
+              key={i}
+              line={line}
+              first={i === 0}
+              last={i === rows.length - 1}
+              src={src}
+              lang={lang}
+              current={current}
+              pieces={pieces}
+              failing={id => (issues.get(id) ?? []).some(isError)}
+              say={say}
+            />
+          )}
+        </VList>
+      )}
     </>
   )
 }
 
-function Paragraph({ block, failing, current, pieces, onPick, onOpen }: {
+/**
+ * One line of the chapter. **Exported so a test can click a paragraph without
+ * mocking the virtualizer's measurement**, which jsdom cannot answer: it lays
+ * nothing out, so `VList` mounts only the line `keepMounted` names. The ledger's
+ * rows are tested beside the application for the same reason, and this is the
+ * same component with the same handlers the list draws.
+ */
+export function Line({ line, first, last = false, src, lang, current, pieces, failing, say }: {
+  line: readonly Piece[]
+  /** Carries the page's top margin. */
+  first: boolean
+  /** Carries the long run-out, so a chapter's end is read clear of the window's bottom. */
+  last?: boolean
+  src: string
+  lang: string
+  current: string | null
+  pieces: string[] | null
+  failing: (id: string) => boolean
+  say: (text: string) => void
+}) {
+  return (
+    <div
+      className="line"
+      style={first || last ? { paddingTop: first ? 48 : undefined, paddingBottom: last ? '40vh' : undefined } : undefined}
+    >
+      {line.map(piece => {
+        const id = piece.block.id
+        return (
+          <Paragraph
+            // A block is on a line once: a skeleton run a break divides puts
+            // one half on each of two lines, never two halves on one.
+            key={piece.index}
+            block={piece.block}
+            text={piece.text}
+            failing={id != null && failing(id)}
+            current={id != null && id === current}
+            pieces={id != null && id === current ? pieces : null}
+            onPick={() => {
+              if (id == null) return
+              routes.focus(src, lang, id)
+            }}
+            onOpen={() => {
+              if (id == null) return
+              say(`opening ${id} in the ledger`)
+              routes.go(routes.doc(src, lang, id))
+            }}
+          />
+        )
+      })}
+    </div>
+  )
+}
+
+function Paragraph({ block, text, failing, current, pieces, onPick, onOpen }: {
   block: Block
+  /** What this line draws of it: all of a segment, or one side of a skeleton run's break. */
+  text: string
   failing: boolean
   current: boolean
   pieces: string[] | null
@@ -160,7 +295,7 @@ function Paragraph({ block, failing, current, pieces, onPick, onOpen }: {
   // punctuation and markup, so it is shown rather than swallowed: dropping it
   // would be this page deciding what the document says.
   if (block.id == null) {
-    return <span className="block skeleton">{block.text}</span>
+    return <span className="block skeleton">{text}</span>
   }
 
   // `from` names the branch that produced the text. Since version 4 a stored
@@ -199,7 +334,7 @@ function Paragraph({ block, failing, current, pieces, onPick, onOpen }: {
         // Rendered in order, never located by searching: the concatenation is
         // the input exactly, so the pieces *are* the positions.
         ? pieces.map((piece, i) => <span className="sentence" key={i}>{piece}</span>)
-        : block.text}
+        : text}
     </span>
   )
 }

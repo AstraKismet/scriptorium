@@ -225,8 +225,11 @@ main { display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
 /* ── the reading view ──────────────────────────────────────── */
 
 .reading { flex: 1; overflow: auto; min-height: 0; }
-.page {
-  max-width: 34em; margin: 0 auto; padding: 48px 24px 40vh;
+/* One line of the chapter, the unit the reading view virtualizes. The column is
+   drawn per line rather than once around the page, because there is no page
+   element any more: the scroller holds lines. */
+.line {
+  max-width: 34em; margin: 0 auto; padding: 0 24px;
   font: 16px/1.85 var(--prose);
 }
 .block { white-space: pre-wrap; }
