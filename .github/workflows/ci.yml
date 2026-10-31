@@ -25,7 +25,15 @@ jobs:
         # Windows stays in the matrix deliberately. The round-trip defects this
         # suite is growing to catch are CRLF-specific, and Windows is the
         # primary development platform.
-        os: [ubuntu-latest, windows-latest]
+        #
+        # The Linux leg is pinned rather than `ubuntu-latest`. On 2026-10-31
+        # `ubuntu-latest` resolved to Ubuntu 26.04, for which setup-python has
+        # no 3.9 build, so the py3.9 leg failed in five seconds on every pull
+        # request without running a test. 3.9 is this project's declared floor
+        # (`requires-python`), so the image moves before the floor does: 24.04
+        # still ships it. Raising the floor is a separate decision, and this
+        # pin is the thing to revisit when it is taken or when 24.04 retires.
+        os: [ubuntu-24.04, windows-latest]
         python: ["3.9", "3.12"]
     steps:
       - uses: actions/checkout@v4
