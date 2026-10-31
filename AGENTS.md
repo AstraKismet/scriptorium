@@ -621,7 +621,7 @@ python -m scriptorium --help        # or `lx` after `pip install -e .`
 
 cd studio/web && npm ci             # only to CHANGE the workbench; `lx web`
 npm run typecheck                   #   needs none of this, because the build
-npm test                            #   is committed. 154 tests (8 `it.fails`), jsdom, no network
+npm test                            #   is committed. 172 tests (9 `it.fails`), jsdom, no network
 npm run build                       # writes src/scriptorium/web/static/ — commit it
 
 lx run docs/guide.md --lang zh-TW   # extract -> translate -> check -> repair -> render
@@ -851,6 +851,16 @@ own.
   replaces `doc`, answers to this rule. Before 2026-09-20 a
   Back press threw the words away with no request at all. `docs/decisions.md`,
   2026-09-20.
+
+  **And nothing the server refuses is thrown away either.** A save forgets an id
+  only while its entry is still the text it sent. A wording refused as stale
+  stays in its entry, marked with the stored wording, and the row shows both.
+  It is never sent again until the reviewer chooses in that row: *Write mine
+  over it* is a compare-and-swap on the token they were shown, and *Discard
+  mine* drops theirs. Only one save is on the wire at a time, because the same
+  words sent twice come back as a conflict with themselves, and the server's
+  normalization means no comparison of texts can tell. `docs/decisions.md`,
+  2026-10-31.
 
 - **A document is opened by the address, and an act rests on what the page has
   just read.** `App.tsx`'s effect turns the address into `at`. `open()` is

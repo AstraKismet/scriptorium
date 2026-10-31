@@ -1501,9 +1501,11 @@ describe('what the page acts on is what it has just read', () => {
       if (path.startsWith('/api/save')) {
         saves += 1
         // As the server answers by default: every target sent is stored, with a
-        // new token — `stored` is what the page takes at once (contract,
-        // `POST /api/save`), so a fixture answering it empty would be a server
-        // this page never talks to.
+        // new token. The page learns what a save stored from the re-read after it
+        // (HANDOFF-096 owns that), and since HANDOFF-091 takes from `stored` one
+        // thing only: the token of its own write, for words typed while that
+        // write was in flight. A fixture answering it empty would still be a
+        // server this page never talks to.
         const sent = (call.body as { targets?: Record<string, string> } | null)?.targets ?? {}
         const stored = Object.fromEntries(Object.entries(sent).map(([id, text]) => [id, { text, token: `w-${id}-${saves}` }]))
         return over.save?.(saves, call.body) ?? { body: { applied: Object.keys(stored).length, unknown: [], stored, conflicts: {} } }
@@ -1784,24 +1786,31 @@ describe('what the page acts on is what it has just read', () => {
     // Back, Back with words unsaved: the first open was still flushing when the
     // second finished, and carried on — raising `docLoading` over the page the
     // second had drawn and never lowering it.
+    //
+    // Since HANDOFF-091 the second open waits for the write already on the wire
+    // instead of sending the same words again, which the server's
+    // compare-and-swap then reported as a conflict with the first write. So the
+    // first save is released before the second open can finish, and what is
+    // asserted is unchanged: the overtaken open touches nothing on its way out.
     const first = held()
-    serve({
-      save: n => (n === 1
-        ? { body: wrote, after: first.until }
-        : { body: { applied: 0, unknown: [], stored: {}, conflicts: { s0003: { text: '燈還亮著。', token: 'z' } } } }),
-    })
+    serve({ save: n => (n === 1 ? { body: wrote, after: first.until } : null) })
     await opened()
     await userEvent.setup().type(field(), '燈還亮著。')
     window.location.hash = address(second.source)
     await waitFor(() => { expect(callsTo('/api/save')).toHaveLength(1) })
     window.location.hash = address(third.source)
-    await waitFor(() => { expect(readsOf(third.source)).toBe(1) }, { timeout: 4000 })
-    await waitFor(() => { expect(screen.getByText('/2 translated')).toBeTruthy() }, { timeout: 4000 })
+    await settle(100)
+    // The words are on the wire once, and not sent a second time meanwhile.
+    expect(callsTo('/api/save')).toHaveLength(1)
 
     await act(async () => { first.release(); await settle(100) })
+    await waitFor(() => { expect(readsOf(third.source)).toBe(1) }, { timeout: 4000 })
+    await waitFor(() => { expect(screen.getByText('/2 translated')).toBeTruthy() }, { timeout: 4000 })
     expect(screen.queryByText(/^reading /)).toBeNull()
     expect(useStore.getState().doc?.source).toBe(third.source)
     expect(readsOf(second.source)).toBe(0)
+    expect(callsTo('/api/save')).toHaveLength(1)
+    expect(logged('bad', 'changed underneath this edit')).toBe(false)
   }, 15000)
 
   // ── the toolbar's confirmation, decided from what it has just read ────────
@@ -1903,24 +1912,32 @@ describe('what the page acts on is what it has just read', () => {
   }, 20000)
 
   it('does not let an overtaken open write its refusal over the page of a later open of the same document (older)', async () => {
+    // An open overtaken while it flushed would find wording still unwritten when
+    // its flush returned — words typed during it — and refuse over the page the
+    // later open had drawn. Before HANDOFF-091 the door was a third document
+    // reached while the first flush was still in flight; with one save on the
+    // wire that cannot be reached any more, so the words are typed into the same
+    // field during the flush, which leaves the overtaken open exactly the same
+    // unwritten wording to refuse over.
     const s1 = held()
-    const s3 = held()
-    serve({ save: n => (n === 1 ? { body: wrote, after: s1.until } : n === 3 ? { body: wrote, after: s3.until } : null) })
+    serve({ save: n => (n === 1 ? { body: wrote, after: s1.until } : null) })
     await opened()
     const user = userEvent.setup()
     await user.type(field(), '燈還亮著。')
     window.location.hash = address(second.source, 's0001')
     await waitFor(() => { expect(callsTo('/api/save')).toHaveLength(1) })
+    // Typed during the flush. Set in the registry, as the field would: jsdom
+    // mounts only the row the address names, and the address has moved off it.
+    act(() => { drafts.set('s0003', '燈還亮著。還', '') })
     window.location.hash = address(third.source, 's0001')
-    await waitFor(() => { expect(useStore.getState().doc?.source).toBe(third.source) }, { timeout: 4000 })
-    await user.type(field(), '早晨來得晚。')
     window.location.hash = address(second.source, 's0001')
-    await waitFor(() => { expect(callsTo('/api/save')).toHaveLength(3) })
 
-    await act(async () => { s1.release(); await settle(100) })
-    await act(async () => { s3.release(); await settle(200) })
+    await act(async () => { s1.release(); await settle(200) })
     await waitFor(() => { expect(useStore.getState().doc?.source).toBe(second.source) }, { timeout: 4000 })
     expect(useStore.getState().docError).toBe('')
+    // The words typed during the flush were written, after it and once.
+    expect(callsTo('/api/save')).toHaveLength(2)
+    expect((callsTo('/api/save')[1]!.body as { targets: Record<string, string> }).targets).toEqual({ s0003: '燈還亮著。還' })
   }, 20000)
 
   it('keeps words typed during the re-read Re-extract makes, and does not extract over them (older)', async () => {
@@ -2563,13 +2580,21 @@ describe('what the page acts on is what it has just read', () => {
     act(() => { rowButton('Draft again').click() })
     await waitFor(() => { expect(callsTo('/api/save')).toHaveLength(1) })
     act(() => { screen.getByRole('button', { name: 'Re-extract' }).click() })
-    await waitFor(() => { expect(callsTo('/api/extract')).toHaveLength(1) }, { timeout: 4000 })
-    await waitFor(() => { expect(after).toBe(1) }, { timeout: 4000 })
+    // Since HANDOFF-091 Re-extract's flush waits for the save already on the
+    // wire instead of sending the word again, and the two acts resume in the
+    // order they were pressed: "Draft again" starts its run first, and the
+    // re-extract then declines over the running job and says so. Re-extract can
+    // no longer overtake "Draft again" here, so the refusal this test exists
+    // for has no door left — what is asserted is that neither act names a move
+    // that did not happen, and that the second one says what did.
     await act(async () => { firstSave.release(); await settle(300) })
-    const said = useStore.getState().log.filter(l => l.text.includes('s0003')).map(l => l.text)
     await act(async () => { reopen.release(); await settle(100) })
+    const said = useStore.getState().log.map(l => l.text)
 
     expect(said.filter(t => t.includes('the page moved'))).toEqual([])
+    expect(extracted).toBe(false)
+    expect(after).toBe(0)
+    expect(said.some(t => t.includes('a run started while this was asking'))).toBe(true)
   }, 20000)
 
   // **Known broken, HANDOFF-096.** The page does not order its reads of a
@@ -2747,6 +2772,13 @@ describe('what the page acts on is what it has just read', () => {
   // `it.fails`, so the suite turns red the day the design lands and the marker
   // is removed in the same commit — the convention `KNOWN_BROKEN` follows in
   // `tests/test_pipeline.py`.
+  //
+  // Since HANDOFF-091 only one half of this still fails. The field half holds:
+  // a refused wording stays in its field, beside what is stored. The `lost`
+  // half does not: with the re-read failed, the page still holds the token from
+  // before its own first save, so the second save is refused as a conflict with
+  // the reviewer's own write. Learning the token of its own writes in general
+  // is HANDOFF-096's.
   it.fails('keeps the reviewer\'s next edit when the re-read after their first save failed (older)', async () => {
     let saved = false
     serve({
@@ -2815,5 +2847,99 @@ describe('what the page acts on is what it has just read', () => {
     await act(async () => { away.release(); await settle(100) })
     expect({ docError: useStore.getState().docError, loading: useStore.getState().docLoading })
       .toEqual({ docError: '', loading: false })
+  }, 20000)
+
+  // ── HANDOFF-091: a wording the server refused as stale ──────────────────────
+
+  const runWrote: DocResponse = {
+    ...untranslated,
+    report: { ...untranslated.report, translated: 1 },
+    segments: untranslated.segments.map(s => (s.id === 's0003'
+      ? { ...s, target: '燈一直亮著。\n  到天亮。', status: 'translated' as const, origin: 'llm:draft', token: 'z3' }
+      : s)),
+  }
+  const lostTo: Answer = {
+    body: { applied: 0, unknown: [], stored: {}, conflicts: { s0003: { text: '燈一直亮著。\n  到天亮。', token: 'z3' } } },
+  }
+  const conflictOnFirst = (): void => {
+    serve({
+      base: untranslated,
+      save: n => (n === 1 ? lostTo : null),
+      read: (src, n) => (src === doc.source && n >= 2 ? { body: runWrote } : null),
+    })
+  }
+  const blurred = async (user: ReturnType<typeof userEvent.setup>): Promise<void> => {
+    await user.type(field(), '燈還亮著。')
+    await user.click(screen.getByText('The lamp was still burning.'))
+    await waitFor(() => { expect(document.querySelector('.ledger .conflict')).toBeTruthy() }, { timeout: 4000 })
+  }
+
+  it('keeps the reviewer\'s words in the field when a save is refused as stale, beside the stored wording', async () => {
+    conflictOnFirst()
+    await opened(address(doc.source, 's0003'), '/3 translated')
+    const user = userEvent.setup()
+    await user.type(field(), '燈還亮著。')
+    await user.click(screen.getByText('The lamp was still burning.'))
+    await waitFor(() => { expect(callsTo('/api/save')).toHaveLength(1) })
+    await settle(200)
+    // The words first: on the commit before HANDOFF-091 the field adopted the
+    // stored wording and the reviewer's sentence existed nowhere.
+    expect(field().value).toBe('燈還亮著。')
+    expect(drafts.get('s0003')).toBe('燈還亮著。')
+    const stored = document.querySelector<HTMLElement>('.ledger .conflict .stored')!
+    expect(stored.textContent).toBe('燈一直亮著。\n  到天亮。')
+    // A segment's interior line breaks are part of it, and are shown as such.
+    expect(stored.style.whiteSpace).toBe('pre-wrap')
+    expect(logged('bad', 'changed underneath this edit')).toBe(true)
+    expect(screen.getByText(/waiting on your choice/)).toBeTruthy()
+  }, 20000)
+
+  it('sends nothing for a refused row until the reviewer writes theirs over it, against what they were shown', async () => {
+    conflictOnFirst()
+    await opened(address(doc.source, 's0003'), '/3 translated')
+    const user = userEvent.setup()
+    await blurred(user)
+
+    await user.type(field(), '還')
+    await user.click(screen.getByText('The lamp was still burning.'))
+    await user.click(screen.getByRole('button', { name: 'Check' }))
+    await settle(200)
+    expect(callsTo('/api/save')).toHaveLength(1)
+
+    await user.click(rowButton('Write mine over it'))
+    await waitFor(() => { expect(callsTo('/api/save')).toHaveLength(2) })
+    const body = callsTo('/api/save')[1]!.body as { targets: unknown; base: unknown }
+    expect(body.targets).toEqual({ s0003: '燈還亮著。還' })
+    expect(body.base).toEqual({ s0003: 'z3' })
+    await waitFor(() => { expect(document.querySelector('.ledger .conflict')).toBeNull() })
+    expect(drafts.has('s0003')).toBe(false)
+  }, 20000)
+
+  it('puts the stored wording in the field when the reviewer discards theirs, and writes nothing', async () => {
+    conflictOnFirst()
+    await opened(address(doc.source, 's0003'), '/3 translated')
+    const user = userEvent.setup()
+    await blurred(user)
+
+    await user.click(rowButton('Discard mine'))
+    await waitFor(() => { expect(field().value).toBe('燈一直亮著。\n  到天亮。') })
+    expect(drafts.has('s0003')).toBe(false)
+    expect(document.querySelector('.ledger .conflict')).toBeNull()
+    expect(callsTo('/api/save')).toHaveLength(1)
+    expect(logged('plain', 'your wording was dropped at your request')).toBe(true)
+  }, 20000)
+
+  it('sends a field\'s words once when a toolbar act takes focus from it', async () => {
+    // The blur saves, and the act saves first too. Both used to go out with the
+    // same base, and against a server that compare-and-swaps the second came
+    // back as a conflict carrying the words the first had just written.
+    serve({ base: untranslated })
+    await opened(address(doc.source, 's0003'), '/3 translated')
+    const user = userEvent.setup()
+    await user.type(field(), '燈還亮著。')
+    await user.click(screen.getByRole('button', { name: 'Check' }))
+    await settle(300)
+    expect(callsTo('/api/save')).toHaveLength(1)
+    expect(logged('bad', 'changed underneath this edit')).toBe(false)
   }, 20000)
 })

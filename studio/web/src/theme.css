@@ -184,6 +184,20 @@ main { display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
 }
 .ph { color: var(--lapis); background: rgba(110, 143, 232, .11); border-radius: 2px; padding: 0 2px; }
 
+/* A wording the server refused as stale, waiting on the reviewer's choice: the
+   stored wording beside theirs (HANDOFF-091). `2 / -1`, not `3 / -1`: at 900 px
+   and below a row has two columns. */
+.row.conflicted .tgt::after { background: var(--amber); }
+.conflict { grid-column: 2 / -1; padding: 0 16px 11px; display: flex; flex-direction: column; gap: 6px; }
+.conflict .why { font: 12px/1.5 var(--display); font-style: italic; color: var(--amber); }
+.conflict .stored {
+  font: 13px/1.65 var(--text); word-break: break-word; color: var(--muted);
+  border-left: 2px solid var(--amber); padding-left: 10px;
+}
+.conflict .stored .blank { color: var(--faint); font-style: italic; }
+.conflict .choose { display: flex; gap: 7px; }
+.conflict .choose button { font-size: 11px; padding: 3px 8px; }
+
 .acts { grid-column: 2 / -1; padding: 0 16px 10px; display: flex; gap: 7px; flex-wrap: wrap; align-items: center; }
 .acts button { font-size: 11px; padding: 3px 8px; }
 .acts .why { color: var(--faint); font-size: 11px; }
