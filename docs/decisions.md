@@ -3,7 +3,90 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-11-01 · Independent review of HANDOFF-090: the landing does not hold on a novel
+
+HANDOFF-090 was executed in a continuous run and kept for review by a session
+that had not done the work. This is that review, by Opus 5.5 in a fresh session.
+Its basis was the package as claimed, copied verbatim before its status changed;
+the package at close; the squash commit `3789c5e` against its parent `6e6f212`;
+and the entry below. The package's text was not rewritten while it was executed:
+the only differences are its status, its commit list and a closing section.
+
+**Verdict: drift in the implementation and the record, not in the spec.**
+Criteria 2 and 3 pass at `3789c5e`, re-run for this review: `npm run typecheck`,
+`npm test` (146 passed, 8 expected fail), `npm run build` and a clean static
+diff; `pytest` exit 0 with 2950 collected, the same as at the claim base;
+`ruff` exit 0. The bounded-mount test fails on the parent's `Reading.tsx`
+(`expected 5000 to be less than 100`). Two mutation passes run by the review
+killed 32 of 41 mutants and 14 of 14. The red lines hold, no wire contract moved,
+and CI on PR #43 is green on all six checks. Criterion 4 was deferred to
+HANDOFF-099 at the maintainer's instruction that day.
+
+What was wrong:
+
+- **The landing does not hold on a document of varied paragraph lengths, which
+  is what a novel is.** The entry below says `virtua` keeps the paragraph centred
+  as the lines around it are measured, and that an ordinary paragraph lands
+  within 30 px of the centre. Both hold for uniform paragraphs only, which is what
+  the measured document had. The review used 5000 paragraphs of mixed length: 40%
+  one-line dialogue, the rest 1–18 sentences. It ran headless Chrome 156 in one
+  foregrounded tab at 1366×900, with `visibilityState` `visible`. A deep link to
+  s0300, s1000 or s2500 settled with the paragraph 533–681 px below the centre of
+  the 818 px scroller, out of view, in every run; `6e6f212` landed all three
+  within 1 px of it. The element is centred once, two frames after the preview,
+  at an estimated offset. `virtua` then measures the lines around it, the
+  paragraph moves, and nothing re-centres it. jsdom lays nothing out, so the
+  suite asserts which element the scroll was called on and never where it ended.
+  Scheduled as HANDOFF-100.
+- **'The worst main-thread frame was 162 ms' understates the unvirtualized
+  builds.** A `longtask` observer run beside the long-animation-frame one recorded
+  tasks of up to 230 ms in them. With forced renderer accessibility the tasks
+  reached 714 ms. No long-animation-frame entry reported these tasks, while a
+  deliberate 200 ms block registered in both observers. The virtualized build has
+  nothing of 50 ms or more in either, so the decision stands on firmer ground than
+  the entry claimed. The renderer's main thread with accessibility on joins GPU
+  raster and the browser process's accessibility layer as places the ten seconds
+  may live. That also narrows the 2026-09-14 entry's "so the ten seconds are
+  layout and paint".
+- **For opening *Read*, the reply is where the time went.** In the review's
+  browser runs the open wait ended when the preview's body arrived. On this
+  machine `lx web` delivers a body of a few hundred kilobytes or more in steps of
+  about 300 ms. In 12 curl requests of a 4.67 MB preview, the body took 0.93 s in
+  8 and 0.31–0.63 s in the other 4. A 256 KB `workbench.js` stalled in 6 of 12.
+  The open-*Read* column in the tables below therefore records which step a run
+  hit, not which build ran. A 256 KB body stalls too, so none of this shows that
+  dropping the preview's duplicate `text` would help: the contract question is
+  neither more nor less urgent than it was. Scheduled as HANDOFF-101.
+- **Scrolling was not measured, and the entry did not say so.** The package
+  asked for entering, scrolling, clicking and leaving, and the tables have no
+  scroll step. The review measured it in all three builds with six 800 px wheel
+  ticks. Each took 18–49 ms from the wheel to a frame showing the new position,
+  with no long frame or long task in any of them. The virtualized build kept
+  39–45 blocks mounted while scrolling.
+- **The numbers are for a stand-in, and the entry does not say how it differs.**
+  The measured document was a synthetic Markdown file: LF, every paragraph
+  translated, 10 001 blocks. The freeze was seen on a plain-text CRLF document of
+  9999 blocks, where about six paragraphs in seven carried a short placeholder and
+  the rest showed English source. The attribution between builds stands, because
+  every build ran on the same document. What the stand-in cannot do is rule out
+  the document as the reason the freeze did not reproduce. HANDOFF-099 now checks
+  both documents, with the input method on, against a control build.
+- **Costs the entry did not list.** Select-all and copy reach only mounted lines.
+  Tab after scrolling the focused paragraph out of the mounted range leaves the
+  chapter; HANDOFF-100 decides whether to fix that. And "measurement is not
+  mocked" is true of the click tests only: the bounded screenful test mocks
+  `ResizeObserver`, on purpose.
+
+**Disposition.** Two packages are scheduled. HANDOFF-100 covers the landing,
+the costs it can fix, and tests for the nine mutants the suite let through.
+HANDOFF-101 covers the transfer stall. HANDOFF-099 is blocked by HANDOFF-100, so
+the maintainer checks the final build once. It also gained the second document, a
+mandatory input-method run, a control build and corrected figures.
+
 ## 2026-10-31 · The reading view is virtualized by line
+
+*The landing paragraph and three measurement claims below are corrected by the
+2026-11-01 review above.*
 
 Closing HANDOFF-090. On 2026-09-14 the maintainer measured *Read → click a
 paragraph → Back to the ledger*, on a 5000-segment document in a painted Chrome
