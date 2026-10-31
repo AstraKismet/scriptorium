@@ -180,11 +180,16 @@ _RESET_OR_TONE = re.compile(
 #: and the property it protects is unchanged — a module that is not on it and
 #: names either key is a new place a register can be sent from, and somebody has
 #: to look at it.
+#:
+#: `components/Reading.test.tsx` was looked at on 2026-10-31 (HANDOFF-090) and is
+#: here for `App.test.tsx`'s reason exactly: a `GET /api/doc` reply fixture for a
+#: five-thousand-segment document, and nothing in it is sent.
 _MAY_NAME_RESET = {
     "src/contract.ts",
     "src/store.ts",
     "src/store.test.ts",
     "src/App.test.tsx",
+    "src/components/Reading.test.tsx",
 }
 
 
