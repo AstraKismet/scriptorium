@@ -61,8 +61,18 @@ const marks = new Map<string, StoredTarget>()
  */
 const bases = new Map<string, string>()
 
-/** Id → the text the save on the wire sent. Empty when nothing is on the wire. */
-const flying = new Map<string, string>()
+/**
+ * Id → how many rounds of writing that sent it have not yet been read back.
+ *
+ * A round ends here **after its re-read lands**, not when its reply does: until
+ * then the row still shows the wording from before the write, and a field typed
+ * back to that wording would otherwise end the entry while the server holds
+ * what was sent — nothing would ever write the reviewer's last change. A count
+ * rather than a flag, because the next round may send the same id while the
+ * previous one's re-read is still on its way, and the first to finish must not
+ * end the other's (found by the review of HANDOFF-091).
+ */
+const flying = new Map<string, number>()
 
 /**
  * Moves on every `clear()`. A reply that lands after the map was cleared is
@@ -115,8 +125,8 @@ function drop(id: string): boolean {
  * Record an edit. Returns whether this crossed the row into or out of dirty.
  *
  * Typing a field back to the wording it was shown ends the entry — unless a
- * save carrying the entry is on the wire. Then the reply decides: what was sent
- * will be stored, so the field's wording is no longer what is stored, and only
+ * save carrying the entry has not been read back yet. Then what was sent is, or
+ * will be, stored, so the field's wording is no longer what is stored, and only
  * the entry can still write it.
  */
 export function set(id: string, text: string, original: string): boolean {
@@ -222,13 +232,22 @@ export function discard(id: string): void {
 }
 
 /** A save is about to send these. */
-export function sending(sent: Record<string, string>): void {
-  for (const [id, text] of Object.entries(sent)) flying.set(id, text)
+export function sending(sent: Iterable<string>): void {
+  for (const id of sent) flying.set(id, (flying.get(id) ?? 0) + 1)
 }
 
-/** The save on the wire has an answer, or will never have one. */
-export function landed(): void {
-  flying.clear()
+/**
+ * The round that sent these is over: its reply and its re-read have landed, or
+ * it failed and there is nothing to read back. Only the caller that called
+ * {@link sending} in this same parse may say so — a round from before a
+ * `clear()` has nothing here to end (the counts it added went with the clear).
+ */
+export function landed(sent: Iterable<string>): void {
+  for (const id of sent) {
+    const n = (flying.get(id) ?? 0) - 1
+    if (n > 0) flying.set(id, n)
+    else flying.delete(id)
+  }
 }
 
 /** See {@link generation}. */

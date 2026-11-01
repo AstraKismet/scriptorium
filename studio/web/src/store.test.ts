@@ -7,10 +7,10 @@
  * rebuild, nothing in this repository executed the frontend's JavaScript at all,
  * so the one guard that existed was a regex over a file.
  */
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import * as drafts from './drafts'
-import { useStore, visible, writeEpoch } from './store'
+import { SAVE_WAIT_MS, useStore, visible, writeEpoch } from './store'
 import { answering, callsTo, lastCall, otherwise, replies } from './test/wire'
 import { CONTRACT_VERSION } from './contract'
 import type { DocResponse, Segment, StateResponse } from './contract'
@@ -817,6 +817,133 @@ describe('a refused wording, and words typed while a save is in flight', () => {
     expect(await useStore.getState().save()).toBe(false)
     expect(drafts.get('s0001')).toBe('她一夜沒睡。')
     expect(bad('cannot read')).toBe(true)
+  })
+
+  // ── found by the correctness review of HANDOFF-091's first version ──────────
+
+  // One save on the wire at a time made a request that never answers a lock:
+  // no later save was sent and `open()`, which waits on its flush, never left.
+  it('stops waiting for a save that never answers, keeps the words, and lets the next save and the next open through', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      await openWith([segment({ id: 's0001', target: 'orig', token: 't0' })])
+      drafts.set('s0001', '燈還亮著', 'orig')
+      let n = 0
+      answering(call => {
+        if (call.path.startsWith('/api/save')) {
+          n += 1
+          return n === 1
+            ? { body: {}, after: new Promise<void>(() => undefined) }
+            : { body: { applied: 1, unknown: [], stored: { s0001: { text: '燈還亮著', token: 'w2' } }, conflicts: {} } }
+        }
+        if (call.path.startsWith('/api/doc')) return { body: ch2([segment({ id: 's0001' })]) }
+        return null
+      })
+      let left = false
+      const opening = useStore.getState().open('book/ch2.md', 'zh-TW').then(() => { left = true })
+      await vi.advanceTimersByTimeAsync(SAVE_WAIT_MS - 1)
+      expect(left).toBe(false)
+      await vi.advanceTimersByTimeAsync(1)
+      // Asserted rather than awaited, so that the page that waits forever fails
+      // here instead of hanging the file.
+      expect(left).toBe(true)
+      await opening
+      // It refused to leave over words it could not write, and said why.
+      expect(useStore.getState().doc?.source).toBe('book/ch1.md')
+      expect(drafts.get('s0001')).toBe('燈還亮著')
+      expect(useStore.getState().docError).toMatch(/^s0001 could not be written to book\/ch1\.md/)
+      expect(bad(`did not answer this save within ${SAVE_WAIT_MS / 1000} seconds`)).toBe(true)
+
+      // The lock is gone: the next open sends the words again, and leaves.
+      await useStore.getState().open('book/ch2.md', 'zh-TW')
+      expect(callsTo('/api/save')).toHaveLength(2)
+      expect(useStore.getState().doc?.source).toBe('book/ch2.md')
+      expect(useStore.getState().docError).toBe('')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // "Draft again" reads the segment's origin right after `save()` answers, to
+  // decide whether to ask about replacing a person's wording. A save asked
+  // while another was on the wire answered before that one's re-read landed.
+  it('answers no save before the last round\'s re-read has landed, queued or asked after the reply', async () => {
+    await openWith([segment({ id: 's0001', target: 'orig', origin: 'llm:draft', token: 't0' })])
+    drafts.set('s0001', '燈還亮著', 'orig')
+    const wire = hold()
+    const reread = hold()
+    replies(
+      { body: { applied: 1, unknown: [], stored: { s0001: { text: '燈還亮著', token: 'w1' } }, conflicts: {} }, after: wire.until },
+      { body: doc([segment({ id: 's0001', target: '燈還亮著', origin: 'human', token: 'w1' })]), after: reread.until },
+    )
+    const answered: string[] = []
+    void useStore.getState().save().then(() => { answered.push('first') })
+    void useStore.getState().save().then(() => { answered.push('queued') })
+    wire.release()
+    await new Promise(r => { setTimeout(r, 20) })
+    void useStore.getState().save().then(() => { answered.push('after the reply') })
+    await new Promise(r => { setTimeout(r, 20) })
+    expect(answered).toEqual([])
+    expect(callsTo('/api/save')).toHaveLength(1)
+
+    reread.release()
+    await new Promise(r => { setTimeout(r, 20) })
+    expect(answered).toHaveLength(3)
+    // What the caller reads now is the document as the save left it.
+    expect(useStore.getState().doc?.segments[0]?.origin).toBe('human')
+  })
+
+  // Between a reply and its re-read the row still shows the wording from before
+  // the save; typing the field back to it used to end the entry while the
+  // server held the newer words, with nothing left that would write the change.
+  it('keeps a field typed back to its old wording while the save that changed it is still being read back', async () => {
+    await openWith([segment({ id: 's0001', target: 'orig', token: 't0' })])
+    drafts.set('s0001', '燈還亮著', 'orig')
+    const reread = hold()
+    replies(
+      { body: { applied: 1, unknown: [], stored: { s0001: { text: '燈還亮著', token: 'w1' } }, conflicts: {} } },
+      { body: doc([segment({ id: 's0001', target: '燈還亮著', origin: 'human', token: 'w1' })]), after: reread.until },
+    )
+    const saving = useStore.getState().save()
+    await new Promise(r => { setTimeout(r, 20) })
+    expect(callsTo('/api/save')).toHaveLength(1)
+    drafts.set('s0001', 'orig', 'orig')
+    reread.release()
+    await saving
+    expect(drafts.get('s0001')).toBe('orig')
+
+    replies({ body: { applied: 1, unknown: [], stored: { s0001: { text: 'orig', token: 'w2' } }, conflicts: {} } })
+    otherwise({ body: doc([segment({ id: 's0001', target: 'orig', origin: 'human', token: 'w2' })]) })
+    await useStore.getState().save()
+    expect((lastCall('/api/save')?.body as { targets: unknown; base: unknown })).toMatchObject({
+      targets: { s0001: 'orig' }, base: { s0001: 'w1' },
+    })
+  })
+
+  // A reply from before the map was cleared used to end what the new parse had
+  // in flight.
+  it('lets no reply from a parse that has gone end what the parse on screen has in flight', async () => {
+    await openWith([segment({ id: 's0001', target: 'orig', token: 't0' })])
+    drafts.set('s0001', '舊的字', 'orig')
+    const old = hold()
+    const fresh = hold()
+    replies(
+      { body: { applied: 1, unknown: [], stored: {}, conflicts: {} }, after: old.until },
+      { body: { applied: 1, unknown: [], stored: { s0001: { text: '新的字', token: 'n1' } }, conflicts: {} }, after: fresh.until },
+    )
+    otherwise({ body: doc([segment({ id: 's0001', target: 'orig', token: 't0' })]) })
+    const before = useStore.getState().save()
+    // The page put another parse on screen: what `open()` does on a document change.
+    drafts.clear()
+    drafts.set('s0001', '新的字', 'orig')
+    const now = useStore.getState().save()
+    old.release()
+    await before
+    // The new parse's send is still in flight, so typing the field back keeps it.
+    drafts.set('s0001', 'orig', 'orig')
+    expect(drafts.get('s0001')).toBe('orig')
+    fresh.release()
+    await now
   })
 })
 

@@ -31,13 +31,23 @@ const BOUNDS = [0, 10, 25, 50, 100]
  * stay enabled through those round trips. Checked immediately before the
  * header, in the same tick as the call, so the header is never logged over a
  * request that is then not sent.
+ *
+ * **Said beside the button, not only in the log.** The reviewer pressed a
+ * control on this bar and is looking at it; the log is a drawer that may be
+ * shut. Since HANDOFF-091 the ordinary door is "Draft again" with a field
+ * unsaved and Re-extract pressed while its save is on the wire: the two resume
+ * in the order they were pressed, the run starts first, and this declines. The
+ * maintainer ruled (2026-11-02) that the decline names the run in progress and
+ * what to do, where the reviewer is looking.
  */
-function refusedWhileRunning(src: string): boolean {
-  if (!useStore.getState().running) return false
-  useStore.getState().say(
-    `  ${src} was not re-extracted: a run started while this was asking — try again when it finishes`,
-    'warn',
-  )
+function refusedWhileRunning(src: string, act: string): boolean {
+  const { running, runName, say, setNotice } = useStore.getState()
+  if (!running) return false
+  const text =
+    `${src} was not re-extracted: ${runName || 'a run'} started before ${act} could begin, and ` +
+    `the two cannot run at once. Let the run finish, then press ${act} again.`
+  say('  ' + text, 'warn')
+  setNotice(text)
   return true
 }
 
@@ -58,6 +68,8 @@ export function Toolbar() {
   const extract = useStore(s => s.extract)
   const startOver = useStore(s => s.startOver)
   const say = useStore(s => s.say)
+  const notice = useStore(s => s.notice)
+  const setNotice = useStore(s => s.setNotice)
 
   const dirty = useSyncExternalStore(drafts.subscribe, drafts.version)
   const [startingOver, setStartingOver] = useState(false)
@@ -70,6 +82,7 @@ export function Toolbar() {
   /** Re-read the source. Destructive in a way the wire never names. */
   const reExtract = async () => {
     if (!ready) return
+    setNotice('')
     // Before the dialog, not after: an edit still in the ledger is written
     // against the ids *this* parse produced, and the next parse reassigns them
     // from `s0001`.
@@ -196,7 +209,7 @@ export function Toolbar() {
       )
       return
     }
-    if (refusedWhileRunning(doc.source)) return
+    if (refusedWhileRunning(doc.source, 'Re-extract')) return
     say(`— re-extract ${doc.source} [${doc.lang}] —`, 'plain', true)
     // The document the dialog named, and not whatever is on screen when the
     // reviewer answers it: Back still works under an open dialog.
@@ -307,11 +320,19 @@ export function Toolbar() {
         </span>
       </div>
 
+      {notice && (
+        <div className="bar notice" role="status">
+          <span>{notice}</span>
+          <span className="spacer" />
+          <button type="button" className="quiet" onClick={() => { setNotice('') }}>Dismiss</button>
+        </div>
+      )}
+
       <div className="bar" style={{ paddingTop: 7, paddingBottom: 7 }}>
         <span className="note-line" style={{ maxWidth: 'none' }}>
           {doc.source} · {doc.lang} · register <b style={{ color: 'var(--vellum)' }}>{doc.tone || 'unknown'}</b>
         </span>
-        <button type="button" className="quiet" disabled={!ready} onClick={() => { setStartingOver(true) }}>
+        <button type="button" className="quiet" disabled={!ready} onClick={() => { setNotice(''); setStartingOver(true) }}>
           Start over in another register…
         </button>
         <span className="spacer" />
@@ -372,7 +393,7 @@ function StartOver({ onClose, onChoose }: {
     )
     if (!ok) return
     onClose()
-    if (refusedWhileRunning(doc.source)) return
+    if (refusedWhileRunning(doc.source, 'Start over')) return
     say(`— start over · ${doc.source} [${doc.lang}] · register ${chosen} —`, 'plain', true)
     // Addressed to the document the dialog above named, for the reason the
     // toolbar's Re-extract gives.

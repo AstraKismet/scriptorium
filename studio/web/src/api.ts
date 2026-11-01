@@ -78,11 +78,12 @@ async function get<T>(path: string): Promise<T> {
   return body as T
 }
 
-async function post<T>(path: string, payload: unknown): Promise<T> {
+async function post<T>(path: string, payload: unknown, signal?: AbortSignal): Promise<T> {
   const response = await fetch(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
+    ...(signal ? { signal } : {}),
   })
   const body = await read(response)
   if (!response.ok) throw new ApiError(sentence(body, response.status), response.status)
@@ -153,8 +154,8 @@ export const postExtract = (request: ExtractRequest): Promise<ExtractResponse> =
 
 /** Write reviewed targets, as `human`. An empty or all-blank target is refused
  *  for the **whole** request with a `400`. */
-export const postSave = (request: SaveRequest): Promise<SaveResponse> =>
-  post('/api/save', request)
+export const postSave = (request: SaveRequest, signal?: AbortSignal): Promise<SaveResponse> =>
+  post('/api/save', request, signal)
 
 /** Hold segments out of every queue that selects work, or return them to it.
  *  Holding requires a non-empty target; lifting carries no such condition. */

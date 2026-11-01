@@ -1463,6 +1463,8 @@ describe('what the page acts on is what it has just read', () => {
     save?: (n: number, body: unknown) => Answer | null
     listing?: (n: number) => Promise<void> | null
     hold?: (n: number) => Answer | null
+    /** The answer to `POST /api/translate`; by default a run with nothing to do. */
+    translate?: () => Answer | null
     onExtract?: () => void
     base?: DocResponse
   } = {}): void => {
@@ -1535,7 +1537,7 @@ describe('what the page acts on is what it has just read', () => {
         return { body: over.base ?? doc }
       }
       if (path.startsWith('/api/check')) return { body: { errors: 1, warnings: 0, by_rule: { missing: 1 } } }
-      if (path.startsWith('/api/translate')) return { body: { id: 'j1', total: 0, route: { provider: 'local', model: 'qwen', error: null } } }
+      if (path.startsWith('/api/translate')) return over.translate?.() ?? { body: { id: 'j1', total: 0, route: { provider: 'local', model: 'qwen', error: null } } }
       if (path.startsWith('/api/sentences')) return { body: { sentences: [] } }
       if (path.startsWith('/api/preview')) {
         const blocks = fresh.segments.map(s => ({ id: s.id, kind: s.kind, from: 'source' as const, text: s.source }))
@@ -2301,7 +2303,13 @@ describe('what the page acts on is what it has just read', () => {
     await user.type(field(), '燈還亮著。')
     await user.click(screen.getByText('The lamp was still burning.'))
     await waitFor(() => { expect(readsOf(doc.source)).toBe(2) })
-    await user.click(screen.getByRole('button', { name: 'Check' }))
+    // A later re-read, asked while the save's own is on its way. Check used to
+    // be the door, and since HANDOFF-091 it is not one: no `save()` answers
+    // before the last round's re-read has landed, so Check's own read now comes
+    // after it. A re-read that goes through no save — a run's trailing one,
+    // Hold's, *Discard mine*'s — still reaches this ordering, and is what this
+    // stands for.
+    act(() => { void useStore.getState().refresh() })
     await waitFor(() => { expect(readsOf(doc.source)).toBe(3) })
     await act(async () => { saveRead.release(); await settle(200) })
 
@@ -2335,7 +2343,13 @@ describe('what the page acts on is what it has just read', () => {
     await user.type(field(), '燈還亮著。')
     await user.click(screen.getByText('The lamp was still burning.'))
     await waitFor(() => { expect(readsOf(doc.source)).toBe(2) })
-    await user.click(screen.getByRole('button', { name: 'Check' }))
+    // A later re-read, asked while the save's own is on its way. Check used to
+    // be the door, and since HANDOFF-091 it is not one: no `save()` answers
+    // before the last round's re-read has landed, so Check's own read now comes
+    // after it. A re-read that goes through no save — a run's trailing one,
+    // Hold's, *Discard mine*'s — still reaches this ordering, and is what this
+    // stands for.
+    act(() => { void useStore.getState().refresh() })
     await waitFor(() => { expect(readsOf(doc.source)).toBe(3) })
     await act(async () => { saveRead.release(); await settle(200) })
 
@@ -2408,7 +2422,13 @@ describe('what the page acts on is what it has just read', () => {
     await user.type(field(), '燈還亮著。')
     await user.click(screen.getByText('The lamp was still burning.'))
     await waitFor(() => { expect(readsOf(doc.source)).toBe(2) })
-    await user.click(screen.getByRole('button', { name: 'Check' }))
+    // A later re-read, asked while the save's own is on its way. Check used to
+    // be the door, and since HANDOFF-091 it is not one: no `save()` answers
+    // before the last round's re-read has landed, so Check's own read now comes
+    // after it. A re-read that goes through no save — a run's trailing one,
+    // Hold's, *Discard mine*'s — still reaches this ordering, and is what this
+    // stands for.
+    act(() => { void useStore.getState().refresh() })
     await waitFor(() => { expect(readsOf(doc.source)).toBe(3) })
     await act(async () => { saveRead.release(); await settle(200) })
 
@@ -2445,7 +2465,13 @@ describe('what the page acts on is what it has just read', () => {
     await user.type(field(), '燈還亮著。')
     await user.click(screen.getByText('The lamp was still burning.'))
     await waitFor(() => { expect(readsOf(doc.source)).toBe(2) })
-    await user.click(screen.getByRole('button', { name: 'Check' }))
+    // A later re-read, asked while the save's own is on its way. Check used to
+    // be the door, and since HANDOFF-091 it is not one: no `save()` answers
+    // before the last round's re-read has landed, so Check's own read now comes
+    // after it. A re-read that goes through no save — a run's trailing one,
+    // Hold's, *Discard mine*'s — still reaches this ordering, and is what this
+    // stands for.
+    act(() => { void useStore.getState().refresh() })
     await waitFor(() => { expect(readsOf(doc.source)).toBe(3) })
     await act(async () => { saveRead.release(); await settle(200) })
 
@@ -2558,17 +2584,28 @@ describe('what the page acts on is what it has just read', () => {
     expect(said.some(t => t.includes('was between documents, or reading one'))).toBe(true)
   }, 20000)
 
-  // P6: "Draft again" overtaken by the toolbar's Re-extract (pressed while its
-  // save was in flight): the refusal names a move that did not happen.
-  it('does not say the page moved when what overtook "Draft again" was a re-extract of the same page', async () => {
+  // P6, as it stands since HANDOFF-091. It was "Draft again" overtaken by the
+  // toolbar's Re-extract, pressed while its save was in flight, whose refusal
+  // named a move that did not happen. That cannot happen any more: Re-extract's
+  // flush waits for the save already on the wire instead of sending the word
+  // again, and the two acts resume in the order they were pressed — "Draft
+  // again" starts its run first, and Re-extract then declines over it. The
+  // maintainer ratified the re-sequencing on 2026-11-02, on two conditions: the
+  // name says what is asserted now, and the decline is explained where the
+  // reviewer is looking — beside the bar, naming the run and what to do — and
+  // not only as a line in the log drawer.
+  it('declines Re-extract pressed while "Draft again"\'s save is on the wire once the run starts, and says why beside the bar', async () => {
     const firstSave = held()
     const reopen = held()
+    const run = held()
     let extracted = false
     let after = 0
     serve({
       base: untranslated,
       onExtract: () => { extracted = true },
       save: n => (n === 1 ? { body: wrote, after: firstSave.until } : null),
+      // A run lasts: its start is answered only once the test lets it.
+      translate: () => ({ body: { id: 'j1', total: 0, route: { provider: 'local', model: 'qwen', error: null } }, after: run.until }),
       read: src => {
         if (src !== doc.source || !extracted) return null
         after += 1
@@ -2580,21 +2617,24 @@ describe('what the page acts on is what it has just read', () => {
     act(() => { rowButton('Draft again').click() })
     await waitFor(() => { expect(callsTo('/api/save')).toHaveLength(1) })
     act(() => { screen.getByRole('button', { name: 'Re-extract' }).click() })
-    // Since HANDOFF-091 Re-extract's flush waits for the save already on the
-    // wire instead of sending the word again, and the two acts resume in the
-    // order they were pressed: "Draft again" starts its run first, and the
-    // re-extract then declines over the running job and says so. Re-extract can
-    // no longer overtake "Draft again" here, so the refusal this test exists
-    // for has no door left — what is asserted is that neither act names a move
-    // that did not happen, and that the second one says what did.
     await act(async () => { firstSave.release(); await settle(300) })
-    await act(async () => { reopen.release(); await settle(100) })
+    await waitFor(() => { expect(callsTo('/api/translate')).toHaveLength(1) })
+    await waitFor(() => { expect(screen.queryByRole('status')).toBeTruthy() }, { timeout: 4000 })
     const said = useStore.getState().log.map(l => l.text)
 
     expect(said.filter(t => t.includes('the page moved'))).toEqual([])
     expect(extracted).toBe(false)
     expect(after).toBe(0)
-    expect(said.some(t => t.includes('a run started while this was asking'))).toBe(true)
+    // Where the reviewer is looking: beside the bar they pressed it on.
+    const notice = screen.getByRole('status')
+    expect(notice.closest('main, .shell')).toBeTruthy()
+    expect(notice.textContent).toContain('book/ch1.md was not re-extracted')
+    expect(notice.textContent).toContain('the draft run on s0003')
+    expect(notice.textContent).toContain('Let the run finish, then press Re-extract again.')
+    // And it goes when dismissed.
+    await userEvent.setup().click(within(notice).getByRole('button', { name: 'Dismiss' }))
+    expect(screen.queryByRole('status')).toBeNull()
+    await act(async () => { run.release(); reopen.release(); await settle(100) })
   }, 20000)
 
   // **Known broken, HANDOFF-096.** The page does not order its reads of a

@@ -74,6 +74,16 @@ interface Store {
 
   /** One run at a time, and every entry point reads it. */
   running: boolean
+  /** Which run `running` is about, in words a refusal can name — `''` while
+   *  nothing runs. */
+  runName: string
+  /**
+   * Why an act the reviewer just pressed did not run, said where they are
+   * looking — beside the control — and not only as a line in a drawer that may
+   * be closed. Set by the act that declined; cleared when it is dismissed, when
+   * that act is pressed again, or when another document is put on screen.
+   */
+  notice: string
   runCost: RunCost | null
 
   log: LogLine[]
@@ -95,6 +105,7 @@ interface Store {
   limit: number
 
   say: (text: string, level?: Level, head?: boolean) => void
+  setNotice: (text: string) => void
   clearLog: () => void
   setFilter: (f: Filter) => void
   setLimit: (n: number) => void
@@ -447,7 +458,7 @@ async function reExtract(
   tone: string | null,
 ): Promise<boolean> {
   if (get().running) return false
-  set({ running: true })
+  set({ running: true, runName: `the extract of ${where.src}` })
   try {
     const r = await api.postExtract(
       tone === null ? { ...where } : { ...where, reset: true, tone },
@@ -537,7 +548,7 @@ async function reExtract(
     get().say('  ' + reason(e), 'bad')
     return false
   } finally {
-    set({ running: false })
+    set({ running: false, runName: '' })
   }
 }
 
@@ -554,6 +565,8 @@ export const useStore = create<Store>()((set, get) => ({
   readFailed: false,
 
   running: false,
+  runName: '',
+  notice: '',
   runCost: null,
 
   log: [],
@@ -574,6 +587,7 @@ export const useStore = create<Store>()((set, get) => ({
     }),
 
   clearLog: () => set({ log: [] }),
+  setNotice: notice => set({ notice }),
   setFilter: filter => set({ filter }),
   setLimit: limit => set({ limit }),
   setModel: model => set({ model }),
@@ -803,7 +817,7 @@ export const useStore = create<Store>()((set, get) => ({
           )
         }
       }
-      set({ doc, docLoading: false })
+      set(same(leaving, want) ? { doc, docLoading: false } : { doc, docLoading: false, notice: '' })
     } catch (e) {
       if (!current()) return
       // A refusal the server *answered* — never a request that did not arrive.
@@ -890,7 +904,10 @@ export const useStore = create<Store>()((set, get) => ({
     // trip whenever anything is dirty — with every run control still enabled.
     // Two clicks in that window started two runs, and two `llm:*` writes to one
     // segment are last-write-wins with no token and no check.
-    set({ running: true })
+    set({
+      running: true,
+      runName: ids ? `the ${mode} run on ${names(ids)}` : `the ${mode} run over ${where.src}`,
+    })
 
     const bound = get().limit
     // The bound is named in the header rather than after the fact, so a reader
@@ -944,14 +961,14 @@ export const useStore = create<Store>()((set, get) => ({
       get().say('  ' + reason(e), 'bad')
     } finally {
       forgetJob()
-      set({ running: false })
+      set({ running: false, runName: '' })
     }
   },
 
   resume: async () => {
     const held = remembered()
     if (!held || get().running) return
-    set({ running: true })
+    set({ running: true, runName: `the run ${held.id} on ${held.src}, started before this page was loaded` })
     get().say(`— following ${held.id}, started before this page was loaded —`, 'warn', true)
     try {
       await follow(set, get, held.id, { src: held.src, lang: held.lang })
@@ -959,7 +976,7 @@ export const useStore = create<Store>()((set, get) => ({
       get().say('  ' + reason(e), 'bad')
     } finally {
       forgetJob()
-      set({ running: false })
+      set({ running: false, runName: '' })
     }
   },
 
@@ -973,7 +990,7 @@ export const useStore = create<Store>()((set, get) => ({
     if (!get().running) return
     abandoned = true
     forgetJob()
-    set({ running: false })
+    set({ running: false, runName: '' })
     get().say(
       '  stopped following this run. It has not been cancelled — there is no way to ' +
       'cancel one — so the server is still writing, and what it writes will be there ' +
@@ -1167,11 +1184,24 @@ export const statusOf = (e: unknown): number | null =>
  * One save on the wire at a time; see `onWire`.
  *
  * **The lock covers the request and the settling of its reply, and not the
- * re-read after it.** A re-read is a whole `GET /api/doc`, and an act queued
- * behind it — Check, a run, a flush on the way out — would wait on a read that
- * concerns none of what it sends. The caller still gets its answer only once
- * the re-read has landed, as it always did.
+ * re-read after it.** A re-read is a whole `GET /api/doc`, and the *request* of
+ * an act queued behind it — Check, a run, a flush on the way out — would wait on
+ * a read that concerns none of what it sends.
+ *
+ * **But no caller gets its answer before the last round's re-read has landed**,
+ * its own round's or the one before it. A caller reads the document right after
+ * `save()` answers: "Draft again" decides from the segment's origin whether to
+ * ask about replacing a person's wording. A queued caller whose own round sent
+ * nothing used to answer as soon as the lock was released, before the previous
+ * round's re-read — the origin was the one from before the save, no question was
+ * asked, the model was billed and the write refused (found by the review of
+ * HANDOFF-091). The same held for a call made after the lock was released and
+ * before that re-read landed. `settling` is that re-read, per drafts epoch: a
+ * re-read of a document replaced since is not something this one waits on.
  */
+let settling: Promise<void> | null = null
+let settlingEpoch = -1
+
 function flush(get: () => Store): Promise<Outcome> {
   const epoch = drafts.epoch()
   if (!onWire || onWireEpoch !== epoch) {
@@ -1183,10 +1213,23 @@ function flush(get: () => Store): Promise<Outcome> {
     onWireEpoch = epoch
     queued = null
     void lock.then(() => { if (onWire === lock) onWire = null })
-    return sent.then(async ({ outcome, reread }) => {
+    const prior = settlingEpoch === epoch ? settling : null
+    const whole = sent.then(async ({ outcome, reread, landing }) => {
       if (reread) await get().refresh()
+      // The ids this round sent stop counting as in flight only now, once the
+      // row shows what was written — and only in the parse they were sent in.
+      if (drafts.epoch() === epoch) drafts.landed(landing)
       return outcome
     })
+    const answer = prior ? Promise.all([whole, prior]).then(([outcome]) => outcome) : whole
+    // Chained through `prior`, not this round's alone: a round that sends
+    // nothing finishes at once, and recording only that would let the next
+    // caller answer before the earlier round's re-read.
+    const done: Promise<void> = answer.then(() => undefined, () => undefined)
+    settling = done
+    settlingEpoch = epoch
+    void done.then(() => { if (settling === done) settling = null })
+    return answer
   }
   if (!queued) {
     const after = onWire
@@ -1199,8 +1242,28 @@ function flush(get: () => Store): Promise<Outcome> {
   return queued
 }
 
-/** One round of writing: what `save()` was before HANDOFF-091, and its reply. */
-async function round(get: () => Store): Promise<{ outcome: Outcome; reread: boolean }> {
+/**
+ * How long a save may go unanswered before this page stops waiting for it.
+ *
+ * `api.ts` sets no timeout of its own, and one save on the wire at a time made a
+ * request that never answers a lock: no later save was sent, and `open()` —
+ * which waits on its flush — never left the document (found by the review of
+ * HANDOFF-091; before it, a second save went out beside the hung one). Past this
+ * the request is abandoned and treated as failed: the words stay in `drafts`,
+ * the lock is released, and the next save sends them again. If the server did
+ * write them after all, that next save is a compare-and-swap against the token
+ * from before, so it comes back as a conflict carrying what was stored — the
+ * reviewer is shown it, and nothing is overwritten silently.
+ *
+ * Thirty seconds is six times the server's own SQLite busy timeout
+ * (`store.BUSY_TIMEOUT`, five), so a save waiting its turn behind a run's batch
+ * write is not cut off.
+ */
+export const SAVE_WAIT_MS = 30_000
+
+/** One round of writing: what `save()` was before HANDOFF-091, and its reply.
+ *  `landing` is what it sent, which `flush()` ends once it has been read back. */
+async function round(get: () => Store): Promise<{ outcome: Outcome; reread: boolean; landing: string[] }> {
   {
     // **Nothing stranded is written, by anyone.** A re-extract this page asked
     // for has renumbered the ids every entry is keyed on, and until the new
@@ -1210,11 +1273,11 @@ async function round(get: () => Store): Promise<{ outcome: Outcome; reread: bool
     // was first checked only in `open()`, and a blur during the re-extract's own
     // reload walked straight past it (found by an adversarial pass, 2026-09-21).
     // `false`, because something is being held back; `open()` names what goes.
-    if (drafts.stranded()) return { outcome: { ok: false, failed: false }, reread: false }
+    if (drafts.stranded()) return { outcome: { ok: false, failed: false }, reread: false, landing: [] }
     const where = get().shown()
-    if (!where || !drafts.size()) return { outcome: { ok: true, failed: false }, reread: false }
+    if (!where || !drafts.size()) return { outcome: { ok: true, failed: false }, reread: false, landing: [] }
     const doc = get().doc
-    if (!doc) return { outcome: { ok: true, failed: false }, reread: false }
+    if (!doc) return { outcome: { ok: true, failed: false }, reread: false, landing: [] }
 
     // Blank edits are held back rather than sent. The server refuses an empty
     // target for the WHOLE request, and this is one map for the whole ledger —
@@ -1240,7 +1303,7 @@ async function round(get: () => Store): Promise<{ outcome: Outcome; reread: bool
       )
     }
     const ids = Object.keys(targets)
-    if (!ids.length) return { outcome: { ok: !held.length && !waiting.length, failed: false }, reread: false }
+    if (!ids.length) return { outcome: { ok: !held.length && !waiting.length, failed: false }, reread: false, landing: [] }
 
     // The token each edit was based on, so a translation batch that landed
     // mid-review — or a second window — cannot overwrite a sentence silently.
@@ -1263,26 +1326,40 @@ async function round(get: () => Store): Promise<{ outcome: Outcome; reread: bool
 
     const epoch = drafts.epoch()
     writes += 1
-    drafts.sending(targets)
+    drafts.sending(ids)
     let r: SaveResponse
+    const abandon = new AbortController()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const unanswered = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        abandon.abort()
+        reject(new Error(
+          `the server did not answer this save within ${SAVE_WAIT_MS / 1000} seconds, so this ` +
+          `page stopped waiting and took nothing as written — ${names(ids)} stay unsaved here ` +
+          `and go out again with the next save`,
+        ))
+      }, SAVE_WAIT_MS)
+    })
     try {
-      r = await api.postSave({ ...where, targets, base })
+      r = await Promise.race([api.postSave({ ...where, targets, base }, abandon.signal), unanswered])
     } catch (e) {
       writes += 1
-      drafts.landed()
       // Kept on failure: an empty target is a 400, and clearing first would
       // throw away every other edit in the batch along with the one the server
       // would not take.
       get().say('  ' + reason(e), 'bad')
-      return { outcome: { ok: false, failed: true }, reread: false }
+      return { outcome: { ok: false, failed: true }, reread: false, landing: ids }
+    } finally {
+      clearTimeout(timer)
     }
     writes += 1
-    drafts.landed()
 
     // **A reply about a parse no longer on screen settles nothing here.** Ids
     // restart at `s0001` in every document, so settling it would forget, keep
-    // or mark some other paragraph's entry.
-    if (drafts.epoch() !== epoch) return { outcome: { ok: false, failed: false }, reread: false }
+    // or mark some other paragraph's entry — and that includes what is in
+    // flight, which is why `flush()` and not this function ends the round in
+    // `drafts`, and only in the epoch it was sent in.
+    if (drafts.epoch() !== epoch) return { outcome: { ok: false, failed: false }, reread: false, landing: ids }
 
     // **A reply this page cannot read takes nothing as written.** It used to
     // forget every entry it sent and only then fail on `r.conflicts`.
@@ -1293,7 +1370,7 @@ async function round(get: () => Store): Promise<{ outcome: Outcome; reread: bool
         `was taken as written — ${names(ids)} stay unsaved here`,
         'bad',
       )
-      return { outcome: { ok: false, failed: true }, reread: false }
+      return { outcome: { ok: false, failed: true }, reread: false, landing: ids }
     }
 
     // Every id sent is exactly one of: named no segment, refused, written. A
@@ -1336,6 +1413,7 @@ async function round(get: () => Store): Promise<{ outcome: Outcome; reread: bool
     return {
       outcome: { ok: !held.length && !waiting.length && !refused.length, failed: false },
       reread: same(get().at, where),
+      landing: ids,
     }
   }
 }

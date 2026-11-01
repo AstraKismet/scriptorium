@@ -130,8 +130,9 @@ every id it had sent, and only then fail on `r.conflicts`.
 - `save()` answers `false` while a marked wording waits. Every caller that
   ignores the answer stays as wrong as it was. That is HANDOFF-092's, and its
   file now says so.
-- A request that never answers holds every later save of the same document. The
-  words are kept either way, and `open()` already waited on a hung flush.
+- ~~A request that never answers holds every later save of the same document.~~
+  Wrong, and corrected on 2026-11-02 below: it held every later save *and*
+  every `open()` for good, which the parent never did.
 - Three tests depended on a second save flying beside a held first one, and
   were re-sequenced. Each comment says what changed and what the test still
   asserts. "Draft again overtaken by Re-extract" no longer has a door: the two
@@ -174,6 +175,66 @@ alone.
 - Case 7 of the same package keeps its `it.fails`. Its field half now holds,
   and its false-conflict half does not.
 - *Re-extract*'s refusal sentence over a marked row — `HANDOFF-092`.
+
+### Amended 2026-11-02, after an independent correctness review
+
+The review read `aee2d00` (the source of `a44a544`) in a context that had not
+written it, and found two regressions and a gap, each with a probe that failed
+on that commit. All three are repaired here, with the review's two notes.
+
+- **A save that never answers no longer locks the page.** `api.ts` has no
+  timeout, so with one save on the wire one hung request meant no later save was
+  sent and `open()`, which waits on its flush, never left. The parent sent a
+  second save and left. Now a save unanswered after `SAVE_WAIT_MS` (30 s, six
+  times the server's SQLite busy timeout) is abandoned: the request is aborted,
+  the round counts as failed, the words stay, and the lock is released. `open()`
+  then refuses with its existing "could not be written … the log says why", and
+  the log says the server did not answer. Pressing again sends the words again.
+  If the server did write them late, that send is a compare-and-swap against
+  the old token, so it comes back as a conflict showing what was stored, or as
+  the very text sent, which the backstop takes as a write. The alternative, a
+  bound on how long `open()` waits while the request stays on the wire, lost: a
+  second request beside a live first one is the double send this entry exists
+  to remove.
+- **No `save()` answers before the last round's re-read has landed.** A queued
+  caller whose own round sent nothing answered when the lock was released, before
+  the previous round's re-read. "Draft again" then read the origin from before
+  the save, asked no question about a person's wording, and billed a run whose
+  write was refused. The same held for a call made after the lock was released
+  and before that re-read. The lock still covers only the request and its reply;
+  what waits is the *answer*, chained per drafts epoch through every round still
+  being read back. The cost: an act pressed while a save is being read back —
+  Check, Write file, Commit — sends its own request after that read. Four
+  HANDOFF-088 tests used Check as the door for "a later re-read asked while the
+  save's own is on its way", and Check is not that door any more. They now ask
+  `refresh()` directly, which stands for the re-reads that go through no save (a
+  run's trailing one, Hold's, *Discard mine*'s). Their assertions are unchanged.
+- **An id stays in flight until it has been read back.** `drafts.landed()`
+  cleared the in-flight set when the reply landed. Until the re-read the row
+  still shows the wording from before the save, so typing the field back to it
+  ended the entry while the server held the newer words, and nothing would write
+  the change. In-flight is now a count per id, ended by `flush()` after the
+  re-read: the next round can send the same id while the previous one is being
+  read back. A reply from a parse that has gone ends nothing, because the count
+  is ended only in the epoch it was sent in (the review's first note).
+- **The maintainer's ruling on the re-sequenced Re-extract test.** *Re-extract*
+  pressed while "Draft again"'s save is on the wire now declines once the run
+  starts. The decline is said beside the bar, in a `role="status"` notice, as
+  well as in the log. It names the run in progress, and says to let the run
+  finish and then press *Re-extract* again. The store keeps `runName` for this,
+  and a notice clears on *Dismiss*, on the next press, or when another document
+  is put on screen. The test is renamed to say what it asserts now.
+
+The review's second note, *Re-extract*'s "could not be saved … copy that wording
+somewhere" over a marked row and the toolbar's "N unsaved" tooltip, stays with
+`HANDOFF-092`, where it is already written.
+
+Four new store tests cover the three repairs and the epoch note. Each was run
+against `a44a544` and failed on an assertion: `expected false to be true` (the
+open had not left after the bound), `expected [ 'queued', 'after the reply' ] to
+deeply equal []`, and `expected undefined to be 'orig'` twice. The renamed App
+test failed there on the notice's absence.
+
 ## 2026-10-31 · The reading view is virtualized by line
 
 Closing HANDOFF-090. On 2026-09-14 the maintainer measured *Read → click a
