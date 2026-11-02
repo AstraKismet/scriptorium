@@ -621,7 +621,7 @@ python -m scriptorium --help        # or `lx` after `pip install -e .`
 
 cd studio/web && npm ci             # only to CHANGE the workbench; `lx web`
 npm run typecheck                   #   needs none of this, because the build
-npm test                            #   is committed. 176 tests (9 `it.fails`), jsdom, no network
+npm test                            #   is committed. 188 tests (11 `it.fails`), jsdom, no network
 npm run build                       # writes src/scriptorium/web/static/ — commit it
 
 lx run docs/guide.md --lang zh-TW   # extract -> translate -> check -> repair -> render
@@ -862,8 +862,8 @@ own.
   normalization means no comparison of texts can tell. Three things keep that
   lock from costing what it saves: a save unanswered after `SAVE_WAIT_MS` is
   abandoned as failed with its words kept, no `save()` answers before the last
-  round's re-read has landed, and an id counts as in flight until it has been
-  read back. `docs/decisions.md`, 2026-10-31 and 2026-11-02.
+  round's re-read has landed (a re-read bounded the same way), and an id counts
+  as in flight until it has been read back. `docs/decisions.md`, 2026-10-31 and 2026-11-02.
 
 - **A document is opened by the address, and an act rests on what the page has
   just read.** `App.tsx`'s effect turns the address into `at`. `open()` is

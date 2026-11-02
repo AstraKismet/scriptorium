@@ -81,7 +81,9 @@ interface Store {
    * Why an act the reviewer just pressed did not run, said where they are
    * looking — beside the control — and not only as a line in a drawer that may
    * be closed. Set by the act that declined; cleared when it is dismissed, when
-   * that act is pressed again, or when another document is put on screen.
+   * that act is pressed again, when another document is put on screen, or when
+   * the run it names ends — after that "let the run finish" is no longer true,
+   * and the log keeps the line.
    */
   notice: string
   runCost: RunCost | null
@@ -961,7 +963,7 @@ export const useStore = create<Store>()((set, get) => ({
       get().say('  ' + reason(e), 'bad')
     } finally {
       forgetJob()
-      set({ running: false, runName: '' })
+      set({ running: false, runName: '', notice: '' })
     }
   },
 
@@ -976,7 +978,7 @@ export const useStore = create<Store>()((set, get) => ({
       get().say('  ' + reason(e), 'bad')
     } finally {
       forgetJob()
-      set({ running: false, runName: '' })
+      set({ running: false, runName: '', notice: '' })
     }
   },
 
@@ -990,7 +992,7 @@ export const useStore = create<Store>()((set, get) => ({
     if (!get().running) return
     abandoned = true
     forgetJob()
-    set({ running: false, runName: '' })
+    set({ running: false, runName: '', notice: '' })
     get().say(
       '  stopped following this run. It has not been cancelled — there is no way to ' +
       'cancel one — so the server is still writing, and what it writes will be there ' +
@@ -1215,7 +1217,14 @@ function flush(get: () => Store): Promise<Outcome> {
     void lock.then(() => { if (onWire === lock) onWire = null })
     const prior = settlingEpoch === epoch ? settling : null
     const whole = sent.then(async ({ outcome, reread, landing }) => {
-      if (reread) await get().refresh()
+      if (reread && !await within(get().refresh(), SAVE_WAIT_MS)) {
+        get().say(
+          `  the document was not read back within ${SAVE_WAIT_MS / 1000} seconds of this save, ` +
+          `so what is on screen may be older than what was written — it is read again ` +
+          `with the next act that reads it`,
+          'warn',
+        )
+      }
       // The ids this round sent stop counting as in flight only now, once the
       // row shows what was written — and only in the parse they were sent in.
       if (drafts.epoch() === epoch) drafts.landed(landing)
@@ -1260,6 +1269,20 @@ function flush(get: () => Store): Promise<Outcome> {
  * write is not cut off.
  */
 export const SAVE_WAIT_MS = 30_000
+
+/**
+ * Whether `p` settled within `ms`. The re-read after a save is bounded like the
+ * save itself: no `save()` answers before the last round's re-read has landed,
+ * so a `GET /api/doc` that never answers would otherwise hold every later save
+ * and every `open()` for good — the lock `SAVE_WAIT_MS` removed from the POST,
+ * arriving one request later (found by the second review of HANDOFF-091). Past
+ * the bound the caller is answered and the read is left to land, or not.
+ */
+function within(p: Promise<unknown>, ms: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const late = new Promise<boolean>(resolve => { timer = setTimeout(() => { resolve(false) }, ms) })
+  return Promise.race([p.then(() => true, () => true), late]).finally(() => { clearTimeout(timer) })
+}
 
 /** One round of writing: what `save()` was before HANDOFF-091, and its reply.
  *  `landing` is what it sent, which `flush()` ends once it has been read back. */
@@ -1397,7 +1420,8 @@ async function round(get: () => Store): Promise<{ outcome: Outcome; reread: bool
     const refused = lost.filter(id => drafts.conflict(id))
     if (refused.length) {
       get().say(
-        `  ${names(refused)} changed underneath this edit and were not written — your ` +
+        `  ${names(refused)} changed underneath this edit and ` +
+        `${refused.length === 1 ? 'was' : 'were'} not written — your ` +
         `wording is still in ${refused.length === 1 ? 'its row' : 'each row'}, beside what is ` +
         `stored now, and nothing sends it until you choose there which stays`,
         'bad',

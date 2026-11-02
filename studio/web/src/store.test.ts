@@ -600,7 +600,7 @@ describe('a refused wording, and words typed while a save is in flight', () => {
     expect(drafts.get('s0001')).toBe('她一夜沒睡。')
     expect(drafts.conflict('s0001')).toEqual({ text: '她整夜未眠。', token: 'tok9' })
     expect(ok).toBe(false)
-    expect(bad('changed underneath this edit')).toBe(true)
+    expect(bad('s0001 changed underneath this edit and was not written')).toBe(true)
     expect(bad('beside what is stored now')).toBe(true)
   })
 
@@ -810,6 +810,87 @@ describe('a refused wording, and words typed while a save is in flight', () => {
     expect((lastCall('/api/save')?.body as { base: unknown }).base).toEqual({ s0001: 'tok1' })
   })
 
+  /** A server that keeps a text and token per id and compare-and-swaps on `base`. */
+  const casServer = (gates: Record<number, Promise<void>>): Record<string, { text: string; token: string }> => {
+    const server: Record<string, { text: string; token: string }> = {
+      s0001: { text: 'orig', token: 't0' }, s0002: { text: 'two', token: 'u0' },
+    }
+    let n = 0
+    answering(call => {
+      if (call.path.startsWith('/api/save')) {
+        n += 1
+        const { targets, base } = call.body as { targets: Record<string, string>; base: Record<string, string> }
+        const stored: Record<string, { text: string; token: string }> = {}
+        const conflicts: Record<string, { text: string; token: string }> = {}
+        for (const [id, text] of Object.entries(targets)) {
+          if (base[id] && base[id] !== server[id]!.token) { conflicts[id] = { ...server[id]! }; continue }
+          server[id] = { text, token: `w${n}${id}` }
+          stored[id] = { ...server[id]! }
+        }
+        return { body: { applied: Object.keys(stored).length, unknown: [], stored, conflicts }, after: gates[n] }
+      }
+      if (call.path.startsWith('/api/doc')) {
+        if (call.path.includes('ch2')) return { body: ch2([segment({ id: 's0001' })]) }
+        return { body: doc(Object.entries(server).map(([id, s]) => segment({ id, target: s.text, token: s.token }))) }
+      }
+      return null
+    })
+    return server
+  }
+
+  /**
+   * **Known broken, HANDOFF-096 (its tenth case).** Found by the second review
+   * of HANDOFF-091 and left there by the maintainer's ruling of 2026-11-02. While
+   * `open()` flushes, the address has moved, so no lap is read back: the page
+   * still holds the token from before lap 1's write, and lap 1 forgot the entry
+   * it wrote with its base. Words typed into that row during lap 2 are then sent,
+   * on the re-open the refusal recommends, against the old token, and come back
+   * as a conflict with the page's own write. No words are lost — the row shows
+   * both — but the refusal's "which writes it" is not true here. The same root
+   * as case 9: the token of the page's own writes.
+   */
+  it.fails('writes words typed during the second lap on the re-open the refusal recommends, with no conflict against the page\'s own write', async () => {
+    await openWith([segment({ id: 's0001', target: 'orig', token: 't0' }), segment({ id: 's0002', target: 'two', token: 'u0' })])
+    const lap1 = hold()
+    const lap2 = hold()
+    const server = casServer({ 1: lap1.until, 2: lap2.until })
+    drafts.set('s0001', 'X', 'orig')
+    const opening = useStore.getState().open('book/ch2.md', 'zh-TW')
+    drafts.set('s0002', 'Y', 'two')
+    lap1.release()
+    await new Promise(r => { setTimeout(r, 20) })
+    expect(callsTo('/api/save')).toHaveLength(2)
+    drafts.set('s0001', 'XZ', 'orig')
+    lap2.release()
+    await opening
+    expect(useStore.getState().docError).toMatch(/s0001 was typed into while/)
+    await useStore.getState().open('book/ch1.md', 'zh-TW')
+    expect(bad('changed underneath')).toBe(false)
+    expect(server.s0001!.text).toBe('XZ')
+  })
+
+  /**
+   * **Known broken, HANDOFF-096 (its eleventh case).** The same window: a field
+   * typed back to the wording it showed before lap 1 drops its entry, because
+   * the id stopped counting as in flight with no read-back, and the server keeps
+   * lap 1's words. Older than HANDOFF-091 (it fails on `3789c5e` too).
+   */
+  it.fails('keeps a field typed back to its pre-save wording during the second lap', async () => {
+    await openWith([segment({ id: 's0001', target: 'orig', token: 't0' }), segment({ id: 's0002', target: 'two', token: 'u0' })])
+    const lap1 = hold()
+    const lap2 = hold()
+    const server = casServer({ 1: lap1.until, 2: lap2.until })
+    drafts.set('s0001', 'X', 'orig')
+    const opening = useStore.getState().open('book/ch2.md', 'zh-TW')
+    drafts.set('s0002', 'Y', 'two')
+    lap1.release()
+    await new Promise(r => { setTimeout(r, 20) })
+    drafts.set('s0001', 'orig', 'orig')
+    lap2.release()
+    await opening
+    expect(drafts.has('s0001') || server.s0001!.text === 'orig').toBe(true)
+  })
+
   it('takes nothing as written from a reply it cannot read', async () => {
     await openWith([segment({ id: 's0001', token: 'tok1' })])
     drafts.set('s0001', '她一夜沒睡。', '她沒有睡。')
@@ -944,6 +1025,194 @@ describe('a refused wording, and words typed while a save is in flight', () => {
     expect(drafts.get('s0001')).toBe('orig')
     fresh.release()
     await now
+  })
+
+  // ── found by the second review and the mutation run of HANDOFF-091 ──────────
+
+  // The re-read after a save is waited on by every later save, so one that
+  // never answers held them all, and `open()`, for good — the lock the POST's
+  // bound had just removed, one request later. The reviewer's probe.
+  it('stops waiting for a re-read that never answers, so later saves and the next open still answer', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      await openWith([segment({ id: 's0001', target: 'orig', token: 't0' }), segment({ id: 's0002', target: 'two', token: 'u0' })])
+      answering(call => {
+        if (call.path.startsWith('/api/save')) {
+          const t = (call.body as { targets: Record<string, string> }).targets
+          const stored = Object.fromEntries(Object.entries(t).map(([k, v]) => [k, { text: v, token: 'w-' + k }]))
+          return { body: { applied: Object.keys(t).length, unknown: [], stored, conflicts: {} } }
+        }
+        if (call.path.startsWith('/api/doc')) {
+          if (call.path.includes('ch2')) return { body: ch2([segment({ id: 's0001' })]) }
+          return { body: {}, after: new Promise<void>(() => undefined) }
+        }
+        return null
+      })
+      drafts.set('s0001', 'X', 'orig')
+      void useStore.getState().save()
+      await vi.advanceTimersByTimeAsync(10)
+      expect(callsTo('/api/save')).toHaveLength(1)
+      drafts.set('s0002', 'Y', 'two')
+      let left = false
+      void useStore.getState().open('book/ch2.md', 'zh-TW').then(() => { left = true })
+      await vi.advanceTimersByTimeAsync(SAVE_WAIT_MS * 2)
+      expect(callsTo('/api/save')).toHaveLength(2)
+      expect(left).toBe(true)
+      expect(useStore.getState().doc?.source).toBe('book/ch2.md')
+      expect(useStore.getState().log.some(l => l.text.includes('was not read back within'))).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('aborts the request it stops waiting for', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      await openWith([segment({ id: 's0001', target: 'orig', token: 't0' })])
+      drafts.set('s0001', '燈還亮著', 'orig')
+      replies({ body: {}, after: new Promise<void>(() => undefined) })
+      void useStore.getState().save()
+      await vi.advanceTimersByTimeAsync(10)
+      const signal = callsTo('/api/save')[0]?.signal
+      expect(signal?.aborted).toBe(false)
+      await vi.advanceTimersByTimeAsync(SAVE_WAIT_MS)
+      expect(signal?.aborted).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // A reply about a parse that has gone may not mark, forget or settle an entry
+  // of the parse on screen, which has the same ids for other paragraphs.
+  it('lets no reply from a parse that has gone mark an entry of the parse on screen', async () => {
+    await openWith([segment({ id: 's0001', target: 'orig', token: 't0' })])
+    drafts.set('s0001', '舊的字', 'orig')
+    const old = hold()
+    replies({ body: { applied: 0, unknown: [], stored: {}, conflicts: { s0001: { text: '別人的字', token: 'z' } } }, after: old.until })
+    otherwise({ body: doc([segment({ id: 's0001', target: 'orig', token: 't0' })]) })
+    const before = useStore.getState().save()
+    drafts.clear()
+    drafts.set('s0001', '新的字', 'orig')
+    old.release()
+    await before
+    expect(drafts.conflict('s0001')).toBeUndefined()
+    expect(drafts.get('s0001')).toBe('新的字')
+  })
+
+  // Two rounds may send one id while the first is still being read back; the
+  // first to finish must not end the other's.
+  it('keeps an id in flight until the last round that sent it has been read back', async () => {
+    await openWith([segment({ id: 's0001', target: 'orig', token: 't0' })])
+    drafts.set('s0001', '一', 'orig')
+    const reread = hold()
+    const second = hold()
+    replies(
+      { body: { applied: 1, unknown: [], stored: { s0001: { text: '一', token: 'w1' } }, conflicts: {} } },
+      { body: doc([segment({ id: 's0001', target: '一', token: 'w1' })]), after: reread.until },
+      { body: { applied: 1, unknown: [], stored: { s0001: { text: '二', token: 'w2' } }, conflicts: {} }, after: second.until },
+    )
+    otherwise({ body: doc([segment({ id: 's0001', target: '二', token: 'w2' })]) })
+    const a = useStore.getState().save()
+    await new Promise(r => { setTimeout(r, 20) })
+    drafts.set('s0001', '二', 'orig')
+    const b = useStore.getState().save()
+    await new Promise(r => { setTimeout(r, 20) })
+    expect(callsTo('/api/save')).toHaveLength(2)
+    reread.release()
+    await new Promise(r => { setTimeout(r, 20) })
+    // The first round is over; the second, which sent this id too, is not.
+    drafts.set('s0001', 'orig', 'orig')
+    expect(drafts.get('s0001')).toBe('orig')
+    second.release()
+    await Promise.all([a, b])
+  })
+
+  // The backstop alone: a conflict carrying the very text sent is a write even
+  // when the field has moved on since, so the newer words stay unmarked.
+  it('takes a conflict carrying the text sent as a write while newer words wait in the field', async () => {
+    await openWith([segment({ id: 's0001', target: 'orig', token: 't0' })])
+    drafts.set('s0001', '一', 'orig')
+    const wire = hold()
+    replies({ body: { applied: 0, unknown: [], stored: {}, conflicts: { s0001: { text: '一', token: 'w1' } } }, after: wire.until })
+    otherwise({ body: doc([segment({ id: 's0001', target: '一', token: 'w1' })]) })
+    const saving = useStore.getState().save()
+    drafts.set('s0001', '一二', 'orig')
+    wire.release()
+    await saving
+    expect(drafts.conflict('s0001')).toBeUndefined()
+    expect(drafts.get('s0001')).toBe('一二')
+    expect(drafts.base('s0001')).toBe('w1')
+  })
+
+  // Convergence alone: the field typed to the stored wording while the refused
+  // request was in flight is no conflict, and nothing waits on a choice.
+  it('drops an entry that already says what is stored when its save is refused', async () => {
+    await openWith([segment({ id: 's0001', target: 'orig', token: 't0' })])
+    drafts.set('s0001', '一', 'orig')
+    const wire = hold()
+    replies({ body: { applied: 0, unknown: [], stored: {}, conflicts: { s0001: { text: '別人的字', token: 'z' } } }, after: wire.until })
+    otherwise({ body: doc([segment({ id: 's0001', target: '別人的字', token: 'z' })]) })
+    const saving = useStore.getState().save()
+    drafts.set('s0001', '別人的字', 'orig')
+    wire.release()
+    await saving
+    expect(drafts.has('s0001')).toBe(false)
+    expect(drafts.conflict('s0001')).toBeUndefined()
+  })
+
+  // "Write mine over it" names the token of the wording the reviewer was shown,
+  // even when the page's own copy of the document says something older.
+  it('sends a chosen wording against the token it was shown, not the one the page holds', async () => {
+    await openWith([segment({ id: 's0001', target: 'orig', token: 'tok1' })])
+    drafts.set('s0001', '她一夜沒睡。', 'orig')
+    replies({ body: refused })
+    // The re-read after the refusal fails, so the page still holds `tok1`.
+    otherwise({ status: 500, body: { error: 'database is locked' } })
+    await useStore.getState().save()
+    expect(useStore.getState().doc?.segments[0]?.token).toBe('tok1')
+    drafts.overrule('s0001')
+    replies({ body: { applied: 1, unknown: [], stored: { s0001: { text: '她一夜沒睡。', token: 'tok10' } }, conflicts: {} } })
+    await useStore.getState().save()
+    expect((lastCall('/api/save')?.body as { base: unknown }).base).toEqual({ s0001: 'tok9' })
+  })
+
+  it('clears the notice when another document is put on screen, and when the run it names ends', async () => {
+    await openWith([segment()])
+    useStore.getState().setNotice('book/ch1.md was not re-extracted')
+    replies({ body: ch2([segment()]) })
+    await useStore.getState().open('book/ch2.md', 'zh-TW')
+    expect(useStore.getState().notice).toBe('')
+
+    useStore.getState().setNotice('book/ch2.md was not re-extracted')
+    replies({ body: { id: 'j1', total: 0, route: { provider: 'local', model: 'qwen', error: null } } })
+    await useStore.getState().runJob('draft')
+    expect(useStore.getState().notice).toBe('')
+  })
+})
+
+describe('what the registry forgets with an entry', () => {
+  it('ends an in-flight count, a base and a mark with the parse they were kept in', () => {
+    drafts.clear()
+    drafts.set('s0001', '一', 'orig')
+    drafts.sending(['s0001'])
+    drafts.settle({ s0001: '舊' }, { s0001: 'w1' })
+    expect(drafts.base('s0001')).toBe('w1')
+    drafts.clear()
+    drafts.set('s0001', '二', 'orig')
+    expect(drafts.base('s0001')).toBeUndefined()
+    // Not in flight in this parse: typing back to the shown wording ends it.
+    drafts.set('s0001', 'orig', 'orig')
+    expect(drafts.has('s0001')).toBe(false)
+  })
+
+  it('drops the base with the entry it was kept for', () => {
+    drafts.clear()
+    drafts.set('s0001', '一', 'orig')
+    drafts.settle({ s0001: '舊' }, { s0001: 'w1' })
+    drafts.discard('s0001')
+    drafts.set('s0001', '二', 'orig')
+    expect(drafts.base('s0001')).toBeUndefined()
+    drafts.clear()
   })
 })
 

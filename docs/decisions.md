@@ -235,6 +235,51 @@ open had not left after the bound), `expected [ 'queued', 'after the reply' ] to
 deeply equal []`, and `expected undefined to be 'orig'` twice. The renamed App
 test failed there on the notice's absence.
 
+### Second review, 2026-11-02, and the scope the maintainer set
+
+A second independent reviewer read `a49b811` against the package and this
+entry, and a mutation lane planted 52 mutants in its own worktree (33 killed).
+The review confirmed three findings with failing probes:
+
+- **F1, a regression of the repair above.** The POST was bounded, the re-read
+  after it was not, and every later `save()` now waits on that re-read, so a
+  `GET /api/doc` that never answered locked saves and `open()` exactly as the
+  hung POST had. The re-read is bounded at `SAVE_WAIT_MS` too. Past the bound
+  the caller is answered, a line says the document was not read back, and the
+  read is left to land or not.
+- **F2 and F3: `open()`'s laps are never read back.** The address has already
+  moved, so the page keeps the token from before lap 1's write. Words typed
+  into that row during lap 2 then come back on the recommended re-open as a
+  conflict with the page's own write (F2). A field typed back to its pre-save
+  wording loses that change (F3, older than this package). Both have case 9's
+  root, the token of the page's own writes.
+
+**The maintainer ruled (2026-11-02) to repair F1 here, add the tests the
+mutation run showed missing, and move F2 and F3 to `HANDOFF-096`** as cases 10
+and 11, `it.fails` in `store.test.ts`. A narrow own-write token here would be a
+second mechanism for that package to replace, and F2 loses no words: the row
+shows both wordings and the reviewer chooses. The cost is that the refusal's
+"Open … again, which writes it" is not true in that window.
+
+The same ruling covered two smaller items. The notice is cleared when the run
+it names ends, because "let the run finish" is false after that and the log
+keeps the line. The log line's verb agrees with the number of ids.
+
+Twelve surviving mutants now have a test that kills them, each confirmed by
+planting it: the epoch early return, the abort, the per-id count, the backstop
+and convergence taken separately, *Write mine over it*'s base, `clear()` and
+`drop()` forgetting their `flying` and `bases`, and the notice's two clears.
+The F1 test is the reviewer's probe. The lane read the rest as unreachable or
+equivalent: `mark()` clearing a base that `overrule` and `discard` always
+replace, `settle()` deleting a mark no sent id can carry, the "entry missing"
+guards, and a second lap over conflicted ids that sends nothing. Three were
+left without a test: *Discard mine*'s re-read, the `conflicted` class, and the
+blank stored-wording placeholder.
+
+The maintainer approved the conflict panel's wording from a screenshot of a
+real conflict in a headless browser: the explanation, *Write mine over it*,
+*Discard mine*, and "N waiting on your choice".
+
 ## 2026-10-31 · The reading view is virtualized by line
 
 Closing HANDOFF-090. On 2026-09-14 the maintainer measured *Read → click a
