@@ -12,7 +12,7 @@
  * change mid-run repainted a ledger full of freshly enabled per-row controls.
  * A flag every control reads cannot be short by one.
  */
-import { useState, useSyncExternalStore } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 
 import { ask } from './Confirm'
 import { ModelPicker } from './ModelPicker'
@@ -103,6 +103,13 @@ export function Toolbar() {
     // which counts a blank; `open()` has asked `wording()` since 2026-09-20.
     const written = async (): Promise<boolean> => {
       const left = await writeOut()
+      // Unreachable from this bar today — a stranded map exists only while an
+      // extract runs, and this button waits for it — and answered anyway, so a
+      // later caller cannot re-extract over words a re-parse is still naming.
+      if (left.stranded.length) {
+        say(`  ${doc.source} was not re-extracted: a re-extract is still landing`, 'warn')
+        return false
+      }
       if (left.failed.length) {
         say(
           `  ${names(left.failed)} could not be saved, and a re-extract renumbers segments — ` +
@@ -408,12 +415,26 @@ function StartOver({ onClose, onChoose }: {
   const say = useStore(s => s.say)
   const refresh = useStore(s => s.refresh)
   const [register, setRegister] = useState('')
+  // **A cancelled Start over asks nothing.** The re-read below is the first
+  // await, and the bar stays live through it: Cancel unmounted it, the read
+  // landed, and the discard dialog opened for an act the reviewer had called
+  // off — one click from discarding the document. Before the re-read `ask` was
+  // the first await and the gap did not exist (found by the review of
+  // HANDOFF-092). The same window let a second press or Enter run this twice.
+  const mounted = useRef(true)
+  const busy = useRef(false)
+  useEffect(() => () => { mounted.current = false }, [])
 
   if (!doc) return null
 
   const go = async () => {
     const chosen = register.trim()
-    if (!chosen) return
+    if (!chosen || busy.current) return
+    busy.current = true
+    try { await asked(chosen) } finally { busy.current = false }
+  }
+
+  const asked = async (chosen: string) => {
     // **The count is read now, or the dialog says it could not be.** It used to
     // state `doc.report.translated` from whatever read last landed, and the page
     // learns what a save stored only from the re-read after it — so when that
@@ -425,6 +446,7 @@ function StartOver({ onClose, onChoose }: {
     // the number informs the answer and decides nothing, so it is enough to say
     // it is unknown and give the last one read, marked as such.
     const read = await refresh()
+    if (!mounted.current) return
     const now = useStore.getState().doc
     const fresh = read && now && now.source === doc.source && now.lang === doc.lang ? now : null
     const count = fresh
@@ -447,7 +469,7 @@ function StartOver({ onClose, onChoose }: {
         '',
         count,
         ...(unsaved.length
-          ? ['', `Wording typed on this page and never written is discarded too: ${names(unsaved)}.`]
+          ? ['', `Wording typed on this page and not written yet is discarded too: ${names(unsaved)}.`]
           : []),
         '',
         'The register is part of the translation memory key, so wording banked under',

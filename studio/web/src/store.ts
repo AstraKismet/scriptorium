@@ -152,10 +152,10 @@ interface Store {
    * of the lists: it is not wording.
    */
   writeOut: () => Promise<Unwritten>
-  /** Decline an act for `why` (see `declines`): said in the log and beside the
-   *  bar, and taken down by the next save that writes. True when it declined;
-   *  `''` declines nothing. */
-  decline: (why: string) => boolean
+  /** Decline an act for `d` (see `declines`): said in the log and beside the
+   *  bar, and taken down once it is no longer true. True when it declined;
+   *  `null` declines nothing. */
+  decline: (d: Declined | null) => boolean
   runJob: (mode: Mode, ids?: string[], overwriteHuman?: boolean, note?: string) => Promise<void>
   /** Pick up a run this page started before it was reloaded. */
   resume: () => Promise<void>
@@ -261,22 +261,34 @@ interface Outcome { ok: boolean; failed: boolean }
  * What a save left holding wording that exists only on this page, by why.
  *
  * - `failed`: a request failed, or answered with something this page cannot
- *   read. The log says why; the next save sends the wording again. A map a
- *   re-parse has stranded is counted here too — nothing can write it either.
+ *   read. The log says why; the next save sends the wording again.
  * - `waiting`: refused as stale, and waiting in its row for the reviewer to
  *   choose between their wording and the stored one (HANDOFF-091). Safe where it
  *   is; nothing sends it until they choose.
- * - `newer`: typed while the save was on the wire. Nothing failed; the next save
- *   writes it, on top of the token the save produced.
+ * - `newer`: typed while the save was on the wire — into a row that save
+ *   carried, or into one it never saw. Nothing failed; the next save writes it.
+ * - `stranded`: a re-extract this page asked for has renumbered the ids, so
+ *   nothing can write it; it goes, named, when the new parse is on screen. Its
+ *   own list, because "the log says why, press it again" is false of it (found
+ *   by the review of HANDOFF-092).
  *
- * A blank is in none of the three, because a blank is not wording — the rule
- * `open()` has followed since 2026-09-20, and that the toolbar's Re-extract did
- * not (HANDOFF-092).
+ * A blank is in none of them, because a blank is not wording — the rule `open()`
+ * has followed since 2026-09-20, and that the toolbar's Re-extract did not
+ * (HANDOFF-092).
  */
 export interface Unwritten {
   failed: string[]
   waiting: string[]
   newer: string[]
+  stranded: string[]
+}
+
+/** A refusal, and the rows and reason it is about — so the notice it puts up
+ *  can be taken down the moment it stops being true, and not before. */
+export interface Declined {
+  text: string
+  ids: string[]
+  why: 'failed' | 'waiting' | 'newer' | 'stranded'
 }
 
 /**
@@ -342,27 +354,32 @@ export const unwrittenIds = (): string[] => unwritten()
 /** What is left after a round whose outcome was `failed` or not. */
 function left(failed: boolean): Unwritten {
   const ids = unwritten()
-  if (drafts.stranded()) return { failed: ids, waiting: [], newer: [] }
+  if (drafts.stranded()) return { failed: [], waiting: [], newer: [], stranded: ids }
   const waiting = ids.filter(id => drafts.conflict(id))
   const rest = ids.filter(id => !drafts.conflict(id))
-  return failed ? { failed: rest, waiting, newer: [] } : { failed: [], waiting, newer: rest }
+  return failed
+    ? { failed: rest, waiting, newer: [], stranded: [] }
+    : { failed: [], waiting, newer: rest, stranded: [] }
 }
 
 const rows = (ids: string[]): string => (ids.length === 1 ? 'its row' : 'their rows')
 
 /**
  * Why an act that rests on what the server holds may not go ahead after a save,
- * or `''` when it may. One sentence per act, because what the act would do
+ * or `null` when it may. One sentence per act, because what the act would do
  * without the words is what makes the refusal worth reading.
  *
- * `failed` stops every act: the wording exists only here and the act would be
- * done to the document without it. `waiting` stops only the acts whose output
- * stands for the document — the file and the memory — because the document's
- * wording at that row is not decided yet; a run, a check and the reading view
- * go ahead over it, since the reviewer's words are safe in the row and nothing
- * sends them until they choose. `newer` stops nothing: a row typed into while
- * its save was on the wire was written in that save, so the server already
- * holds a person's wording there and origin precedence keeps a run off it.
+ * `failed`, `stranded` and `newer` stop every act: in each the wording exists
+ * only here and the act would be done to the document without it. `newer` was
+ * first let through, on the argument that a row typed into during its save was
+ * written in that save — true of a row the save carried, false of one it never
+ * saw, and a run then drafted a sentence the reviewer was typing (found by the
+ * review of HANDOFF-092). Nothing failed there, so its sentence says so and a
+ * second press writes the words first. `waiting` stops only the acts whose
+ * output stands for the document — the file and the memory — because the
+ * document's wording at that row is not decided yet; a run, a check and the
+ * reading view go ahead over it, since the reviewer's words are safe in the row
+ * and nothing sends them until they choose.
  */
 export function declines(
   what: Unwritten,
@@ -370,43 +387,108 @@ export function declines(
   src: string,
   without: string,
   decided = false,
-): string {
+): Declined | null {
+  if (what.stranded.length) {
+    const ids = what.stranded
+    return {
+      ids, why: 'stranded',
+      text: `${refusal}: a re-extract has just renumbered the segments of ${src}, so ` +
+        `${names(ids)} can no longer be written anywhere. ${ids.length === 1 ? 'It goes' : 'They go'} ` +
+        `when the new parse is on screen, and the log names ${ids.length === 1 ? 'it' : 'them'} then.`,
+    }
+  }
   if (what.failed.length) {
-    return `${refusal}: ${names(what.failed)} could not be written to ${src} — the log ` +
-      `says why — and ${without}. The wording is still in ${rows(what.failed)}; press it again ` +
-      `once it is written.`
+    const ids = what.failed
+    return {
+      ids, why: 'failed',
+      text: `${refusal}: ${names(ids)} could not be written to ${src} — the log says why — ` +
+        `and ${without}. The wording is still in ${rows(ids)}; press it again once it is written.`,
+    }
+  }
+  if (what.newer.length) {
+    const ids = what.newer
+    return {
+      ids, why: 'newer',
+      text: `${refusal}: ${names(ids)} changed while this was saving and ` +
+        `${ids.length === 1 ? 'is' : 'are'} not written yet — nothing failed, but ${without}. ` +
+        `Press it again, which writes ${ids.length === 1 ? 'it' : 'them'} first.`,
+    }
   }
   if (decided && what.waiting.length) {
-    return `${refusal}: ${names(what.waiting)} changed underneath your edit and ` +
-      `${what.waiting.length === 1 ? 'waits' : 'wait'} on your choice in ${rows(what.waiting)}, so ` +
-      `what ${src} says there is not decided yet. Choose which wording stays, then press it again.`
+    const ids = what.waiting
+    return {
+      ids, why: 'waiting',
+      text: `${refusal}: ${names(ids)} changed underneath your edit and ` +
+        `${ids.length === 1 ? 'waits' : 'wait'} on your choice in ${rows(ids)}, so what ${src} ` +
+        `says there is not decided yet. Choose which wording stays, then press it again.`,
+    }
   }
-  return ''
-}
-
-/** Decline an act for `why`, said in the log and beside the bar. True when it
- *  declined; `''` declines nothing. The notice is taken down by the next save
- *  that gets a readable answer, as a failed save's own is (see `saveNotice`):
- *  it is about the same wording, and is false the moment that is written. */
-function stopped(get: () => Store, why: string): boolean {
-  if (!why) return false
-  get().say('  ' + why, 'warn')
-  saveNotice = why
-  get().setNotice(why)
-  return true
+  return null
 }
 
 /**
- * The notice a failed save put beside the bar, while it is still the one shown.
+ * The notice a save, or an act declining over unwritten wording, put beside the
+ * bar — with the rows and the reason it is about, and the parse those rows
+ * belong to.
  *
  * A save that fails says why in the log at `bad`, and the log is a drawer that
  * may be shut — while the field the reviewer just left, or moved off with
- * Ctrl+Enter, gives no sign beyond a dot that its wording went nowhere. So a
- * failed round says so where the reviewer is looking, and the next round that
- * gets a readable answer takes it down again: a notice saying "not written" over
- * wording a later save wrote is the same lie one step later.
+ * Ctrl+Enter, gives no sign beyond a dot that its wording went nowhere. So it is
+ * said where the reviewer is looking. **And it is taken down exactly when it
+ * stops being true, and not by anything else** (`stillTrue`): the first version
+ * cleared it on any readable save and on a run's end, and the review found it
+ * wrong both ways — cleared while a row still waited on the reviewer's choice or
+ * still held words that had failed, kept after the field was emptied, the row's
+ * wording discarded, or the map stranded by a re-extract.
  */
-let saveNotice: string | null = null
+let said: (Declined & { epoch: number }) | null = null
+
+/** Whether `said` still describes the page. A readable save answers `failed`
+ *  and `newer` itself, in `round()`. */
+function stillTrue(s: Declined & { epoch: number }): boolean {
+  if (drafts.epoch() !== s.epoch) return false
+  if (s.why === 'stranded') return drafts.stranded()
+  if (drafts.stranded()) return false
+  const holding = s.ids.filter(id => wording(drafts.get(id) ?? ''))
+  if (s.why === 'waiting') return holding.some(id => drafts.conflict(id))
+  return holding.some(id => !drafts.conflict(id))
+}
+
+/** Take `said` down if it is no longer true — or forget it if something else
+ *  has replaced it beside the bar. */
+function recheck(get: () => Store): void {
+  if (!said) return
+  if (get().notice !== said.text) { said = null; return }
+  if (!stillTrue(said)) {
+    said = null
+    get().setNotice('')
+  }
+}
+
+/** Put `d` beside the bar as `said`. */
+function sayBeside(get: () => Store, d: Declined): void {
+  said = { ...d, epoch: drafts.epoch() }
+  get().setNotice(d.text)
+}
+
+/** Whether the notice beside the bar is one `said` is keeping — which a run's
+ *  end must leave alone. */
+const keeping = (get: () => Store): boolean => !!said && get().notice === said.text
+
+/** A run has ended: "let the run finish" is no longer true, so its notice goes
+ *  — but not one about unwritten wording that still holds. */
+function endOfRun(get: () => Store): void {
+  if (!keeping(get)) get().setNotice('')
+}
+
+/** Decline an act for `d`, said in the log and beside the bar. True when it
+ *  declined; `null` declines nothing. */
+function stopped(get: () => Store, d: Declined | null): boolean {
+  if (!d) return false
+  get().say('  ' + d.text, 'warn')
+  sayBeside(get, d)
+  return true
+}
 
 /**
  * Name a list of segment ids in a log line, bounded.
@@ -597,6 +679,9 @@ async function reExtract(
     // translations, not the sentence they were part-way through typing. So the
     // ids are named when they go rather than vanishing without a line.
     if (same(get().shown(), where)) drafts.strand()
+    // A notice that wording is still in its row, or waits there, is false from
+    // this moment: nothing can write it now (found by the review of HANDOFF-092).
+    recheck(get)
     get().say(
       `  ${r.segments} segments, ${r.reused} reused` +
       (r.rejected ? `, ${r.rejected} stale proposal(s) refused` : ''),
@@ -1042,8 +1127,10 @@ export const useStore = create<Store>()((set, get) => ({
 
     // What the run's own end leaves beside the bar. A run that ends clears the
     // notice, because "let the run finish" is no longer true then — except the
-    // one this run says about itself when it declines to start.
-    let keep = ''
+    // one this run says about itself when it declines to start, and one about
+    // unwritten wording that is still true (`keeping`), which a run ending does
+    // nothing to.
+    let keep: Declined | null = null
     try {
       // **Not started over wording only this page holds.** The server chooses a
       // run's segments from what it has stored, and origin precedence can only
@@ -1056,7 +1143,7 @@ export const useStore = create<Store>()((set, get) => ({
         'a run chooses its segments from what is stored, so it could replace wording that exists only on this page',
       )
       if (why) {
-        get().say('  ' + why, 'warn')
+        get().say('  ' + why.text, 'warn')
         keep = why
         return
       }
@@ -1095,8 +1182,9 @@ export const useStore = create<Store>()((set, get) => ({
       get().say('  ' + reason(e), 'bad')
     } finally {
       forgetJob()
-      if (keep) saveNotice = keep
-      set({ running: false, runName: '', notice: keep })
+      set({ running: false, runName: '' })
+      if (keep) sayBeside(get, keep)
+      else endOfRun(get)
     }
   },
 
@@ -1111,7 +1199,8 @@ export const useStore = create<Store>()((set, get) => ({
       get().say('  ' + reason(e), 'bad')
     } finally {
       forgetJob()
-      set({ running: false, runName: '', notice: '' })
+      set({ running: false, runName: '' })
+      endOfRun(get)
     }
   },
 
@@ -1125,7 +1214,8 @@ export const useStore = create<Store>()((set, get) => ({
     if (!get().running) return
     abandoned = true
     forgetJob()
-    set({ running: false, runName: '', notice: '' })
+    set({ running: false, runName: '' })
+    endOfRun(get)
     get().say(
       '  stopped following this run. It has not been cancelled — there is no way to ' +
       'cancel one — so the server is still writing, and what it writes will be there ' +
@@ -1301,6 +1391,12 @@ export const useStore = create<Store>()((set, get) => ({
   },
 }))
 
+// A choice in a row (*Discard mine*, *Write mine over it*), a cleared map and a
+// settled save all move the registry, and each can make a notice about
+// unwritten wording false. The registry announces only crossings, so this costs
+// nothing per keystroke.
+drafts.subscribe(() => { recheck(useStore.getState) })
+
 // ── selectors, kept beside the store so a component imports one thing ──────
 
 /** The segments a filter admits. Pure, and it computes nothing the server
@@ -1460,15 +1556,17 @@ function notWritten(get: () => Store, ids: string[], epoch: number): void {
   const text =
     `${names(ids)} ${ids.length === 1 ? 'was' : 'were'} not written — the save failed, and the ` +
     `log says why. The wording is still in ${rows(ids)}, marked unsaved, and the next save sends ` +
-    `it again: leaving the field, Ctrl+Enter, or any act on this bar.`
-  saveNotice = text
-  get().setNotice(text)
+    `it again: leaving the field, Ctrl+Enter, or Check and the other acts that save first.`
+  sayBeside(get, { text, ids, why: 'failed' })
 }
 
 /** One round of writing: what `save()` was before HANDOFF-091, and its reply.
  *  `landing` is what it sent, which `flush()` ends once it has been read back. */
 async function round(get: () => Store): Promise<{ outcome: Outcome; reread: boolean; landing: string[] }> {
   {
+    // A field emptied since the notice went up changes no count the registry
+    // announces, so it is asked here too: every save passes this point.
+    recheck(get)
     // **Nothing stranded is written, by anyone.** A re-extract this page asked
     // for has renumbered the ids every entry is keyed on, and until the new
     // parse is on screen `doc` still carries the old one's tokens — so a blur in
@@ -1578,10 +1676,13 @@ async function round(get: () => Store): Promise<{ outcome: Outcome; reread: bool
       notWritten(get, ids, epoch)
       return { outcome: { ok: false, failed: true }, reread: false, landing: ids }
     }
-    // A readable answer: whatever a failed round said beside the bar is no
-    // longer the state of things — what this one could not write, it says below.
-    if (saveNotice !== null && get().notice === saveNotice) get().setNotice('')
-    saveNotice = null
+    // A readable answer: a notice that wording had failed, or was not yet
+    // written, is about what this round has just sent or found waiting — so it
+    // is no longer the state of things. What this round could not write, it
+    // says below. A notice about a row waiting on the reviewer's choice is not
+    // answered by a save at all, only by the choice (`recheck`).
+    if (said && (said.why === 'failed' || said.why === 'newer') && keeping(get)) get().setNotice('')
+    if (said && said.why !== 'waiting') said = null
 
     // Every id sent is exactly one of: named no segment, refused, written. A
     // conflict whose stored text is the text sent is a write, not a refusal —

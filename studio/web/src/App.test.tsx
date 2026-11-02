@@ -3151,7 +3151,7 @@ describe('what the page acts on is what it has just read', () => {
     await user.type(screen.getByPlaceholderText('type a register'), 'plain')
     await user.click(screen.getByRole('button', { name: 'Start over…' }))
     await waitFor(() => { expect(dialogOpen()).toBe(true) }, { timeout: 4000 })
-    expect(document.querySelector('dialog[open]')!.textContent).toContain('never written is discarded too: s0003')
+    expect(document.querySelector('dialog[open]')!.textContent).toContain('not written yet is discarded too: s0003')
   }, 20000)
 
   it('states the count Start over reads itself, when the re-read after a save failed', async () => {
@@ -3201,6 +3201,79 @@ describe('what the page acts on is what it has just read', () => {
     const said = document.querySelector('dialog[open]')!.textContent
     expect(said).toContain('could not be read again; the last read said 0 of 3')
     expect(said).not.toContain('0 of 3 segments are translated now')
+  }, 20000)
+
+  // The four below were found by the independent review of HANDOFF-092's first
+  // version — a probe each from the adversarial lane, and one mutant that
+  // survived the mutation lane.
+
+  it('asks nothing for a Start over cancelled while it was reading the count', async () => {
+    const slow = held()
+    serve({ read: (src, n) => (src === doc.source && n === 2 ? { body: doc, after: slow.until } : null) })
+    await opened(address(doc.source, 's0003'), '/3 translated')
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: /Start over in another register/ }))
+    await user.type(screen.getByPlaceholderText('type a register'), 'plain')
+    await user.click(screen.getByRole('button', { name: 'Start over…' }))
+    await waitFor(() => { expect(readsOf(doc.source)).toBe(2) })
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByPlaceholderText('type a register')).toBeNull()
+    await act(async () => { slow.release(); await settle(200) })
+    expect(dialogOpen()).toBe(false)
+  }, 20000)
+
+  it('takes down "still in its row" once a Start over has stranded the words', async () => {
+    const slow = held()
+    serve({ base: untranslated, save: () => ({ ...refused, after: slow.until }) })
+    await opened(address(doc.source, 's0003'), '/3 translated')
+    const user = userEvent.setup()
+    await typedThenFailed(user)
+    await user.click(screen.getByRole('button', { name: /Start over in another register/ }))
+    slow.release()
+    await waitFor(() => { expect(notice()).toContain('s0003 was not written') }, { timeout: 4000 })
+    await user.type(screen.getByPlaceholderText('type a register'), 'plain')
+    await user.click(screen.getByRole('button', { name: 'Start over…' }))
+    await waitFor(() => { expect(dialogOpen()).toBe(true) }, { timeout: 4000 })
+    await user.click(within(document.querySelector<HTMLDialogElement>('dialog[open]')!).getByRole('button', { name: 'Discard and re-extract' }))
+    await waitFor(() => { expect(extracts()).toHaveLength(1) })
+    await waitFor(() => { expect(useStore.getState().running).toBe(false) }, { timeout: 4000 })
+    await settle(200)
+    expect(drafts.size()).toBe(0)
+    expect(logged('bad', 'the re-parse renumbered')).toBe(true)
+    expect(notice()).not.toContain('still in its row')
+  }, 20000)
+
+  it('does not promise that stranded words will be written, when Read is pressed over them', async () => {
+    const listing = held()
+    serve({ base: untranslated, save: () => refused, listing: n => (n === 2 ? listing.until : null) })
+    await opened(address(doc.source, 's0003'), '/3 translated')
+    const user = userEvent.setup()
+    await typedThenFailed(user)
+    await user.click(screen.getByRole('button', { name: /Start over in another register/ }))
+    await user.type(screen.getByPlaceholderText('type a register'), 'plain')
+    await user.click(screen.getByRole('button', { name: 'Start over…' }))
+    await waitFor(() => { expect(dialogOpen()).toBe(true) }, { timeout: 4000 })
+    await user.click(within(document.querySelector<HTMLDialogElement>('dialog[open]')!).getByRole('button', { name: 'Discard and re-extract' }))
+    await waitFor(() => { expect(drafts.stranded()).toBe(true) }, { timeout: 4000 })
+    await user.click(screen.getByRole('button', { name: 'Read' }))
+    await waitFor(() => { expect(notice()).toContain('The reading view was not opened') }, { timeout: 4000 })
+    const said = notice()
+    await act(async () => { listing.release(); await settle(200) })
+    expect(said).toContain('can no longer be written anywhere')
+    expect(said).not.toContain('press it again once it is written')
+  }, 20000)
+
+  it('refuses Re-extract over a save that failed, saying so, before any dialog', async () => {
+    serve({ save: () => refused })
+    await opened(address(doc.source, 's0003'), '/3 translated')
+    const user = userEvent.setup()
+    await typedThenFailed(user)
+    await user.click(screen.getByRole('button', { name: 'Re-extract' }))
+    await waitFor(() => { expect(logged('bad', 'could not be saved, and a re-extract renumbers segments')).toBe(true) }, { timeout: 4000 })
+    await settle(200)
+    expect(dialogOpen()).toBe(false)
+    expect(extracts()).toHaveLength(0)
+    expect(readsOf(doc.source)).toBe(1)
   }, 20000)
 
   it('lets the tab close over a field the reviewer emptied, which loses nothing', async () => {

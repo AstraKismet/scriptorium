@@ -150,7 +150,7 @@ export const SegmentRow = memo(function SegmentRow({ seg }: { seg: Segment }) {
     // compare-and-swap still guards the reviewer's wording against it.
     const why = declines(
       await useStore.getState().writeOut(), `${seg.id} was not sent`, named?.src ?? 'this document',
-      'whether the run would replace wording a person wrote would be decided from what was stored before it',
+      'a run chooses and asks from what is stored, so it would be decided without it',
     )
     if (useStore.getState().decline(why)) return
     // The origin below decides whether to ask about replacing a person's

@@ -1224,20 +1224,20 @@ describe('what a save left unwritten, and why (HANDOFF-092)', () => {
     await openWith([segment({ id: 's0001' })])
     drafts.set('s0001', '  ', '她沒有睡。')
     expect(await useStore.getState().save()).toBe(false)
-    expect(await useStore.getState().writeOut()).toEqual({ failed: [], waiting: [], newer: [] })
+    expect(await useStore.getState().writeOut()).toEqual({ failed: [], waiting: [], newer: [], stranded: [] })
   })
 
   it('names a failed request as failed, and a refused one as waiting', async () => {
     await openWith([segment({ id: 's0001', token: 'tok1' }), segment({ id: 's0002', token: 'tok2' })])
     drafts.set('s0002', '第二段。', '她沒有睡。')
     replies({ status: 500, body: { error: 'database is locked' } })
-    expect(await useStore.getState().writeOut()).toEqual({ failed: ['s0002'], waiting: [], newer: [] })
+    expect(await useStore.getState().writeOut()).toEqual({ failed: ['s0002'], waiting: [], newer: [], stranded: [] })
 
     drafts.clear()
     drafts.set('s0001', '她一夜沒睡。', '她沒有睡。')
     replies({ body: refused })
     otherwise({ body: doc([segment({ id: 's0001', target: '她整夜未眠。', token: 'tok9' })]) })
-    expect(await useStore.getState().writeOut()).toEqual({ failed: [], waiting: ['s0001'], newer: [] })
+    expect(await useStore.getState().writeOut()).toEqual({ failed: [], waiting: ['s0001'], newer: [], stranded: [] })
   })
 
   it('names words typed while the save was on the wire as newer, not as failed', async () => {
@@ -1250,7 +1250,114 @@ describe('what a save left unwritten, and why (HANDOFF-092)', () => {
     const out = useStore.getState().writeOut()
     drafts.set('s0001', '她一夜沒睡。還', '她沒有睡。')
     release()
-    expect(await out).toEqual({ failed: [], waiting: [], newer: ['s0001'] })
+    expect(await out).toEqual({ failed: [], waiting: [], newer: ['s0001'], stranded: [] })
+  })
+
+  it('names wording a re-extract has stranded as stranded, and nothing else', async () => {
+    await openWith([segment({ id: 's0001', token: 'tok1' })])
+    drafts.set('s0001', '她一夜沒睡。', '她沒有睡。')
+    drafts.strand()
+    try {
+      expect(await useStore.getState().writeOut()).toEqual({ failed: [], waiting: [], newer: [], stranded: ['s0001'] })
+      expect(callsTo('/api/save')).toHaveLength(0)
+    } finally {
+      drafts.clear()
+    }
+  })
+})
+
+/**
+ * The notice beside the bar about unwritten wording stays up exactly while it
+ * is true. Each case here was found by the independent review of HANDOFF-092
+ * against its first version, which cleared it on any readable save and on a
+ * run's end.
+ */
+describe('a notice about unwritten wording, while it is true (HANDOFF-092)', () => {
+  const failing = { status: 500, body: { error: 'database is locked' } }
+  const conflict = { applied: 0, unknown: [], stored: {}, conflicts: { s0001: { text: '她整夜未眠。', token: 'tok9' } } }
+  const notice = (): string => useStore.getState().notice
+  const hold = (): { until: Promise<void>; release: () => void } => {
+    let release: () => void = () => undefined
+    const until = new Promise<void>(r => { release = r })
+    return { until, release }
+  }
+
+  it('is not taken down by a run ending while the words are still unwritten', async () => {
+    await openWith([segment({ id: 's0001', token: 'tok1' })])
+    const gate = hold()
+    replies({ body: { id: 'job1', total: 0, route: { provider: 'local', model: 'm' } }, after: gate.until })
+    const run = useStore.getState().runJob('draft')
+    await vi.waitFor(() => { expect(callsTo('/api/translate')).toHaveLength(1) })
+    drafts.set('s0001', '她一夜沒睡。', '她沒有睡。')
+    replies(failing)
+    await useStore.getState().save()
+    expect(notice()).toMatch(/s0001 was not written/)
+    gate.release()
+    await run
+    expect(drafts.get('s0001')).toBe('她一夜沒睡。')
+    expect(notice()).toMatch(/s0001 was not written/)
+  })
+
+  it('is taken down when the field is emptied', async () => {
+    await openWith([segment({ id: 's0001', token: 'tok1' })])
+    drafts.set('s0001', '她一夜沒睡。', '她沒有睡。')
+    replies(failing)
+    await useStore.getState().save()
+    expect(notice()).toMatch(/still in its row/)
+    drafts.set('s0001', '', '她沒有睡。')
+    await useStore.getState().save()
+    expect(notice()).toBe('')
+  })
+
+  it('about a row waiting on a choice, survives an unrelated save and goes with the choice', async () => {
+    await openWith([segment({ id: 's0001', token: 'tok1' }), segment({ id: 's0002', token: 'tok2' })])
+    drafts.set('s0001', '她一夜沒睡。', '她沒有睡。')
+    replies({ body: conflict })
+    otherwise({ body: doc([segment({ id: 's0001', target: '她整夜未眠。', token: 'tok9' }), segment({ id: 's0002', token: 'tok2' })]) })
+    await useStore.getState().commit()
+    expect(callsTo('/api/commit')).toHaveLength(0)
+    expect(notice()).toMatch(/waits on your choice/)
+
+    drafts.set('s0002', '第二段。', '她沒有睡。')
+    replies({ body: { applied: 1, unknown: [], stored: { s0002: { text: '第二段。', token: 'tokB' } }, conflicts: {} } })
+    await useStore.getState().save()
+    expect(drafts.conflict('s0001')).toBeTruthy()
+    expect(notice()).toMatch(/waits on your choice/)
+
+    drafts.discard('s0001')
+    expect(notice()).toBe('')
+  })
+
+  it('starts no run over a row typed into while the run\'s own save was on the wire', async () => {
+    await openWith([segment({ id: 's0001', token: 'tok1' }), segment({ id: 's0002', target: '', status: 'pending', token: 'tok2' })])
+    drafts.set('s0001', '她一夜沒睡。', '她沒有睡。')
+    const gate = hold()
+    replies(
+      { body: { applied: 1, unknown: [], stored: { s0001: { text: '她一夜沒睡。', token: 'tokA' } }, conflicts: {} }, after: gate.until },
+      { body: doc([segment({ id: 's0001', target: '她一夜沒睡。', token: 'tokA' }), segment({ id: 's0002', target: '', status: 'pending', token: 'tok2' })]) },
+    )
+    const run = useStore.getState().runJob('draft')
+    await vi.waitFor(() => { expect(callsTo('/api/save')).toHaveLength(1) })
+    drafts.set('s0002', '第二段，還在寫。', '')
+    gate.release()
+    await run
+    expect(callsTo('/api/translate')).toHaveLength(0)
+    expect(notice()).toMatch(/s0002 changed while this was saving/)
+    expect(notice()).toMatch(/nothing failed/)
+  })
+
+  it('does not name rows of a document that replaced the one whose save failed', async () => {
+    await openWith([segment({ id: 's0001', token: 'tok1' })])
+    drafts.set('s0001', '她一夜沒睡。', '她沒有睡。')
+    const gate = hold()
+    replies({ ...failing, after: gate.until })
+    const saving = useStore.getState().save()
+    await vi.waitFor(() => { expect(callsTo('/api/save')).toHaveLength(1) })
+    // The document is replaced while the save is still unanswered.
+    drafts.clear()
+    gate.release()
+    await saving
+    expect(notice()).toBe('')
   })
 })
 
