@@ -156,6 +156,9 @@ interface Store {
    *  bar, and taken down once it is no longer true. True when it declined;
    *  `null` declines nothing. */
   decline: (d: Declined | null) => boolean
+  /** Clear the notice as an act begins — leaving one about unwritten wording
+   *  that is still true, which only Dismiss or the condition ending removes. */
+  quiet: () => void
   runJob: (mode: Mode, ids?: string[], overwriteHuman?: boolean, note?: string) => Promise<void>
   /** Pick up a run this page started before it was reloaded. */
   resume: () => Promise<void>
@@ -1074,6 +1077,8 @@ export const useStore = create<Store>()((set, get) => ({
   writeOut: () => flush(get).then(o => left(o.failed)),
 
   decline: why => stopped(get, why),
+
+  quiet: () => { recheck(get); endOfRun(get) },
 
   /**
    * Start a run and follow it to a terminal state.

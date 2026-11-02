@@ -65,6 +65,7 @@ export function Toolbar() {
   const commit = useStore(s => s.commit)
   const writeOut = useStore(s => s.writeOut)
   const decline = useStore(s => s.decline)
+  const quiet = useStore(s => s.quiet)
   const refresh = useStore(s => s.refresh)
   const extract = useStore(s => s.extract)
   const startOver = useStore(s => s.startOver)
@@ -83,7 +84,10 @@ export function Toolbar() {
   /** Re-read the source. Destructive in a way the wire never names. */
   const reExtract = async () => {
     if (!ready) return
-    setNotice('')
+    // A fresh press says its own refusals afresh — but a notice about unwritten
+    // wording that is still true is not this act's to take down (second review
+    // of HANDOFF-092): only Dismiss, or the condition ending, does that.
+    quiet()
     // Before the dialog, not after: an edit still in the ledger is written
     // against the ids *this* parse produced, and the next parse reassigns them
     // from `s0001`.
@@ -380,7 +384,7 @@ export function Toolbar() {
         <span className="note-line" style={{ maxWidth: 'none' }}>
           {doc.source} · {doc.lang} · register <b style={{ color: 'var(--vellum)' }}>{doc.tone || 'unknown'}</b>
         </span>
-        <button type="button" className="quiet" disabled={!ready} onClick={() => { setNotice(''); setStartingOver(true) }}>
+        <button type="button" className="quiet" disabled={!ready} onClick={() => { quiet(); setStartingOver(true) }}>
           Start over in another register…
         </button>
         <span className="spacer" />
@@ -423,7 +427,13 @@ function StartOver({ onClose, onChoose }: {
   // HANDOFF-092). The same window let a second press or Enter run this twice.
   const mounted = useRef(true)
   const busy = useRef(false)
-  useEffect(() => () => { mounted.current = false }, [])
+  // Set in the setup as well as the cleanup: StrictMode mounts, unmounts and
+  // mounts again in development, and a ref only ever set false stayed false — no
+  // Start over ever asked (found by the second review of HANDOFF-092).
+  useEffect(() => {
+    mounted.current = true
+    return () => { mounted.current = false }
+  }, [])
 
   if (!doc) return null
 

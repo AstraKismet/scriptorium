@@ -11,6 +11,7 @@
  * virtualized. See the note on 'opens the document the address names, and
  * settles', and the one on 'moving between segments'.
  */
+import { StrictMode } from 'react'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -3274,6 +3275,48 @@ describe('what the page acts on is what it has just read', () => {
     expect(dialogOpen()).toBe(false)
     expect(extracts()).toHaveLength(0)
     expect(readsOf(doc.source)).toBe(1)
+  }, 20000)
+
+  // Three more, from the second review (of `43058a0`).
+
+  it('opens Start over\'s dialog under StrictMode, which mounts every component twice', async () => {
+    serve()
+    startAt(address(doc.source, 's0003'))
+    render(<StrictMode><App /></StrictMode>)
+    await waitFor(() => { expect(screen.getByText('/3 translated')).toBeTruthy() }, { timeout: 4000 })
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: /Start over in another register/ }))
+    await user.type(screen.getByPlaceholderText('type a register'), 'plain')
+    await user.click(screen.getByRole('button', { name: 'Start over…' }))
+    await waitFor(() => { expect(dialogOpen()).toBe(true) }, { timeout: 4000 })
+  }, 20000)
+
+  it('keeps a failed save\'s notice when Start over is opened and cancelled', async () => {
+    serve({ base: untranslated, save: () => refused })
+    await opened(address(doc.source, 's0003'), '/3 translated')
+    const user = userEvent.setup()
+    await typedThenFailed(user)
+    await user.click(screen.getByText('The lamp was still burning.'))
+    await waitFor(() => { expect(notice()).toContain('s0003 was not written') }, { timeout: 4000 })
+    await user.click(screen.getByRole('button', { name: /Start over in another register/ }))
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    await settle(200)
+    expect(drafts.get('s0003')).toBe('燈還亮著。')
+    expect(notice()).toContain('s0003 was not written')
+  }, 20000)
+
+  it('keeps a "waits on your choice" notice when Re-extract refuses over the same row', async () => {
+    conflictOnFirst()
+    await opened(address(doc.source, 's0003'), '/3 translated')
+    const user = userEvent.setup()
+    await blurred(user)
+    await user.click(screen.getByRole('button', { name: 'Write file' }))
+    await waitFor(() => { expect(notice()).toContain('waits on your choice') }, { timeout: 4000 })
+    await user.click(screen.getByRole('button', { name: 'Re-extract' }))
+    await waitFor(() => { expect(logged('warn', 'was not re-extracted')).toBe(true) }, { timeout: 4000 })
+    await settle(200)
+    expect(drafts.conflict('s0003')).toBeTruthy()
+    expect(notice()).toContain('waits on your choice')
   }, 20000)
 
   it('lets the tab close over a field the reviewer emptied, which loses nothing', async () => {
