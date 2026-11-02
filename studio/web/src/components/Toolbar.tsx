@@ -12,14 +12,14 @@
  * change mid-run repainted a ledger full of freshly enabled per-row controls.
  * A flag every control reads cannot be short by one.
  */
-import { useState, useSyncExternalStore } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 
 import { ask } from './Confirm'
 import { ModelPicker } from './ModelPicker'
 import type { DocAddress } from '../contract'
 import * as drafts from '../drafts'
 import * as routes from '../router'
-import { useStore, writeEpoch, type Filter } from '../store'
+import { declines, holdsWording, names, unwrittenIds, useStore, writeEpoch, type Filter } from '../store'
 
 const BOUNDS = [0, 10, 25, 50, 100]
 
@@ -63,7 +63,9 @@ export function Toolbar() {
   const check = useStore(s => s.check)
   const render = useStore(s => s.render)
   const commit = useStore(s => s.commit)
-  const save = useStore(s => s.save)
+  const writeOut = useStore(s => s.writeOut)
+  const decline = useStore(s => s.decline)
+  const quiet = useStore(s => s.quiet)
   const refresh = useStore(s => s.refresh)
   const extract = useStore(s => s.extract)
   const startOver = useStore(s => s.startOver)
@@ -82,7 +84,10 @@ export function Toolbar() {
   /** Re-read the source. Destructive in a way the wire never names. */
   const reExtract = async () => {
     if (!ready) return
-    setNotice('')
+    // A fresh press says its own refusals afresh — but a notice about unwritten
+    // wording that is still true is not this act's to take down (second review
+    // of HANDOFF-092): only Dismiss, or the condition ending, does that.
+    quiet()
     // Before the dialog, not after: an edit still in the ledger is written
     // against the ids *this* parse produced, and the next parse reassigns them
     // from `s0001`.
@@ -92,21 +97,56 @@ export function Toolbar() {
     // can never be applied afterwards, because the ids they are keyed on will
     // name different text. So the act stops instead, with the reviewer holding
     // the only copy.
+    //
+    // **Three reasons, three sentences, and a blank is not one of them.** The
+    // one sentence this used to say — "could not be saved … copy that wording
+    // somewhere" — was said over a field the reviewer had emptied, which holds
+    // nothing to copy and which `save()` holds back by design, and over a row
+    // waiting on the reviewer's choice, whose wording is safe beside the stored
+    // one and one click from resolved (HANDOFF-092). It asked `drafts.size()`,
+    // which counts a blank; `open()` has asked `wording()` since 2026-09-20.
     const written = async (): Promise<boolean> => {
-      const saved = await save()
-      if (!drafts.size()) return true
-      // Two different reasons, and only one of them is a refusal: `save()`
-      // answers true when everything it sent was written, so what is left then
-      // was typed while it was in flight.
-      say(
-        saved
-          ? `  ${drafts.ids().slice(0, 20).join(', ')} changed while this was saving and are not ` +
-            `written yet — ${doc.source} was not re-extracted; press Re-extract again`
-          : `  ${drafts.ids().slice(0, 20).join(', ')} could not be saved, and a re-extract ` +
-            `renumbers segments — copy that wording somewhere before trying again`,
-        saved ? 'warn' : 'bad',
-      )
-      return false
+      const left = await writeOut()
+      // Unreachable from this bar today — a stranded map exists only while an
+      // extract runs, and this button waits for it — and answered anyway, so a
+      // later caller cannot re-extract over words a re-parse is still naming.
+      if (left.stranded.length) {
+        say(`  ${doc.source} was not re-extracted: a re-extract is still landing`, 'warn')
+        return false
+      }
+      if (left.failed.length) {
+        say(
+          `  ${names(left.failed)} could not be saved, and a re-extract renumbers segments — ` +
+          `${doc.source} was not re-extracted. The log says why the save failed; the wording is ` +
+          `still in ${left.failed.length === 1 ? 'its row' : 'their rows'}. Press Re-extract again ` +
+          `once it is written, or copy the wording out first.`,
+          'bad',
+        )
+        return false
+      }
+      if (left.waiting.length) {
+        say(
+          `  ${names(left.waiting)} changed underneath your edit and ` +
+          `${left.waiting.length === 1 ? 'waits' : 'wait'} on your choice in ` +
+          `${left.waiting.length === 1 ? 'its row' : 'their rows'}, and a re-extract renumbers ` +
+          `segments, which would discard that wording — ${doc.source} was not re-extracted. ` +
+          `Choose which wording stays, then press Re-extract again.`,
+          'warn',
+        )
+        return false
+      }
+      if (left.newer.length) {
+        // Not a refusal of the save: everything it sent was written, and what
+        // is left was typed while it was in flight.
+        say(
+          `  ${names(left.newer)} changed while this was saving and ` +
+          `${left.newer.length === 1 ? 'is' : 'are'} not written yet — ${doc.source} was not ` +
+          `re-extracted; press Re-extract again`,
+          'warn',
+        )
+        return false
+      }
+      return true
     }
     if (!await written()) return
     const before = writeEpoch()
@@ -157,7 +197,7 @@ export function Toolbar() {
     // the way (older than HANDOFF-088; its reviews found it three times, each
     // time in an ordering of the reads the last repair had not covered). The
     // reviewer keeps the words and presses again.
-    if (writeEpoch() !== before || drafts.size()) {
+    if (writeEpoch() !== before || holdsWording()) {
       say(
         `  ${doc.source} was not re-extracted: wording changed while it was being read — ` +
         `press Re-extract again`,
@@ -201,7 +241,7 @@ export function Toolbar() {
     // left the ledger editable, and the dialog's own focus moving out of a field
     // saves it — a save that can be refused. Words still here now are words the
     // extract would strand (found by the fifth review).
-    if (drafts.size() || writeEpoch() !== before) {
+    if (holdsWording() || writeEpoch() !== before) {
       say(
         `  ${doc.source} was not re-extracted: wording changed while this was asking — ` +
         `press Re-extract again`,
@@ -269,7 +309,19 @@ export function Toolbar() {
           // return trip was repaired by the effect that copied the store's focus
           // into the address — the effect whose other half blanked the page.
           onClick={async () => {
-            await save()
+            // The reading view renders what the server holds, so over a save that
+            // failed it shows the sentence the reviewer has just replaced, as if
+            // it were the chapter — and from a view with no ledger, where nothing
+            // marks it unsaved. A row waiting on the reviewer's choice does not
+            // stop it: a view is not a verdict, and what is stored there is what
+            // the chapter says until they choose. Nothing is lost by going either
+            // way — the words stay in `drafts` and the shell's tab-close guard
+            // covers every route — so this is about what the view would claim.
+            const why = declines(
+              await writeOut(), 'The reading view was not opened', doc.source,
+              'the reading view shows what is stored, without it',
+            )
+            if (decline(why)) return
             routes.go(routes.read(doc.source, doc.lang, routes.placeIn(doc.source, doc.lang)))
           }}
         >
@@ -332,7 +384,7 @@ export function Toolbar() {
         <span className="note-line" style={{ maxWidth: 'none' }}>
           {doc.source} · {doc.lang} · register <b style={{ color: 'var(--vellum)' }}>{doc.tone || 'unknown'}</b>
         </span>
-        <button type="button" className="quiet" disabled={!ready} onClick={() => { setNotice(''); setStartingOver(true) }}>
+        <button type="button" className="quiet" disabled={!ready} onClick={() => { quiet(); setStartingOver(true) }}>
           Start over in another register…
         </button>
         <span className="spacer" />
@@ -365,20 +417,70 @@ function StartOver({ onClose, onChoose }: {
 }) {
   const doc = useStore(s => s.doc)
   const say = useStore(s => s.say)
+  const refresh = useStore(s => s.refresh)
   const [register, setRegister] = useState('')
+  // **A cancelled Start over asks nothing.** The re-read below is the first
+  // await, and the bar stays live through it: Cancel unmounted it, the read
+  // landed, and the discard dialog opened for an act the reviewer had called
+  // off — one click from discarding the document. Before the re-read `ask` was
+  // the first await and the gap did not exist (found by the review of
+  // HANDOFF-092). The same window let a second press or Enter run this twice.
+  const mounted = useRef(true)
+  const busy = useRef(false)
+  // Set in the setup as well as the cleanup: StrictMode mounts, unmounts and
+  // mounts again in development, and a ref only ever set false stayed false — no
+  // Start over ever asked (found by the second review of HANDOFF-092).
+  useEffect(() => {
+    mounted.current = true
+    return () => { mounted.current = false }
+  }, [])
 
   if (!doc) return null
 
   const go = async () => {
     const chosen = register.trim()
-    if (!chosen) return
+    if (!chosen || busy.current) return
+    busy.current = true
+    try { await asked(chosen) } finally { busy.current = false }
+  }
+
+  const asked = async (chosen: string) => {
+    // **The count is read now, or the dialog says it could not be.** It used to
+    // state `doc.report.translated` from whatever read last landed, and the page
+    // learns what a save stored only from the re-read after it — so when that
+    // re-read failed, the one dialog that discards a document said "0 of 3 are
+    // translated now" over a translation just written (HANDOFF-092). It re-reads,
+    // as Re-extract does. Unlike Re-extract it does not refuse when the read
+    // fails: Re-extract skips its dialog on a count of zero, so a wrong count
+    // there is a skipped confirmation, while this asks whatever the count is —
+    // the number informs the answer and decides nothing, so it is enough to say
+    // it is unknown and give the last one read, marked as such.
+    const read = await refresh()
+    if (!mounted.current) return
+    const now = useStore.getState().doc
+    const fresh = read && now && now.source === doc.source && now.lang === doc.lang ? now : null
+    const count = fresh
+      ? `${fresh.report.translated} of ${fresh.report.segments} segments are translated now.`
+      : `How many segments are translated now could not be read again; the last read said ` +
+        `${doc.report.translated} of ${doc.report.segments}, and anything written since is not in it.`
+    // **Unsaved wording is named, not saved and not refused over.** Writing it
+    // first would buy nothing — a reset reads no prior row, so it is discarded
+    // with everything else — and refusing, as Re-extract does, protects words
+    // that this act exists to discard: Re-extract keeps what it can, so a lost
+    // sentence there is a surprise, while here it is the act. What was missing
+    // was saying so: the dialog listed what it discards and not this, and the
+    // words went with a line in the log after the fact (HANDOFF-087).
+    const unsaved = unwrittenIds()
     const ok = await ask(
       `Start ${doc.source} over in “${chosen}”?`,
       [
         'Everything this document holds is discarded and the source is parsed again',
         'from nothing. No translation, no hold, no waiver and no origin survives.',
         '',
-        `${doc.report.translated} of ${doc.report.segments} segments are translated now.`,
+        count,
+        ...(unsaved.length
+          ? ['', `Wording typed on this page and not written yet is discarded too: ${names(unsaved)}.`]
+          : []),
         '',
         'The register is part of the translation memory key, so wording banked under',
         `the old register (${doc.tone || 'unknown'}) will not come back under the new one.`,

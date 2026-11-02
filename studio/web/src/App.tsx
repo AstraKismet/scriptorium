@@ -18,9 +18,8 @@ import { Reading } from './components/Reading'
 import { RoutingScreen } from './components/RoutingScreen'
 import { Toolbar } from './components/Toolbar'
 import { CONTRACT_VERSION, type DocAddress } from './contract'
-import * as drafts from './drafts'
 import * as routes from './router'
-import { notExtracted, useStore } from './store'
+import { holdsWording, notExtracted, useStore } from './store'
 
 export function App() {
   const boot = useStore(s => s.boot)
@@ -38,8 +37,17 @@ export function App() {
   // afternoon's wording. It is deliberately not the fragment navigations this
   // page does to itself: `beforeunload` does not fire for those at all, and
   // `store.open()` is where those are answered.
+  //
+  // It asks `holdsWording()`, not `drafts.size()`: a field the reviewer emptied
+  // is held back by every save and loses nothing when the tab closes, and a
+  // prompt over it teaches people to click through the one that matters
+  // (HANDOFF-092). A wording waiting on the reviewer's choice is wording.
+  //
+  // **Nothing is written on the way out, and that is decided.** A `pagehide`
+  // flush and a save debounced on typing were both weighed and lost; see
+  // `docs/decisions.md`, 2026-11-02, "How long typed words live only in memory".
   useEffect(() => {
-    const guard = (e: BeforeUnloadEvent) => { if (drafts.size()) e.preventDefault() }
+    const guard = (e: BeforeUnloadEvent) => { if (holdsWording()) e.preventDefault() }
     window.addEventListener('beforeunload', guard)
     return () => { window.removeEventListener('beforeunload', guard) }
   }, [])

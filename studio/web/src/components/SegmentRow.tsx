@@ -20,7 +20,7 @@ import { Marked, sameSlots } from '../marks'
 import * as drafts from '../drafts'
 import { isError, type Segment } from '../contract'
 import * as routes from '../router'
-import { useStore } from '../store'
+import { declines, useStore } from '../store'
 
 const grow = (el: HTMLTextAreaElement): void => {
   el.style.height = 'auto'
@@ -140,7 +140,19 @@ export const SegmentRow = memo(function SegmentRow({ seg }: { seg: Segment }) {
     // document with `overwrite_human` set (seventh review; older than this
     // package).
     const named = useStore.getState().shown()
-    await save()
+    // **Not over a save that failed.** The origin read below would be the one
+    // from before the reviewer's words — they never reached the server — so the
+    // question about replacing a person's wording would not be asked, or a hold
+    // dialog would be answered for nothing, before `runJob`'s own save failed in
+    // turn and declined. Said here, once, before any dialog (HANDOFF-092). A row
+    // waiting on the reviewer's choice does not stop it: "Draft again" on that
+    // row is a third answer to the same question, and the conflict's
+    // compare-and-swap still guards the reviewer's wording against it.
+    const why = declines(
+      await useStore.getState().writeOut(), `${seg.id} was not sent`, named?.src ?? 'this document',
+      'a run chooses and asks from what is stored, so it would be decided without it',
+    )
+    if (useStore.getState().decline(why)) return
     // The origin below decides whether to ask about replacing a person's
     // wording, so it must come from a document the page is not about to
     // replace: Back and Forward during the save put an open on its way, and the
@@ -256,6 +268,12 @@ export const SegmentRow = memo(function SegmentRow({ seg }: { seg: Segment }) {
           defaultValue={drafts.get(seg.id) ?? seg.target}
           onInput={() => { const el = box.current; if (el) { grow(el); touched() } }}
           onFocus={point}
+          // **Not awaited, and nothing here reads the answer — on purpose.**
+          // Leaving a field destroys nothing: the words stay in `drafts`, the row
+          // stays marked, and the next save sends them. What a failed save owes
+          // the reviewer is a sentence where they are looking, and `save()` says
+          // it itself beside the bar for every caller (`notWritten`) — a reply
+          // read here as well would be a second spelling of that sentence.
           onBlur={() => { void save() }}
           onKeyDown={e => {
             // **Never while the IME is composing.** Enter is the candidate-
@@ -267,6 +285,15 @@ export const SegmentRow = memo(function SegmentRow({ seg }: { seg: Segment }) {
             if (e.nativeEvent.isComposing) return
             if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
               e.preventDefault()
+              // **The caret moves at once, and is not held until the save
+              // answers.** Waiting would hold it for a save *and* the re-read of
+              // the whole document after it — on a novel-length chapter, long
+              // enough that the reviewer's next sentence lands in the row they
+              // have just confirmed. And moving it back on a failure would pull
+              // the caret out of a field they are typing in, mid-composition
+              // perhaps. So a failure is said rather than prevented: `save()`
+              // puts the sentence beside the bar naming this row, which stays
+              // marked unsaved (HANDOFF-092).
               void save()
               const rows = [...document.querySelectorAll<HTMLTextAreaElement>('.ledger textarea')]
               const next = rows[rows.indexOf(e.currentTarget) + 1]
@@ -297,6 +324,8 @@ export const SegmentRow = memo(function SegmentRow({ seg }: { seg: Segment }) {
             <button
               type="button"
               title="Write your wording, over the stored wording shown here"
+              // As `onBlur`: nothing follows that a failure could make
+              // destructive, and `save()` says a failure beside the bar.
               onClick={() => { drafts.overrule(seg.id); void save() }}
             >
               Write mine over it
