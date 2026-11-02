@@ -1059,7 +1059,34 @@ describe('a refused wording, and words typed while a save is in flight', () => {
       expect(callsTo('/api/save')).toHaveLength(2)
       expect(left).toBe(true)
       expect(useStore.getState().doc?.source).toBe('book/ch2.md')
-      expect(useStore.getState().log.some(l => l.text.includes('was not read back within'))).toBe(true)
+      expect(useStore.getState().log.some(l => l.level === 'warn' && l.text.includes('was not read back within'))).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // The bound answers the caller; it must not also end the in-flight count, or
+  // a field typed back to the wording still shown loses the change the server
+  // never got (found by the third review; the reviewer's probe).
+  it('keeps an entry typed back to the shown wording after the re-read bound fired', async () => {
+    await openWith([segment({ id: 's0001', target: 'orig', token: 't0' })])
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      answering(call => {
+        if (call.path.startsWith('/api/save')) {
+          return { body: { applied: 1, unknown: [], stored: { s0001: { text: 'new', token: 'w1' } }, conflicts: {} } }
+        }
+        if (call.path.startsWith('/api/doc')) return { body: {}, after: new Promise<void>(() => undefined) }
+        return null
+      })
+      drafts.set('s0001', 'new', 'orig')
+      let answered = false
+      void useStore.getState().save().then(() => { answered = true })
+      await vi.advanceTimersByTimeAsync(SAVE_WAIT_MS + 10)
+      expect(answered).toBe(true)
+      expect(useStore.getState().doc?.segments[0]?.target).toBe('orig')
+      drafts.set('s0001', 'orig', 'orig')
+      expect(drafts.has('s0001')).toBe(true)
     } finally {
       vi.useRealTimers()
     }

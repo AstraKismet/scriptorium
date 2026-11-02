@@ -1217,17 +1217,27 @@ function flush(get: () => Store): Promise<Outcome> {
     void lock.then(() => { if (onWire === lock) onWire = null })
     const prior = settlingEpoch === epoch ? settling : null
     const whole = sent.then(async ({ outcome, reread, landing }) => {
-      if (reread && !await within(get().refresh(), SAVE_WAIT_MS)) {
-        get().say(
-          `  the document was not read back within ${SAVE_WAIT_MS / 1000} seconds of this save, ` +
-          `so what is on screen may be older than what was written — it is read again ` +
-          `with the next act that reads it`,
-          'warn',
-        )
+      // The ids this round sent stop counting as in flight only once the row
+      // shows what was written — and only in the parse they were sent in.
+      const end = (): void => { if (drafts.epoch() === epoch) drafts.landed(landing) }
+      if (reread) {
+        const read = get().refresh()
+        if (!await within(read, SAVE_WAIT_MS)) {
+          // **The caller is answered; the in-flight count is not ended.** The row
+          // still shows the wording from before the save, and a field typed back
+          // to it would otherwise drop the entry while the server holds the newer
+          // words (found by the third review of HANDOFF-091). It ends when the
+          // read does, whenever that is.
+          void read.finally(end)
+          get().say(
+            `  the document was not read back within ${SAVE_WAIT_MS / 1000} seconds of this save, ` +
+            `so what is on screen may be older than what was written`,
+            'warn',
+          )
+          return outcome
+        }
       }
-      // The ids this round sent stop counting as in flight only now, once the
-      // row shows what was written — and only in the parse they were sent in.
-      if (drafts.epoch() === epoch) drafts.landed(landing)
+      end()
       return outcome
     })
     const answer = prior ? Promise.all([whole, prior]).then(([outcome]) => outcome) : whole

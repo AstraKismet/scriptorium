@@ -280,6 +280,31 @@ The maintainer approved the conflict panel's wording from a screenshot of a
 real conflict in a headless browser: the explanation, *Write mine over it*,
 *Discard mine*, and "N waiting on your choice".
 
+### Third review, 2026-11-02: the bound answers the caller and nothing else
+
+An independent review of `a49b811..c3e8a1c` confirmed one should-fix, and the
+bound on the re-read caused it. Past the bound, `flush()` still ended the ids'
+in-flight count. The row was never read back, so a field typed back to the
+wording it still showed dropped its entry while the server held the newer
+words: the hang had become lost words. On a timeout the count now ends when that
+read settles, and the reviewer's probe is a test.
+
+"An id stays in flight until it has been read back" is therefore true for a
+re-read that answers or never answers. It is **not** true for one that *fails*:
+a 500 also ends the count with nothing read back. That is older than this
+package and is written into `HANDOFF-096` beside case 11.
+
+The review's other observations stay as they are, on purpose:
+
+- *Stop following* (`abandon()`) clears the notice, although the server is
+  still writing. The page treats the run as over from that moment, and
+  *Re-extract* is pressable again, so "let the run finish" would be false
+  there too.
+- An abandoned run's `follow()` keeps polling. When it ends, it clears
+  `running`, `runName` and now the notice under a newer run. That run-ownership
+  defect is older than this package; the notice only rides on it.
+- No test covers the notice clears in `resume()` and `abandon()`.
+
 ## 2026-10-31 · The reading view is virtualized by line
 
 Closing HANDOFF-090. On 2026-09-14 the maintainer measured *Read → click a
