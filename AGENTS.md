@@ -621,7 +621,7 @@ python -m scriptorium --help        # or `lx` after `pip install -e .`
 
 cd studio/web && npm ci             # only to CHANGE the workbench; `lx web`
 npm run typecheck                   #   needs none of this, because the build
-npm test                            #   is committed. 189 tests (11 `it.fails`), jsdom, no network
+npm test                            #   is committed. 220 tests (11 `it.fails`), jsdom, no network
 npm run build                       # writes src/scriptorium/web/static/ — commit it
 
 lx run docs/guide.md --lang zh-TW   # extract -> translate -> check -> repair -> render
@@ -864,6 +864,17 @@ own.
   abandoned as failed with its words kept, no `save()` answers before the last
   round's re-read has landed (a re-read bounded the same way), and an id counts
   as in flight until it has been read back. `docs/decisions.md`, 2026-10-31 and 2026-11-02.
+
+  **And an act that follows a save reads what the save left.** `store.writeOut()`
+  answers with what is still unwritten and why — `failed`, `waiting` on the
+  reviewer's choice, `newer` words typed while the save was on the wire, or
+  `stranded` by a re-extract; a blank is none of them — and every act on the
+  bar, and a row's *Draft again*, declines over all but `waiting`, the file and
+  the memory over `waiting` too. A failed save is said beside the bar by
+  `store.round()` and nowhere else, and that sentence stays up exactly while it
+  is true — not cleared by a run ending, not kept past the choice. Nothing writes
+  typed words on the way out of the page: a `pagehide` flush and a debounced save
+  both lost, and a crash is `HANDOFF-105`'s. `docs/decisions.md`, 2026-11-02.
 
 - **A document is opened by the address, and an act rests on what the page has
   just read.** `App.tsx`'s effect turns the address into `at`. `open()` is

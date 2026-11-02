@@ -3,6 +3,230 @@
 Short entries, newest first. Record the alternative that lost, not just the
 choice that won — the reasoning is what future changes need.
 
+## 2026-11-02 · Every caller of `save()` acts on what it left unwritten
+
+Closing HANDOFF-092. `store.save()` answers `false` when it held something back,
+"so a caller about to do something destructive can stop", and seven callers
+discarded the answer: a blur and Ctrl+Enter said nothing when the save failed;
+the run controls, Check, Write file and Commit to memory went on without the
+reviewer's words; *Read* opened a view of the wording they had just replaced.
+An eighth the package's table missed — the row's *Draft again*, which awaited
+`save()` and then decided from the stored origin whether to ask about replacing
+a person's wording, an origin from before the words that failed to arrive. *Start
+over* never saved, its dialog did not mention unsaved wording, and it stated a
+translated count that only a re-read updates. And *Re-extract*, the one caller
+that did read the answer, read it wrongly: it asked `drafts.size()`, so a field
+the reviewer had emptied — which `save()` holds back by design — and a row
+waiting on the reviewer's choice since HANDOFF-091 were both "could not be saved
+… copy that wording somewhere", at `bad`, over nothing to copy.
+
+### The answer a caller reads
+
+`store.writeOut()` is `save()` answered with what is left and why, four lists
+because there are four remedies:
+
+- `failed` — a request failed or answered with something unreadable. The words
+  exist only on this page; the next save sends them again.
+- `waiting` — refused as stale and waiting in its row for the reviewer's choice.
+  Safe, and sent by nothing until they choose.
+- `newer` — typed while the save was on the wire, into a row it carried or one
+  it never saw. Nothing failed; the next save writes them.
+- `stranded` — a re-extract this page asked for has renumbered the ids, so
+  nothing can write them; `open()` names them when they go.
+
+**A blank is in none of them.** The same `wording()` predicate `open()` has read
+since 2026-09-20; `holdsWording()` exports it for the toolbar and the tab-close
+guard, which had their own spelling.
+
+### What each caller does now
+
+| Caller | Over `failed`, `newer` or `stranded` | Over `waiting` |
+|---|---|---|
+| a blur, Ctrl+Enter, *Write mine over it* | a failure said beside the bar (below); the caret is not held | the row already shows it |
+| *Translate pending*, *Polish prose*, *Repair failing* (`runJob`) | not started | goes ahead |
+| *Draft again* | not sent, and asks nothing | goes ahead |
+| *Check* | nothing checked | goes ahead |
+| *Write file* (`render`) | no file written | no file written |
+| *Commit to memory* | nothing banked | nothing banked |
+| *Read* | the reading view is not opened | goes ahead |
+| *Re-extract* | refused, a sentence per reason | refused, "choose which wording stays" |
+| *Start over* | named in its dialog as discarded too | named in its dialog as discarded too |
+
+Each refusal says which of the reasons it is — "could not be written, the log
+says why", "changed while this was saving, nothing failed", "can no longer be
+written anywhere" — because each has a different remedy. A blank stops nothing.
+
+**Why those three stop every act.** Each act is done to what the server holds,
+and the reviewer's words are not in it. The run is the costly one: the server
+chooses its segments from stored state, origin precedence can only protect a
+person's wording it has been given, so *Translate pending* billed a draft of the
+very sentence the reviewer had just translated — and their next save then wrote
+over the draft. A check over a failed save is a verdict on wording already
+replaced; a file and a memory record are that wording delivered. `newer` was
+first let through, on the argument that a row typed into during a save was
+written in that save; that holds for a row the save carried and not for one it
+never saw, and the review below found a run drafting a sentence the reviewer was
+still typing. Nothing failed there, so the sentence says so and a second press
+writes the words first.
+
+**Why `waiting` stops only the file and the memory.** Those two stand for the
+document, and the document's wording at that row is not decided yet; the
+memory is tracked and its last record per key is what every other document is
+offered. A run, a check and the reading view go ahead: the reviewer's words are
+safe in the row, a check and a view are about what is stored until they choose,
+and a run that writes the row meets the conflict's compare-and-swap like any
+other writer.
+
+**A failed save says so beside the bar, from one place, and the sentence stays
+up exactly while it is true.** The round that fails sets the toolbar's notice,
+naming the rows. One home, in `store.round()`, rather than a reading of the reply
+in each caller: a blur and Ctrl+Enter have nothing destructive after them, so a
+sentence where the reviewer is looking is all they owe, and a second spelling of
+it per caller is how two callers come to disagree. It is not said over another
+document's rows: a round whose parse has left the screen is in the log and
+nowhere else.
+
+The notice is kept with the rows and the reason it is about and the parse they
+belong to (`said`), and is taken down when that stops describing the page
+(`stillTrue`): a failed or not-yet-written row by the next save that gets a
+readable answer, or once none of its rows holds wording; a row waiting on a
+choice only by the choice; anything by a strand or a new parse. It is asked when
+the registry moves, at every save, and after a strand. A run's end clears the
+notice — "let the run finish" is no longer true — and leaves this one alone. The
+first version cleared it on any readable save and on every run's end, and the
+review below found it wrong in both directions.
+
+**Ctrl+Enter moves the caret at once, and that is decided.** Holding it until the
+save answers holds it for a save *and* the whole-document re-read after it, long
+enough on a novel-length chapter that the reviewer's next sentence lands in the
+row they have just confirmed; moving it back on a failure pulls the caret out of
+a field they are typing in. So a failure is said, not prevented.
+
+**Start over re-reads its count, and says when it cannot.** It used to state
+`doc.report.translated`, and the page learns what a save stored only from the
+re-read after it — so with that re-read failed, the one dialog that discards a
+document said "0 of 3 are translated now" over a translation just written. It
+re-reads, as Re-extract does, but does not refuse when the read fails: Re-extract
+skips its dialog on a count of zero, so a wrong count there is a skipped
+confirmation, while Start over always asks and the number decides nothing. It
+says the count could not be read and gives the last one, marked as such. The
+read is an await before its dialog where there used to be none, so a Start over
+cancelled during it asks nothing, and a second press does not run it twice. It does
+not save first and does not refuse over unsaved wording: a reset reads no prior
+row, so writing them buys nothing, and refusing protects exactly what this act
+exists to discard. It names them in the dialog instead — before, they went with
+a log line after the fact.
+
+### How long typed words live only in memory: no time bound
+
+The package asked for a decision between a flush on `pagehide`/`visibilitychange`
+and a save debounced on typing. Four independent design lanes — one per option,
+one for the status quo, one attacking the question — argued it, and **neither
+was adopted**. A field's words reach the server when it loses focus, when the
+page leaves the document (`open()`), or when an act saves first; nothing is
+written on the way out, and the tab-close prompt stays.
+
+The question understated the status quo. Under the HTML specification, a page
+losing system focus runs the unfocusing steps and fires `blur` at the focused
+element, so switching tabs or windows already saves through `onBlur` — the
+dictionary-lookup pause both mechanisms were meant to cover. That Chrome does so
+was not measured here.
+
+*Lost:* **a `pagehide` flush** with `fetch(…, {keepalive: true})`. It cannot read
+its reply, so a stale-wording refusal throws the words away unseen — the exact
+loss the 2026-10-31 entry exists to stop — and it cannot learn the token of its
+own write, so a page restored from the back-forward cache meets its own words as
+a conflict. It has to send while a round may be on the wire, re-opening the
+duplicate send one-save-on-the-wire was built to end. And it fires only after the
+reviewer has answered *Leave* to the prompt, writing what they just declined to
+keep. `visibilitychange` adds nothing over `onBlur` on the desktop and fires on
+every tab switch.
+
+*Lost:* **a save debounced on typing.** Every pause becomes a `human` write and a
+whole-document `GET /api/doc`, which on a novel queues Check, *Draft again* and
+`open()` behind it. Input events carry an IME composition, so without a
+composition guard it banks bopomofo. And it turns an exploratory edit into
+permanent provenance, which the question did not count: today a field typed back
+to the model's own wording writes nothing (`drafts.set` drops the entry), while
+under a debounce the intermediate wording is stored first, so returning to the
+model's text is a change, saved as `human`, the waiver dropped, and every
+unattended run off that segment for good.
+
+*Not closed by either, and scheduled:* a **browser or OS crash, a power loss, or
+a tab the browser discards** while a field holds words it has not left — no event
+fires, so no flush can run. The one mechanism that closes it without a `human`
+write is a journal of `drafts` in browser storage, offered back on the next load,
+and it needs to know which parse an entry was typed against, because ids restart
+at `s0001` on every parse — HANDOFF-093's parse identity. `HANDOFF-105`, blocked
+on it.
+
+The tab-close guard now asks `holdsWording()`: a field the reviewer emptied loses
+nothing when the tab closes, and a prompt over it teaches people to click through
+the one that matters.
+
+### How it is tested
+
+Thirty-one new tests in all, `npm test` going from 189 to 220. The first
+eighteen: fifteen in `App.test.tsx`, each answering `POST /api/save`
+with a refusal — a failure or a stale-wording conflict — or, for the package's
+own probe, emptying a field, and asserting what the caller does; three in
+`store.test.ts` for the three lists. All eighteen fail against `eaa24d7`'s
+sources (the store's three on the missing function). One existing test changed
+its premise rather than its assertion: *"does not say the document on screen was
+being read again when the page declined to leave it"* opened *Draft again*'s
+dialog over a failed save, which now declines before any dialog, so the save that
+fails is the navigation's.
+
+### Independent review, and what it changed
+
+Three lanes in their own contexts reviewed the first commit, `605abad`, each
+writing down the properties from the package before reading the diff and none
+reading the commit message: a correctness lane and an adversarial lane (Opus
+5.5), and a mutation lane (Sonnet 5.5) in its own worktree. Together they found:
+
+- **A defect this package introduced**: *Start over*'s new re-read is an await
+  before its dialog, and a Cancel pressed during it still opened the discard
+  dialog — one click from discarding the document.
+- **The notice wrong in both directions**, as above: cleared by a run's end over
+  words still unwritten and by an unrelated save over a row still waiting; kept
+  after the field was emptied, the wording discarded, or the map stranded.
+- **`newer` let an act through over a row its save never carried** — reproduced
+  as a run sent while the reviewer's sentence existed only on the page.
+- **Stranded words described as a failed save** — "the log says why, press it
+  again once it is written", of words nothing can write.
+- **Three surviving mutants of twenty-seven**: the stranded branch of the
+  classification, the parse guard on the failed-save notice, and Re-extract's
+  failed-save refusal, each without a test that asserted it.
+
+Each got a test before its repair: the eight findings' tests fail against
+`605abad`, and the three survivors' tests kill their mutants (two pass against
+`605abad`, because the behaviour they pin was already there). Nits not taken: a
+failed round's `failed` list can include words typed into another row during it,
+which were never sent — the act is declined either way, and the sentence is
+close; and *Read* over a `newer` row now declines rather than showing the row's
+earlier wording, which settles the reviewer's remaining nit by the `newer` change.
+
+A second independent lane (Opus 5.5) reviewed that repair, `43058a0`, and found
+all six findings closed and three more, each now a test that fails against
+`43058a0`:
+
+- **A defect in the repair**: the ref that tells *Start over* its bar is gone was
+  set false in an effect's cleanup and never set true, and StrictMode mounts
+  every component twice in development — so under `npm run dev` no Start over
+  ever asked. The committed build does not double-mount and was not affected.
+- **Two acts took the notice down on their own**: *Start over*'s button and
+  *Re-extract*'s first statement cleared it unconditionally, so a failed save's
+  sentence went at a click on Start over and Cancel, and a "waits on your
+  choice" went when Re-extract refused over the very same row. Both now clear
+  only what is not still true (`store.quiet`); *Dismiss* still clears anything,
+  because that is the reviewer's own act.
+
+Two nits left as they are, recorded so they are not rediscovered: a notice
+naming two rows stays up while either still holds wording, so it can go on
+naming one the reviewer emptied; and a notice replaced by another is not put
+back when the other comes down — the row itself and the bar's count still say
+it.
+
 ## 2026-11-01 · Independent review of HANDOFF-090: the landing does not hold on a novel
 
 HANDOFF-090 was executed in a continuous run and kept for review by a session
