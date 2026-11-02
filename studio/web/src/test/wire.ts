@@ -12,6 +12,8 @@ export interface Call {
   path: string
   method: string
   body: unknown
+  /** The request's abort signal, when the page passed one. */
+  signal?: AbortSignal
 }
 
 export interface Answer {
@@ -66,6 +68,7 @@ export function install(): void {
       path,
       method,
       body: typeof raw === 'string' ? JSON.parse(raw) : null,
+      ...(init?.signal ? { signal: init.signal } : {}),
     }
     calls.push(call)
     const answer = byPath?.(call) ?? queued.shift() ?? fallback

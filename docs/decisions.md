@@ -83,6 +83,308 @@ HANDOFF-101 covers the transfer stall. HANDOFF-099 is blocked by HANDOFF-100, so
 the maintainer checks the final build once. It also gained the second document, a
 mandatory input-method run, a control build and corrected figures.
 
+## 2026-10-31 · A refused wording stays in its row beside the stored one, and a save forgets only what it wrote
+
+Closing HANDOFF-091. When `POST /api/save` refused an edit as stale, `save()`
+had already forgotten every id it sent. The field then adopted the stored
+wording, so the reviewer's sentence existed nowhere, and the log named only the
+ids.
+
+Three more defects sat on the same lines:
+
+- **Words typed during a save were forgotten.** A keystroke landing while the
+  save was in flight was dropped when the reply arrived: forgetting went by id,
+  not by text.
+- **Writes were reported as conflicts.** The same wording was sent twice
+  whenever a blur and the act that took focus from it each called `save()`.
+  The server's compare-and-swap refused the second copy, and the page said in
+  red that a write which had succeeded had not.
+- **`open()` gave the wrong reason for refusing to leave.** It said "could not
+  be written … the log says why" about words typed during its own successful
+  flush.
+
+### What was measured, and what the brief got wrong
+
+A premise review read the brief against the code before any design lane built on
+it. Each item below was established with a probe that failed on `d297b0d`.
+
+- **Double sends caused most of the conflicts, not translation batches.** Any
+  toolbar act while a field had focus sent the same body twice under the same
+  `base`, and so did Ctrl+Enter whenever a next row was mounted, because it calls
+  `save()` and then moves focus. The brief had named runs as the ordinary source.
+- **"Stored text equals sent text" cannot be decided on the client.** The server
+  normalizes what it stores. Under zh-TW's default operations,
+  `燈還亮著,她說` is stored as `燈還亮著，她說` and `他用Python寫程式` as
+  `他用 Python 寫程式`. A conflict carrying the page's own write therefore
+  usually differs from the text sent, and invariant 8 forbids copying the
+  normalizer into the client.
+- **`base` is read from `doc` when a save is sent, not when the edit began.** A
+  re-read landing in between moves the base past wording the reviewer never
+  saw. The ordinary case is `follow()` at the end of a run. The save then
+  overwrites the batch's write and no conflict is reported. That is the lost
+  update the token exists to stop, and this package does not close it. See
+  *Left open*.
+
+### The decision
+
+**The reviewer's words stay in their entry, marked, and the row shows the
+stored wording beside them until the reviewer chooses.** This takes the storage
+of the package's shape 1 and the essential part of shape 3. The mark lives in
+`drafts.ts` beside the entry, keyed by the same parse's ids and ended by the
+same `clear()`. It holds the refusal's stored text and token, never the
+reviewer's words, which stay in the entry and out of the store. No save sends a
+marked entry: not a blur, not Ctrl+Enter, not a flush on the way out. The row
+offers two choices:
+
+- **Write mine over it.** This sends the reviewer's wording as a
+  compare-and-swap against the token of the stored wording they were shown. If
+  the server has moved again, the result is a new conflict, never a silent
+  overwrite.
+- **Discard mine.** This drops the entry and the field adopts the stored
+  wording.
+
+The stored text is drawn as plain text in `pre-wrap`, so a segment's interior
+line breaks show and copying from it is byte-exact. `open()` refuses to leave a
+document while a marked wording waits there, as it refuses over any wording it
+holds the only copy of. Opening that document again is never refused.
+
+**The two shapes that lost:**
+
+- **The words printed into the log (shape 2).** The 2026-09-20 reasons still
+  hold: `.log` sets no `white-space`, the drawer has a *Clear* button, and the
+  log is gone on reload. A new reason decides it: every guard reads `drafts` —
+  `beforeunload`, `open()`'s refusal, *Re-extract*'s refusal and the toolbar's
+  count. Moving the only copy into the log makes all of them say "nothing
+  unsaved" while the words sit where nothing protects them.
+- **A full merge surface (shape 3).** That means a second editable field, a
+  diff, and an editor for the merged result. A second textarea needs its own
+  uncontrolled-field and IME rules. A character diff over CJK text and `⟦n⟧`
+  placeholders is code no test can check mechanically. And it buys nothing
+  the reviewer cannot already do: the stored text can be selected, the field
+  can be edited, and *Write mine over it* writes whatever the field holds.
+
+A mark with no stored wording in view (the bare shape 1) also lost. Choosing
+without seeing what you are choosing against is a blind overwrite or a blind
+discard.
+
+**One save on the wire at a time.** A `save()` asked while one is in flight
+waits for it, then runs one more round, shared by every caller that asked
+meanwhile. That round reads `drafts` when it starts. This closes the double
+send at its root, independently of normalization. The lock covers the request
+and the settling of its reply, but not the re-read after it, so a queued Check
+does not wait on a whole `GET /api/doc`. The lock is keyed on the drafts epoch,
+so a document replaced under a round in flight starts a fresh line. The
+backstop stays: a conflict whose stored text equals the text sent is a write.
+
+A second mechanism was built and lost: keeping the duplicate request and, on a
+conflict, waiting for the in-flight twin's reply before deciding. It matches
+twins by text, which normalization defeats in one of the two arrival orders.
+It also keeps the request that caused the false conflict in the first place.
+
+**A save forgets an id only while its entry is still the text it sent.** An
+entry typed on top of a write stays, based on the token that write produced,
+taken from the reply's `stored`. That is the narrowest use of the reply that
+closes the case, and nothing patches `doc`. Without it, the next save would
+name the token from before the write and be refused as a conflict with the
+reviewer's own words. A field typed back to its old wording while a save
+carrying it is in flight is kept for the same reason: what was sent will be
+stored.
+
+**`open()` flushes in two laps, and says why it stays.** Words typed during the
+first lap are written by a second, based on the first lap's token. Typing that
+outlasts both laps is refused with a sentence that says so and says nothing
+failed. One lap per keystroke would be a loop with no bound. The refusal names
+its reason per id, because the three reasons have three remedies:
+
+- the save failed: the existing sentence;
+- the wording was typed while being written: open the document again, which
+  writes it;
+- the wording is waiting on the reviewer's choice: open the document again and
+  choose in the row.
+
+**A reply the page cannot read takes nothing as written.** It used to forget
+every id it had sent, and only then fail on `r.conflicts`.
+
+### What the change costs
+
+- `save()` answers `false` while a marked wording waits. Every caller that
+  ignores the answer stays as wrong as it was. That is HANDOFF-092's, and its
+  file now says so.
+- ~~A request that never answers holds every later save of the same document.~~
+  Wrong, and corrected on 2026-11-02 below: it held every later save *and*
+  every `open()` for good, which the parent never did.
+- Three tests depended on a second save flying beside a held first one, and
+  were re-sequenced. Each comment says what changed and what the test still
+  asserts. "Draft again overtaken by Re-extract" no longer has a door: the two
+  acts resume in the order they were pressed, and the second declines over the
+  first's run and says so.
+- A marked row the ledger's filter hides, for example *Untranslated* once a run
+  has written it, is found through the log line and the toolbar's "N waiting on
+  your choice", not by scrolling. Making `visible()` read the marks would put
+  hot state into a pure function of the document.
+
+### How it is tested
+
+Thirteen store tests and four App tests are new. Each was run against
+`6e6f212` (the commit this package started from), and all seventeen failed
+there on their first assertion about the words, for example
+`expected undefined to be '燈還亮著'`. Together they cover:
+
+- the conflict and its mark;
+- nothing sent until the reviewer chooses, then sent against the shown token;
+- a second conflict on top of an overrule;
+- *Discard mine*;
+- the package's own probe, verbatim;
+- the token for text typed during a save;
+- both `open()` laps, and the truthful refusals;
+- a conflict carrying the very text sent;
+- one request for three saves;
+- an unreadable reply;
+- the stored wording in `pre-wrap` beside the field;
+- one save when a toolbar act takes focus.
+
+A source scan pins *Discard mine* and *Write mine over it* to `SegmentRow`
+alone.
+
+### Left open
+
+- `base` read at send time — `HANDOFF-096`, added there as case 9, an
+  `it.fails` in `store.test.ts`. Its fix is the token of the wording an edit
+  began on, advanced by the page's own writes. `drafts.base` is the seam it
+  replaces.
+- Case 7 of the same package keeps its `it.fails`. Its field half now holds,
+  and its false-conflict half does not.
+- *Re-extract*'s refusal sentence over a marked row — `HANDOFF-092`.
+
+### Amended 2026-11-02, after an independent correctness review
+
+The review read `aee2d00` (the source of `a44a544`) in a context that had not
+written it, and found two regressions and a gap, each with a probe that failed
+on that commit. All three are repaired here, with the review's two notes.
+
+- **A save that never answers no longer locks the page.** `api.ts` has no
+  timeout, so with one save on the wire one hung request meant no later save was
+  sent and `open()`, which waits on its flush, never left. The parent sent a
+  second save and left. Now a save unanswered after `SAVE_WAIT_MS` (30 s, six
+  times the server's SQLite busy timeout) is abandoned: the request is aborted,
+  the round counts as failed, the words stay, and the lock is released. `open()`
+  then refuses with its existing "could not be written … the log says why", and
+  the log says the server did not answer. Pressing again sends the words again.
+  If the server did write them late, that send is a compare-and-swap against
+  the old token, so it comes back as a conflict showing what was stored, or as
+  the very text sent, which the backstop takes as a write. The alternative, a
+  bound on how long `open()` waits while the request stays on the wire, lost: a
+  second request beside a live first one is the double send this entry exists
+  to remove.
+- **No `save()` answers before the last round's re-read has landed.** A queued
+  caller whose own round sent nothing answered when the lock was released, before
+  the previous round's re-read. "Draft again" then read the origin from before
+  the save, asked no question about a person's wording, and billed a run whose
+  write was refused. The same held for a call made after the lock was released
+  and before that re-read. The lock still covers only the request and its reply;
+  what waits is the *answer*, chained per drafts epoch through every round still
+  being read back. The cost: an act pressed while a save is being read back —
+  Check, Write file, Commit — sends its own request after that read. Four
+  HANDOFF-088 tests used Check as the door for "a later re-read asked while the
+  save's own is on its way", and Check is not that door any more. They now ask
+  `refresh()` directly, which stands for the re-reads that go through no save (a
+  run's trailing one, Hold's, *Discard mine*'s). Their assertions are unchanged.
+- **An id stays in flight until it has been read back.** `drafts.landed()`
+  cleared the in-flight set when the reply landed. Until the re-read the row
+  still shows the wording from before the save, so typing the field back to it
+  ended the entry while the server held the newer words, and nothing would write
+  the change. In-flight is now a count per id, ended by `flush()` after the
+  re-read: the next round can send the same id while the previous one is being
+  read back. A reply from a parse that has gone ends nothing, because the count
+  is ended only in the epoch it was sent in (the review's first note).
+- **The maintainer's ruling on the re-sequenced Re-extract test.** *Re-extract*
+  pressed while "Draft again"'s save is on the wire now declines once the run
+  starts. The decline is said beside the bar, in a `role="status"` notice, as
+  well as in the log. It names the run in progress, and says to let the run
+  finish and then press *Re-extract* again. The store keeps `runName` for this,
+  and a notice clears on *Dismiss*, on the next press, or when another document
+  is put on screen. The test is renamed to say what it asserts now.
+
+The review's second note, *Re-extract*'s "could not be saved … copy that wording
+somewhere" over a marked row and the toolbar's "N unsaved" tooltip, stays with
+`HANDOFF-092`, where it is already written.
+
+Four new store tests cover the three repairs and the epoch note. Each was run
+against `a44a544` and failed on an assertion: `expected false to be true` (the
+open had not left after the bound), `expected [ 'queued', 'after the reply' ] to
+deeply equal []`, and `expected undefined to be 'orig'` twice. The renamed App
+test failed there on the notice's absence.
+
+### Second review, 2026-11-02, and the scope the maintainer set
+
+A second independent reviewer read `a49b811` against the package and this
+entry, and a mutation lane planted 52 mutants in its own worktree (33 killed).
+The review confirmed three findings with failing probes:
+
+- **F1, a regression of the repair above.** The POST was bounded, the re-read
+  after it was not, and every later `save()` now waits on that re-read, so a
+  `GET /api/doc` that never answered locked saves and `open()` exactly as the
+  hung POST had. The re-read is bounded at `SAVE_WAIT_MS` too. Past the bound
+  the caller is answered, a line says the document was not read back, and the
+  read is left to land or not.
+- **F2 and F3: `open()`'s laps are never read back.** The address has already
+  moved, so the page keeps the token from before lap 1's write. Words typed
+  into that row during lap 2 then come back on the recommended re-open as a
+  conflict with the page's own write (F2). A field typed back to its pre-save
+  wording loses that change (F3, older than this package). Both have case 9's
+  root, the token of the page's own writes.
+
+**The maintainer ruled (2026-11-02) to repair F1 here, add the tests the
+mutation run showed missing, and move F2 and F3 to `HANDOFF-096`** as cases 10
+and 11, `it.fails` in `store.test.ts`. A narrow own-write token here would be a
+second mechanism for that package to replace, and F2 loses no words: the row
+shows both wordings and the reviewer chooses. The cost is that the refusal's
+"Open … again, which writes it" is not true in that window.
+
+The same ruling covered two smaller items. The notice is cleared when the run
+it names ends, because "let the run finish" is false after that and the log
+keeps the line. The log line's verb agrees with the number of ids.
+
+Twelve surviving mutants now have a test that kills them, each confirmed by
+planting it: the epoch early return, the abort, the per-id count, the backstop
+and convergence taken separately, *Write mine over it*'s base, `clear()` and
+`drop()` forgetting their `flying` and `bases`, and the notice's two clears.
+The F1 test is the reviewer's probe. The lane read the rest as unreachable or
+equivalent: `mark()` clearing a base that `overrule` and `discard` always
+replace, `settle()` deleting a mark no sent id can carry, the "entry missing"
+guards, and a second lap over conflicted ids that sends nothing. Three were
+left without a test: *Discard mine*'s re-read, the `conflicted` class, and the
+blank stored-wording placeholder.
+
+The maintainer approved the conflict panel's wording from a screenshot of a
+real conflict in a headless browser: the explanation, *Write mine over it*,
+*Discard mine*, and "N waiting on your choice".
+
+### Third review, 2026-11-02: the bound answers the caller and nothing else
+
+An independent review of `a49b811..c3e8a1c` confirmed one should-fix, and the
+bound on the re-read caused it. Past the bound, `flush()` still ended the ids'
+in-flight count. The row was never read back, so a field typed back to the
+wording it still showed dropped its entry while the server held the newer
+words: the hang had become lost words. On a timeout the count now ends when that
+read settles, and the reviewer's probe is a test.
+
+"An id stays in flight until it has been read back" is therefore true for a
+re-read that answers or never answers. It is **not** true for one that *fails*:
+a 500 also ends the count with nothing read back. That is older than this
+package and is written into `HANDOFF-096` beside case 11.
+
+The review's other observations stay as they are, on purpose:
+
+- *Stop following* (`abandon()`) clears the notice, although the server is
+  still writing. The page treats the run as over from that moment, and
+  *Re-extract* is pressable again, so "let the run finish" would be false
+  there too.
+- An abandoned run's `follow()` keeps polling. When it ends, it clears
+  `running`, `runName` and now the notice under a newer run. That run-ownership
+  defect is older than this package; the notice only rides on it.
+- No test covers the notice clears in `resume()` and `abandon()`.
+
 ## 2026-10-31 · The reading view is virtualized by line
 
 *The landing paragraph and three measurement claims below are corrected by the

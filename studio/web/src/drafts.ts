@@ -36,8 +36,50 @@
  * `docs/decisions.md`, 2026-09-20.
  */
 
+import type { StoredTarget } from './contract'
+
 const drafts = new Map<string, string>()
 const listeners = new Set<() => void>()
+
+/**
+ * The stored wording an entry lost to, per id, from the reply that refused it.
+ *
+ * **A refused wording stays here, in its entry, and is not sent again until the
+ * reviewer chooses** — HANDOFF-091. Kept beside the entry rather than in the
+ * store because it is keyed by this parse's ids exactly as the entry is, and so
+ * it has to end exactly when the entry does: `clear()` ends both.
+ */
+const marks = new Map<string, StoredTarget>()
+
+/**
+ * The token a send of this entry must name as its `base` instead of the one
+ * `doc` holds. Two writers of it: a reviewer who chose to write their wording
+ * over a stored one (the token of the wording they were shown), and a write that
+ * landed while the reviewer kept typing (the token that write produced — their
+ * newer words are on top of it, so naming the older token would report a
+ * conflict with their own write).
+ */
+const bases = new Map<string, string>()
+
+/**
+ * Id → how many rounds of writing that sent it have not yet been read back.
+ *
+ * A round ends here **after its re-read lands**, not when its reply does: until
+ * then the row still shows the wording from before the write, and a field typed
+ * back to that wording would otherwise end the entry while the server holds
+ * what was sent — nothing would ever write the reviewer's last change. A count
+ * rather than a flag, because the next round may send the same id while the
+ * previous one's re-read is still on its way, and the first to finish must not
+ * end the other's (found by the review of HANDOFF-091).
+ */
+const flying = new Map<string, number>()
+
+/**
+ * Moves on every `clear()`. A reply that lands after the map was cleared is
+ * about a parse that is no longer on screen, whose ids now name other
+ * paragraphs, so it may not settle or mark anything here.
+ */
+let generation = 0
 
 let stamp = 0
 
@@ -71,12 +113,27 @@ function changed(): void {
   for (const listener of listeners) listener()
 }
 
-/** Record an edit. Returns whether this crossed the row into or out of dirty. */
+/** Drop an entry and everything kept about it. Returns whether anything went. */
+function drop(id: string): boolean {
+  const a = drafts.delete(id)
+  const b = marks.delete(id)
+  bases.delete(id)
+  return a || b
+}
+
+/**
+ * Record an edit. Returns whether this crossed the row into or out of dirty.
+ *
+ * Typing a field back to the wording it was shown ends the entry — unless a
+ * save carrying the entry has not been read back yet. Then what was sent is, or
+ * will be, stored, so the field's wording is no longer what is stored, and only
+ * the entry can still write it.
+ */
 export function set(id: string, text: string, original: string): boolean {
   const was = drafts.has(id)
-  if (text === original) {
+  if (text === original && !flying.has(id)) {
     if (!was) return false
-    drafts.delete(id)
+    drop(id)
     changed()
     return true
   }
@@ -95,12 +152,106 @@ export const entries = (): [string, string][] => [...drafts.entries()]
 
 export const size = (): number => drafts.size
 
-/** Forget the ids that were written. Everything else stays dirty and visible. */
-export function forget(written: Iterable<string>): void {
+/** Forget ids outright — the ones a reply says name no segment. */
+export function forget(ids: Iterable<string>): void {
   let touched = false
-  for (const id of written) touched = drafts.delete(id) || touched
+  for (const id of ids) touched = drop(id) || touched
   if (touched) changed()
 }
+
+/**
+ * Settle the ids a reply wrote. **An entry goes only while it is still the text
+ * that was sent**: words typed while the request was in flight are newer than
+ * what was stored, and forgetting them by id — which is what this did until
+ * HANDOFF-091 — left them on screen with nothing marking the row dirty and
+ * nothing that would ever write them. Such an entry stays, based on the token
+ * the write produced. Returns the ids that stayed.
+ */
+export function settle(sent: Record<string, string>, tokens: Record<string, string | undefined>): string[] {
+  const kept: string[] = []
+  let touched = false
+  for (const [id, text] of Object.entries(sent)) {
+    if (!drafts.has(id)) continue
+    if (drafts.get(id) === text) {
+      touched = drop(id) || touched
+      continue
+    }
+    kept.push(id)
+    marks.delete(id)
+    const token = tokens[id]
+    if (token) bases.set(id, token)
+    else bases.delete(id)
+  }
+  if (touched || kept.length) changed()
+  return kept
+}
+
+/**
+ * The reply refused this entry: the stored wording moved underneath it. The
+ * entry stays and is marked with what is stored now, and no save sends it until
+ * the reviewer chooses with {@link overrule} or {@link discard}. An entry that
+ * already says what is stored has converged, and goes.
+ */
+export function mark(id: string, stored: StoredTarget): void {
+  if (!drafts.has(id)) return
+  if (drafts.get(id) === stored.text) {
+    drop(id)
+  } else {
+    marks.set(id, stored)
+    bases.delete(id)
+  }
+  changed()
+}
+
+/** The stored wording this entry lost to, while the reviewer has not chosen. */
+export const conflict = (id: string): StoredTarget | undefined => marks.get(id)
+
+/** Every id waiting on the reviewer's choice. */
+export const conflicted = (): string[] => [...marks.keys()]
+
+/** The token a send of this entry must name, when it is not `doc`'s. */
+export const base = (id: string): string | undefined => bases.get(id)
+
+/**
+ * The reviewer chose their own wording over the stored one. The next save
+ * sends it as a compare-and-swap on the wording they were shown — so if the
+ * stored wording has moved again since, that is a conflict again, never a
+ * silent overwrite.
+ */
+export function overrule(id: string): void {
+  const m = marks.get(id)
+  if (!m) return
+  bases.set(id, m.token)
+  marks.delete(id)
+  changed()
+}
+
+/** The reviewer chose the stored wording: their own is dropped, at their request. */
+export function discard(id: string): void {
+  if (drop(id)) changed()
+}
+
+/** A save is about to send these. */
+export function sending(sent: Iterable<string>): void {
+  for (const id of sent) flying.set(id, (flying.get(id) ?? 0) + 1)
+}
+
+/**
+ * The round that sent these is over: its reply and its re-read have landed, or
+ * it failed and there is nothing to read back. Only the caller that called
+ * {@link sending} in this same parse may say so — a round from before a
+ * `clear()` has nothing here to end (the counts it added went with the clear).
+ */
+export function landed(sent: Iterable<string>): void {
+  for (const id of sent) {
+    const n = (flying.get(id) ?? 0) - 1
+    if (n > 0) flying.set(id, n)
+    else flying.delete(id)
+  }
+}
+
+/** See {@link generation}. */
+export const epoch = (): number => generation
 
 /**
  * Say that a re-parse has landed, so nothing here can be written any more.
@@ -120,7 +271,12 @@ export const stranded = (): boolean => orphaned
  *  screen that the entries in it were typed against. */
 export function clear(): void {
   orphaned = false
-  if (!drafts.size) return
+  generation += 1
+  flying.clear()
+  bases.clear()
+  const had = drafts.size + marks.size
+  marks.clear()
+  if (!had) return
   drafts.clear()
   changed()
 }

@@ -841,8 +841,15 @@ that names none is ignored, which is what `unknown` already means here.
 **Lost updates are detected, and only when the client opts in.** `base` is the
 mechanism and the token is `sha1(target)[:12]` — derived from the text rather
 than kept as a revision counter, so two writes producing the same wording are not
-reported as a conflict, and so it costs no column and no state version. A
-conflict is a `200` with the id in `conflicts`, never a status code: one request
+reported as a conflict, and so it costs no column and no state version. Read that
+as: a write that leaves the wording where it was does not move the token. It
+does **not** mean that a second request carrying the same words under the same
+stale `base` is accepted. The first one moved the token, so the second is a
+conflict, and the text it reports is the *stored* text after normalization,
+which may differ from what was sent. A client must not send its own words
+twice. The workbench sends one save at a time since 2026-10-31
+(`docs/decisions.md`, HANDOFF-091). A conflict is a `200` with the id in
+`conflicts`, never a status code: one request
 carries a hundred segments and a status cannot say which of them lost. A client
 that sends no `base` is last-write-wins exactly as before. *Known divergences*
 (17), closed for a client that opts in.
