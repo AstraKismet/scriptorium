@@ -145,6 +145,17 @@ interface Store {
   shown: () => DocAddress | null
 
   save: () => Promise<boolean>
+  /**
+   * `save()`, answered with what it left unwritten and why — the three reasons
+   * have three different remedies, and a caller about to act on the document
+   * needs to know which one it is looking at (HANDOFF-092). A blank is in none
+   * of the lists: it is not wording.
+   */
+  writeOut: () => Promise<Unwritten>
+  /** Decline an act for `why` (see `declines`): said in the log and beside the
+   *  bar, and taken down by the next save that writes. True when it declined;
+   *  `''` declines nothing. */
+  decline: (why: string) => boolean
   runJob: (mode: Mode, ids?: string[], overwriteHuman?: boolean, note?: string) => Promise<void>
   /** Pick up a run this page started before it was reloaded. */
   resume: () => Promise<void>
@@ -247,6 +258,28 @@ export const writeEpoch = (): number => writes
 interface Outcome { ok: boolean; failed: boolean }
 
 /**
+ * What a save left holding wording that exists only on this page, by why.
+ *
+ * - `failed`: a request failed, or answered with something this page cannot
+ *   read. The log says why; the next save sends the wording again. A map a
+ *   re-parse has stranded is counted here too — nothing can write it either.
+ * - `waiting`: refused as stale, and waiting in its row for the reviewer to
+ *   choose between their wording and the stored one (HANDOFF-091). Safe where it
+ *   is; nothing sends it until they choose.
+ * - `newer`: typed while the save was on the wire. Nothing failed; the next save
+ *   writes it, on top of the token the save produced.
+ *
+ * A blank is in none of the three, because a blank is not wording — the rule
+ * `open()` has followed since 2026-09-20, and that the toolbar's Re-extract did
+ * not (HANDOFF-092).
+ */
+export interface Unwritten {
+  failed: string[]
+  waiting: string[]
+  newer: string[]
+}
+
+/**
  * **One save on the wire at a time.** HANDOFF-091: the field's blur and the
  * act that took focus from it — Ctrl+Enter's move to the next row, any toolbar
  * button, a rail click, Back pressed twice — each called `save()`, and a second
@@ -298,6 +331,83 @@ const wording = (text: string): boolean => text.trim() !== ''
 const unwritten = (): string[] =>
   drafts.entries().filter(([, text]) => wording(text)).map(([id]) => id)
 
+/** Whether anything on this page holds wording no save has written. Exported
+ *  so that an act deciding whether it may go ahead asks the predicate `save()`
+ *  and `open()` ask, rather than `drafts.size()`, which counts a blank. */
+export const holdsWording = (): boolean => unwritten().length > 0
+
+/** The same ids, for a dialog that has to name what it would discard. */
+export const unwrittenIds = (): string[] => unwritten()
+
+/** What is left after a round whose outcome was `failed` or not. */
+function left(failed: boolean): Unwritten {
+  const ids = unwritten()
+  if (drafts.stranded()) return { failed: ids, waiting: [], newer: [] }
+  const waiting = ids.filter(id => drafts.conflict(id))
+  const rest = ids.filter(id => !drafts.conflict(id))
+  return failed ? { failed: rest, waiting, newer: [] } : { failed: [], waiting, newer: rest }
+}
+
+const rows = (ids: string[]): string => (ids.length === 1 ? 'its row' : 'their rows')
+
+/**
+ * Why an act that rests on what the server holds may not go ahead after a save,
+ * or `''` when it may. One sentence per act, because what the act would do
+ * without the words is what makes the refusal worth reading.
+ *
+ * `failed` stops every act: the wording exists only here and the act would be
+ * done to the document without it. `waiting` stops only the acts whose output
+ * stands for the document — the file and the memory — because the document's
+ * wording at that row is not decided yet; a run, a check and the reading view
+ * go ahead over it, since the reviewer's words are safe in the row and nothing
+ * sends them until they choose. `newer` stops nothing: a row typed into while
+ * its save was on the wire was written in that save, so the server already
+ * holds a person's wording there and origin precedence keeps a run off it.
+ */
+export function declines(
+  what: Unwritten,
+  refusal: string,
+  src: string,
+  without: string,
+  decided = false,
+): string {
+  if (what.failed.length) {
+    return `${refusal}: ${names(what.failed)} could not be written to ${src} — the log ` +
+      `says why — and ${without}. The wording is still in ${rows(what.failed)}; press it again ` +
+      `once it is written.`
+  }
+  if (decided && what.waiting.length) {
+    return `${refusal}: ${names(what.waiting)} changed underneath your edit and ` +
+      `${what.waiting.length === 1 ? 'waits' : 'wait'} on your choice in ${rows(what.waiting)}, so ` +
+      `what ${src} says there is not decided yet. Choose which wording stays, then press it again.`
+  }
+  return ''
+}
+
+/** Decline an act for `why`, said in the log and beside the bar. True when it
+ *  declined; `''` declines nothing. The notice is taken down by the next save
+ *  that gets a readable answer, as a failed save's own is (see `saveNotice`):
+ *  it is about the same wording, and is false the moment that is written. */
+function stopped(get: () => Store, why: string): boolean {
+  if (!why) return false
+  get().say('  ' + why, 'warn')
+  saveNotice = why
+  get().setNotice(why)
+  return true
+}
+
+/**
+ * The notice a failed save put beside the bar, while it is still the one shown.
+ *
+ * A save that fails says why in the log at `bad`, and the log is a drawer that
+ * may be shut — while the field the reviewer just left, or moved off with
+ * Ctrl+Enter, gives no sign beyond a dot that its wording went nowhere. So a
+ * failed round says so where the reviewer is looking, and the next round that
+ * gets a readable answer takes it down again: a notice saying "not written" over
+ * wording a later save wrote is the same lie one step later.
+ */
+let saveNotice: string | null = null
+
 /**
  * Name a list of segment ids in a log line, bounded.
  *
@@ -306,7 +416,7 @@ const unwritten = (): string[] =>
  * lands in it, which on a novel that is one sentence repeated is every segment
  * in the book. A line naming five thousand ids is not a line anybody reads.
  */
-function names(ids: string[], most = 20): string {
+export function names(ids: string[], most = 20): string {
   if (ids.length <= most) return ids.join(', ')
   return `${ids.slice(0, most).join(', ')} and ${ids.length - most} more`
 }
@@ -876,6 +986,10 @@ export const useStore = create<Store>()((set, get) => ({
    */
   save: () => flush(get).then(o => o.ok),
 
+  writeOut: () => flush(get).then(o => left(o.failed)),
+
+  decline: why => stopped(get, why),
+
   /**
    * Start a run and follow it to a terminal state.
    *
@@ -926,8 +1040,26 @@ export const useStore = create<Store>()((set, get) => ({
       true,
     )
 
+    // What the run's own end leaves beside the bar. A run that ends clears the
+    // notice, because "let the run finish" is no longer true then — except the
+    // one this run says about itself when it declines to start.
+    let keep = ''
     try {
-      await get().save()
+      // **Not started over wording only this page holds.** The server chooses a
+      // run's segments from what it has stored, and origin precedence can only
+      // protect a person's wording it has been given: a row whose save failed is
+      // still pending there, so Translate pending would bill a draft of a
+      // sentence the reviewer has already translated, which their next save then
+      // writes over.
+      const why = declines(
+        await get().writeOut(), `The ${mode} run was not started`, where.src,
+        'a run chooses its segments from what is stored, so it could replace wording that exists only on this page',
+      )
+      if (why) {
+        get().say('  ' + why, 'warn')
+        keep = why
+        return
+      }
       // **Neither key is sent unless it was chosen.** With both omitted the
       // server resolves this stage's own routing entry, which is what makes one
       // pair of controls safe on a bar with three run buttons — a seeded value
@@ -963,7 +1095,8 @@ export const useStore = create<Store>()((set, get) => ({
       get().say('  ' + reason(e), 'bad')
     } finally {
       forgetJob()
-      set({ running: false, runName: '', notice: '' })
+      if (keep) saveNotice = keep
+      set({ running: false, runName: '', notice: keep })
     }
   },
 
@@ -1038,7 +1171,15 @@ export const useStore = create<Store>()((set, get) => ({
   check: async () => {
     const where = get().shown()
     if (!where) return
-    await get().save()
+    // A check reports on what the server holds and persists that report, so a
+    // check over a failed save is a verdict on wording the reviewer has already
+    // replaced — at `good`, possibly, over a row they are still fixing. A row
+    // waiting on their choice does not stop it: what is stored there is what a
+    // check is about until they choose.
+    if (stopped(get, declines(
+      await get().writeOut(), 'Nothing was checked', where.src,
+      'a check reports on what is stored, without it',
+    ))) return
     try {
       const r = await api.postCheck(where)
       const waived = r.by_rule['waived'] ?? 0
@@ -1101,7 +1242,13 @@ export const useStore = create<Store>()((set, get) => ({
   render: async () => {
     const where = get().shown()
     if (!where) return
-    await get().save()
+    // The file stands for the document, so it waits for the document to be
+    // decided: not over wording that failed to reach the server, and not over a
+    // row whose reviewer has yet to choose between theirs and what is stored.
+    if (stopped(get, declines(
+      await get().writeOut(), 'No file was written', where.src,
+      'the file would be written without it', true,
+    ))) return
     try {
       const r = await api.postRender({ ...where, fallback: false })
       get().say(
@@ -1116,7 +1263,14 @@ export const useStore = create<Store>()((set, get) => ({
   commit: async () => {
     const where = get().shown()
     if (!where) return
-    await get().save()
+    // The memory is tracked and `store.load_tm` keeps the last record per key,
+    // so what is banked here is what every other document is offered. Banking
+    // the stored wording of a row whose reviewer's own failed to arrive, or who
+    // has yet to choose, files the wording they are replacing as the answer.
+    if (stopped(get, declines(
+      await get().writeOut(), 'Nothing was banked', where.src,
+      'the memory would bank what is stored there instead', true,
+    ))) return
     try {
       const r = await api.postCommit(where)
       // Not the count alone. `committed` is not a complete report: held,
@@ -1294,6 +1448,23 @@ function within(p: Promise<unknown>, ms: number): Promise<boolean> {
   return Promise.race([p.then(() => true, () => true), late]).finally(() => { clearTimeout(timer) })
 }
 
+/**
+ * Say beside the bar that a round wrote nothing — only while the parse it was
+ * sent from is still the one on screen: ids restart at `s0001` in every
+ * document, so naming them over another document's rows would point at
+ * paragraphs nobody typed into. That parse's own words have gone with it, and
+ * the log has the line.
+ */
+function notWritten(get: () => Store, ids: string[], epoch: number): void {
+  if (drafts.epoch() !== epoch) return
+  const text =
+    `${names(ids)} ${ids.length === 1 ? 'was' : 'were'} not written — the save failed, and the ` +
+    `log says why. The wording is still in ${rows(ids)}, marked unsaved, and the next save sends ` +
+    `it again: leaving the field, Ctrl+Enter, or any act on this bar.`
+  saveNotice = text
+  get().setNotice(text)
+}
+
 /** One round of writing: what `save()` was before HANDOFF-091, and its reply.
  *  `landing` is what it sent, which `flush()` ends once it has been read back. */
 async function round(get: () => Store): Promise<{ outcome: Outcome; reread: boolean; landing: string[] }> {
@@ -1381,6 +1552,7 @@ async function round(get: () => Store): Promise<{ outcome: Outcome; reread: bool
       // throw away every other edit in the batch along with the one the server
       // would not take.
       get().say('  ' + reason(e), 'bad')
+      notWritten(get, ids, epoch)
       return { outcome: { ok: false, failed: true }, reread: false, landing: ids }
     } finally {
       clearTimeout(timer)
@@ -1403,8 +1575,13 @@ async function round(get: () => Store): Promise<{ outcome: Outcome; reread: bool
         `was taken as written — ${names(ids)} stay unsaved here`,
         'bad',
       )
+      notWritten(get, ids, epoch)
       return { outcome: { ok: false, failed: true }, reread: false, landing: ids }
     }
+    // A readable answer: whatever a failed round said beside the bar is no
+    // longer the state of things — what this one could not write, it says below.
+    if (saveNotice !== null && get().notice === saveNotice) get().setNotice('')
+    saveNotice = null
 
     // Every id sent is exactly one of: named no segment, refused, written. A
     // conflict whose stored text is the text sent is a write, not a refusal —

@@ -1217,6 +1217,43 @@ describe('a refused wording, and words typed while a save is in flight', () => {
   })
 })
 
+describe('what a save left unwritten, and why (HANDOFF-092)', () => {
+  const refused = { applied: 0, unknown: [], stored: {}, conflicts: { s0001: { text: '她整夜未眠。', token: 'tok9' } } }
+
+  it('counts a blank in none of the three, because a blank is not wording', async () => {
+    await openWith([segment({ id: 's0001' })])
+    drafts.set('s0001', '  ', '她沒有睡。')
+    expect(await useStore.getState().save()).toBe(false)
+    expect(await useStore.getState().writeOut()).toEqual({ failed: [], waiting: [], newer: [] })
+  })
+
+  it('names a failed request as failed, and a refused one as waiting', async () => {
+    await openWith([segment({ id: 's0001', token: 'tok1' }), segment({ id: 's0002', token: 'tok2' })])
+    drafts.set('s0002', '第二段。', '她沒有睡。')
+    replies({ status: 500, body: { error: 'database is locked' } })
+    expect(await useStore.getState().writeOut()).toEqual({ failed: ['s0002'], waiting: [], newer: [] })
+
+    drafts.clear()
+    drafts.set('s0001', '她一夜沒睡。', '她沒有睡。')
+    replies({ body: refused })
+    otherwise({ body: doc([segment({ id: 's0001', target: '她整夜未眠。', token: 'tok9' })]) })
+    expect(await useStore.getState().writeOut()).toEqual({ failed: [], waiting: ['s0001'], newer: [] })
+  })
+
+  it('names words typed while the save was on the wire as newer, not as failed', async () => {
+    await openWith([segment({ id: 's0001', token: 'tok1' })])
+    drafts.set('s0001', '她一夜沒睡。', '她沒有睡。')
+    let release: () => void = () => undefined
+    const until = new Promise<void>(r => { release = r })
+    replies({ body: { applied: 1, unknown: [], stored: { s0001: { text: '她一夜沒睡。', token: 'tok2' } }, conflicts: {} }, after: until })
+    otherwise({ body: doc([segment({ id: 's0001', target: '她一夜沒睡。', token: 'tok2' })]) })
+    const out = useStore.getState().writeOut()
+    drafts.set('s0001', '她一夜沒睡。還', '她沒有睡。')
+    release()
+    expect(await out).toEqual({ failed: [], waiting: [], newer: ['s0001'] })
+  })
+})
+
 describe('what the registry forgets with an entry', () => {
   it('ends an in-flight count, a base and a mark with the parse they were kept in', () => {
     drafts.clear()

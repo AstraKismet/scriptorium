@@ -19,7 +19,7 @@ import { ModelPicker } from './ModelPicker'
 import type { DocAddress } from '../contract'
 import * as drafts from '../drafts'
 import * as routes from '../router'
-import { useStore, writeEpoch, type Filter } from '../store'
+import { declines, holdsWording, names, unwrittenIds, useStore, writeEpoch, type Filter } from '../store'
 
 const BOUNDS = [0, 10, 25, 50, 100]
 
@@ -63,7 +63,8 @@ export function Toolbar() {
   const check = useStore(s => s.check)
   const render = useStore(s => s.render)
   const commit = useStore(s => s.commit)
-  const save = useStore(s => s.save)
+  const writeOut = useStore(s => s.writeOut)
+  const decline = useStore(s => s.decline)
   const refresh = useStore(s => s.refresh)
   const extract = useStore(s => s.extract)
   const startOver = useStore(s => s.startOver)
@@ -92,21 +93,49 @@ export function Toolbar() {
     // can never be applied afterwards, because the ids they are keyed on will
     // name different text. So the act stops instead, with the reviewer holding
     // the only copy.
+    //
+    // **Three reasons, three sentences, and a blank is not one of them.** The
+    // one sentence this used to say — "could not be saved … copy that wording
+    // somewhere" — was said over a field the reviewer had emptied, which holds
+    // nothing to copy and which `save()` holds back by design, and over a row
+    // waiting on the reviewer's choice, whose wording is safe beside the stored
+    // one and one click from resolved (HANDOFF-092). It asked `drafts.size()`,
+    // which counts a blank; `open()` has asked `wording()` since 2026-09-20.
     const written = async (): Promise<boolean> => {
-      const saved = await save()
-      if (!drafts.size()) return true
-      // Two different reasons, and only one of them is a refusal: `save()`
-      // answers true when everything it sent was written, so what is left then
-      // was typed while it was in flight.
-      say(
-        saved
-          ? `  ${drafts.ids().slice(0, 20).join(', ')} changed while this was saving and are not ` +
-            `written yet — ${doc.source} was not re-extracted; press Re-extract again`
-          : `  ${drafts.ids().slice(0, 20).join(', ')} could not be saved, and a re-extract ` +
-            `renumbers segments — copy that wording somewhere before trying again`,
-        saved ? 'warn' : 'bad',
-      )
-      return false
+      const left = await writeOut()
+      if (left.failed.length) {
+        say(
+          `  ${names(left.failed)} could not be saved, and a re-extract renumbers segments — ` +
+          `${doc.source} was not re-extracted. The log says why the save failed; the wording is ` +
+          `still in ${left.failed.length === 1 ? 'its row' : 'their rows'}. Press Re-extract again ` +
+          `once it is written, or copy the wording out first.`,
+          'bad',
+        )
+        return false
+      }
+      if (left.waiting.length) {
+        say(
+          `  ${names(left.waiting)} changed underneath your edit and ` +
+          `${left.waiting.length === 1 ? 'waits' : 'wait'} on your choice in ` +
+          `${left.waiting.length === 1 ? 'its row' : 'their rows'}, and a re-extract renumbers ` +
+          `segments, which would discard that wording — ${doc.source} was not re-extracted. ` +
+          `Choose which wording stays, then press Re-extract again.`,
+          'warn',
+        )
+        return false
+      }
+      if (left.newer.length) {
+        // Not a refusal of the save: everything it sent was written, and what
+        // is left was typed while it was in flight.
+        say(
+          `  ${names(left.newer)} changed while this was saving and ` +
+          `${left.newer.length === 1 ? 'is' : 'are'} not written yet — ${doc.source} was not ` +
+          `re-extracted; press Re-extract again`,
+          'warn',
+        )
+        return false
+      }
+      return true
     }
     if (!await written()) return
     const before = writeEpoch()
@@ -157,7 +186,7 @@ export function Toolbar() {
     // the way (older than HANDOFF-088; its reviews found it three times, each
     // time in an ordering of the reads the last repair had not covered). The
     // reviewer keeps the words and presses again.
-    if (writeEpoch() !== before || drafts.size()) {
+    if (writeEpoch() !== before || holdsWording()) {
       say(
         `  ${doc.source} was not re-extracted: wording changed while it was being read — ` +
         `press Re-extract again`,
@@ -201,7 +230,7 @@ export function Toolbar() {
     // left the ledger editable, and the dialog's own focus moving out of a field
     // saves it — a save that can be refused. Words still here now are words the
     // extract would strand (found by the fifth review).
-    if (drafts.size() || writeEpoch() !== before) {
+    if (holdsWording() || writeEpoch() !== before) {
       say(
         `  ${doc.source} was not re-extracted: wording changed while this was asking — ` +
         `press Re-extract again`,
@@ -269,7 +298,19 @@ export function Toolbar() {
           // return trip was repaired by the effect that copied the store's focus
           // into the address — the effect whose other half blanked the page.
           onClick={async () => {
-            await save()
+            // The reading view renders what the server holds, so over a save that
+            // failed it shows the sentence the reviewer has just replaced, as if
+            // it were the chapter — and from a view with no ledger, where nothing
+            // marks it unsaved. A row waiting on the reviewer's choice does not
+            // stop it: a view is not a verdict, and what is stored there is what
+            // the chapter says until they choose. Nothing is lost by going either
+            // way — the words stay in `drafts` and the shell's tab-close guard
+            // covers every route — so this is about what the view would claim.
+            const why = declines(
+              await writeOut(), 'The reading view was not opened', doc.source,
+              'the reading view shows what is stored, without it',
+            )
+            if (decline(why)) return
             routes.go(routes.read(doc.source, doc.lang, routes.placeIn(doc.source, doc.lang)))
           }}
         >
@@ -365,6 +406,7 @@ function StartOver({ onClose, onChoose }: {
 }) {
   const doc = useStore(s => s.doc)
   const say = useStore(s => s.say)
+  const refresh = useStore(s => s.refresh)
   const [register, setRegister] = useState('')
 
   if (!doc) return null
@@ -372,13 +414,41 @@ function StartOver({ onClose, onChoose }: {
   const go = async () => {
     const chosen = register.trim()
     if (!chosen) return
+    // **The count is read now, or the dialog says it could not be.** It used to
+    // state `doc.report.translated` from whatever read last landed, and the page
+    // learns what a save stored only from the re-read after it — so when that
+    // re-read failed, the one dialog that discards a document said "0 of 3 are
+    // translated now" over a translation just written (HANDOFF-092). It re-reads,
+    // as Re-extract does. Unlike Re-extract it does not refuse when the read
+    // fails: Re-extract skips its dialog on a count of zero, so a wrong count
+    // there is a skipped confirmation, while this asks whatever the count is —
+    // the number informs the answer and decides nothing, so it is enough to say
+    // it is unknown and give the last one read, marked as such.
+    const read = await refresh()
+    const now = useStore.getState().doc
+    const fresh = read && now && now.source === doc.source && now.lang === doc.lang ? now : null
+    const count = fresh
+      ? `${fresh.report.translated} of ${fresh.report.segments} segments are translated now.`
+      : `How many segments are translated now could not be read again; the last read said ` +
+        `${doc.report.translated} of ${doc.report.segments}, and anything written since is not in it.`
+    // **Unsaved wording is named, not saved and not refused over.** Writing it
+    // first would buy nothing — a reset reads no prior row, so it is discarded
+    // with everything else — and refusing, as Re-extract does, protects words
+    // that this act exists to discard: Re-extract keeps what it can, so a lost
+    // sentence there is a surprise, while here it is the act. What was missing
+    // was saying so: the dialog listed what it discards and not this, and the
+    // words went with a line in the log after the fact (HANDOFF-087).
+    const unsaved = unwrittenIds()
     const ok = await ask(
       `Start ${doc.source} over in “${chosen}”?`,
       [
         'Everything this document holds is discarded and the source is parsed again',
         'from nothing. No translation, no hold, no waiver and no origin survives.',
         '',
-        `${doc.report.translated} of ${doc.report.segments} segments are translated now.`,
+        count,
+        ...(unsaved.length
+          ? ['', `Wording typed on this page and never written is discarded too: ${names(unsaved)}.`]
+          : []),
         '',
         'The register is part of the translation memory key, so wording banked under',
         `the old register (${doc.tone || 'unknown'}) will not come back under the new one.`,
